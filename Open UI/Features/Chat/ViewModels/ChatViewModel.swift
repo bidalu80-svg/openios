@@ -1,6 +1,7 @@
 import Foundation
 import os.log
 import SwiftUI
+import PDFKit
 
 extension Notification.Name {
     static let conversationTitleUpdated = Notification.Name("conversationTitleUpdated")
