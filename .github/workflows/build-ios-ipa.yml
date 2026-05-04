@@ -30,6 +30,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Select Xcode 26
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.2.app
+          xcodebuild -version
+          swift --version
+
       - name: Validate required secrets
         env:
           IOS_P12_BASE64: ${{ secrets.IOS_P12_BASE64 }}
