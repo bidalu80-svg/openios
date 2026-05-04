@@ -248,6 +248,10 @@ final class ChatViewModel {
     /// Independent from backgroundTaskId (which covers streaming completion).
     @ObservationIgnored nonisolated(unsafe) private var transcriptionBackgroundTaskId: UIBackgroundTaskIdentifier = .invalid
 
+    private var isOpenAICompatibleProvider: Bool {
+        manager?.providerType == .openAICompatible
+    }
+
     /// Pending transcriptions that were interrupted when the app moved to the background
     /// (iOS < 26 only — no GPU access in background). Keyed by attachment ID.
     /// Re-started automatically when the app returns to foreground.
@@ -2571,7 +2575,7 @@ final class ChatViewModel {
         if conversation == nil {
             let chatTitle = String(currentText.prefix(50))
             var serverId: String?
-            if !isTemporaryChat {
+            if !isTemporaryChat && !isOpenAICompatibleProvider {
                 do {
                     let created = try await manager.createConversation(
                         title: chatTitle, messages: [], model: modelId,
@@ -2659,6 +2663,56 @@ final class ChatViewModel {
         // Activate the isolated streaming store so token updates bypass
         // conversation.messages and only invalidate the streaming message view.
         streamingStore.beginStreaming(messageId: assistantMessageId, modelId: modelId)
+
+        if isOpenAICompatibleProvider {
+            streamingTask = Task { [weak self] in
+                guard let self else { return }
+                let acc = ContentAccumulator()
+
+                do {
+                    let request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
+                    let sseStream = try await manager.sendMessageStreaming(request: request)
+
+                    for try await event in sseStream {
+                        if Task.isCancelled { break }
+
+                        if let delta = event.contentDelta, !delta.isEmpty {
+                            acc.append(delta)
+                            self.updateAssistantMessage(
+                                id: assistantMessageId,
+                                content: acc.content,
+                                isStreaming: true
+                            )
+                        }
+
+                        if event.isFinished { break }
+                    }
+                } catch {
+                    if !Task.isCancelled {
+                        self.updateAssistantMessage(
+                            id: assistantMessageId,
+                            content: acc.content,
+                            isStreaming: false,
+                            error: ChatMessageError(content: error.localizedDescription)
+                        )
+                        self.cleanupStreaming()
+                    }
+                    return
+                }
+
+                if Task.isCancelled { return }
+
+                self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+                self.hasFinishedStreaming = true
+                self.isStreaming = false
+                self.selfInitiatedStream = false
+                self.activeTaskId = nil
+                self.lastTaskExtractionLength = 0
+                await self.sendCompletionNotificationIfNeeded(content: acc.content)
+                NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            }
+            return
+        }
 
         // Ensure socket connected with resilient retry.
         // For Cloudflare-protected servers, WebSocket connections may be blocked

@@ -258,14 +258,20 @@ final class AuthViewModel {
 
     // MARK: - Server Connection
 
-    /// Attempts to connect to the specified server URL, verifies it is OpenWebUI,
-    /// and transitions to the auth method selection phase.
+    /// Attempts to connect to the specified OpenAI-compatible BASEURL,
+    /// verifies API key access by loading models, and authenticates locally.
     func connect() async {
         let trimmed = serverURL
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !trimmed.isEmpty, URL(string: trimmed) != nil else {
-            errorMessage = "Please enter a valid server URL."
+            errorMessage = "Please enter a valid BASEURL."
+            return
+        }
+
+        let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAPIKey.isEmpty else {
+            errorMessage = "Please enter your APIKEY."
             return
         }
 
@@ -304,7 +310,8 @@ final class AuthViewModel {
         let config = ServerConfig(
             name: url.host ?? "Server",
             url: normalizedURL,
-            apiKey: apiKey.isEmpty ? nil : apiKey,
+            providerType: .openAICompatible,
+            apiKey: trimmedAPIKey,
             customHeaders: userCustomHeaders,
             lastConnected: .now,
             isActive: true,
@@ -313,113 +320,41 @@ final class AuthViewModel {
 
         let client = APIClient(serverConfig: config)
 
-        // If an API key is provided, treat it as the auth token
-        if !apiKey.isEmpty {
-            client.updateAuthToken(apiKey)
-        }
+        client.updateAuthToken(trimmedAPIKey)
 
-        // Health check with proxy detection — also detects HTTP→HTTPS redirects from
-        // a load balancer so we can update the stored URL to the correct HTTPS address.
-        let healthCheck = await client.checkHealthWithProxyDetectionAndFinalURL()
+        let activeConfig = config
+        let activeClient = client
 
-        // If the load balancer redirected HTTP→HTTPS, update normalizedURL so all
-        // subsequent requests (login, SSO, /api/config) go to the HTTPS address.
-        // We also need a fresh client and config pointing at the HTTPS URL.
-        var activeConfig = config
-        var activeClient = client
-        if let redirectedURL = healthCheck.finalURL {
-            logger.info("🔀 [connect] HTTP→HTTPS redirect detected: \(normalizedURL) → \(redirectedURL)")
-            normalizedURL = redirectedURL
-            serverURL = redirectedURL
-            // Rebuild config + client with the corrected HTTPS URL
-            activeConfig = ServerConfig(
-                name: URL(string: redirectedURL)?.host ?? "Server",
-                url: redirectedURL,
-                apiKey: apiKey.isEmpty ? nil : apiKey,
-                customHeaders: userCustomHeaders,
-                lastConnected: .now,
-                isActive: true,
-                allowSelfSignedCertificates: allowSelfSignedCerts
-            )
-            activeClient = APIClient(serverConfig: activeConfig)
-            if !apiKey.isEmpty {
-                activeClient.updateAuthToken(apiKey)
-            }
-        }
-
-        switch healthCheck.result {
-        case .healthy:
-            break
-        case .cloudflareChallenge:
-            // The server is behind Cloudflare Bot Fight Mode.
-            // We need a real browser to complete the JS/Turnstile challenge.
-            // Show the WKWebView sheet so the user can pass the check.
-            pendingCloudflareURL = normalizedURL
-            isConnecting = false
-            showCloudflareChallenge = true
-            return
-        case .proxyAuthRequired:
-            // The server is behind an auth proxy (Authelia, Authentik, Keycloak, etc.).
-            // Show a WKWebView so the user can authenticate through the proxy portal.
-            // Once done, the proxy session cookies are captured and injected into URLSession.
-            pendingProxyAuthURL = normalizedURL
-            isConnecting = false
-            showProxyAuthChallenge = true
-            return
-        case .unhealthy:
-            errorMessage = "Server is reachable but not responding correctly."
-            isConnecting = false
-            return
-        case .unreachable:
-            errorMessage = "Could not connect to the server. Check the URL and your network."
-            isConnecting = false
-            return
-        }
-
-        // Verify it's an OpenWebUI server. This also probes /api/config, which
-        // Cloudflare can independently challenge even if /health passed.
-        // If it fails, do a second Cloudflare check before giving up.
-        guard let config_result = await activeClient.verifyAndGetConfig() else {
-            let cfCheck = await activeClient.checkHealthWithProxyDetection()
-            if cfCheck == .cloudflareChallenge {
-                pendingCloudflareURL = normalizedURL
+        do {
+            let models = try await activeClient.getModels()
+            guard !models.isEmpty else {
+                errorMessage = "Connected, but no models were returned. Check your BASEURL and APIKEY."
                 isConnecting = false
-                showCloudflareChallenge = true
                 return
             }
-            errorMessage = "Server does not appear to be an OpenWebUI instance."
+        } catch {
+            let apiError = APIError.from(error)
+            errorMessage = apiError.errorDescription ?? "Could not load models. Check your BASEURL and APIKEY."
             isConnecting = false
             return
         }
 
-        backendConfig = config_result
-        logger.info("📋 [connect] backendConfig set — name='\(config_result.name ?? "nil")', version='\(config_result.version ?? "nil")', features_nil=\(config_result.features == nil), isSignupEnabled=\(self.isSignupEnabled), isLoginEnabled=\(self.isLoginEnabled), oauthProviders=\(config_result.oauthProviders?.enabledProviders.joined(separator: ",") ?? "none"), isValidOpenWebUI=\(config_result.isValidOpenWebUI)")
-        // Upsert the new server. For multi-server scenarios the new server
-        // must be made active explicitly — addServer() only auto-activates
-        // the very first server in an empty list.
         serverConfigStore.addServer(activeConfig)
         if let saved = serverConfigStore.server(forURL: normalizedURL) {
             serverConfigStore.setActiveServer(id: saved.id)
         }
         dependencies?.refreshServices()
 
-        // If API key was provided, try to authenticate immediately
-        if !apiKey.isEmpty {
-            do {
-                currentUser = try await activeClient.getCurrentUser()
-                cacheCurrentUser()
-                phase = .authenticated
-                startTokenRefreshTimer()
-                markOnboardingSeen()
-            } catch {
-                // API key invalid; proceed to auth selection
-                logger.warning("API key auth failed: \(error.localizedDescription)")
-                phase = .authMethodSelection
-            }
-        } else {
-            phase = .authMethodSelection
-        }
-
+        currentUser = User(
+            id: "openai-compatible-user",
+            username: "API Key User",
+            email: "",
+            name: "API Key User",
+            role: .user
+        )
+        cacheCurrentUser()
+        phase = .authenticated
+        markOnboardingSeen()
         isConnecting = false
     }
 
@@ -668,6 +603,18 @@ final class AuthViewModel {
 
         let maxRetries = 3
         var lastError: Error?
+
+        if serverConfigStore.activeServer?.providerType == .openAICompatible {
+            currentUser = User(
+                id: "openai-compatible-user",
+                username: "API Key User",
+                email: "",
+                name: "API Key User",
+                role: .user
+            )
+            phase = .authenticated
+            return
+        }
 
         for attempt in 1...maxRetries {
             do {

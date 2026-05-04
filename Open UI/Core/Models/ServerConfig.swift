@@ -1,14 +1,20 @@
 import Foundation
 
-/// Configuration for connecting to an OpenWebUI server instance.
+/// Configuration for connecting to an AI provider server.
 ///
 /// **Security:** The `apiKey` is intentionally excluded from `Codable`
 /// serialisation so it is never persisted in plaintext UserDefaults.
 /// Use ``KeychainService`` to store/retrieve API keys instead.
 struct ServerConfig: Codable, Identifiable, Hashable, Sendable {
+    enum ProviderType: String, Codable, Sendable {
+        case openWebUI
+        case openAICompatible
+    }
+
     let id: String
     var name: String
     var url: String
+    var providerType: ProviderType
     var customHeaders: [String: String]
     var lastConnected: Date?
     var isActive: Bool
@@ -83,7 +89,7 @@ struct ServerConfig: Codable, Identifiable, Hashable, Sendable {
 
     // Exclude apiKey from Codable to prevent plaintext storage in UserDefaults.
     enum CodingKeys: String, CodingKey {
-        case id, name, url, customHeaders, lastConnected, isActive, allowSelfSignedCertificates
+        case id, name, url, providerType, customHeaders, lastConnected, isActive, allowSelfSignedCertificates
         case cfClearanceValue, cfClearanceExpiry, cfUserAgent, isCloudflareBotProtected
         case proxyAuthCookies, isAuthProxyProtected, proxyAuthPortalURL
         case lastUserName, lastUserEmail, lastUserProfileImageURL, lastAuthType, hasActiveSession
@@ -97,6 +103,7 @@ struct ServerConfig: Codable, Identifiable, Hashable, Sendable {
         id = try c.decode(String.self, forKey: .id)
         name = try c.decode(String.self, forKey: .name)
         url = try c.decode(String.self, forKey: .url)
+        providerType = (try? c.decode(ProviderType.self, forKey: .providerType)) ?? .openWebUI
         customHeaders = (try? c.decode([String: String].self, forKey: .customHeaders)) ?? [:]
         lastConnected = try? c.decode(Date.self, forKey: .lastConnected)
         isActive = (try? c.decode(Bool.self, forKey: .isActive)) ?? false
@@ -123,6 +130,7 @@ struct ServerConfig: Codable, Identifiable, Hashable, Sendable {
         id: String = UUID().uuidString,
         name: String,
         url: String,
+        providerType: ProviderType = .openWebUI,
         apiKey: String? = nil,
         customHeaders: [String: String] = [:],
         lastConnected: Date? = nil,
@@ -146,6 +154,7 @@ struct ServerConfig: Codable, Identifiable, Hashable, Sendable {
         self.id = id
         self.name = name
         self.url = url
+        self.providerType = providerType
         self.apiKey = apiKey
         self.customHeaders = customHeaders
         self.lastConnected = lastConnected

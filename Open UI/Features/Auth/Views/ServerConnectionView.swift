@@ -191,7 +191,7 @@ struct AuthPrimaryButton: View {
 
 // MARK: - Server Connection View
 
-/// View for connecting to an OpenWebUI server — modernized with animated background.
+/// View for connecting to an OpenAI-compatible server — modernized with animated background.
 struct ServerConnectionView: View {
     @Bindable var viewModel: AuthViewModel
     @Environment(\.theme) private var theme
@@ -237,7 +237,7 @@ struct ServerConnectionView: View {
                             .opacity(appeared ? 1 : 0)
                             .offset(y: appeared ? 0 : 10)
 
-                        Text("Connect to your OpenWebUI server")
+                        Text("Connect to any OpenAI-compatible API")
                             .scaledFont(size: 16)
                             .foregroundStyle(theme.textSecondary)
                             .opacity(appeared ? 1 : 0)
@@ -247,13 +247,26 @@ struct ServerConnectionView: View {
                     // Connection form card
                     VStack(spacing: Spacing.lg) {
                         ModernTextField(
-                            label: "Server URL",
-                            placeholder: "https://your-server.com or http://IP:port",
+                            label: "BASEURL",
+                            placeholder: "https://api.example.com/v1",
                             text: $viewModel.serverURL,
                             keyboardType: .URL,
                             textContentType: .URL,
                             onSubmit: {
-                                if !viewModel.serverURL.isEmpty {
+                                if !viewModel.serverURL.isEmpty && !viewModel.apiKey.isEmpty {
+                                    Task { await viewModel.connect() }
+                                }
+                            }
+                        )
+
+                        ModernTextField(
+                            label: "APIKEY",
+                            placeholder: "Enter your API key",
+                            text: $viewModel.apiKey,
+                            isSecure: true,
+                            textContentType: .password,
+                            onSubmit: {
+                                if !viewModel.serverURL.isEmpty && !viewModel.apiKey.isEmpty {
                                     Task { await viewModel.connect() }
                                 }
                             }
@@ -262,13 +275,6 @@ struct ServerConnectionView: View {
                         // Advanced options
                         DisclosureGroup(isExpanded: $showAdvancedOptions) {
                             VStack(spacing: Spacing.lg) {
-                                ModernTextField(
-                                    label: "API Key (optional)",
-                                    placeholder: "Enter API key to skip login",
-                                    text: $viewModel.apiKey,
-                                    isSecure: true
-                                )
-
                                 HStack {
                                     VStack(alignment: .leading, spacing: Spacing.xxs) {
                                         Text("Self-Signed Certificates")
@@ -325,7 +331,7 @@ struct ServerConnectionView: View {
                             title: viewModel.isConnecting ? "Connecting..." : "Connect",
                             icon: viewModel.isConnecting ? nil : "link",
                             isLoading: viewModel.isConnecting,
-                            isDisabled: viewModel.serverURL.isEmpty
+                            isDisabled: viewModel.serverURL.isEmpty || viewModel.apiKey.isEmpty
                         ) {
                             Task { await viewModel.connect() }
                         }
@@ -371,7 +377,7 @@ struct ServerConnectionView: View {
                             .scaledFont(size: 14, weight: .medium)
                             .foregroundStyle(theme.textSecondary)
 
-                        Text("Enter the URL of your OpenWebUI server.\nUse https:// or http:// — direct URLs and IP:port supported.")
+                        Text("Enter an OpenAI-compatible BASEURL, for example https://api.example.com/v1, and your APIKEY.")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textTertiary)
                             .multilineTextAlignment(.center)

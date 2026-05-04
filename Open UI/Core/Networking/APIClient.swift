@@ -28,6 +28,20 @@ final class APIClient: @unchecked Sendable {
 
     var baseURL: String { network.serverConfig.url }
 
+    private var modelsPath: String {
+        network.serverConfig.providerType == .openAICompatible ? "/models" : "/api/models"
+    }
+
+    private var chatCompletionsPath: String {
+        network.serverConfig.providerType == .openAICompatible ? "/chat/completions" : "/api/chat/completions"
+    }
+
+    private func chatCompletionBody(for request: ChatCompletionRequest) -> [String: Any] {
+        network.serverConfig.providerType == .openAICompatible
+            ? request.toOpenAICompatibleJSON()
+            : request.toJSON()
+    }
+
     // MARK: - Health & Configuration
 
     func checkHealth() async -> Bool {
@@ -358,7 +372,7 @@ final class APIClient: @unchecked Sendable {
     // MARK: - Models
 
     func getModels() async throws -> [AIModel] {
-        let (data, _) = try await network.requestRaw(path: "/api/models")
+        let (data, _) = try await network.requestRaw(path: modelsPath)
 
         guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
@@ -838,10 +852,10 @@ final class APIClient: @unchecked Sendable {
     func sendMessage(
         request: ChatCompletionRequest
     ) async throws -> (json: [String: Any], messageId: String, sessionId: String) {
-        let body = request.toJSON()
+        let body = chatCompletionBody(for: request)
 
         let responseJSON = try await network.requestJSON(
-            path: "/api/chat/completions",
+            path: chatCompletionsPath,
             method: .post,
             body: body,
             timeout: 30
@@ -856,19 +870,19 @@ final class APIClient: @unchecked Sendable {
 
     func sendMessageStreaming(request: ChatCompletionRequest) async throws -> SSEStream {
         try await network.streamRequestBytes(
-            path: "/api/chat/completions",
+            path: chatCompletionsPath,
             method: .post,
-            body: request.toJSON()
+            body: chatCompletionBody(for: request)
         )
     }
 
     /// Sends a chat completion request via HTTP POST. Returns immediately;
     /// actual content is delivered via Socket.IO events.
     func sendMessageHTTP(request: ChatCompletionRequest) async throws -> [String: Any] {
-        let body = request.toJSON()
+        let body = chatCompletionBody(for: request)
         let bodyData = try JSONSerialization.data(withJSONObject: body)
         let (data, _) = try await network.requestRaw(
-            path: "/api/chat/completions",
+            path: chatCompletionsPath,
             method: .post,
             body: bodyData,
             timeout: 30
@@ -897,9 +911,9 @@ final class APIClient: @unchecked Sendable {
     /// - Returns: An `SSEStream` that yields tokens as they arrive.
     func sendMessagePipeSSE(request: ChatCompletionRequest) async throws -> SSEStream {
         try await network.streamRequestBytes(
-            path: "/api/chat/completions",
+            path: chatCompletionsPath,
             method: .post,
-            body: request.toJSON()
+            body: chatCompletionBody(for: request)
         )
     }
 
@@ -3205,7 +3219,7 @@ final class APIClient: @unchecked Sendable {
         ]
 
         let json = try await network.requestJSON(
-            path: "/api/chat/completions",
+            path: chatCompletionsPath,
             method: .post,
             body: body
         )
@@ -3248,7 +3262,7 @@ final class APIClient: @unchecked Sendable {
         ]
 
         let json = try await network.requestJSON(
-            path: "/api/chat/completions",
+            path: chatCompletionsPath,
             method: .post,
             body: body
         )

@@ -238,4 +238,6 @@ final class ConversationManager: @unchecked Sendable {
     }
 
     var baseURL: String { apiClient.baseURL }
+
+    var providerType: ServerConfig.ProviderType { apiClient.network.serverConfig.providerType }
 }
