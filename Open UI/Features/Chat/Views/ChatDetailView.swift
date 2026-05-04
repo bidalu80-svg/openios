@@ -1,0 +1,4182 @@
+import SwiftUI
+import PhotosUI
+import UniformTypeIdentifiers
+import AVFoundation
+import QuickLook
+import MarkdownView
+import os.log
+
+// MARK: - Chat Detail View
+
+struct ChatDetailView: View {
+    @Environment(AppDependencyContainer.self) private var dependencies
+    @Environment(AppRouter.self) private var router
+    @Environment(\.theme) private var theme
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    private let logger = Logger(subsystem: "com.openui", category: "ChatDetailView")
+
+    private let initialConversationId: String?
+    @State private var viewModel: ChatViewModel
+
+    // MARK: Model selector sheet
+    @State private var isShowingModelSelectorSheet = false
+    @State private var isShowingChatParams = false
+    @State private var editingModelDetail: ModelDetail? = nil
+    @State private var isLoadingModelDetail = false
+
+    // MARK: Scroll state (iOS 18 ScrollPosition API)
+    /// iOS 18+ declarative scroll position. Used with `.scrollPosition($scrollPosition)`
+    /// to drive programmatic scrolling via `scrollTo(edge:)`.
+    @State private var scrollPosition: ScrollPosition = .init()
+    /// True when the user has manually scrolled away from the bottom.
+    @State private var isScrolledUp = false
+    /// Last known contentOffset.y — used to detect user-initiated upward drags.
+    @State private var lastScrollOffset: CGFloat = 0
+    /// Cached scroll content height — updated via a separate onScrollGeometryChange.
+    @State private var viewState_contentHeight: CGFloat = 0
+    /// Cached scroll container height — updated via a separate onScrollGeometryChange.
+    @State private var viewState_containerHeight: CGFloat = 0
+    /// Timestamp of the last *programmatic* scroll-to-bottom.
+    /// Used both as a streaming throttle guard (prevent pump-scroll more than 10hz)
+    /// and as a suppressor to prevent the offset-change handler from falsely
+    /// interpreting a programmatic scroll animation as a manual upward drag.
+    @State private var lastProgrammaticScrollTime: Date = .distantPast
+
+    // MARK: Message pagination (sliding window — memory optimization)
+    /// The ending index (exclusive) of the visible message window.
+    /// `nil` means "pinned to latest" — the window always includes the newest messages.
+    @State private var windowEnd: Int? = nil
+    /// Number of messages currently in the window. Starts small, grows to `maxWindowSize`.
+    @State private var windowSize: Int = 5
+    /// Guard to prevent rapid-fire pagination triggers.
+    @State private var isLoadingMoreMessages = false
+    /// Maximum messages rendered at once (the sliding-window cap).
+    private let maxWindowSize = 10
+
+
+    // MARK: UI state
+    @State private var showCopiedToast = false
+    @State private var activeActionMessageId: String?
+    @State private var activeVersionIndex: [String: Int] = [:]
+
+    // MARK: Action event handling (dynamic input/confirmation/notification)
+
+    /// Pending `__event_call__` input prompt waiting for user text.
+    @State private var actionInputRequest: ActionInputRequest? = nil
+    /// Pending `__event_call__` confirmation waiting for user yes/no.
+    @State private var actionConfirmRequest: ActionConfirmRequest? = nil
+    /// Toast message from `__event_emitter__` notification events.
+    @State private var actionNotificationToast: String? = nil
+    /// Continuation used to resume the streaming task with the user's input/confirmation response.
+    @State private var actionCallContinuation: CheckedContinuation<ActionCallResponse, Never>? = nil
+    /// Bound to the TextField inside the action input alert.
+    @State private var actionInputText: String = ""
+    @State private var speakingMessageId: String?
+    @State private var ttsGeneratingMessageId: String?
+    @State private var usagePopoverMessageId: String?
+    @State private var sourcesSheetMessage: ChatMessage?
+    @State private var randomPrompts: [SuggestedPrompt] = []
+
+    // MARK: Model mention (@ trigger)
+    @State private var isShowingModelPicker = false
+    @State private var modelPickerQuery = ""
+    @State private var mentionedModel: AIModel? = nil
+
+    // MARK: Inline edit
+    @State private var editingMessageId: String?
+    @State private var editingMessageText = ""
+    @FocusState private var isEditFieldFocused: Bool
+
+    // MARK: User message version navigation
+    /// Tracks the active version index for user messages (edit history).
+    /// -1 means the current (latest) user message content. 0...N-1 = an older version.
+    @State private var activeUserVersionIndex: [String: Int] = [:]
+
+    /// Maps assistant message ID → content override when viewing an older user version.
+    /// When nil, the assistant shows its own current content.
+    /// When set, the assistant displays this overridden content instead.
+    @State private var assistantContentOverride: [String: String] = [:]
+
+    // MARK: Dictation
+    @State private var isDictating = false
+
+    // MARK: Keyboard
+    @State private var keyboard = KeyboardTracker()
+
+    // MARK: Attachment pickers
+    @State private var selectedPhotos: [PhotosPickerItem] = []
+    @State private var showFilePicker = false
+    @State private var showPhotosPicker = false
+    @State private var showAudioPicker = false
+    @State private var showCameraPicker = false
+    @State private var showWebURLAlert = false
+    @State private var webURLInput = ""
+    @State private var showReferenceChatPicker = false
+
+    // MARK: #URL inline suggestion
+    @State private var detectedWebURL: String?
+
+
+    // MARK: File download & preview
+    @State private var isDownloadingFile = false
+    @State private var downloadedFileURL: URL?
+    @State private var showDownloadError = false
+    @State private var downloadErrorMessage = ""
+    /// URL for QuickLook in-app file preview (PDF, images, docs, etc.)
+    @State private var previewFileURL: URL?
+    /// Code preview from MarkdownView's eye button (fullscreen code view)
+    @State private var codePreviewCode: String?
+    @State private var codePreviewLanguage: String = ""
+
+    // MARK: Init
+
+    init(conversationId: String, viewModel: ChatViewModel) {
+        self.initialConversationId = conversationId
+        self._viewModel = State(initialValue: viewModel)
+    }
+
+    init(viewModel: ChatViewModel) {
+        self.initialConversationId = nil
+        self._folderWorkspace = nil
+        self._viewModel = State(initialValue: viewModel)
+    }
+
+    // MARK: - Folder Workspace Init
+
+    /// Creates a ChatDetailView in "folder workspace" mode.
+    /// When `folderWorkspace` is set, the welcome/empty state shows the folder
+    /// icon + name centered (matching the web UI). New chats are created inside
+    /// the folder with its system prompt injected.
+    init(viewModel: ChatViewModel, folderWorkspace: ChatFolder?) {
+        self.initialConversationId = nil
+        self._folderWorkspace = folderWorkspace
+        self._viewModel = State(initialValue: viewModel)
+    }
+
+    private var _folderWorkspace: ChatFolder?
+
+    // MARK: - Body
+
+    var body: some View {
+        @Bindable var vm = viewModel
+
+        ZStack {
+            theme.background.ignoresSafeArea()
+            messageListArea
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if editingMessageId != nil {
+                editInputBar
+                    .padding(.bottom, keyboard.height)
+            } else {
+                inputFieldArea(vm: vm)
+                    .padding(.bottom, keyboard.height)
+            }
+        }
+        .ignoresSafeArea(.keyboard)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { toolbarContent }
+        .task {
+            keyboard.start()
+            if let manager = dependencies.conversationManager {
+                viewModel.configure(with: manager, socket: dependencies.socketService, store: dependencies.activeChatStore, asr: dependencies.asrService)
+            }
+            // Perform non-async setup before awaiting load() so the UI
+            // populates prompts and temporary-chat state instantly.
+            if viewModel.isNewConversation {
+                viewModel.isTemporaryChat = UserDefaults.standard.bool(forKey: "temporaryChatDefault")
+            }
+            randomPrompts = Self.resolvePromptSuggestions(
+                adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
+                modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
+                count: promptCardCount
+            )
+            NotificationService.shared.activeConversationId =
+                viewModel.conversationId ?? viewModel.conversation?.id
+        await viewModel.load()
+        // After messages load, ensure we're pinned to the latest window and
+        // scroll to the bottom. The 60ms delay lets the ScrollView finish
+        // laying out the newly-populated content before we issue the scroll.
+        let loadedCount = viewModel.messages.count
+        if loadedCount > 0 {
+            isScrolledUp = false
+            windowEnd = nil
+            windowSize = min(maxWindowSize, loadedCount)
+            try? await Task.sleep(nanoseconds: 60_000_000) // 60ms layout settle
+            scrollPosition.scrollTo(edge: .bottom)
+        }
+        await viewModel.fetchPinnedModels()
+        // Rebuild prompts after load() — models are now fetched with fresh
+            // suggestion_prompts from the server. The pre-load resolve above
+            // uses cached data for instant display; this post-load resolve
+            // ensures prompts reflect the latest server state.
+            randomPrompts = Self.resolvePromptSuggestions(
+                adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
+                modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
+                count: promptCardCount
+            )
+        }
+        // Reactive fallback: if backendConfig wasn't ready when .task ran
+        // (first app launch), rebuild prompts as soon as the config arrives.
+        // Watch the suggestion count (Int?) — always Equatable, avoids
+        // asking the type-checker to diff the entire BackendConfig struct.
+        .onChange(of: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions?.count) { _, _ in
+            // Always rebuild when the server config changes — this handles both the
+            // first-launch timing case (randomPrompts is empty) AND the case where
+            // the admin updates suggestions on the server while the app is running.
+            randomPrompts = Self.resolvePromptSuggestions(
+                adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
+                modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
+                count: promptCardCount
+            )
+        }
+        // Also rebuild prompts when the selected model changes — the new model may
+        // have per-model suggestion_prompts that should show as a fallback when the
+        // admin hasn't set global prompts.
+        .onChange(of: viewModel.selectedModelId) { _, _ in
+            randomPrompts = Self.resolvePromptSuggestions(
+                adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
+                modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
+                count: promptCardCount
+            )
+        }
+        .onAppear {
+            viewModel.syncOnEntry()
+        }
+        .onDisappear {
+            keyboard.stop()
+            // Stop TTS playback and clear state when navigating away from chat
+            if speakingMessageId != nil || ttsGeneratingMessageId != nil {
+                dependencies.textToSpeechService.stop()
+                speakingMessageId = nil
+                ttsGeneratingMessageId = nil
+            }
+            NotificationService.shared.activeConversationId = nil
+        }
+        // Stop TTS when app enters background to prevent Metal GPU crashes
+        // and keep the speakingMessageId state in sync with actual playback.
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            if speakingMessageId != nil || ttsGeneratingMessageId != nil {
+                dependencies.textToSpeechService.stop()
+                speakingMessageId = nil
+                ttsGeneratingMessageId = nil
+            }
+        }
+        // Toasts & banners
+        .overlay(alignment: .top) {
+            if showCopiedToast { copiedToastView }
+        }
+        .overlay(alignment: .bottom) {
+            if let error = viewModel.errorMessage {
+                errorBannerView(error)
+                    .padding(.bottom, keyboard.height + 80)
+            }
+        }
+        // Sheets & alerts
+        .sheet(isPresented: $showFilePicker) {
+            DocumentPickerView { urls in
+                Task {
+                    for url in urls {
+                        let ext = url.pathExtension.lowercased()
+                        let audioExts = ["mp3","wav","m4a","aac","flac","ogg","caf","aiff","wma"]
+                        if audioExts.contains(ext) {
+                            await processAudioFileURL(url)
+                        } else {
+                            await processFileURL(url)
+                        }
+                    }
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showCameraPicker) {
+            CameraPickerView { image in processCameraImage(image) }
+                .ignoresSafeArea()
+        }
+        .alert("Add Web Link", isPresented: $showWebURLAlert) {
+            TextField("https://example.com", text: $webURLInput)
+                .textContentType(.URL)
+                .keyboardType(.URL)
+                .autocapitalization(.none)
+            Button("Cancel", role: .cancel) { webURLInput = "" }
+            Button("Add") { processWebURL() }
+        } message: {
+            Text("Enter a URL to include as context in your message.")
+        }
+        .onChange(of: selectedPhotos) { _, newItems in
+            Task { await processSelectedPhotos(newItems); selectedPhotos = [] }
+        }
+        // Pick up files shared from other apps via "Open In" / document import.
+        // The version counter fires this even when the view is already visible.
+        .onChange(of: dependencies.pendingIncomingFileVersion) { _, _ in
+            if let file = dependencies.pendingIncomingFile {
+                viewModel.attachments.append(file)
+                // Trigger immediate upload for shared files (via "Open In")
+                viewModel.uploadAttachmentImmediately(attachmentId: file.id)
+                dependencies.pendingIncomingFile = nil
+            }
+        }
+        .sheet(item: $sourcesSheetMessage) { message in
+            SourcesDetailSheet(sources: message.sources)
+        }
+        // Prompt variable input sheet — shown when a selected prompt has {{variables}}
+        .sheet(isPresented: Binding<Bool>(
+            get: { viewModel.pendingPromptForVariables != nil },
+            set: { if !$0 { viewModel.cancelPromptVariables() } }
+        )) {
+            if let prompt = viewModel.pendingPromptForVariables {
+                PromptVariableSheet(
+                    promptName: prompt.name,
+                    variables: viewModel.pendingPromptVariables,
+                    onSave: { values in
+                        viewModel.submitPromptVariables(values: values)
+                    },
+                    onCancel: {
+                        viewModel.cancelPromptVariables()
+                    }
+                )
+            }
+        }
+        // Intercept link taps from MarkdownView: download server file URLs
+        // with auth instead of opening Safari (the user may not be logged in
+        // to the browser). MarkdownView posts a notification instead of
+        // calling UIApplication.shared.open directly, so we can route the
+        // URL through our authenticated download flow.
+        .onReceive(NotificationCenter.default.publisher(for: .markdownLinkTapped)) { notification in
+            guard let url = notification.userInfo?["url"] as? URL else { return }
+            let urlString = url.absoluteString
+            let base = viewModel.serverBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+            // Server file URL → download with auth token and present share sheet
+            if !base.isEmpty, urlString.hasPrefix(base), urlString.contains("/api/v1/files/"),
+               urlString.hasSuffix("/content") {
+                let parts = urlString.split(separator: "/")
+                if let filesIdx = parts.firstIndex(of: "files"),
+                   filesIdx + 1 < parts.count {
+                    let fileId = String(parts[filesIdx + 1])
+                    Task { await downloadAndShareFile(fileId: fileId) }
+                    return
+                }
+            }
+
+            // All other URLs → open in Safari normally
+            UIApplication.shared.open(url)
+        }
+        // Handle sendPrompt bridge calls from InlineVisualizerView.
+        // Populates the chat input and sends immediately — same pattern as suggestion taps.
+        .onReceive(NotificationCenter.default.publisher(for: .vizSendPrompt)) { notification in
+            guard let text = notification.userInfo?["text"] as? String, !text.isEmpty else { return }
+            if viewModel.isStreaming {
+                // Queue the prompt — set input but don't send while the model is busy
+                viewModel.inputText = text
+            } else {
+                viewModel.inputText = text
+                Task { await viewModel.sendMessage() }
+            }
+        }
+        .overlay {
+            if isDownloadingFile {
+                ZStack {
+                    Color.black.opacity(0.3).ignoresSafeArea()
+                    VStack(spacing: Spacing.sm) {
+                        ProgressView()
+                            .controlSize(.large)
+                            .tint(.white)
+                        Text("Downloading…")
+                            .scaledFont(size: 14, weight: .medium)
+                            .foregroundStyle(.white)
+                    }
+                    .padding(Spacing.lg)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous))
+                }
+                .transition(.opacity)
+            }
+        }
+        .alert("Download Failed", isPresented: $showDownloadError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(downloadErrorMessage)
+        }
+        // MARK: Action event modifiers (input dialog, confirmation, notification toast)
+        .applyActionEventModifiers(
+            actionInputRequest: $actionInputRequest,
+            actionConfirmRequest: $actionConfirmRequest,
+            actionNotificationToast: $actionNotificationToast,
+            actionCallContinuation: $actionCallContinuation,
+            actionInputText: $actionInputText
+        )
+        .sheet(item: $downloadedFileURL) { url in
+            ShareSheetView(activityItems: [url])
+        }
+        // In-app file preview using QuickLook (PDFs, images, docs, etc.)
+        .quickLookPreview($previewFileURL)
+        // Chat advanced parameters sheet (slider icon in toolbar)
+        .sheet(isPresented: $isShowingChatParams) {
+            ChatAdvancedParamsSheet(
+                params: Binding(
+                    get: { viewModel.conversation?.chatParams ?? viewModel.pendingChatParams ?? ChatAdvancedParams() },
+                    set: { newParams in
+                        if viewModel.conversation != nil {
+                            viewModel.conversation?.chatParams = newParams
+                        } else {
+                            viewModel.pendingChatParams = newParams
+                        }
+                    }
+                )
+            )
+            .themed()
+        }
+        .sheet(item: $editingModelDetail) { detail in
+            NavigationStack {
+                ModelEditorView(existingModel: detail) { _ in
+                    Task { viewModel.refreshModelsInBackground() }
+                    editingModelDetail = nil
+                }
+            }
+            .themed()
+        }
+        .applyWidgetAndPickerHandlers(
+            showCameraPicker: $showCameraPicker,
+            showPhotosPicker: $showPhotosPicker,
+            showFilePicker: $showFilePicker,
+            selectedPhotos: $selectedPhotos,
+            codePreviewCode: $codePreviewCode,
+            codePreviewLanguage: $codePreviewLanguage,
+            onDismissOverlays: { dismissAllPickers() }
+        )
+    }
+
+    // MARK: - Toolbar
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            HStack(spacing: Spacing.sm) {
+                modelSelectorButton
+                if viewModel.isTemporaryChat {
+                    Image(systemName: "eye.slash.fill")
+                        .scaledFont(size: 12, weight: .semibold)
+                        .foregroundStyle(theme.warning)
+                }
+            }
+            // Force SwiftUI to fully re-layout the toolbar principal slot when
+            // the selected model changes. Without this, the toolbar caches the
+            // intrinsic width from the previous (possibly longer) model name
+            // and never shrinks back even when a shorter name is selected.
+            .id(viewModel.selectedModelId ?? "none")
+        }
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            Button {
+                Haptics.play(.light)
+                isShowingChatParams = true
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .scaledFont(size: 13, weight: .medium)
+                    .foregroundStyle((viewModel.conversation?.chatParams != nil || viewModel.pendingChatParams != nil) ? theme.brandPrimary : theme.textTertiary)
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Chat parameters")
+            if viewModel.messages.isEmpty {
+                Button {
+                    withAnimation(MicroAnimation.snappy) {
+                        viewModel.isTemporaryChat.toggle()
+                    }
+                    Haptics.play(.light)
+                } label: {
+                    Image(systemName: viewModel.isTemporaryChat ? "eye.slash.fill" : "eye")
+                        .scaledFont(size: 13, weight: .medium)
+                        .foregroundStyle(viewModel.isTemporaryChat ? theme.warning : theme.textTertiary)
+                        .frame(width: 34, height: 34)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(viewModel.isTemporaryChat ? "Temporary chat on" : "Temporary chat off")
+            }
+        }
+    }
+
+    private var modelSelectorButton: some View {
+        Group {
+            if viewModel.availableModels.isEmpty {
+                Text(viewModel.conversation?.title ?? String(localized: "New Chat"))
+                    .scaledFont(size: 14, weight: .medium)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } else {
+                Button {
+                    Haptics.play(.light)
+                    viewModel.refreshModelsInBackground()
+                    isShowingModelSelectorSheet = true
+                } label: {
+                    HStack(spacing: Spacing.xs) {
+                        if let model = viewModel.selectedModel {
+                            ModelAvatar(
+                                size: 22,
+                                imageURL: viewModel.resolvedImageURL(for: model),
+                                label: model.shortName,
+                                authToken: viewModel.serverAuthToken
+                            )
+                            .fixedSize()
+                        }
+                        Text(viewModel.selectedModel?.shortName ?? String(localized: "Select Model"))
+                            .scaledFont(size: 14, weight: .medium)
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .layoutPriority(0)
+                        Image(systemName: "chevron.down")
+                            .scaledFont(size: 10, weight: .semibold)
+                            .foregroundStyle(theme.textTertiary)
+                            .fixedSize()
+                            .layoutPriority(1)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(theme.cardBackground.opacity(0.9))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+                .sheet(isPresented: $isShowingModelSelectorSheet) {
+                    ModelSelectorSheet(
+                        models: viewModel.availableModels,
+                        selectedModelId: viewModel.selectedModelId,
+                        serverBaseURL: viewModel.serverBaseURL,
+                        authToken: viewModel.serverAuthToken,
+                        isAdmin: dependencies.authViewModel.currentUser?.role == .admin,
+                        pinnedModelIds: viewModel.pinnedModelIds,
+                        onEdit: dependencies.authViewModel.currentUser?.role == .admin ? { model in
+                            isShowingModelSelectorSheet = false
+                            Task {
+                                try? await Task.sleep(nanoseconds: 600_000_000)
+                                await openModelEditorFromPicker(model)
+                            }
+                        } : nil,
+                        onTogglePin: { modelId in
+                            viewModel.togglePinModel(modelId)
+                        },
+                        onSelect: { model in
+                            withAnimation(MicroAnimation.snappy) {
+                                viewModel.selectModel(model.id)
+                            }
+                        }
+                    )
+                    .themed()
+                    .presentationBackgroundInteraction(.disabled)
+                    .onDisappear {
+                        Task { await ImageCacheService.shared.clearMemory() }
+                    }
+                }
+            }
+        }
+        // Cap the model selector width so long names truncate
+        // instead of pushing into trailing toolbar buttons.
+        .frame(maxWidth: 220)
+    }
+
+    // MARK: - Input Field Area
+
+    @ViewBuilder
+    private func inputFieldArea(vm: ChatViewModel) -> some View {
+        @Bindable var vm = vm
+        VStack(spacing: 0) {
+            // Picker overlays — rendered above the input field so input stays visible
+            if let url = detectedWebURL {
+                webURLSuggestionPill(url: url)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .opacity
+                    ))
+            }
+
+            if vm.isShowingKnowledgePicker {
+                KnowledgePickerView(
+                    query: vm.knowledgeSearchQuery,
+                    items: vm.knowledgeItems,
+                    isLoading: vm.isLoadingKnowledge,
+                    keyboardHeight: keyboard.height,
+                    onSelect: { item in
+                        viewModel.selectKnowledgeItem(item)
+                    },
+                    onDismiss: {
+                        viewModel.dismissKnowledgePicker()
+                    }
+                )
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .opacity
+                ))
+            }
+
+            if vm.isShowingPromptPicker {
+                PromptPickerView(
+                    query: vm.promptSearchQuery,
+                    prompts: vm.availablePrompts,
+                    isLoading: vm.isLoadingPrompts,
+                    keyboardHeight: keyboard.height,
+                    onSelect: { prompt in
+                        viewModel.selectPrompt(prompt)
+                    },
+                    onDismiss: {
+                        viewModel.dismissPromptPicker()
+                    }
+                )
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .opacity
+                ))
+            }
+
+            if vm.isShowingSkillPicker {
+                SkillPickerView(
+                    query: vm.skillSearchQuery,
+                    skills: vm.availableSkills,
+                    isLoading: vm.isLoadingSkills,
+                    keyboardHeight: keyboard.height,
+                    onSelect: { skill in
+                        viewModel.selectSkill(skill)
+                    },
+                    onDismiss: {
+                        viewModel.dismissSkillPicker()
+                    }
+                )
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .opacity
+                ))
+            }
+
+            if isShowingModelPicker {
+                ModelPickerView(
+                    query: modelPickerQuery,
+                    models: vm.availableModels,
+                    serverBaseURL: vm.serverBaseURL,
+                    authToken: vm.serverAuthToken,
+                    keyboardHeight: keyboard.height,
+                    onSelect: { model in
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            mentionedModel = model
+                            viewModel.mentionedModelId = model.id
+                        }
+                        viewModel.removeMentionToken()
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            isShowingModelPicker = false
+                            modelPickerQuery = ""
+                        }
+                        Haptics.play(.light)
+                    },
+                    onDismiss: {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            isShowingModelPicker = false
+                            modelPickerQuery = ""
+                        }
+                    }
+                )
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .opacity
+                ))
+            }
+
+            // ── Task List Panel (above input field) ──
+            if !vm.tasks.isEmpty {
+                TaskListView(
+                    tasks: vm.tasks,
+                    isStreaming: vm.isStreaming,
+                    onToggleStatus: { taskId, newStatus in
+                        viewModel.updateTaskStatus(taskId: taskId, newStatus: newStatus)
+                    }
+                )
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .opacity
+                ))
+            }
+
+            ChatInputField(
+                text: $vm.inputText,
+                attachments: $vm.attachments,
+                placeholder: placeholderText,
+                isEnabled: !vm.isStreaming,
+                onSend: { Task { await viewModel.sendMessage() } },
+                onStopGenerating: vm.isStreaming ? { viewModel.stopStreaming() } : nil,
+                webSearchEnabled: $vm.webSearchEnabled,
+                imageGenerationEnabled: $vm.imageGenerationEnabled,
+                codeInterpreterEnabled: $vm.codeInterpreterEnabled,
+                isWebSearchAvailable: dependencies.authViewModel.featurePermissions.webSearch && isFeatureAvailable("web_search", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableWebSearch),
+                isImageGenerationAvailable: dependencies.authViewModel.featurePermissions.imageGeneration && isFeatureAvailable("image_generation", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableImageGeneration),
+                isCodeInterpreterAvailable: dependencies.authViewModel.featurePermissions.codeInterpreter && isFeatureAvailable("code_interpreter", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableCodeInterpreter),
+                tools: vm.availableTools,
+                selectedToolIds: $vm.selectedToolIds,
+                isLoadingTools: vm.isLoadingTools,
+                terminalEnabled: vm.terminalEnabled,
+                isTerminalAvailable: !vm.availableTerminalServers.isEmpty,
+                terminalServerName: vm.selectedTerminalServer?.displayName ?? "",
+                availableTerminalServers: vm.availableTerminalServers,
+                onTerminalToggle: { viewModel.toggleTerminal() },
+                onTerminalServerSelected: { server in
+                    viewModel.selectedTerminalServer = server
+                },
+                onBrowseFiles: nil,
+                mentionedModel: $mentionedModel,
+                mentionedModelImageURL: mentionedModel.flatMap { viewModel.resolvedImageURL(for: $0) },
+                mentionedModelAuthToken: viewModel.serverAuthToken,
+                onAtTrigger: { query in
+                    modelPickerQuery = query
+                    if !isShowingModelPicker {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            isShowingModelPicker = true
+                        }
+                        viewModel.refreshModelsInBackground()
+                    }
+                },
+                onAtDismiss: {
+                    if isShowingModelPicker {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            isShowingModelPicker = false
+                            modelPickerQuery = ""
+                        }
+                    }
+                },
+                selectedKnowledgeItems: $vm.selectedKnowledgeItems,
+                selectedReferenceChats: $vm.selectedReferenceChats,
+                onHashTrigger: { query in
+                    // Detect if the query looks like a URL → show inline suggestion pill
+                    let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") || trimmed.hasPrefix("www.") {
+                        // Dismiss knowledge picker if it was showing
+                        if viewModel.isShowingKnowledgePicker {
+                            withAnimation(.easeOut(duration: 0.15)) {
+                                viewModel.dismissKnowledgePicker()
+                            }
+                        }
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            detectedWebURL = trimmed
+                        }
+                    } else {
+                        // Not a URL → normal knowledge picker behavior
+                        if detectedWebURL != nil {
+                            withAnimation(.easeOut(duration: 0.15)) {
+                                detectedWebURL = nil
+                            }
+                        }
+                        viewModel.knowledgeSearchQuery = query
+                        if !viewModel.isShowingKnowledgePicker {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                viewModel.isShowingKnowledgePicker = true
+                            }
+                            viewModel.loadKnowledgeItems()
+                        }
+                    }
+                },
+                onHashDismiss: {
+                    if detectedWebURL != nil {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            detectedWebURL = nil
+                        }
+                    }
+                    if viewModel.isShowingKnowledgePicker {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            viewModel.dismissKnowledgePicker()
+                        }
+                    }
+                },
+                onSlashTrigger: { query in
+                    viewModel.promptSearchQuery = query
+                    if !viewModel.isShowingPromptPicker {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            viewModel.isShowingPromptPicker = true
+                        }
+                        viewModel.loadPrompts()
+                    }
+                },
+                onSlashDismiss: {
+                    if viewModel.isShowingPromptPicker {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            viewModel.dismissPromptPicker()
+                        }
+                    }
+                },
+                onDollarTrigger: { query in
+                    viewModel.skillSearchQuery = query
+                    if !viewModel.isShowingSkillPicker {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            viewModel.isShowingSkillPicker = true
+                        }
+                        viewModel.loadSkills()
+                    }
+                },
+                onDollarDismiss: {
+                    if viewModel.isShowingSkillPicker {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            viewModel.dismissSkillPicker()
+                        }
+                    }
+                },
+                onFileAttachment: { showFilePicker = true },
+                onPhotoAttachment: { showPhotosPicker = true },
+                onCameraCapture: { showCameraPicker = true },
+                onWebAttachment: { showWebURLAlert = true },
+                onReferenceChatAttachment: { showReferenceChatPicker = true },
+                onVoiceInput: { toggleVoiceInput() },
+                onDictationStart: { startDictation() },
+                onDictationStop: { stopDictation() },
+                onDictationCancel: { cancelDictation() },
+                isDictating: isDictating,
+                dictationService: dependencies.dictationService,
+                onToolsSheetPresented: {
+                    Task { await viewModel.loadTools() }
+                }
+            )
+        }
+        .background(theme.background)
+        .animation(.easeOut(duration: 0.2), value: vm.isShowingKnowledgePicker)
+        .animation(.easeOut(duration: 0.15), value: vm.selectedKnowledgeItems.count)
+        .animation(.easeOut(duration: 0.15), value: vm.selectedReferenceChats.count)
+        .animation(.easeOut(duration: 0.25), value: vm.tasks.count)
+        .sheet(isPresented: $showReferenceChatPicker) {
+            ReferenceChatPickerView(
+                isPresented: $showReferenceChatPicker,
+                conversationManager: dependencies.conversationManager
+            ) { item in
+                viewModel.selectReferenceChat(item)
+            }
+        }
+        // Sync mentionedModel → viewModel.mentionedModelId when user taps × on chip
+        .onChange(of: mentionedModel) { _, newModel in
+            viewModel.mentionedModelId = newModel?.id
+        }
+    }
+
+    private var photoPickerLabel: some View {
+        VStack(spacing: Spacing.xs) {
+            ZStack {
+                Circle()
+                    .fill(LinearGradient(
+                        colors: [theme.brandPrimary.opacity(0.2), theme.brandPrimary.opacity(0.12)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    ))
+                    .frame(width: 36, height: 36)
+                Image(systemName: "photo")
+                    .scaledFont(size: 16, weight: .medium)
+                    .foregroundStyle(theme.brandPrimary)
+            }
+            Text("Photo")
+                .scaledFont(size: 12, weight: .medium)
+                .fontWeight(.semibold)
+                .foregroundStyle(theme.textPrimary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, Spacing.sm)
+        .background(theme.surfaceContainer.opacity(theme.isDark ? 0.45 : 0.92))
+        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.5)
+        )
+    }
+
+    private var placeholderText: String {
+        if let model = viewModel.selectedModel {
+            return String(localized: "Message \(model.shortName)")
+        }
+        return String(localized: "Message")
+    }
+
+    /// Checks whether a feature (web_search, image_generation, code_interpreter)
+    /// should be visible in the tools sheet. A feature is available only when:
+    /// 1. The server-level feature flag is enabled (from `/api/config`), AND
+    /// 2. The selected model has that capability enabled (from `info.meta.capabilities`).
+    ///
+    /// If the admin unchecks a capability on the model, the toggle disappears
+    /// from the app — the model simply can't use it.
+    private func isFeatureAvailable(_ capabilityKey: String, serverEnabled: Bool?) -> Bool {
+        // Server must have the feature enabled globally
+        guard serverEnabled == true else { return false }
+        // Model must have the capability enabled
+        guard let model = viewModel.selectedModel,
+              let caps = model.capabilities,
+              let value = caps[capabilityKey] else {
+            // If model has no capabilities dict at all, default to showing
+            // (backward compat — older servers may not send capabilities)
+            return serverEnabled == true
+        }
+        return ["1", "true"].contains(value.lowercased())
+    }
+    
+    // MARK: - iPad Layout Helpers
+
+    /// Maximum reading width for iPad. Content is centered in the available space.
+    /// On iPhone, this is effectively unlimited (fills the screen).
+    private var iPadMaxContentWidth: CGFloat { .infinity }
+
+    /// Number of columns in the welcome prompt grid.
+    private var promptColumnCount: Int {
+        horizontalSizeClass == .regular ? 4 : 2
+    }
+
+    /// Number of prompt cards to show (4 cols needs 8, 2 cols needs 4).
+    private var promptCardCount: Int {
+        horizontalSizeClass == .regular ? 8 : 4
+    }
+
+    // MARK: - Message List Area
+
+    private var messageListArea: some View {
+        ZStack {
+            scrollContent
+
+            // Welcome screen — shown when no messages and not loading
+            if !viewModel.isLoadingConversation && viewModel.messages.isEmpty {
+                if let folder = _folderWorkspace {
+                    folderWelcomeView(folder: folder)
+                        .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                } else {
+                    welcomeView
+                        .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                }
+            }
+        }
+        // FAB overlay
+        .overlay(alignment: .bottomTrailing) {
+            scrollToBottomFAB
+        }
+        .onAppear {
+            // Snap instantly to bottom on chat open.
+            scrollPosition.scrollTo(edge: .bottom)
+        }
+        // Auto-scroll: when a new message arrives, scroll to bottom.
+        // The minHeight trick on the last conversation turn ensures that
+        // scrolling to bottom naturally places the user's sent message
+        // near the top of the viewport (ChatGPT-style).
+        .onChange(of: viewModel.messages.count) { old, new in
+            // ── Keep pagination window pinned to latest on new messages ──
+            // When new messages arrive (user sent or assistant appended),
+            // reset the window to show the latest messages so they're visible.
+            // Skip bulk loads (old == 0) — those start paginated at 5.
+            if new > old && old > 0 {
+                // Pin window to the end (latest messages)
+                windowEnd = nil
+                // Grow the window to include the new messages, capped at maxWindowSize
+                windowSize = min(max(windowSize, maxWindowSize), new)
+            }
+
+            guard new > old else { return }
+
+            // ── ALWAYS scroll to bottom when a new message is added ──
+            // No matter where the user is scrolled, sending a message must
+            // bring the new message into view. Re-engage auto-scroll so the
+            // response streams in below it.
+            isScrolledUp = false
+            lastProgrammaticScrollTime = Date()
+
+            if old == 0 {
+                // First message in a new chat — smooth ease-out.
+                withAnimation(.easeOut(duration: 0.3)) {
+                    scrollPosition.scrollTo(edge: .bottom)
+                }
+            } else if keyboard.isVisible {
+                // Keyboard is open — dismiss it first so its collapsing
+                // animation doesn't fight the scroll animation. After a
+                // short delay (keyboard starts collapsing), flow the
+                // content up with a spring.
+                UIApplication.shared.sendAction(
+                    #selector(UIResponder.resignFirstResponder),
+                    to: nil, from: nil, for: nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    lastProgrammaticScrollTime = Date()
+                    withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+                        scrollPosition.scrollTo(edge: .bottom)
+                    }
+                }
+            } else {
+                // Keyboard already hidden (follow-ups, etc.) — scroll now.
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+                    scrollPosition.scrollTo(edge: .bottom)
+                }
+            }
+        }
+        // Streaming: when streaming starts, only clear the scrolledUp flag
+        // if the user is already near the bottom. If they've manually
+        // scrolled up, respect that position and don't yank them back.
+        .onChange(of: viewModel.isStreaming) { _, streaming in
+            if streaming && !isScrolledUp {
+                // Already at bottom — ensure auto-scroll stays active.
+                scrollPosition.scrollTo(edge: .bottom)
+            }
+        }
+        // Resume auto-scroll: when the user scrolls back to the bottom
+        // (or taps the FAB) during an active stream, re-pin so new
+        // tokens keep the view anchored at the bottom.
+        .onChange(of: isScrolledUp) { oldValue, newValue in
+            if oldValue == true && newValue == false && viewModel.isStreaming {
+                scrollPosition.scrollTo(edge: .bottom)
+            }
+        }
+    }
+
+    private var scrollContent: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                if viewModel.isLoadingConversation {
+                    loadingPlaceholders
+                } else {
+                    messagesList
+                }
+            }
+            .padding(.top, 8)
+            .padding(.bottom, 8)
+            .frame(maxWidth: iPadMaxContentWidth)
+            .frame(maxWidth: .infinity)
+        }
+        .background(ScrollViewHorizontalLock())
+        .scrollIndicators(.hidden)
+        .scrollDismissesKeyboard(editingMessageId != nil ? .never : .interactively)
+        .defaultScrollAnchor(.bottom)
+        .scrollPosition($scrollPosition, anchor: .bottom)
+        // Detect scroll position to show/hide FAB + auto-load pagination
+        .onScrollGeometryChange(for: CGPoint.self) { geo in
+            geo.contentOffset
+        } action: { _, newOffset in
+            let distanceFromBottom = max(0,
+                viewState_contentHeight - newOffset.y - viewState_containerHeight)
+            if distanceFromBottom <= 100 {
+                // User scrolled very close to the bottom — re-engage auto-scroll.
+                if isScrolledUp { isScrolledUp = false }
+            } else {
+                // Suppress false "user scrolled up" detection after any programmatic
+                // scroll. The scroll animation itself causes the offset to momentarily
+                // move in various directions, which would otherwise trigger
+                // isScrolledUp = true and break auto-scroll for streaming.
+                let timeSinceProgrammatic = Date().timeIntervalSince(lastProgrammaticScrollTime)
+                // During streaming the scroll pump fires every 0.1 s, so we use a
+                // shorter suppression window (0.15 s) to still catch animation bounce
+                // from each pump cycle, while giving the user a window to register
+                // an intentional upward drag.  Outside streaming, keep 0.6 s.
+                let suppressionWindow: TimeInterval = viewModel.isStreaming ? 0.15 : 0.6
+                // A strong upward drag (>30 pt in one callback) is unambiguously
+                // intentional — bypass the time guard entirely so it registers
+                // immediately even during the 0.1 s scroll-pump interval.
+                let dragDelta = lastScrollOffset - newOffset.y  // positive = upward
+                let isStrongDrag = dragDelta > 30
+                if !isStrongDrag {
+                    guard timeSinceProgrammatic > suppressionWindow else { return }
+                }
+
+                // During active streaming, any upward movement at all breaks out
+                // immediately so the scroll pump can't fight the user's finger.
+                // Outside of streaming, require a small but intentional drag (8pt)
+                // to avoid accidental break-out from bounce/inertia.
+                let threshold: CGFloat = viewModel.isStreaming ? 2 : 8
+                if newOffset.y < lastScrollOffset - threshold {
+                    if !isScrolledUp { isScrolledUp = true }
+                }
+            }
+            if abs(newOffset.y - lastScrollOffset) > 2 {
+                lastScrollOffset = newOffset.y
+            }
+
+            // ── Sliding window: load older messages when near the top ──
+            let total = viewModel.messages.count
+            let effectiveEnd = windowEnd ?? total
+            let effectiveStart = max(0, effectiveEnd - windowSize)
+
+            if newOffset.y < 200,
+               !isLoadingMoreMessages,
+               effectiveStart > 0,
+               !viewModel.isLoadingConversation {
+                isLoadingMoreMessages = true
+                let anchorId = viewModel.messages[effectiveStart].id
+                let slideBy = min(5, effectiveStart)
+
+                // Detach from "pinned to latest" on first upward scroll
+                if windowEnd == nil { windowEnd = total }
+
+                // Slide window backwards: keep size capped, shift windowEnd so start moves up
+                windowSize = min(windowSize + slideBy, maxWindowSize)
+                let newStart = max(0, effectiveStart - slideBy)
+                windowEnd = min(newStart + windowSize, total)
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    scrollPosition.scrollTo(id: anchorId, anchor: .top)
+                    isLoadingMoreMessages = false
+                }
+            }
+
+            // ── Sliding window: load newer messages when near the bottom ──
+            if let wEnd = windowEnd, wEnd < total,
+               distanceFromBottom < 200,
+               !isLoadingMoreMessages,
+               !viewModel.isLoadingConversation {
+                isLoadingMoreMessages = true
+                let anchorId = viewModel.messages[min(wEnd - 1, total - 1)].id
+                let slideBy = min(5, total - wEnd)
+                windowEnd = wEnd + slideBy
+
+                // Re-pin to latest when we've scrolled all the way back down
+                if windowEnd! >= total { windowEnd = nil }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    scrollPosition.scrollTo(id: anchorId, anchor: .bottom)
+                    isLoadingMoreMessages = false
+                }
+            }
+        }
+        .onScrollGeometryChange(for: CGSize.self) { geo in
+            CGSize(width: geo.contentSize.height, height: geo.containerSize.height)
+        } action: { oldSize, newSize in
+            let oldContentHeight = viewState_contentHeight
+            if abs(newSize.width - viewState_contentHeight) > 1 {
+                viewState_contentHeight = newSize.width
+            }
+            if abs(newSize.height - viewState_containerHeight) > 1 {
+                viewState_containerHeight = newSize.height
+            }
+            // Smooth scroll-to-bottom during active streaming:
+            // When the content height grows (new tokens pushed layout taller)
+            // and the user hasn't scrolled up, animate to the bottom so new
+            // content slides in smoothly instead of snapping.
+            let grew = newSize.width > oldContentHeight + 1
+            if grew && viewModel.isStreaming && !isScrolledUp {
+                let now = Date()
+                if now.timeIntervalSince(lastProgrammaticScrollTime) > 0.2 {
+                    lastProgrammaticScrollTime = now
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        scrollPosition.scrollTo(edge: .bottom)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Scroll-to-Bottom FAB
+
+    @ViewBuilder
+    private var scrollToBottomFAB: some View {
+        if isScrolledUp && !viewModel.messages.isEmpty && !viewModel.isLoadingConversation {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 38, height: 38)
+                    .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+                Circle()
+                    .strokeBorder(theme.cardBorder.opacity(0.35), lineWidth: 0.5)
+                    .frame(width: 38, height: 38)
+                Image(systemName: "chevron.down")
+                    .scaledFont(size: 13, weight: .bold)
+                    .foregroundStyle(theme.textSecondary)
+            }
+            .contentShape(Circle())
+            .highPriorityGesture(
+                TapGesture().onEnded {
+                    // Disengage auto-scroll lock first so the streaming pump
+                    // doesn't fight the scroll animation we're about to start.
+                    isScrolledUp = false
+                    // Reset sliding window to latest messages
+                    windowEnd = nil
+                    windowSize = min(maxWindowSize, viewModel.messages.count)
+                    withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
+                        scrollPosition.scrollTo(edge: .bottom)
+                    }
+                    Haptics.play(.light)
+                }
+            )
+            .padding(.trailing, Spacing.md)
+            .padding(.bottom, Spacing.sm)
+            .transition(
+                .asymmetric(
+                    insertion: .scale(scale: 0.7).combined(with: .opacity),
+                    removal: .scale(scale: 0.7).combined(with: .opacity)
+                )
+                .animation(.spring(response: 0.3, dampingFraction: 0.7))
+            )
+            .accessibilityLabel("Scroll to bottom")
+            .accessibilityAddTraits(.isButton)
+        }
+    }
+
+    // MARK: - Loading Placeholders
+
+    private var loadingPlaceholders: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<4, id: \.self) { i in
+                SkeletonChatMessage(isUser: i % 2 == 1, lineCount: i == 0 ? 2 : i == 2 ? 3 : 2)
+                    .padding(.vertical, 4)
+            }
+        }
+        .padding(.top, Spacing.lg)
+    }
+
+    // MARK: - Messages List
+
+    /// Splits messages into two groups around the last conversation turn.
+    ///
+    /// The **last turn** is defined as the last user message plus any
+    /// assistant/system messages that follow it. This group is wrapped in a
+    /// `VStack` with `minHeight: viewportHeight, alignment: .top` — the
+    /// ChatGPT-style trick that makes scroll-to-bottom place the user's
+    /// sent message near the **top** of the viewport, with the AI response
+    /// streaming in below it.
+    ///
+    /// All earlier messages render at their natural height.
+    private var messagesList: some View {
+        let allMessages = viewModel.messages
+        let total = allMessages.count
+
+        // ── Sliding window: compute the visible slice ──
+        let effectiveEnd = windowEnd ?? total
+        let effectiveStart = max(0, effectiveEnd - windowSize)
+        let clampedEnd = min(effectiveEnd, total)
+        let messages = Array(allMessages[effectiveStart..<clampedEnd])
+        let hasMoreAbove = effectiveStart > 0
+        let hasMoreBelow = clampedEnd < total
+
+        let indexMap = Dictionary(allMessages.enumerated().map { ($1.id, $0) },
+                                  uniquingKeysWith: { first, _ in first })
+
+        // Split point: index of the last user message *within the visible slice*.
+        // Everything from here to the end is the "last turn".
+        // If there are no user messages, splitAt == count → no split, all normal.
+        let lastUserIdx = messages.lastIndex(where: { $0.role == .user })
+        let splitAt = lastUserIdx ?? messages.count
+
+        // Only apply minHeight trick when the window includes the actual last message
+        let windowIncludesEnd = (windowEnd == nil || clampedEnd >= total)
+
+        return Group {
+            // ── "Loading more" indicator at the top ──
+            if hasMoreAbove {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, Spacing.md)
+                    .id("pagination-spinner-top")
+            }
+
+            // ── Messages before the last turn (natural height) ──
+            ForEach(Array(messages.prefix(splitAt))) { message in
+                let index = indexMap[message.id] ?? 0
+                messageRow(message: message, index: index)
+                    .id(message.id)
+            }
+
+            // ── Last turn (user msg + assistant reply) with minHeight ──
+            if splitAt < messages.count {
+                VStack(spacing: 0) {
+                    ForEach(Array(messages.suffix(from: splitAt))) { message in
+                        let index = indexMap[message.id] ?? 0
+                        messageRow(message: message, index: index)
+                            .id(message.id)
+                    }
+                }
+                .frame(minHeight: windowIncludesEnd ? max(viewState_containerHeight, 0) : nil,
+                       alignment: .top)
+            }
+
+            // ── "Loading newer" indicator at the bottom ──
+            if hasMoreBelow {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, Spacing.md)
+                    .id("pagination-spinner-bottom")
+            }
+        }
+    }
+
+    // MARK: - Message Row
+
+    @ViewBuilder
+    private func messageRow(message: ChatMessage, index: Int) -> some View {
+        let isLastAssistant = message.role == .assistant && index == viewModel.messages.count - 1
+
+        VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 0) {
+
+            // ── Assistant header (avatar + model name) ──
+            if message.role == .assistant {
+                assistantHeader(for: message)
+            }
+
+            // ── Streaming status indicators ──
+            if message.role == .assistant {
+                IsolatedStreamingStatus(
+                    streamingStore: viewModel.streamingStore,
+                    message: message
+                )
+            }
+
+            // ── Message bubble / content ──
+            messageBubble(for: message, isLastAssistant: isLastAssistant)
+
+            // ── Tool-generated images ──
+            if message.role == .assistant && !message.isStreaming {
+                let vIdx = activeVersionIndex[message.id] ?? -1
+                let displayFiles: [ChatMessageFile] = {
+                    if vIdx >= 0 && vIdx < message.versions.count {
+                        return message.versions[vIdx].files
+                    }
+                    return message.files
+                }()
+                if !displayFiles.isEmpty {
+                    messageFilesView(files: displayFiles)
+                        .padding(.horizontal, Spacing.screenPadding)
+                        .padding(.top, Spacing.xs)
+                }
+            }
+
+            // ── Sources bar ──
+            if message.role == .assistant && !message.isStreaming {
+                let vIdx = activeVersionIndex[message.id] ?? -1
+                let displaySources: [ChatSourceReference] = {
+                    if vIdx >= 0 && vIdx < message.versions.count {
+                        return message.versions[vIdx].sources
+                    }
+                    return message.sources
+                }()
+                if !displaySources.isEmpty {
+                    sourcesBar(sources: displaySources, messageId: message.id)
+                        .padding(.horizontal, Spacing.screenPadding)
+                        .padding(.top, Spacing.xs)
+                }
+            }
+
+            // ── Inline error ──
+            if let error = message.error {
+                messageErrorView(error.content ?? String(localized: "An error occurred"))
+                    .padding(.horizontal, Spacing.screenPadding)
+            }
+
+            // ── Assistant action bar (always visible) ──
+            if message.role == .assistant && !message.isStreaming {
+                assistantActionBar(for: message)
+                    .padding(.horizontal, Spacing.screenPadding)
+                    .padding(.top, Spacing.xs)
+                    // Popover must live at the row level (not inside the ForEach action bar)
+                    // so that every message gets its own independent popover anchor.
+                    // Attaching it inside assistantActionBar (which is called inside ForEach)
+                    // causes SwiftUI to only register the last one.
+                    .popover(isPresented: Binding(
+                        get: { usagePopoverMessageId == message.id },
+                        set: { if !$0 { usagePopoverMessageId = nil } }
+                    ), arrowEdge: .bottom) {
+                        let vIdx = activeVersionIndex[message.id] ?? -1
+                        let popoverUsage: [String: Any] = {
+                            if vIdx >= 0 && vIdx < message.versions.count {
+                                return message.versions[vIdx].usage ?? [:]
+                            }
+                            return message.usage ?? [:]
+                        }()
+                        UsageInfoPopover(usage: popoverUsage)
+                            .themed()
+                            .presentationCompactAdaptation(.popover)
+                    }
+            }
+
+            // ── User message version arrows (always visible when edit history exists) ──
+            if message.role == .user && !message.versions.isEmpty && !viewModel.isStreaming {
+                userVersionSwitcher(for: message)
+                    .padding(.horizontal, Spacing.screenPadding)
+                    .padding(.top, 2)
+            }
+
+            // ── Follow-up suggestions (last assistant message only) ──
+            if isLastAssistant && !message.isStreaming {
+                let vIdx = activeVersionIndex[message.id] ?? -1
+                let displayFollowUps: [String] = {
+                    if vIdx >= 0 && vIdx < message.versions.count {
+                        return message.versions[vIdx].followUps
+                    }
+                    return message.followUps
+                }()
+                if !displayFollowUps.isEmpty {
+                    followUpSuggestions(displayFollowUps)
+                        .padding(.horizontal, Spacing.screenPadding)
+                        .padding(.top, Spacing.sm)
+                        // Use simple opacity transition — .move(edge: .bottom) triggers
+                        // a layout re-measurement during animation that can temporarily
+                        // make the scroll content wider than the screen, enabling 2D pan.
+                        .transition(.opacity)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("\(message.role == .user ? "You" : "Assistant"): \(message.content.prefix(200))"))
+    }
+
+    // MARK: - Assistant Header
+
+    private func resolveModel(for message: ChatMessage) -> AIModel? {
+        if let mid = message.model,
+           let model = viewModel.availableModels.first(where: { $0.id == mid }) {
+            return model
+        }
+        return viewModel.selectedModel
+    }
+
+    private func assistantHeader(for message: ChatMessage) -> some View {
+        let model = resolveModel(for: message)
+        return HStack(spacing: Spacing.sm) {
+            if let m = model {
+                ModelAvatar(size: 22, imageURL: viewModel.resolvedImageURL(for: m),
+                            label: m.shortName, authToken: viewModel.serverAuthToken)
+            } else {
+                ModelAvatar(size: 22, label: message.model)
+            }
+            Text(model?.shortName ?? message.model ?? String(localized: "Assistant"))
+                .scaledFont(size: 12, weight: .medium)
+                .foregroundStyle(theme.textSecondary)
+        }
+        .padding(.horizontal, Spacing.screenPadding)
+        .padding(.top, Spacing.sm)
+        .padding(.bottom, 4)
+    }
+
+    // MARK: - Message Bubble
+
+    @ViewBuilder
+    private func messageBubble(for message: ChatMessage, isLastAssistant: Bool) -> some View {
+        ChatMessageBubble(
+            role: message.role,
+            showTimestamp: activeActionMessageId == message.id,
+            timestamp: message.timestamp
+        ) {
+            messageContent(for: message)
+        }
+        // Only apply tap gesture to user bubbles — assistant content contains
+        // interactive elements (links, text selection) that onTapGesture would block.
+        // Assistant action bar is always visible so no tap-reveal is needed.
+        .if(message.role == .user) { view in
+            view.onTapGesture {
+                withAnimation(MicroAnimation.snappy) {
+                    activeActionMessageId = activeActionMessageId == message.id ? nil : message.id
+                }
+                Haptics.play(.light)
+            }
+        }
+        .if(message.role != .assistant) { view in
+            view.contextMenu { messageContextMenu(for: message) }
+        }
+    }
+
+    @ViewBuilder
+    private func messageContextMenu(for message: ChatMessage) -> some View {
+        Button { copyMessage(message) } label: {
+            Label("Copy", systemImage: "doc.on.doc")
+        }
+        if message.role == .user && !viewModel.isStreaming {
+            Button { beginInlineEdit(message: message) } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+        }
+        if message.role == .assistant && !viewModel.isStreaming {
+            Button { Task { await viewModel.regenerateResponse(messageId: message.id) } } label: {
+                Label("Regenerate", systemImage: "arrow.clockwise")
+            }
+        }
+        Divider()
+        if !viewModel.isStreaming {
+            Button(role: .destructive) {
+                let userVIdx = activeUserVersionIndex[message.id] ?? -1
+                Task { await viewModel.deleteMessage(id: message.id, activeVersionIndex: message.role == .user ? userVIdx : nil) }
+                // Clean up local navigation state after deletion
+                if message.role == .user {
+                    if !message.versions.isEmpty {
+                        if userVIdx < 0 {
+                            // Deleted main — reset to main (last version promoted)
+                            activeUserVersionIndex.removeValue(forKey: message.id)
+                        } else if message.versions.count <= 1 {
+                            // Deleted last version — back to main
+                            activeUserVersionIndex.removeValue(forKey: message.id)
+                            // Clear AI override since we're back to main
+                            if let userIdx = viewModel.messages.firstIndex(where: { $0.id == message.id }),
+                               userIdx + 1 < viewModel.messages.count,
+                               viewModel.messages[userIdx + 1].role == .assistant {
+                                assistantContentOverride.removeValue(forKey: viewModel.messages[userIdx + 1].id)
+                            }
+                        } else if userVIdx >= message.versions.count - 1 {
+                            activeUserVersionIndex[message.id] = max(0, userVIdx - 1)
+                        }
+                    }
+                }
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+
+    // MARK: - Message Content
+
+    @ViewBuilder
+    private func messageContent(for message: ChatMessage) -> some View {
+        if message.role == .user {
+            // Resolve which user version to display
+            let userVIdx = activeUserVersionIndex[message.id] ?? -1
+            let displayContent: String = {
+                if userVIdx >= 0 && userVIdx < message.versions.count {
+                    return message.versions[userVIdx].content
+                }
+                return message.content
+            }()
+            let displayFiles: [ChatMessageFile] = {
+                if userVIdx >= 0 && userVIdx < message.versions.count {
+                    return message.versions[userVIdx].files
+                }
+                return message.files
+            }()
+
+            VStack(alignment: .trailing, spacing: Spacing.sm) {
+                // Inline images inside the bubble
+                let imageFiles = displayFiles.filter { $0.type == "image" }
+                if !imageFiles.isEmpty {
+                    ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
+                        if let fileId = file.url, !fileId.isEmpty {
+                            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                                .frame(maxWidth: 220, maxHeight: 220)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                    }
+                }
+
+                // Non-image file cards inside the bubble
+                let nonImageFiles = displayFiles.filter { $0.type != "image" && $0.type != "collection" && $0.type != "folder" }
+                if !nonImageFiles.isEmpty {
+                    ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
+                        fileAttachmentCard(file: file)
+                    }
+                }
+
+                // Text content
+                if !displayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    UserMessageContentView(content: displayContent)
+                        .lineSpacing(2)
+                }
+            }
+        } else {
+            // ── STREAMING ISOLATION ──
+            // All streaming store reads (streamingContent, streamingSources,
+            // isActive, streamingMessageId) are moved into IsolatedAssistantMessage
+            // — a separate struct whose body is the only thing that re-evaluates
+            // on every token. ChatDetailView.body never touches these properties,
+            // so it stays completely inert during streaming.
+            IsolatedAssistantMessage(
+                streamingStore: viewModel.streamingStore,
+                message: message,
+                activeVersionIndex: activeVersionIndex[message.id] ?? -1,
+                contentOverride: assistantContentOverride[message.id],
+                serverBaseURL: viewModel.serverBaseURL,
+                authToken: viewModel.serverAuthToken,
+                apiClient: dependencies.apiClient
+            )
+        }
+    }
+
+
+
+    // MARK: - iMessage-Style Edit Input Bar
+
+    /// Replaces the normal input bar when editing a message.
+    /// Lives in the safeAreaInset bottom slot — exactly where the normal
+    /// ChatInputField sits — so iOS keyboard avoidance just works.
+    private var editInputBar: some View {
+        HStack(spacing: 10) {
+            // Cancel button
+            Button {
+                cancelInlineEdit()
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(theme.surfaceContainer)
+                        .frame(width: 34, height: 34)
+                    Image(systemName: "xmark")
+                        .scaledFont(size: 13, weight: .semibold)
+                        .foregroundStyle(theme.textSecondary)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel edit")
+
+            // Text field — fills remaining space, grows vertically up to 6 lines
+            TextField("Edit message…", text: $editingMessageText, axis: .vertical)
+                .scaledFont(size: 16)
+                .foregroundStyle(theme.textPrimary)
+                .tint(theme.brandPrimary)
+                .lineLimit(1...6)
+                .focused($isEditFieldFocused)
+                .submitLabel(.done)
+                .onSubmit {
+                    if !editingMessageText.contains("\n") { submitInlineEdit() }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(theme.surfaceContainer)
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+
+            // Send / confirm button
+            Button {
+                submitInlineEdit()
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(editingMessageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                              ? theme.textTertiary.opacity(0.3)
+                              : theme.brandPrimary)
+                        .frame(width: 34, height: 34)
+                    Image(systemName: "arrow.up")
+                        .scaledFont(size: 14, weight: .bold)
+                        .foregroundStyle(.white)
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(editingMessageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .accessibilityLabel("Save and resend")
+        }
+        .padding(.horizontal, Spacing.md)
+        .padding(.top, 10)
+        .padding(.bottom, 10)
+        .background(theme.background)
+        .overlay(alignment: .top) {
+            Divider().opacity(0.5)
+        }
+        .onAppear {
+            isEditFieldFocused = true
+        }
+    }
+
+    private func beginInlineEdit(message: ChatMessage) {
+        editingMessageId = message.id
+        editingMessageText = message.content
+        // Focus immediately — no delay needed since we're not fighting scroll layout
+        isEditFieldFocused = true
+        Haptics.play(.light)
+    }
+
+    private func cancelInlineEdit() {
+        isEditFieldFocused = false
+        withAnimation(.easeInOut(duration: 0.18)) {
+            editingMessageId = nil
+            editingMessageText = ""
+        }
+    }
+
+    private func submitInlineEdit() {
+        guard let id = editingMessageId else { return }
+        let trimmed = editingMessageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        isEditFieldFocused = false
+        withAnimation(.easeInOut(duration: 0.18)) {
+            editingMessageId = nil
+        }
+        editingMessageText = ""
+        Task { await viewModel.editMessage(id: id, newContent: trimmed) }
+        Haptics.play(.medium)
+    }
+
+    // MARK: - Welcome View
+
+    private struct SuggestedPrompt: Identifiable {
+        let id = UUID()
+        let title: String
+        let subtitle: String
+        private let _fullText: String?
+        var fullText: String { _fullText ?? "\(title) \(subtitle)" }
+
+        init(title: String, subtitle: String, fullText: String? = nil) {
+            self.title = title
+            self.subtitle = subtitle
+            self._fullText = fullText
+        }
+    }
+
+    /// Converts server-provided `default_prompt_suggestions` into display models.
+    ///
+    /// Returns an empty array when the server has no suggestions configured
+    /// (admin turned them off or the field is absent), which collapses the
+    /// entire prompt grid and shows a clean hero-only welcome screen.
+    private static func buildServerPrompts(
+        from suggestions: [BackendConfig.PromptSuggestion]?,
+        count: Int
+    ) -> [SuggestedPrompt] {
+        guard let suggestions, !suggestions.isEmpty else { return [] }
+
+        let mapped: [SuggestedPrompt] = suggestions.compactMap { suggestion in
+            // title[0] = bold heading, title[1] = subtitle (may be absent)
+            guard let titleParts = suggestion.title, !titleParts.isEmpty else { return nil }
+            let title = titleParts[0]
+            let subtitle = titleParts.count > 1 ? titleParts[1] : ""
+            // Use the server's `content` field as the sent message; fall back
+            // to joining the title parts if content is missing.
+            let content = suggestion.content ?? titleParts.joined(separator: " ")
+            return SuggestedPrompt(title: title, subtitle: subtitle, fullText: content)
+        }
+
+        // Shuffle so a different subset appears each time, then cap to `count`
+        // (4 cards on iPhone, 8 on iPad).
+        return Array(mapped.shuffled().prefix(count))
+    }
+
+    /// Resolves which prompt suggestions to show on the welcome screen.
+    ///
+    /// Priority:
+    /// 1. Per-model `suggestion_prompts` (from the selected model's `meta.suggestion_prompts`) — if non-empty, use those.
+    /// 2. Admin-level `default_prompt_suggestions` (from `/api/config`) — fallback if the model has none.
+    /// 3. Neither → empty array (no prompt cards shown).
+    private static func resolvePromptSuggestions(
+        adminSuggestions: [BackendConfig.PromptSuggestion]?,
+        modelSuggestions: [BackendConfig.PromptSuggestion]?,
+        count: Int
+    ) -> [SuggestedPrompt] {
+        // 1. Per-model prompts take priority
+        if let model = modelSuggestions, !model.isEmpty {
+            return buildServerPrompts(from: model, count: count)
+        }
+        // 2. Fall back to admin-configured prompts
+        if let admin = adminSuggestions, !admin.isEmpty {
+            return buildServerPrompts(from: admin, count: count)
+        }
+        // 3. Neither → no prompts
+        return []
+    }
+
+    private var welcomeView: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                Spacer(minLength: 60).layoutPriority(1)
+
+                // ── Hero: avatar + greeting ──
+                VStack(spacing: Spacing.sm) {
+                ZStack {
+                    if let model = viewModel.selectedModel {
+                        ModelAvatar(
+                            size: 52,
+                            imageURL: viewModel.resolvedImageURL(for: model),
+                            label: model.shortName,
+                            authToken: viewModel.serverAuthToken
+                        )
+                        .transition(.scale.combined(with: .opacity))
+                    } else {
+                        ModelAvatar(size: 52, label: nil)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+
+                VStack(spacing: 4) {
+                    Text("How can I help?")
+                        .scaledFont(size: 24, weight: .bold)
+                        .foregroundStyle(theme.textPrimary)
+
+                    if let model = viewModel.selectedModel {
+                        Text(model.shortName)
+                            .scaledFont(size: 13, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                }
+
+                if viewModel.isTemporaryChat {
+                    HStack(spacing: 5) {
+                        Image(systemName: "eye.slash.fill")
+                            .scaledFont(size: 10, weight: .semibold)
+                        Text("Temporary Chat")
+                            .scaledFont(size: 11, weight: .semibold)
+                    }
+                    .foregroundStyle(theme.warning)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(theme.warning.opacity(0.1))
+                    .clipShape(Capsule())
+                }
+            }
+
+            // ── Suggested prompt cards ──
+            // Only shown when the server has configured suggestions.
+            // If the admin clears all suggestions (or the server doesn't
+            // return any), this entire block is hidden and the welcome
+            // screen shows only the hero avatar + "How can I help?".
+            if !randomPrompts.isEmpty {
+                Spacer().frame(height: 32)
+
+                // Adaptive grid: 2-col iPhone, 4-col iPad
+                let cols = promptColumnCount
+                let rows = stride(from: 0, to: randomPrompts.count, by: cols).map { i in
+                    Array(randomPrompts[i..<min(i + cols, randomPrompts.count)])
+                }
+                VStack(spacing: 10) {
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                        HStack(spacing: 10) {
+                            ForEach(row) { prompt in
+                                promptCard(prompt)
+                            }
+                            // Fill empty slots if row has fewer items than column count
+                            ForEach(0..<(cols - row.count), id: \.self) { _ in
+                                Color.clear
+                                    .frame(maxWidth: .infinity)
+                            }
+                        }
+                        .padding(.horizontal, Spacing.screenPadding)
+                    }
+                }
+                .frame(maxWidth: iPadMaxContentWidth)
+            }
+
+                Spacer(minLength: 60).layoutPriority(1)
+            }
+            .frame(minHeight: max(viewState_containerHeight, 0))
+            .onTapGesture {
+                UIApplication.shared.sendAction(
+                    #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            }
+        }
+        .scrollDismissesKeyboard(.interactively)
+    }
+
+    // MARK: - Folder Welcome View
+
+    private func folderWelcomeView(folder: ChatFolder) -> some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 60).layoutPriority(1)
+
+            VStack(spacing: Spacing.md) {
+                // Folder icon
+                ZStack {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(theme.brandPrimary.opacity(0.12))
+                        .frame(width: 72, height: 72)
+                    Image(systemName: "folder.fill")
+                        .scaledFont(size: 34, weight: .medium)
+                        .foregroundStyle(theme.brandPrimary)
+                }
+
+                // Folder name
+                Text(folder.name)
+                    .scaledFont(size: 26, weight: .bold)
+                    .foregroundStyle(theme.textPrimary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+
+                // Subtitle hint
+                Text("New chats will be saved to this folder")
+                    .scaledFont(size: 13, weight: .regular)
+                    .foregroundStyle(theme.textTertiary)
+                    .multilineTextAlignment(.center)
+
+                // Show system prompt badge if the folder has one
+                if let systemPrompt = folder.systemPrompt,
+                   !systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    HStack(spacing: Spacing.xs) {
+                        Image(systemName: "text.bubble")
+                            .scaledFont(size: 11, weight: .medium)
+                        Text("Custom system prompt active")
+                            .scaledFont(size: 11, weight: .medium)
+                    }
+                    .foregroundStyle(theme.brandPrimary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(theme.brandPrimary.opacity(0.1))
+                    .clipShape(Capsule())
+                }
+
+                // Show configured model badge if the folder has default models
+                if let firstModel = folder.modelIds.first, !firstModel.isEmpty {
+                    let modelName = viewModel.availableModels.first(where: { $0.id == firstModel })?.shortName ?? firstModel
+                    HStack(spacing: Spacing.xs) {
+                        Image(systemName: "cpu")
+                            .scaledFont(size: 11, weight: .medium)
+                        Text(modelName)
+                            .scaledFont(size: 11, weight: .medium)
+                    }
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(theme.surfaceContainer.opacity(0.6))
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(theme.cardBorder.opacity(0.4), lineWidth: 0.5)
+                    )
+                }
+            }
+            .padding(.horizontal, Spacing.screenPadding)
+
+            Spacer(minLength: 60).layoutPriority(1)
+        }
+        .frame(maxWidth: iPadMaxContentWidth)
+        .frame(maxWidth: .infinity)
+        .onTapGesture {
+            UIApplication.shared.sendAction(
+                #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+    }
+
+    @ViewBuilder
+    private func promptCard(_ prompt: SuggestedPrompt) -> some View {
+        Button {
+            viewModel.inputText = prompt.fullText
+            Task { await viewModel.sendMessage() }
+            Haptics.play(.light)
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(prompt.title)
+                    .scaledFont(size: 14, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(prompt.subtitle)
+                    .scaledFont(size: 12, weight: .regular)
+                    .foregroundStyle(theme.textSecondary.opacity(0.7))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, minHeight: 84, alignment: .topLeading)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(theme.isDark
+                        ? Color.white.opacity(0.05)
+                        : Color.black.opacity(0.035))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(
+                        theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.07),
+                        lineWidth: 0.75
+                    )
+            )
+        }
+        .buttonStyle(PromptCardButtonStyle())
+    }
+
+    // MARK: - Assistant Action Bar
+
+    private func assistantActionBar(for message: ChatMessage) -> some View {
+        // Build a timestamp-sorted list of ALL sibling IDs (current main + versions).
+        // This is the single source of truth for position — it never gets stale
+        // because it is derived fresh from the message object on every render.
+        // After any rederiveMessages() call (branch switch, edit, regen), the
+        // message object is replaced with the new active sibling, so its
+        // .timestamp and .versions[] are always authoritative.
+        let allSiblings: [(id: String, timestamp: Date)] = {
+            var sibs: [(id: String, timestamp: Date)] = [(message.id, message.timestamp)]
+            for v in message.versions { sibs.append((v.id, v.timestamp)) }
+            sibs.sort { $0.timestamp < $1.timestamp }
+            return sibs
+        }()
+        let totalVersions = allSiblings.count
+        // The current active sibling is the main message (message.id).
+        // Its 1-based position in the sorted siblings list is the displayIndex.
+        let displayIndex: Int = (allSiblings.firstIndex(where: { $0.id == message.id }) ?? 0) + 1
+
+        return HStack(spacing: 6) {
+            // Speak
+            Button {
+                toggleSpeech(for: message)
+                Haptics.play(.light)
+            } label: {
+                if ttsGeneratingMessageId == message.id {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .scaleEffect(0.65)
+                        .frame(width: 28, height: 28)
+                        .tint(theme.brandPrimary)
+                } else {
+                    compactActionIcon(
+                        icon: speakingMessageId == message.id ? "stop.fill" : "speaker.wave.2",
+                        isActive: speakingMessageId == message.id
+                    )
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(speakingMessageId == message.id ? "Stop speaking" : "Speak")
+
+            // Copy
+            Button { copyMessage(message) } label: {
+                compactActionIcon(icon: "doc.on.doc", isActive: false)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Copy")
+
+            // Version switcher (only when siblings exist and not overriding with a user edit version)
+            if totalVersions > 1 && !viewModel.isStreaming && assistantContentOverride[message.id] == nil {
+                HStack(spacing: 2) {
+                    Button {
+                        // Navigate to the sibling BEFORE the current one in sorted order.
+                        let currentPos = displayIndex - 1 // 0-based
+                        let targetPos = currentPos - 1
+                        if targetPos >= 0 {
+                            let targetId = allSiblings[targetPos].id
+                            // restoreAssistantVersionById() calls rederiveMessages() which
+                            // replaces the message object entirely. After that, the target
+                            // sibling IS the main message and all state is correct.
+                            viewModel.restoreAssistantVersionById(targetSiblingId: targetId)
+                            Haptics.play(.light)
+                        }
+                    } label: {
+                        compactActionIcon(icon: "chevron.left", isActive: false, size: 10)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(displayIndex == 1)
+                    .opacity(displayIndex == 1 ? 0.35 : 1)
+
+                    Text("\(displayIndex)/\(totalVersions)")
+                        .scaledFont(size: 11, weight: .semibold)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(minWidth: 28)
+
+                    Button {
+                        // Navigate to the sibling AFTER the current one in sorted order.
+                        let currentPos = displayIndex - 1 // 0-based
+                        let targetPos = currentPos + 1
+                        if targetPos < allSiblings.count {
+                            let targetId = allSiblings[targetPos].id
+                            viewModel.restoreAssistantVersionById(targetSiblingId: targetId)
+                            Haptics.play(.light)
+                        }
+                    } label: {
+                        compactActionIcon(icon: "chevron.right", isActive: false, size: 10)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(displayIndex == totalVersions)
+                    .opacity(displayIndex == totalVersions ? 0.35 : 1)
+                }
+            }
+
+            // Regenerate
+            if !viewModel.isStreaming {
+                Button {
+                    Task { await viewModel.regenerateResponse(messageId: message.id) }
+                    Haptics.play(.light)
+                } label: {
+                    compactActionIcon(icon: "arrow.clockwise", isActive: false)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Regenerate")
+            }
+
+            // Delete (only shown when there are multiple versions / regeneration history)
+            if !viewModel.isStreaming && totalVersions > 1 {
+                Button {
+                    Task { await viewModel.deleteMessage(id: message.id) }
+                    // After deletion, rederiveMessages() replaces the message list —
+                    // no index tracking needed. Just clear any stale state.
+                    activeVersionIndex.removeValue(forKey: message.id)
+                    Haptics.play(.light)
+                } label: {
+                    compactActionIcon(icon: "trash", isActive: false)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Delete Version")
+            }
+
+            // Usage info — always show from the current active message (message.usage).
+            // The current message IS the active sibling after any rederiveMessages() call.
+            let displayUsage: [String: Any]? = message.usage
+            if let usage = displayUsage, !usage.isEmpty {
+                Button {
+                    withAnimation(MicroAnimation.snappy) {
+                        usagePopoverMessageId = usagePopoverMessageId == message.id ? nil : message.id
+                    }
+                    Haptics.play(.light)
+                } label: {
+                    compactActionIcon(
+                        icon: "info.circle",
+                        isActive: usagePopoverMessageId == message.id
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Token usage")
+            }
+
+            // Action buttons (from model's configured actions — e.g. Generate Image)
+            if !viewModel.isStreaming {
+                let model = resolveModel(for: message)
+                if let actions = model?.actions, !actions.isEmpty {
+                    ForEach(actions) { action in
+                        Button {
+                            Task { await invokeActionButton(action: action, message: message) }
+                            Haptics.play(.medium)
+                        } label: {
+                            actionButtonIcon(action: action)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(action.name)
+                    }
+                }
+            }
+
+            Spacer()
+        }
+    }
+
+    /// Compact action icon for the always-visible action bar.
+    private func compactActionIcon(icon: String, isActive: Bool, size: CGFloat = 12) -> some View {
+        Image(systemName: icon)
+            .scaledFont(size: size, weight: .medium)
+            .foregroundStyle(isActive ? theme.brandPrimary : theme.textTertiary.opacity(0.7))
+            .frame(width: 28, height: 28)
+            .contentShape(Circle())
+    }
+
+    // MARK: - User Version Switcher (always-visible when edit history exists)
+
+    /// Compact ← N/N → version arrows shown directly below the user bubble.
+    /// Navigates user edit branches by sibling ID (not index), matching the same
+    /// approach as assistantActionBar. This ensures switching the user message
+    /// ALSO switches the paired assistant — because restoreUserVersionById walks
+    /// to the deepest leaf of the target user branch (which includes the assistant).
+    private func userVersionSwitcher(for message: ChatMessage) -> some View {
+        // Build a timestamp-sorted list of ALL sibling IDs (current + versions),
+        // identical to the approach in assistantActionBar. This avoids stale index
+        // state and is always correct even after rederiveMessages() rebuilds the list.
+        let allSiblings: [(id: String, timestamp: Date)] = {
+            var sibs: [(id: String, timestamp: Date)] = [(message.id, message.timestamp)]
+            for v in message.versions { sibs.append((v.id, v.timestamp)) }
+            sibs.sort { $0.timestamp < $1.timestamp }
+            return sibs
+        }()
+        let totalVersions = allSiblings.count
+        // Current active sibling is message.id. Its 1-based position = displayIndex.
+        let displayIndex: Int = (allSiblings.firstIndex(where: { $0.id == message.id }) ?? 0) + 1
+
+        return HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            HStack(spacing: 2) {
+                Button {
+                    // Navigate to the sibling BEFORE the current one.
+                    let currentPos = displayIndex - 1 // 0-based
+                    let targetPos = currentPos - 1
+                    if targetPos >= 0 {
+                        let targetId = allSiblings[targetPos].id
+                        // restoreUserVersionById navigates to the deepest leaf of the
+                        // target user branch — this switches BOTH user AND assistant.
+                        assistantContentOverride = [:]
+                        activeVersionIndex = [:]
+                        viewModel.restoreUserVersionById(targetSiblingId: targetId)
+                        Haptics.play(.light)
+                    }
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .scaledFont(size: 10, weight: .medium)
+                        .foregroundStyle(theme.textTertiary.opacity(0.8))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(displayIndex == 1)
+                .opacity(displayIndex == 1 ? 0.35 : 1)
+
+                Text("\(displayIndex)/\(totalVersions)")
+                    .scaledFont(size: 11, weight: .semibold)
+                    .foregroundStyle(theme.textTertiary)
+                    .frame(minWidth: 28)
+
+                Button {
+                    // Navigate to the sibling AFTER the current one.
+                    let currentPos = displayIndex - 1 // 0-based
+                    let targetPos = currentPos + 1
+                    if targetPos < allSiblings.count {
+                        let targetId = allSiblings[targetPos].id
+                        assistantContentOverride = [:]
+                        activeVersionIndex = [:]
+                        viewModel.restoreUserVersionById(targetSiblingId: targetId)
+                        Haptics.play(.light)
+                    }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .scaledFont(size: 10, weight: .medium)
+                        .foregroundStyle(theme.textTertiary.opacity(0.8))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(displayIndex == totalVersions)
+                .opacity(displayIndex == totalVersions ? 0.35 : 1)
+            }
+            .padding(.trailing, 2)
+        }
+    }
+
+    // MARK: - User Action Bar (kept for backward compat — no longer shown in messageRow)
+
+    private func userActionBar(for message: ChatMessage) -> some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            HStack(spacing: Spacing.xs) {
+                Button { copyMessage(message) } label: {
+                    Image(systemName: "doc.on.doc")
+                        .scaledFont(size: 13, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+
+                if !viewModel.isStreaming {
+                    Button { beginInlineEdit(message: message) } label: {
+                        Image(systemName: "pencil")
+                            .scaledFont(size: 13, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    // MARK: - User Attachment Images
+
+    @ViewBuilder
+    private func userAttachmentImages(for message: ChatMessage) -> some View {
+        let imageFiles = message.files.filter { $0.type == "image" }
+        let nonImageFiles = message.files.filter { $0.type != "image" }
+
+        VStack(alignment: .trailing, spacing: Spacing.xs) {
+            if !imageFiles.isEmpty {
+                HStack(spacing: Spacing.sm) {
+                    Spacer()
+                    ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
+                        if let fileId = file.url, !fileId.isEmpty {
+                            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                                .frame(
+                                    maxWidth: imageFiles.count == 1 ? 200 : 100,
+                                    maxHeight: imageFiles.count == 1 ? 200 : 100
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                        }
+                    }
+                }
+            }
+            if !nonImageFiles.isEmpty {
+                HStack(spacing: Spacing.sm) {
+                    Spacer()
+                    ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
+                        fileAttachmentCard(file: file)
+                    }
+                }
+            }
+        }
+    }
+
+    private func fileAttachmentCard(file: ChatMessageFile) -> some View {
+        let fileName = file.name ?? file.url ?? "File"
+        let fileExt = (fileName as NSString).pathExtension.lowercased()
+        let icon = fileIconName(for: fileExt)
+
+        return Button {
+            if let fileId = file.url {
+                Task { await previewFileInApp(fileId: fileId, fileName: fileName) }
+            }
+        } label: {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: icon)
+                    .scaledFont(size: 18)
+                    .foregroundStyle(theme.brandPrimary)
+                    .frame(width: 32, height: 32)
+                    .background(theme.brandPrimary.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(fileName)
+                        .scaledFont(size: 14)
+                        .fontWeight(.medium)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(fileExt.uppercased())
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                }
+            }
+            .padding(.horizontal, Spacing.sm)
+            .padding(.vertical, Spacing.sm)
+            .background(theme.surfaceContainer.opacity(0.6))
+            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(0.4), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func fileIconName(for ext: String) -> String {
+        switch ext {
+        case "pdf": return "doc.richtext"
+        case "doc", "docx": return "doc.text"
+        case "xls", "xlsx", "csv": return "tablecells"
+        case "ppt", "pptx": return "rectangle.stack"
+        case "json", "yaml", "yml", "xml", "conf", "toml", "ini", "cfg": return "curlybraces"
+        case "txt", "md", "rtf": return "doc.plaintext"
+        case "js", "ts", "py", "swift", "dart", "java", "cpp", "c", "h", "rb", "go", "rs":
+            return "chevron.left.forwardslash.chevron.right"
+        case "HTML", "css", "scss": return "globe"
+        case "zip", "tar", "gz", "rar", "7z": return "archivebox"
+        case "mp3", "wav", "m4a", "flac": return "waveform"
+        case "mp4", "mov", "avi", "mkv": return "film"
+        default: return "doc"
+        }
+    }
+
+    // MARK: - Tool-Generated Images
+
+    @ViewBuilder
+    private func messageFilesView(files: [ChatMessageFile]) -> some View {
+        let imageFiles = files.filter { $0.type == "image" || ($0.contentType ?? "").hasPrefix("image/") }
+        if !imageFiles.isEmpty {
+            let columns = imageFiles.count == 1
+                ? [GridItem(.flexible())]
+                : [GridItem(.flexible(), spacing: Spacing.sm), GridItem(.flexible(), spacing: Spacing.sm)]
+
+            LazyVGrid(columns: columns, spacing: Spacing.sm) {
+                ForEach(Array(imageFiles.enumerated()), id: \.element) { _, file in
+                    if let fileUrl = file.url, !fileUrl.isEmpty {
+                        let fileId: String = {
+                            if !fileUrl.contains("/") { return fileUrl }
+                            let parts = fileUrl.split(separator: "/")
+                            if let idx = parts.firstIndex(of: "files"), idx + 1 < parts.count {
+                                return String(parts[idx + 1])
+                            }
+                            return fileUrl
+                        }()
+                        AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Sources Bar
+
+    private func sourcesBar(sources: [ChatSourceReference], messageId: String) -> some View {
+        Button {
+            if let msg = viewModel.messages.first(where: { $0.id == messageId }) {
+                sourcesSheetMessage = msg
+            }
+        } label: {
+            HStack(spacing: Spacing.xs) {
+                HStack(spacing: -4) {
+                    ForEach(Array(sources.prefix(3).enumerated()), id: \.offset) { _, source in
+                        Circle()
+                            .fill(theme.brandPrimary.opacity(0.2))
+                            .frame(width: 18, height: 18)
+                            .overlay(
+                                Text(String((source.title ?? source.url ?? "?").prefix(1)).uppercased())
+                                    .scaledFont(size: 8, weight: .bold)
+                                    .foregroundStyle(theme.brandPrimary)
+                            )
+                    }
+                }
+                Text("\(sources.count) Source\(sources.count == 1 ? "" : "s")")
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.textSecondary)
+            }
+            .padding(.horizontal, Spacing.sm)
+            .padding(.vertical, Spacing.xs)
+            .background(theme.surfaceContainer.opacity(0.6))
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Follow-Up Suggestions
+
+    private func followUpSuggestions(_ followUps: [String]) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            HStack(spacing: Spacing.xs) {
+                Image(systemName: "lightbulb").scaledFont(size: 12).foregroundStyle(theme.brandPrimary)
+                Text("Continue with")
+                    .scaledFont(size: 12, weight: .medium)
+                    .fontWeight(.medium)
+                    .foregroundStyle(theme.textTertiary)
+            }
+            ForEach(followUps, id: \.self) { suggestion in
+                Button {
+                    viewModel.inputText = suggestion
+                    Task { await viewModel.sendMessage() }
+                    Haptics.play(.light)
+                } label: {
+                    HStack(spacing: Spacing.sm) {
+                        Image(systemName: "arrow.right")
+                            .scaledFont(size: 11, weight: .medium)
+                            .foregroundStyle(theme.brandPrimary)
+                        Text(suggestion)
+                            .scaledFont(size: 14)
+                            .foregroundStyle(theme.brandPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.leading)
+                        Spacer()
+                    }
+                    .padding(.horizontal, Spacing.md)
+                    .padding(.vertical, Spacing.sm)
+                    .background(theme.brandPrimary.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
+                            .strokeBorder(theme.brandPrimary.opacity(0.2), lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    // MARK: - Message Error View
+
+    private func messageErrorView(_ text: String) -> some View {
+        HStack(spacing: Spacing.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .scaledFont(size: 12)
+                .foregroundStyle(theme.error)
+            Text(text)
+                .scaledFont(size: 12, weight: .medium)
+                .foregroundStyle(theme.error)
+            Spacer()
+            if !viewModel.isStreaming {
+                Button { Task { await viewModel.regenerateLastResponse() } } label: {
+                    Text("Retry").scaledFont(size: 12, weight: .medium).foregroundStyle(theme.brandPrimary)
+                }
+            }
+        }
+        .padding(.top, Spacing.xs)
+    }
+
+    // MARK: - Error Banner
+
+    private func errorBannerView(_ message: String) -> some View {
+        HStack(spacing: Spacing.sm) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(theme.error)
+            Text(message)
+                .scaledFont(size: 14)
+                .foregroundStyle(theme.textPrimary)
+            Spacer()
+            Button {
+                withAnimation(MicroAnimation.snappy) { viewModel.errorMessage = nil }
+            } label: {
+                Image(systemName: "xmark")
+                    .scaledFont(size: 12, weight: .semibold)
+                    .foregroundStyle(theme.textTertiary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
+            }
+        }
+        .padding(Spacing.md)
+        .background(theme.errorBackground)
+        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+        .padding(.horizontal, Spacing.screenPadding)
+        .padding(.bottom, Spacing.sm)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .animation(MicroAnimation.gentle, value: viewModel.errorMessage != nil)
+    }
+
+    // MARK: - Copied Toast
+
+    private var copiedToastView: some View {
+        HStack(spacing: Spacing.sm) {
+            Image(systemName: "doc.on.doc.fill").scaledFont(size: 12)
+            Text("Copied to clipboard").scaledFont(size: 12, weight: .medium)
+        }
+        .foregroundStyle(theme.textInverse)
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.sm)
+        .background(theme.textPrimary.opacity(0.85))
+        .clipShape(Capsule())
+        .padding(.top, Spacing.md)
+        .transition(.toastTransition)
+        .animation(MicroAnimation.gentle, value: showCopiedToast)
+    }
+
+
+    // MARK: - Actions
+
+    /// Fetches the full model detail and opens the ModelEditorView sheet.
+    /// Called when an admin taps the edit button in the model selector sheet.
+    private func openModelEditorFromPicker(_ model: AIModel) async {
+        guard let apiClient = dependencies.apiClient else { return }
+        isLoadingModelDetail = true
+        do {
+            let detail = try await apiClient.getWorkspaceModelDetail(id: model.id)
+            isLoadingModelDetail = false
+            editingModelDetail = detail
+        } catch {
+            // Base models (not yet customized as workspace models) return 404.
+            // Construct a default ModelDetail so the editor opens in "create" mode.
+            isLoadingModelDetail = false
+            editingModelDetail = ModelDetail(
+                id: model.id,
+                name: model.name,
+                description: model.description,
+                profileImageURL: model.profileImageURL
+            )
+        }
+    }
+
+    /// Dismiss all picker/overlay states so a new quick action doesn't stack.
+    private func dismissAllPickers() {
+        showCameraPicker = false
+        showFilePicker = false
+        showPhotosPicker = false
+        showAudioPicker = false
+        showWebURLAlert = false
+    }
+
+    // MARK: - Dictation
+
+    private func startDictation() {
+        let service = dependencies.dictationService
+        service.onTranscriptReady = { [weak viewModel] text in
+            guard let vm = viewModel else { return }
+            if vm.inputText.isEmpty {
+                vm.inputText = text
+            } else {
+                vm.inputText += " " + text
+            }
+        }
+        service.onError = { _ in
+            Task { @MainActor in isDictating = false }
+        }
+        isDictating = true
+        Task { await service.startDictation() }
+    }
+
+    private func stopDictation() {
+        dependencies.dictationService.stopDictation()
+        isDictating = false
+    }
+
+    private func cancelDictation() {
+        dependencies.dictationService.cancelDictation()
+        isDictating = false
+    }
+
+    private func toggleVoiceInput() {
+        Haptics.play(.medium)
+        let voiceCallVM = dependencies.makeVoiceCallViewModel()
+        if let manager = dependencies.conversationManager {
+            voiceCallVM.configure(
+                conversationManager: manager,
+                chatViewModel: viewModel,
+                modelName: viewModel.selectedModel?.name ?? "AI Assistant"
+            )
+        }
+        router.presentVoiceCall(viewModel: voiceCallVM)
+    }
+
+    private func toggleSpeech(for message: ChatMessage) {
+        let tts = dependencies.textToSpeechService
+        if speakingMessageId == message.id || ttsGeneratingMessageId == message.id {
+            tts.stop()
+            speakingMessageId = nil
+            ttsGeneratingMessageId = nil
+        } else {
+            tts.stop()
+            speakingMessageId = nil
+            ttsGeneratingMessageId = nil
+            let rate = UserDefaults.standard.double(forKey: "ttsSpeechRate")
+            if rate > 0 { tts.speechRate = Float(rate) * AVSpeechUtteranceDefaultSpeechRate }
+            let voiceId = UserDefaults.standard.string(forKey: "ttsVoiceIdentifier") ?? ""
+            tts.voiceIdentifier = voiceId.isEmpty ? nil : voiceId
+            let messageId = message.id
+            tts.onStart = {
+                speakingMessageId = messageId
+                ttsGeneratingMessageId = nil
+            }
+            tts.onComplete = {
+                speakingMessageId = nil
+                ttsGeneratingMessageId = nil
+            }
+
+            let vIdx = activeVersionIndex[message.id] ?? -1
+            let content: String = {
+                if vIdx >= 0 && vIdx < message.versions.count { return message.versions[vIdx].content }
+                return message.content
+            }()
+            guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            ttsGeneratingMessageId = message.id
+            tts.speak(content)
+        }
+    }
+
+    // MARK: - Action Button Helpers
+
+    /// Renders the icon for an action button.
+    /// Handles three icon formats:
+    ///  1. Base64 SVG data URI  (`data:image/svg+xml;base64,...`) — decoded inline.
+    ///  2. Inline SVG string    (starts with `<svg`) — rendered directly.
+    ///  3. HTTP/HTTPS URL       — fetched remotely by RemoteSVGIconView.
+    ///  4. Everything else      — bolt.fill SF Symbol fallback.
+    @ViewBuilder
+    private func actionButtonIcon(action: AIModelAction) -> some View {
+        if let iconStr = action.icon, !iconStr.isEmpty {
+            if iconStr.hasPrefix("data:image/svg+xml;base64,"),
+               let base64 = iconStr.components(separatedBy: ",").last,
+               let svgData = Data(base64Encoded: base64),
+               let svgString = String(data: svgData, encoding: .utf8) {
+                // Base64-encoded SVG data URI
+                SVGIconView(svgString: svgString)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
+            } else if iconStr.hasPrefix("<svg") || iconStr.hasPrefix("<?xml") {
+                // Raw SVG string
+                SVGIconView(svgString: iconStr)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
+            } else if iconStr.hasPrefix("http://") || iconStr.hasPrefix("https://") {
+                // Remote URL (e.g., https://www.svgrepo.com/show/…/pdf-file.svg)
+                RemoteSVGIconView(url: iconStr)
+            } else {
+                // Unknown format — fallback
+                Image(systemName: "bolt.fill")
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.textTertiary.opacity(0.7))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
+            }
+        } else {
+            Image(systemName: "bolt.fill")
+                .scaledFont(size: 12, weight: .medium)
+                .foregroundStyle(theme.textTertiary.opacity(0.7))
+                .frame(width: 28, height: 28)
+                .contentShape(Circle())
+        }
+    }
+
+    /// Invokes a function-based action button on an assistant message.
+    ///
+    /// Open WebUI action protocol:
+    /// - POST `/api/chat/actions/{id}` is **plain JSON** (not SSE). The HTTP response
+    ///   arrives only after the entire action finishes.
+    /// - While the HTTP request is pending the server emits events via **Socket.IO**
+    ///   on the `"events"` channel targeted at `session_id` (which must equal `socket.sid`):
+    ///   - `__event_emitter__`: fire-and-forget status/notification/replace/message updates.
+    ///   - `__event_call__`:    bidirectional call via `sio.call()` — carries a Socket.IO
+    ///     ack ID. The client must respond via the ack callback to unblock the server.
+    private func invokeActionButton(action: AIModelAction, message: ChatMessage) async {
+        logger.info("🔵 [Action] invokeActionButton: action=\(action.id, privacy: .public) messageId=\(message.id, privacy: .public)")
+        guard let apiClient = dependencies.apiClient else { return }
+
+        // Show initial "Running…" status pill
+        let statusUpdate = ChatStatusUpdate(action: action.name, description: "\(action.name)…", done: false)
+        if let idx = viewModel.conversation?.messages.firstIndex(where: { $0.id == message.id }) {
+            viewModel.conversation?.messages[idx].statusHistory.append(statusUpdate)
+        }
+
+        // Build request body. session_id MUST be socket.sid so the server can target
+        // this Socket.IO session for __event_call__ and __event_emitter__ events.
+        let messageArray: [[String: Any]] = viewModel.messages.map { msg in
+            var dict: [String: Any] = [
+                "role": msg.role.rawValue,
+                "content": msg.content,
+                "timestamp": Int(msg.timestamp.timeIntervalSince1970)
+            ]
+            if !msg.id.isEmpty { dict["id"] = msg.id }
+            return dict
+        }
+        let modelItem: [String: Any] = viewModel.selectedModel?.rawModelItem ?? [:]
+        var body: [String: Any] = [
+            "model": viewModel.selectedModelId ?? "",
+            "messages": messageArray,
+            "id": message.id
+        ]
+        if let chatId = viewModel.conversationId ?? viewModel.conversation?.id {
+            body["chat_id"] = chatId
+        }
+
+        // Ensure the Socket.IO connection is live before we commit a session_id to the
+        // POST body. If the socket is not connected (e.g., after backgrounding), the
+        // server cannot route __event_call__ / __event_emitter__ events back to us.
+        let socket = dependencies.socketService
+        if let socket {
+            let initialState = socket.connectionState
+            logger.info("🔵 [Action] Socket state before action: \(String(describing: initialState), privacy: .public), sid=\(socket.sid ?? "nil", privacy: .public)")
+            if initialState != .connected {
+                logger.info("🔵 [Action] Socket not connected — attempting ensureConnected...")
+                let connected = await socket.ensureConnected(timeout: 5.0)
+                logger.info("🔵 [Action] ensureConnected result: \(connected, privacy: .public), sid=\(socket.sid ?? "nil", privacy: .public)")
+            }
+        } else {
+            logger.warning("⚠️ [Action] No socket service available — action events will not be received")
+        }
+
+        // Use socket.sid — must be captured AFTER ensureConnected so we have a live SID.
+        let socketSid = socket?.sid
+        let socketSessionId = socketSid ?? viewModel.sessionId
+        body["session_id"] = socketSessionId
+        if !modelItem.isEmpty { body["model_item"] = modelItem }
+
+        logger.info("🔵 [Action] Using session_id=\(socketSessionId, privacy: .public) (socket.sid=\(socketSid ?? "nil", privacy: .public))")
+
+        // Register Socket.IO handler BEFORE sending the POST so no events are missed.
+        // Scope to session_id so only events destined for this action are delivered.
+        let subscription = socket?.addChatEventHandler(sessionId: socketSessionId) { socketEvent, ack in
+            Task { @MainActor in
+                await self.handleActionSocketEvent(
+                    socketEvent: socketEvent,
+                    ack: ack,
+                    action: action,
+                    message: message
+                )
+            }
+        }
+        logger.info("🔵 [Action] Socket handler registered (subscription=\(subscription != nil, privacy: .public))")
+
+        do {
+            logger.info("🔵 [Action] Sending POST /api/chat/actions/\(action.id, privacy: .public)")
+            // Plain JSON POST — not SSE. Blocks until the full action completes on the server.
+            let actionResponse = try await apiClient.network.requestJSONOrVoid(
+                path: "/api/chat/actions/\(action.id)",
+                method: .post,
+                body: body,
+                authenticated: true,
+                timeout: 300
+            )
+            logger.info("✅ [Action] POST completed successfully")
+            viewModel.isStreaming = false
+
+            // If the action returned a file result, download it in-app via the authenticated API.
+            // e.g. PDF Export returns { "result": { "success": true, "filename": "…pdf" } }
+            if let result = actionResponse["result"] as? [String: Any],
+               (result["success"] as? Bool) == true,
+               let filename = result["filename"] as? String, !filename.isEmpty {
+                logger.info("📎 [Action] Result contains file: \(filename, privacy: .public) — fetching from server")
+                isDownloadingFile = true
+                let fileId = await resolveFileId(forFilename: filename, apiClient: apiClient)
+                isDownloadingFile = false
+                if let fileId {
+                    await downloadAndShareFile(fileId: fileId)
+                } else {
+                    logger.warning("⚠️ [Action] Could not resolve file ID for '\(filename, privacy: .public)'")
+                    downloadErrorMessage = "Could not find the generated file on the server."
+                    showDownloadError = true
+                }
+            }
+
+            await viewModel.reloadConversation()
+        } catch {
+            logger.error("❌ [Action] POST failed: \(error.localizedDescription, privacy: .public)")
+            viewModel.errorMessage = error.localizedDescription
+        }
+
+        // Clean up socket handler
+        subscription?.dispose()
+
+        // Clear the running status pill
+        if let idx = viewModel.conversation?.messages.firstIndex(where: { $0.id == message.id }) {
+            viewModel.conversation?.messages[idx].statusHistory.removeAll {
+                $0.action == action.name && $0.done != true
+            }
+        }
+    }
+
+    /// Processes a single Socket.IO `"events"` packet arriving during an action invocation.
+    ///
+    /// - `__event_emitter__` packets are dispatched immediately (no ack required).
+    /// - `__event_call__` packets suspend until the user responds, then call `ack` so the
+    ///   server's `await sio.call()` can resume.
+    @MainActor
+    private func handleActionSocketEvent(
+        socketEvent: [String: Any],
+        ack: ((Any?) -> Void)?,
+        action: AIModelAction,
+        message: ChatMessage
+    ) async {
+        // Open WebUI does NOT wrap events in "__event_emitter__" / "__event_call__" envelopes
+        // at the socket event level. The actual event type lives at data.type (e.g. "status",
+        // "input", "confirmation", "execute"). Whether the event requires an ack response is
+        // determined by whether ack != nil (set by the server via sio.call vs sio.emit).
+        let dataPayload = (socketEvent["data"] as? [String: Any]) ?? socketEvent
+        let innerType = (dataPayload["data"] as? [String: Any])?["type"] as? String
+            ?? dataPayload["type"] as? String ?? ""
+        let inner = (dataPayload["data"] as? [String: Any]) ?? dataPayload
+
+        logger.info("🎯 [Action] handleActionSocketEvent innerType=\(innerType, privacy: .public) ack=\(ack != nil, privacy: .public)")
+
+        if ack == nil {
+            // Fire-and-forget event from __event_emitter__ (status, notification, replace, message)
+            switch innerType {
+            case "status":
+                let description = inner["description"] as? String ?? ""
+                let done = inner["done"] as? Bool ?? false
+                let name = inner["action"] as? String ?? action.name
+                if let idx = viewModel.conversation?.messages.firstIndex(where: { $0.id == message.id }) {
+                    if let existingIdx = viewModel.conversation?.messages[idx].statusHistory.firstIndex(where: { $0.action == name && $0.done != true }) {
+                        viewModel.conversation?.messages[idx].statusHistory[existingIdx] = ChatStatusUpdate(action: name, description: description, done: done)
+                    } else {
+                        viewModel.conversation?.messages[idx].statusHistory.append(
+                            ChatStatusUpdate(action: name, description: description, done: done)
+                        )
+                    }
+                }
+            case "notification":
+                let msg = inner["content"] as? String ?? inner["message"] as? String ?? ""
+                actionNotificationToast = msg
+                Task {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    actionNotificationToast = nil
+                }
+            case "replace":
+                let content = inner["content"] as? String ?? ""
+                if let idx = viewModel.conversation?.messages.firstIndex(where: { $0.id == message.id }) {
+                    viewModel.conversation?.messages[idx].content = content
+                }
+            case "message":
+                let content = inner["content"] as? String ?? ""
+                if let idx = viewModel.conversation?.messages.firstIndex(where: { $0.id == message.id }) {
+                    viewModel.conversation?.messages[idx].content += content
+                }
+            default:
+                break
+            }
+        } else {
+            // Bidirectional call from __event_call__ (execute, input, confirmation) — must ack.
+            // For "execute" we don't need user input — handle directly and ack.
+            if innerType == "execute" {
+                let code = inner["code"] as? String ?? inner["script"] as? String ?? ""
+                let result = await handleExecuteEvent(code: code)
+                let ackValue: Any?
+                switch result {
+                case .string(let s): ackValue = s
+                case .bool(let b):   ackValue = b
+                case .cancelled:     ackValue = false
+                }
+                ack?(ackValue)
+                return
+            }
+
+            // For "input" / "confirmation" show a sheet, suspend until user responds,
+            // then call the Socket.IO ack so the server's sio.call() can resume.
+            let userResponse = await withCheckedContinuation { (continuation: CheckedContinuation<ActionCallResponse, Never>) in
+                actionCallContinuation = continuation
+                switch innerType {
+                case "input":
+                    let title   = inner["title"] as? String ?? "Input Required"
+                    let msg     = inner["message"] as? String ?? inner["description"] as? String ?? ""
+                    let placeholder = inner["placeholder"] as? String ?? ""
+                    let defaultVal  = inner["value"] as? String ?? ""
+                    actionInputText = defaultVal
+                    actionInputRequest = ActionInputRequest(
+                        title: title,
+                        message: msg,
+                        placeholder: placeholder,
+                        defaultValue: defaultVal
+                    )
+                case "confirmation":
+                    let title = inner["title"] as? String ?? "Confirm"
+                    let msg   = inner["message"] as? String ?? inner["description"] as? String ?? "Are you sure?"
+                    actionConfirmRequest = ActionConfirmRequest(title: title, message: msg)
+                default:
+                    // Unknown call type — resolve immediately so the server doesn't hang.
+                    continuation.resume(returning: .bool(true))
+                }
+            }
+
+            let ackValue: Any?
+            switch userResponse {
+            case .string(let s): ackValue = s
+            case .bool(let b):   ackValue = b
+            case .cancelled:     ackValue = false
+            }
+            ack?(ackValue)
+        }
+    }
+
+    /// Resolves a file ID from a filename by querying the user's file list.
+    /// Falls back to the most recently created file with the same extension if exact name not found.
+    private func resolveFileId(forFilename filename: String, apiClient: APIClient) async -> String? {
+        guard let files = try? await apiClient.getUserFiles(), !files.isEmpty else {
+            logger.warning("⚠️ [Action] getUserFiles() returned nil or empty")
+            return nil
+        }
+        logger.info("📂 [Action] getUserFiles returned \(files.count, privacy: .public) files")
+        for f in files.prefix(5) {
+            logger.info("  file id=\(f.id, privacy: .public) filename=\(f.filename ?? "nil", privacy: .public)")
+        }
+
+        // Exact match first
+        if let exact = files.first(where: { $0.filename == filename }) {
+            logger.info("✅ [Action] Exact file match: id=\(exact.id, privacy: .public)")
+            return exact.id
+        }
+
+        // Fallback: match by extension, pick newest (highest createdAt)
+        let ext = (filename as NSString).pathExtension.lowercased()
+        let byExt = files.filter { ($0.filename as NSString?)?.pathExtension.lowercased() == ext }
+        let newest = byExt.max(by: { ($0.createdAt ?? 0) < ($1.createdAt ?? 0) })
+        if let newest {
+            logger.info("✅ [Action] Fallback to newest '\(ext, privacy: .public)' file: id=\(newest.id, privacy: .public) filename=\(newest.filename ?? "nil", privacy: .public)")
+            return newest.id
+        }
+
+        return nil
+    }
+
+    /// Handles `__event_call__` `execute` events.
+    /// Tries proven regex fast-paths first (instant, no WKWebView overhead).
+    /// Falls back to ActionJSExecutor (hidden WKWebView) for unknown JS patterns.
+    private func handleExecuteEvent(code: String) async -> ActionCallResponse {
+        logger.info("🟡 [Execute] code length=\(code.count, privacy: .public)")
+
+        // ── Fast path 1: server file download URL (/api/v1/files/{id}) ──────────────
+        let serverBase = viewModel.serverBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let filesUrlPattern = #"['"]((https?://[^\s'"]+/api/v1/files/[^\s'"]+|/api/v1/files/[^\s'"]+))['"]"#
+        if let regex = try? NSRegularExpression(pattern: filesUrlPattern),
+           let match = regex.firstMatch(in: code, range: NSRange(code.startIndex..., in: code)),
+           let urlRange = Range(match.range(at: 1), in: code) {
+            let urlStr = String(code[urlRange])
+            let fullURL = urlStr.hasPrefix("/") ? "\(serverBase)\(urlStr)" : urlStr
+            let parts = fullURL.split(separator: "/")
+            if let filesIdx = parts.firstIndex(of: "files"), filesIdx + 1 < parts.count {
+                let fileId = String(parts[filesIdx + 1])
+                logger.info("🟡 [Execute] Fast-path 1: server file id=\(fileId, privacy: .public)")
+                isDownloadingFile = true
+                await downloadAndShareFile(fileId: fileId)
+                isDownloadingFile = false
+                return .bool(true)
+            }
+        }
+
+        // Extract filename from JS for use in fast paths 2 & 3
+        var fileName = "export.pdf"
+        let filenamePatterns = [
+            #"(?:fileName|filename|name)\s*=\s*['"]([^'"]+\.[a-zA-Z0-9]+)['"]"#,
+            #"saveAs\([^,]+,\s*['"]([^'"]+\.[a-zA-Z0-9]+)['"]\)"#,
+            #"download\s*=\s*['"]([^'"]+\.[a-zA-Z0-9]+)['"]"#,
+        ]
+        for pattern in filenamePatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern),
+               let match = regex.firstMatch(in: code, range: NSRange(code.startIndex..., in: code)),
+               let fnRange = Range(match.range(at: 1), in: code) {
+                fileName = String(code[fnRange])
+                logger.info("🟡 [Execute] Extracted filename: \(fileName, privacy: .public)")
+                break
+            }
+        }
+
+        // ── Fast path 2: `const base64 = "..."` / `base64 = "..."` ──────────────────
+        // Open WebUI PDF export embeds the file as a base64 variable in the execute JS.
+        let base64VarPattern = #"(?:const\s+|let\s+|var\s+)?base64\s*=\s*['"]([A-Za-z0-9+/=\r\n]{20,})['"]"#
+        if let regex = try? NSRegularExpression(pattern: base64VarPattern, options: [.dotMatchesLineSeparators]),
+           let match = regex.firstMatch(in: code, range: NSRange(code.startIndex..., in: code)),
+           let b64Range = Range(match.range(at: 1), in: code) {
+            let rawB64 = String(code[b64Range])
+                .replacingOccurrences(of: "\n", with: "")
+                .replacingOccurrences(of: "\r", with: "")
+                .replacingOccurrences(of: " ", with: "")
+            if let data = Data(base64Encoded: rawB64), !data.isEmpty {
+                logger.info("✅ [Execute] Fast-path 2: base64 var → \(data.count, privacy: .public) bytes as \(fileName, privacy: .public)")
+                let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+                try? data.write(to: tempFile)
+                downloadedFileURL = tempFile
+                return .bool(true)
+            }
+        }
+
+        // ── Fast path 3: atob("...") call ────────────────────────────────────────────
+        let atobPattern = #"atob\(['"]([A-Za-z0-9+/=]{20,})['"]\)"#
+        if let regex = try? NSRegularExpression(pattern: atobPattern),
+           let match = regex.firstMatch(in: code, range: NSRange(code.startIndex..., in: code)),
+           let b64Range = Range(match.range(at: 1), in: code) {
+            let b64 = String(code[b64Range])
+            if let data = Data(base64Encoded: b64), !data.isEmpty {
+                logger.info("✅ [Execute] Fast-path 3: atob → \(data.count, privacy: .public) bytes as \(fileName, privacy: .public)")
+                let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+                try? data.write(to: tempFile)
+                downloadedFileURL = tempFile
+                return .bool(true)
+            }
+        }
+
+        // ── Fallback: WKWebView execution (catches unknown patterns) ─────────────────
+        // Skip scripts that are clearly browser-only (CDN imports, html2canvas, etc.)
+        let isBrowserOnlyScript = code.contains("import(") || code.contains("html2canvas") || code.contains("cdn.jsdelivr")
+        guard !isBrowserOnlyScript, let baseURL = URL(string: serverBase) else {
+            logger.info("🟡 [Execute] Skipping browser-only or unparseable script, unblocking server")
+            return .bool(true)
+        }
+
+        logger.info("🟡 [Execute] No regex match — delegating to ActionJSExecutor")
+        isDownloadingFile = true
+        let download = await ActionJSExecutor.shared.execute(code: code, baseURL: baseURL)
+        isDownloadingFile = false
+
+        if let download {
+            logger.info("✅ [Execute] ActionJSExecutor captured: \(download.filename, privacy: .public) \(download.data.count, privacy: .public) bytes")
+            let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent(download.filename)
+            try? download.data.write(to: tempFile)
+            downloadedFileURL = tempFile
+        } else {
+            logger.warning("⚠️ [Execute] ActionJSExecutor returned nil (timeout or error)")
+        }
+
+        return .bool(true)
+    }
+
+    private func copyMessage(_ message: ChatMessage) {
+        var clean = message.content
+        if let re = try? NSRegularExpression(pattern: #"<details[^>]*>.*?</details>"#, options: [.dotMatchesLineSeparators]) {
+            clean = re.stringByReplacingMatches(in: clean, range: NSRange(clean.startIndex..., in: clean), withTemplate: "")
+        }
+        clean = clean
+            .replacingOccurrences(of: "\n\n\n+", with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !message.sources.isEmpty {
+            clean += "\n\nSources:"
+            for (i, src) in message.sources.enumerated() {
+                clean += "\n[\(i+1)] \(src.resolvedURL ?? src.title ?? "Source \(i+1)")"
+            }
+        }
+        UIPasteboard.general.string = clean
+        Haptics.notify(.success)
+        withAnimation(MicroAnimation.gentle) { showCopiedToast = true }
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            withAnimation(MicroAnimation.gentle) { showCopiedToast = false }
+        }
+    }
+
+    // MARK: - Attachment Processing
+
+private func processSelectedPhotos(_ items: [PhotosPickerItem]) async {
+for item in items {
+            do {
+                if let data = try await item.loadTransferable(type: Data.self) {
+                    let image = UIImage(data: data)
+                    let thumbnail = image.map { Image(uiImage: $0) }
+                    // Downsample to ≤ 2 MP to stay under the API's 5 MB base64 limit
+                    let resized = FileAttachmentService.downsampleForUpload(data: data, image: image)
+                    let attachment = ChatAttachment(
+                        type: .image, name: "Photo_\(Int(Date.now.timeIntervalSince1970)).jpg",
+                        thumbnail: thumbnail, data: resized
+                    )
+                    viewModel.attachments.append(attachment)
+                    // Start uploading immediately so it's ready by send time
+                    viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
+                }
+            } catch {
+                viewModel.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func processFileURL(_ url: URL) async {
+        let hasAccess = url.startAccessingSecurityScopedResource()
+        defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url) else {
+            viewModel.errorMessage = "Failed to read file."
+            return
+        }
+        let isImage = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
+        if isImage {
+            // Downsample to ≤ 2 MP to stay under the API's 5 MB base64 limit
+            let resized = FileAttachmentService.downsampleForUpload(data: data)
+            let thumbnail: Image? = UIImage(data: resized).map { Image(uiImage: $0) }
+            let attachment = ChatAttachment(
+                type: .image, name: url.lastPathComponent,
+                thumbnail: thumbnail, data: resized
+            )
+            viewModel.attachments.append(attachment)
+            viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
+        } else {
+            let attachment = ChatAttachment(
+                type: .file, name: url.lastPathComponent,
+                thumbnail: nil, data: data
+            )
+            viewModel.attachments.append(attachment)
+            viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
+        }
+    }
+
+    private func processCameraImage(_ image: UIImage?) {
+        guard let image else { return }
+        // Downsample to ≤ 2 MP to stay under the API's 5 MB base64 limit
+        let data = FileAttachmentService.downsampleForUpload(image: image)
+        guard !data.isEmpty else { return }
+        let attachment = ChatAttachment(
+            type: .image, name: "Camera_\(Int(Date.now.timeIntervalSince1970)).jpg",
+            thumbnail: Image(uiImage: image), data: data
+        )
+        viewModel.attachments.append(attachment)
+        viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
+    }
+
+    private func processAudioFileURL(_ url: URL) async {
+        let hasAccess = url.startAccessingSecurityScopedResource()
+        defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url) else {
+            viewModel.errorMessage = "Failed to read audio file."
+            return
+        }
+        let attachment = ChatAttachment(type: .audio, name: url.lastPathComponent, thumbnail: nil, data: data)
+        viewModel.attachments.append(attachment)
+
+        // Route to the user-selected transcription engine.
+        // "device" and "server" are live-speech engines, not file transcription — skip ML for those.
+        // Route based on the audio file transcription mode setting.
+        // "server" (default): upload the audio file to the server via the files API —
+        //   the server handles transcription/processing automatically (?process=true).
+        //   No on-device work needed; the user can navigate away freely.
+        // "device": use on-device Parakeet/Qwen3 ASR (existing behavior).
+        let audioFileMode = UserDefaults.standard.string(forKey: "audioFileTranscriptionMode") ?? "server"
+        if audioFileMode == "server" {
+            // Treat audio exactly like any other file attachment — upload immediately.
+            // The server processes the audio via ?process=true and handles transcription.
+            viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
+        } else {
+            // On-device mode: delegate to ViewModel so the Task survives navigation.
+            viewModel.transcribeAudioAttachment(attachmentId: attachment.id, audioData: data, fileName: url.lastPathComponent)
+        }
+    }
+
+    /// Opens a file in an in-app QuickLook preview.
+    /// Uses a local cache keyed by file ID so files that were just uploaded
+    /// don't need to be re-downloaded from the server.
+    private func previewFileInApp(fileId: String, fileName: String) async {
+        // Check cache first — if we already have this file locally, show it instantly
+        let cacheDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("file_cache", isDirectory: true)
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+
+        let cachedFile = cacheDir.appendingPathComponent("\(fileId)_\(fileName)")
+        if FileManager.default.fileExists(atPath: cachedFile.path) {
+            previewFileURL = cachedFile
+            return
+        }
+
+        // Not cached — download from server
+        guard let apiClient = dependencies.apiClient else { return }
+        withAnimation { isDownloadingFile = true }
+
+        do {
+            let (data, _) = try await apiClient.getFileContent(id: fileId)
+            try data.write(to: cachedFile)
+            withAnimation { isDownloadingFile = false }
+            previewFileURL = cachedFile
+        } catch {
+            withAnimation { isDownloadingFile = false }
+            downloadErrorMessage = "Failed to load file: \(error.localizedDescription)"
+            showDownloadError = true
+        }
+    }
+
+    /// Downloads a file from the server using the authenticated API client,
+    /// saves it to a temp directory, and presents the iOS share sheet.
+    private func downloadAndShareFile(fileId: String) async {
+        guard let apiClient = dependencies.apiClient else {
+            downloadErrorMessage = "Not connected to server."
+            showDownloadError = true
+            return
+        }
+
+        withAnimation { isDownloadingFile = true }
+
+        do {
+            let (data, contentType) = try await apiClient.getFileContent(id: fileId)
+
+            // Try to get the file name from file info
+            var fileName = "download"
+            if let info = try? await apiClient.getFileInfo(id: fileId) {
+                if let meta = info["meta"] as? [String: Any], let name = meta["name"] as? String {
+                    fileName = name
+                } else if let name = info["filename"] as? String {
+                    fileName = name
+                } else if let name = info["name"] as? String {
+                    fileName = name
+                }
+            }
+
+            // If no extension, try to infer from content type
+            if (fileName as NSString).pathExtension.isEmpty {
+                let ext: String
+                switch contentType {
+                case let ct where ct.contains("pdf"): ext = "pdf"
+                case let ct where ct.contains("word") || ct.contains("docx"): ext = "docx"
+                case let ct where ct.contains("spreadsheet") || ct.contains("xlsx"): ext = "xlsx"
+                case let ct where ct.contains("presentation") || ct.contains("pptx"): ext = "pptx"
+                case let ct where ct.contains("plain"): ext = "txt"
+                case let ct where ct.contains("json"): ext = "json"
+                case let ct where ct.contains("png"): ext = "png"
+                case let ct where ct.contains("jpeg") || ct.contains("jpg"): ext = "jpg"
+                default: ext = "bin"
+                }
+                fileName = "\(fileName).\(ext)"
+            }
+
+            // Save to temp directory
+            let tempDir = FileManager.default.temporaryDirectory
+            let tempFile = tempDir.appendingPathComponent(fileName)
+            try data.write(to: tempFile)
+
+            withAnimation { isDownloadingFile = false }
+
+            // Present share sheet
+            downloadedFileURL = tempFile
+
+        } catch {
+            withAnimation { isDownloadingFile = false }
+            downloadErrorMessage = "Failed to download: \(error.localizedDescription)"
+            showDownloadError = true
+        }
+    }
+
+    // MARK: - #URL Suggestion Pill
+
+    /// Floating pill shown when the user types `#https://...` in the input field.
+    /// Tapping the pill triggers the web scraping pipeline and strips the `#URL`
+    /// token from the input text. Dismissing (deleting the `#`) hides the pill
+    /// and leaves the text as-is.
+    private func webURLSuggestionPill(url: String) -> some View {
+        Button {
+            // 1. Strip the #URL token from the input text
+            let token = "#\(url)"
+            if let range = viewModel.inputText.range(of: token) {
+                viewModel.inputText.removeSubrange(range)
+                viewModel.inputText = viewModel.inputText
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            // 2. Trigger the web scraping → upload → file attachment pipeline
+            viewModel.processWebURL(urlString: url)
+            // 3. Clear the suggestion state
+            withAnimation(.easeOut(duration: 0.15)) {
+                detectedWebURL = nil
+            }
+            Haptics.play(.light)
+        } label: {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "globe")
+                    .scaledFont(size: 14, weight: .medium)
+                    .foregroundStyle(theme.brandPrimary)
+                Text(url)
+                    .scaledFont(size: 13, weight: .medium)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                Image(systemName: "plus.circle.fill")
+                    .scaledFont(size: 16, weight: .medium)
+                    .foregroundStyle(theme.brandPrimary)
+            }
+            .padding(.horizontal, Spacing.md)
+            .padding(.vertical, Spacing.sm)
+            .background(
+                RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous)
+                    .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.85 : 0.95))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous)
+                    .strokeBorder(theme.brandPrimary.opacity(0.3), lineWidth: 0.75)
+            )
+            .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, Spacing.screenPadding)
+        .padding(.bottom, Spacing.sm)
+    }
+
+    private func processWebURL() {
+        let urlString = webURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !urlString.isEmpty else { return }
+        viewModel.processWebURL(urlString: urlString)
+        webURLInput = ""
+    }
+}
+
+// MARK: - Isolated Streaming Status (Observation Isolation)
+
+/// Isolates streaming status reads into its own view body so that
+/// `StreamingContentStore` property accesses (streamingStatusHistory,
+/// streamingContent, isActive) are attributed to THIS struct's body —
+/// not to ChatDetailView.body. Without this, every token arrival would
+/// re-evaluate the entire 800+ line ChatDetailView.
+private struct IsolatedStreamingStatus: View {
+    let streamingStore: StreamingContentStore
+    let message: ChatMessage
+
+    var body: some View {
+        let isActiveStore = streamingStore.streamingMessageId == message.id
+            && streamingStore.isActive
+        let effectiveStatusHistory = isActiveStore
+            ? streamingStore.streamingStatusHistory
+            : message.statusHistory
+        let effectiveIsStreaming = isActiveStore || message.isStreaming
+
+        if !effectiveStatusHistory.isEmpty {
+            let visible = effectiveStatusHistory.filter { $0.hidden != true }
+            if !visible.isEmpty {
+                let hasPending = visible.contains { $0.done != true }
+                StreamingStatusView(
+                    statusHistory: effectiveStatusHistory,
+                    isStreaming: effectiveIsStreaming && hasPending
+                )
+                .padding(.bottom, Spacing.xs)
+                .transition(.opacity)
+            }
+        }
+    }
+}
+
+// MARK: - Isolated Assistant Message (Observation Isolation)
+
+/// Isolates ALL streaming store reads for assistant message content into
+/// its own view body. This is the single most impactful performance fix:
+///
+/// **Before:** `streamingStore.streamingContent` was read inside
+/// `ChatDetailView.messageContent()` which is called from `body`.
+/// Swift's @Observable macro attributes that read to ChatDetailView,
+/// causing the ENTIRE view (800+ lines, all messages, toolbar, input)
+/// to re-evaluate on every token (~15-20x/sec).
+///
+/// **After:** Only this small struct re-evaluates per token. All other
+/// message views, the toolbar, input field, and scroll infrastructure
+/// remain completely inert during streaming.
+///
+/// ## Fixed-Height Streaming Container (VStack Re-layout Fix)
+/// During active streaming, the content is wrapped in a fixed-height
+/// (400pt) container with internal scrolling. This prevents the parent
+/// VStack from re-measuring ALL sibling message rows when the streaming
+/// content grows in height. When streaming completes, the fixed height
+/// is removed and full content renders at its natural height.
+private struct IsolatedAssistantMessage: View {
+    let streamingStore: StreamingContentStore
+    let message: ChatMessage
+    let activeVersionIndex: Int
+    /// When set, overrides all other content resolution (used when showing an older user message edit version).
+    /// This allows the UI to show the paired AI response for an older user edit WITHOUT creating fake
+    /// regeneration versions on the assistant message.
+    var contentOverride: String? = nil
+    let serverBaseURL: String
+    /// Auth token passed down to Rich UI embed webviews for localStorage injection.
+    var authToken: String? = nil
+    /// APIClient for rendering inline images via AuthenticatedImageView.
+    var apiClient: APIClient? = nil
+
+    var body: some View {
+        let isActivelyStreaming = streamingStore.streamingMessageId == message.id
+            && streamingStore.isActive
+
+        let vIdx = activeVersionIndex
+        let rawContent: String = {
+            // During streaming, use displayContent (the smoothly-drained version)
+            // rather than streamingContent (raw server tokens). This gives the
+            // typewriter effect — characters flow in at a smooth, readable rate
+            // instead of bursting in large chunks.
+            if isActivelyStreaming { return streamingStore.displayContent }
+            // If there's a content override (older user edit version), use it
+            if let override = contentOverride { return override }
+            if vIdx >= 0 && vIdx < message.versions.count { return message.versions[vIdx].content }
+            return message.content
+        }()
+
+        let effectiveSources: [ChatSourceReference] = isActivelyStreaming
+            ? streamingStore.streamingSources : message.sources
+
+        // During streaming: pass raw content through (zero processing per token).
+        // After streaming: apply URL resolution and citation linking.
+        // Note: soft breaks are now handled natively by MarkdownView (renders
+        // \n as line breaks instead of spaces), so no convertSoftBreaksToHard needed.
+        let displayContent: String = {
+            if isActivelyStreaming { return rawContent }
+            let resolved = Self.resolveRelativeURLs(rawContent, baseURL: serverBaseURL)
+            let preferDomain = UserDefaults.standard.object(forKey: "citationShowDomain") as? Bool ?? true
+            return Self.preprocessCitations(resolved, sources: effectiveSources, preferDomain: preferDomain)
+        }()
+
+        let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
+
+        if effectiveIsStreaming && rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            TypingIndicator()
+        } else {
+            // Perf optimisation: when a tool-call block has been fully closed and
+            // the frozen boundary is known, split the content so the heavy tool-call
+            // HTML is never re-parsed after it finishes streaming.
+            //
+            // frozenContent — everything up to & including the last </details> close —
+            // has a stable hashValue between display-link ticks. AssistantMessageContent's
+            // ParseCache hits on every frame (zero re-parse cost).
+            //
+            // liveTextTail — the small prose that the user is currently reading —
+            // is passed to a lightweight standalone StreamingMarkdownView so only
+            // the handful of characters that changed this tick are re-rendered.
+            let frozenBoundary = isActivelyStreaming ? streamingStore.frozenToolBoundaryOffset : 0
+            // Only use the split-render path when the live tail is plain text.
+            // VIZ markers (@@@VIZ-START) and <details blocks require AssistantMessageContent's
+            // full routing (InlineVisualizerView, tool-call renderer, embed injection).
+            // When those are present, fall through to the normal full-content path below.
+            let liveTail = isActivelyStreaming ? streamingStore.liveTextTail : ""
+            let liveTailHasSpecialContent = liveTail.contains("@@@VIZ-START") || liveTail.contains("<details")
+            if frozenBoundary > 0 && !liveTailHasSpecialContent {
+                let dc = streamingStore.displayContent
+                let frozenContent: String = {
+                    guard dc.count >= frozenBoundary else { return dc }
+                    return String(dc[..<dc.index(dc.startIndex, offsetBy: frozenBoundary)])
+                }()
+
+                VStack(alignment: .leading, spacing: 0) {
+                    // Frozen tool-call / reasoning segments — hash is stable, cache always hits.
+                    AssistantMessageContent(
+                        content: frozenContent,
+                        isStreaming: false,
+                        messageEmbeds: message.embeds,
+                        authToken: authToken,
+                        serverBaseURL: serverBaseURL,
+                        apiClient: apiClient
+                    )
+                    // Live tail — split further at the prose freeze boundary if available,
+                    // so post-tool prose also benefits from paragraph-boundary freezing.
+                    if !liveTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        let proseBoundaryAbs = streamingStore.frozenProseBoundaryOffset
+                        let relProseBoundary = proseBoundaryAbs > frozenBoundary
+                            ? proseBoundaryAbs - frozenBoundary : 0
+                        if relProseBoundary > 0 && liveTail.count >= relProseBoundary {
+                            let splitIdx = liveTail.index(liveTail.startIndex, offsetBy: relProseBoundary)
+                            let frozenTailProse = String(liveTail[..<splitIdx])
+                            let liveProsTail   = String(liveTail[splitIdx...])
+                            StreamingMarkdownView(content: frozenTailProse, isStreaming: false)
+                            if !liveProsTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                StreamingMarkdownView(content: liveProsTail, isStreaming: true)
+                            }
+                        } else {
+                            StreamingMarkdownView(content: liveTail, isStreaming: true)
+                        }
+                    }
+                }
+                .transaction { $0.animation = nil }
+            } else {
+                // Fix D: paragraph-boundary freezing for pure prose streaming.
+                //
+                // When no tool calls or VIZ markers are present AND the message is long
+                // enough (> 300 chars), split at the last completed paragraph boundary
+                // (\n\n in the safe zone ≥200 chars from the current end).
+                //
+                // frozenProse  — everything up to the last \n\n — is rendered with
+                //   isStreaming=false. Its content only changes when a new paragraph
+                //   completes (~every few seconds) rather than on every display-link tick.
+                //
+                // liveProse    — the current in-progress paragraph, typically 50–200
+                //   chars — is re-rendered every tick, but is tiny so MarkdownView's
+                //   CommonMark parse is negligible (~20-40× cheaper than parsing the
+                //   full multi-KB string at 60fps).
+                //
+                // Safety guards: skip if <details or @@@VIZ-START are present (those
+                // need AssistantMessageContent's full routing), and skip if we are not
+                // actively streaming (no benefit for already-completed messages).
+                let proseFreezeOffset = isActivelyStreaming
+                    ? streamingStore.frozenProseBoundaryOffset
+                    : 0
+
+                if proseFreezeOffset > 0 && displayContent.count >= proseFreezeOffset {
+                    let dc = displayContent
+                    let splitIdx = dc.index(dc.startIndex, offsetBy: proseFreezeOffset)
+                    let frozenProse = String(dc[..<splitIdx])
+                    let liveProse   = String(dc[splitIdx...])
+                    VStack(alignment: .leading, spacing: 0) {
+                        // Frozen paragraphs: hash changes only when boundary advances (~every 400 chars).
+                        StreamingMarkdownView(content: frozenProse, isStreaming: false)
+                        // Live tail: current paragraph only, changes every tick.
+                        if !liveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            StreamingMarkdownView(content: liveProse, isStreaming: true)
+                        }
+                    }
+                    .transaction { $0.animation = nil }
+                } else {
+                    AssistantMessageContent(
+                        content: displayContent,
+                        isStreaming: effectiveIsStreaming,
+                        messageEmbeds: message.embeds,
+                        authToken: authToken,
+                        serverBaseURL: serverBaseURL,
+                        apiClient: apiClient
+                    )
+                }
+            }
+        }
+    }
+
+    // MARK: - Static Preprocessing (no ChatDetailView dependency)
+
+    static func preprocessCitations(_ content: String, sources: [ChatSourceReference], preferDomain: Bool = true) -> String {
+        guard !sources.isEmpty else { return content }
+
+        // --- Pass 1: expand [1, 2, 3] → [1][2][3] so the single-number pass handles them ---
+        var expanded = content
+        let multiPattern = #"\[(\d+(?:\s*,\s*\d+)+)\](?!\()"#
+        if let multiRegex = try? NSRegularExpression(pattern: multiPattern) {
+            let nsExpanded = expanded as NSString
+            let multiMatches = multiRegex.matches(in: expanded, range: NSRange(location: 0, length: nsExpanded.length))
+            // Process in reverse to preserve indices
+            for match in multiMatches.reversed() {
+                guard let innerRange = Range(match.range(at: 1), in: expanded) else { continue }
+                let numbers = expanded[innerRange]
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                let replacement = numbers.map { "[\($0)]" }.joined()
+                if let fullRange = Range(match.range, in: expanded) {
+                    expanded.replaceSubrange(fullRange, with: replacement)
+                }
+            }
+        }
+
+        // --- Pass 2: replace each [N] with a pill markdown link ---
+        let pattern = #"\[(\d+)\](?!\()"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return expanded }
+        var result = ""
+        var searchStart = expanded.startIndex
+        let nsContent = expanded as NSString
+        let matches = regex.matches(in: expanded, range: NSRange(location: 0, length: nsContent.length))
+        for match in matches {
+            guard let fullRange = Range(match.range, in: expanded),
+                  let numberRange = Range(match.range(at: 1), in: expanded) else { continue }
+            guard let index = Int(expanded[numberRange]) else { continue }
+            result += expanded[searchStart..<fullRange.lowerBound]
+            let sourceIdx = index - 1
+            if sourceIdx >= 0 && sourceIdx < sources.count,
+               let url = sources[sourceIdx].resolvedURL, !url.isEmpty {
+                let label = sources[sourceIdx].displayLabel(preferDomain: preferDomain) ?? "\(index)"
+                result += " [\(label)](\(url)#cite) "
+            } else {
+                result += expanded[fullRange]
+            }
+            searchStart = fullRange.upperBound
+        }
+        result += expanded[searchStart...]
+        return result
+    }
+
+    // Keep old signature body intact but redirect to the new implementation above
+    private static func _preprocessCitationsOld(_ content: String, sources: [ChatSourceReference], preferDomain: Bool = true) -> String {
+        guard !sources.isEmpty else { return content }
+        let pattern = #"\[(\d+)\](?!\()"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return content }
+        var result = ""
+        var searchStart = content.startIndex
+        let nsContent = content as NSString
+        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
+        for match in matches {
+            guard let fullRange = Range(match.range, in: content),
+                  let numberRange = Range(match.range(at: 1), in: content) else { continue }
+            guard let index = Int(content[numberRange]) else { continue }
+            result += content[searchStart..<fullRange.lowerBound]
+            let sourceIdx = index - 1
+            if sourceIdx >= 0 && sourceIdx < sources.count,
+               let url = sources[sourceIdx].resolvedURL, !url.isEmpty {
+                let label = sources[sourceIdx].displayLabel(preferDomain: preferDomain) ?? "\(index)"
+                // #cite suffix triggers small pill badge rendering in MarkdownView
+                result += " [\(label)](\(url)#cite) "
+            } else {
+                result += content[fullRange]
+            }
+            searchStart = fullRange.upperBound
+        }
+        result += content[searchStart...]
+        return result
+    }
+
+    static func resolveRelativeURLs(_ content: String, baseURL: String) -> String {
+        let base = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !base.isEmpty else { return content }
+        let pattern = #"(\]\()(/api/[^\s\)]+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return content }
+        let nsContent = content as NSString
+        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
+        guard !matches.isEmpty else { return content }
+        var result = ""
+        var currentIndex = 0
+        for match in matches {
+            let fullRange = match.range
+            if fullRange.location > currentIndex {
+                result += nsContent.substring(with: NSRange(location: currentIndex, length: fullRange.location - currentIndex))
+            }
+            let prefixRange = match.range(at: 1)
+            let prefix = nsContent.substring(with: prefixRange)
+            let pathRange = match.range(at: 2)
+            let relativePath = nsContent.substring(with: pathRange)
+            result += "\(prefix)\(base)\(relativePath)"
+            currentIndex = fullRange.location + fullRange.length
+        }
+        if currentIndex < nsContent.length {
+            result += nsContent.substring(from: currentIndex)
+        }
+        return result
+    }
+
+}
+
+// MARK: - Superscript Number Helper
+
+/// Converts an integer to its Unicode superscript representation.
+/// e.g., 1 → "¹", 12 → "¹²", 9 → "⁹"
+private func superscriptNumber(_ n: Int) -> String {
+    let superDigits: [Character] = ["\u{2070}", "\u{00B9}", "\u{00B2}", "\u{00B3}", "\u{2074}", "\u{2075}", "\u{2076}", "\u{2077}", "\u{2078}", "\u{2079}"]
+    return String(String(n).compactMap { c in
+        guard let digit = c.wholeNumberValue, digit < superDigits.count else { return nil }
+        return superDigits[digit]
+    })
+}
+
+// MARK: - User Message Content View
+
+/// Renders a user message, parsing `<$slug|slug>` skill tags as inline
+/// styled chips and displaying the surrounding plain text normally.
+///
+/// The web UI stores skill references in message content as `<$slug|slug>`
+/// (e.g. `<$sde|sde>`). This view splits the content into alternating
+/// plain-text and skill-tag segments, then renders each chip with the
+/// same accent styling used in the input field's skill chips.
+struct UserMessageContentView: View {
+    let content: String
+    @Environment(\.theme) private var theme
+
+    /// Parses `content` into alternating text / skill segments.
+    /// Pattern: `<$slug|slug>` — captures the slug before `|`.
+    private var segments: [UserMessageContentView_SegmentType] {
+        let pattern = #"<\$([^|>]+)\|[^>]+>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return [.text(content)]
+        }
+        var result: [UserMessageContentView_SegmentType] = []
+        var searchStart = content.startIndex
+        let nsContent = content as NSString
+        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
+
+        for match in matches {
+            guard let fullRange = Range(match.range, in: content),
+                  let slugRange = Range(match.range(at: 1), in: content) else { continue }
+            let prefix = String(content[searchStart..<fullRange.lowerBound])
+            if !prefix.isEmpty { result.append(.text(prefix)) }
+            result.append(.skill(slug: String(content[slugRange])))
+            searchStart = fullRange.upperBound
+        }
+        let suffix = String(content[searchStart...])
+        if !suffix.isEmpty { result.append(.text(suffix)) }
+        return result.isEmpty ? [.text(content)] : result
+    }
+
+    var body: some View {
+        let segs = segments
+        let hasChips = segs.contains { if case .skill = $0 { return true }; return false }
+
+        if !hasChips {
+            Text(content)
+                .scaledFont(size: 15, context: .content)
+        } else {
+            SkillTaggedTextView(segments: segs)
+        }
+    }
+}
+
+/// Renders a mix of text and skill chips in a flowing layout.
+/// Uses `Layout` to flow content left-to-right, wrapping as needed.
+private struct SkillTaggedTextView: View {
+    let segments: [UserMessageContentView_Segment]
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        // Build one or more lines. We use a simple VStack + HStack wrap
+        // by splitting on newlines first, then rendering each line's chips inline.
+        let lines = buildLines()
+        VStack(alignment: .trailing, spacing: 2) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                FlowRow(segments: line, theme: theme)
+            }
+        }
+    }
+
+    /// Splits segments into lines (splitting on newlines in text segments).
+    private func buildLines() -> [[UserMessageContentView_Segment]] {
+        var lines: [[UserMessageContentView_Segment]] = [[]]
+        for seg in segments {
+            switch seg {
+            case .skill:
+                lines[lines.count - 1].append(seg)
+            case .text(let str):
+                let parts = str.components(separatedBy: "\n")
+                for (i, part) in parts.enumerated() {
+                    if i > 0 { lines.append([]) }
+                    if !part.isEmpty {
+                        lines[lines.count - 1].append(.text(part))
+                    }
+                }
+            }
+        }
+        return lines.filter { !$0.isEmpty }
+    }
+}
+
+// Type alias to share the enum with SkillTaggedTextView
+private typealias UserMessageContentView_Segment = UserMessageContentView_SegmentType
+
+enum UserMessageContentView_SegmentType {
+    case text(String)
+    case skill(slug: String)
+}
+
+/// A single row of mixed text + skill chips, wrapping as needed.
+private struct FlowRow: View {
+    let segments: [UserMessageContentView_Segment]
+    let theme: AppTheme
+
+    var body: some View {
+        // Concatenate text and chip views in an HStack that wraps.
+        // We use ViewThatFits + LazyHStack fallback for wrapping behavior.
+        // For simplicity, render as a single HStack (most messages are short).
+        HStack(alignment: .center, spacing: 4) {
+            ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
+                switch seg {
+                case .text(let str):
+                    Text(str)
+                        .scaledFont(size: 15, context: .content)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .skill(let slug):
+                    SkillChipView(slug: slug, theme: theme)
+                }
+            }
+        }
+    }
+}
+
+/// A single skill chip rendered in the user bubble.
+/// Styled as a small rounded badge matching the web UI's `$slug` pill.
+private struct SkillChipView: View {
+    let slug: String
+    let theme: AppTheme
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text("$")
+                .scaledFont(size: 12, weight: .bold)
+            Text(slug)
+                .scaledFont(size: 12, weight: .semibold)
+        }
+        .foregroundStyle(theme.chatBubbleUserText)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(theme.chatBubbleUserText.opacity(0.18))
+        .clipShape(Capsule())
+        .overlay(
+            Capsule()
+                .strokeBorder(theme.chatBubbleUserText.opacity(0.3), lineWidth: 0.5)
+        )
+    }
+}
+
+// MARK: - Prompt Card Button Style
+
+struct PromptCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .opacity(configuration.isPressed ? 0.85 : 1.0)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
+// MARK: - Document Picker (UIKit Wrapper)
+
+struct DocumentPickerView: UIViewControllerRepresentable {
+    let onPick: ([URL]) -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let supportedTypes: [UTType] = [
+            .pdf, .plainText, .text, .json, .image, .png, .jpeg,
+            .spreadsheet, .presentation, .audio, .mp3, .wav, .aiff, .data
+        ]
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: supportedTypes, asCopy: true)
+        picker.allowsMultipleSelection = true
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+
+    class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: ([URL]) -> Void
+        init(onPick: @escaping ([URL]) -> Void) { self.onPick = onPick }
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) { onPick(urls) }
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {}
+    }
+}
+
+// MARK: - Camera Picker (UIKit Wrapper)
+
+struct CameraPickerView: UIViewControllerRepresentable {
+    let onCapture: (UIImage?) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.cameraCaptureMode = .photo
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator(onCapture: onCapture, dismiss: dismiss) }
+
+    class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let onCapture: (UIImage?) -> Void
+        let dismiss: DismissAction
+        init(onCapture: @escaping (UIImage?) -> Void, dismiss: DismissAction) {
+            self.onCapture = onCapture; self.dismiss = dismiss
+        }
+        func imagePickerController(_ picker: UIImagePickerController,
+                                   didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            onCapture(info[.originalImage] as? UIImage)
+            dismiss()
+        }
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { dismiss() }
+    }
+}
+
+// MARK: - Share Sheet (UIKit Wrapper)
+
+/// Wraps UIActivityViewController for presenting the iOS share sheet.
+struct ShareSheetView: UIViewControllerRepresentable {
+    let activityItems: [Any]
+    var applicationActivities: [UIActivity]? = nil
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: applicationActivities)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+// MARK: - ScrollView Horizontal Lock
+
+/// A zero-size `UIViewRepresentable` that finds the enclosing `UIScrollView`
+/// and installs a KVO observer on `contentOffset` to continuously snap
+/// `contentOffset.x` back to 0. This is the nuclear option for preventing
+/// horizontal panning — no matter what triggers it (animated insertions,
+/// transient layout overflow, MarkdownView intrinsic size, etc.), the
+/// horizontal offset is immediately corrected on the very next frame.
+///
+/// Also sets `alwaysBounceHorizontal = false` and `isDirectionalLockEnabled = true`
+/// as static configuration, and uses a pan gesture recognizer delegate to
+/// prevent horizontal pan recognition entirely.
+private struct ScrollViewHorizontalLock: UIViewRepresentable {
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.isHidden = true
+        view.isUserInteractionEnabled = false
+        DispatchQueue.main.async {
+            context.coordinator.attach(to: view)
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        // Re-attach if the scroll view was recreated
+        if context.coordinator.observedScrollView == nil {
+            DispatchQueue.main.async {
+                context.coordinator.attach(to: uiView)
+            }
+        }
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        private var observation: NSKeyValueObservation?
+        weak var observedScrollView: UIScrollView?
+        private var panBlocker: UIPanGestureRecognizer?
+
+        func attach(to view: UIView) {
+            guard observedScrollView == nil else { return }
+            var current: UIView? = view.superview
+            while let sv = current {
+                if let scrollView = sv as? UIScrollView {
+                    observedScrollView = scrollView
+
+                    // Static configuration
+                    scrollView.alwaysBounceHorizontal = false
+                    scrollView.showsHorizontalScrollIndicator = false
+                    scrollView.isDirectionalLockEnabled = true
+
+                    // KVO: snap contentOffset.x to 0 on every change
+                    observation = scrollView.observe(\.contentOffset, options: [.new]) { [weak self] sv, change in
+                        guard self != nil, let offset = change.newValue else { return }
+                        if abs(offset.x) > 0.5 {
+                            // Use setContentOffset to avoid triggering another KVO notification loop
+                            sv.contentOffset = CGPoint(x: 0, y: offset.y)
+                        }
+                    }
+
+                    // Add a pan gesture recognizer that blocks horizontal panning
+                    let blocker = UIPanGestureRecognizer(target: nil, action: nil)
+                    blocker.delegate = self
+                    blocker.cancelsTouchesInView = false
+                    scrollView.addGestureRecognizer(blocker)
+                    panBlocker = blocker
+
+                    break
+                }
+                current = sv.superview
+            }
+        }
+
+        func detach() {
+            observation?.invalidate()
+            observation = nil
+            if let blocker = panBlocker, let sv = observedScrollView {
+                sv.removeGestureRecognizer(blocker)
+            }
+            panBlocker = nil
+            observedScrollView = nil
+        }
+
+        // MARK: UIGestureRecognizerDelegate
+
+        /// Allow our blocker to recognize simultaneously with all other gestures
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            true
+        }
+
+        /// Block any pan gesture that is primarily horizontal
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
+            // Only block if it's our custom blocker AND the pan is horizontal
+            if pan === panBlocker {
+                return false // never let our blocker actually begin
+            }
+            return true
+        }
+    }
+}
+
+// MARK: - Action Event Modifiers (Type-Checker Relief)
+
+/// Extracted into a View extension to reduce the expression complexity of
+/// ChatDetailView.body. Applying these three modifiers inline in body
+/// pushed the expression past the Swift type-checker limit.
+private extension View {
+    func applyActionEventModifiers(
+        actionInputRequest: Binding<ActionInputRequest?>,
+        actionConfirmRequest: Binding<ActionConfirmRequest?>,
+        actionNotificationToast: Binding<String?>,
+        actionCallContinuation: Binding<CheckedContinuation<ActionCallResponse, Never>?>,
+        actionInputText: Binding<String>
+    ) -> some View {
+        self
+            // MARK: __event_call__ — input dialog (presented as a sheet for reliability)
+            .sheet(isPresented: Binding(
+                get: { actionInputRequest.wrappedValue != nil },
+                set: { if !$0 { } }
+            )) {
+                ActionInputSheet(
+                    request: actionInputRequest.wrappedValue!,
+                    text: actionInputText,
+                    onConfirm: {
+                        actionCallContinuation.wrappedValue?.resume(returning: .string(actionInputText.wrappedValue))
+                        actionCallContinuation.wrappedValue = nil
+                        actionInputRequest.wrappedValue = nil
+                        actionInputText.wrappedValue = ""
+                    },
+                    onCancel: {
+                        actionCallContinuation.wrappedValue?.resume(returning: .cancelled)
+                        actionCallContinuation.wrappedValue = nil
+                        actionInputRequest.wrappedValue = nil
+                        actionInputText.wrappedValue = ""
+                    }
+                )
+                .presentationDetents([.height(240)])
+                .presentationDragIndicator(.visible)
+                .interactiveDismissDisabled()
+            }
+            // MARK: __event_call__ — confirmation dialog
+            .confirmationDialog(
+                actionConfirmRequest.wrappedValue?.title ?? "Confirm",
+                isPresented: Binding(
+                    get: { actionConfirmRequest.wrappedValue != nil },
+                    set: { if !$0 { } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Confirm") {
+                    actionCallContinuation.wrappedValue?.resume(returning: .bool(true))
+                    actionCallContinuation.wrappedValue = nil
+                    actionConfirmRequest.wrappedValue = nil
+                }
+                Button("Cancel", role: .cancel) {
+                    actionCallContinuation.wrappedValue?.resume(returning: .bool(false))
+                    actionCallContinuation.wrappedValue = nil
+                    actionConfirmRequest.wrappedValue = nil
+                }
+            } message: {
+                if let req = actionConfirmRequest.wrappedValue { Text(req.message) }
+            }
+            // MARK: __event_emitter__ — notification toast
+            .overlay(alignment: .top) {
+                if let toastMsg = actionNotificationToast.wrappedValue {
+                    HStack(spacing: 6) {
+                        Image(systemName: "bell.fill").font(.system(size: 11, weight: .medium))
+                        Text(toastMsg).font(.system(size: 13, weight: .medium))
+                    }
+                    .foregroundStyle(Color(.systemBackground))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color(.label).opacity(0.85))
+                    .clipShape(Capsule())
+                    .padding(.top, 14 + 44) // clear navigation bar
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .top).combined(with: .opacity),
+                        removal: .opacity
+                    ))
+                    .allowsHitTesting(false)
+                }
+            }
+    }
+}
+
+// MARK: - Widget & Picker Notification Handlers (Type-Checker Relief)
+
+/// Extracted into a View extension to reduce the expression complexity of
+/// ChatDetailView.body, which was hitting the Swift type-checker limit.
+private extension View {
+    func applyWidgetAndPickerHandlers(
+        showCameraPicker: Binding<Bool>,
+        showPhotosPicker: Binding<Bool>,
+        showFilePicker: Binding<Bool>,
+        selectedPhotos: Binding<[PhotosPickerItem]>,
+        codePreviewCode: Binding<String?>,
+        codePreviewLanguage: Binding<String>,
+        onDismissOverlays: @escaping () -> Void
+    ) -> some View {
+        self
+            .onReceive(NotificationCenter.default.publisher(for: .markdownCodePreview)) { notification in
+                if let code = notification.userInfo?["code"] as? String {
+                    codePreviewLanguage.wrappedValue = notification.userInfo?["language"] as? String ?? ""
+                    codePreviewCode.wrappedValue = code
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openUIDismissOverlays)) { _ in
+                onDismissOverlays()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openUICameraChat)) { _ in
+                showCameraPicker.wrappedValue = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openUIPhotosChat)) { _ in
+                showPhotosPicker.wrappedValue = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openUIFileChat)) { _ in
+                showFilePicker.wrappedValue = true
+            }
+            .photosPicker(
+                isPresented: showPhotosPicker,
+                selection: selectedPhotos,
+                maxSelectionCount: 5,
+                matching: .images,
+                photoLibrary: .shared()
+            )
+            .sheet(item: codePreviewCode) { code in
+                FullCodeView(code: code, language: codePreviewLanguage.wrappedValue)
+            }
+    }
+}
+
+// MARK: - URL Identifiable
+
+extension URL: @retroactive Identifiable {
+    public var id: String { absoluteString }
+}
+
+extension String: @retroactive Identifiable {
+    public var id: String { self }
+}
+
+// MARK: - Action Event UI Models
+
+/// Carries the data for a pending `__event_call__` input prompt.
+/// Setting this on `@State` triggers the `.alert` modifier in the view body.
+struct ActionInputRequest: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+    let placeholder: String
+    let defaultValue: String
+}
+
+/// Carries the data for a pending `__event_call__` confirmation dialog.
+/// Setting this on `@State` triggers the `.confirmationDialog` modifier in the view body.
+struct ActionConfirmRequest: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
+// MARK: - ActionInputSheet
+
+/// A bottom sheet that prompts the user for text input in response to a `__event_call__` input event.
+/// Shown in place of a `.alert`-based dialog because SwiftUI alerts with TextFields are unreliable.
+struct ActionInputSheet: View {
+    let request: ActionInputRequest
+    @Binding var text: String
+    let onConfirm: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Drag handle is shown via .presentationDragIndicator(.visible)
+
+            Text(request.title)
+                .font(.headline)
+                .foregroundStyle(.primary)
+
+            if !request.message.isEmpty {
+                Text(request.message)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            TextField(request.placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 15))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color(.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            HStack(spacing: 12) {
+                Button(action: onCancel) {
+                    Text("Cancel")
+                        .font(.system(size: 16, weight: .medium))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color(.secondarySystemBackground))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onConfirm) {
+                    Text("Confirm")
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.primary)
+                        .foregroundStyle(Color(.systemBackground))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
+        .padding(.bottom, 24)
+    }
+}

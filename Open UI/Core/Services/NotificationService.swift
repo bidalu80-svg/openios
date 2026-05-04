@@ -1,0 +1,468 @@
+import Foundation
+import UserNotifications
+import os.log
+
+/// Manages local notifications for chat generation completion and voice calls.
+///
+/// Matches the Flutter app's notification patterns:
+/// - Generation complete notifications (when app is backgrounded)
+/// - Voice call ongoing notifications
+/// - Actionable notification categories with tap-to-open support
+@MainActor
+final class NotificationService: NSObject, @unchecked Sendable {
+
+    static let shared = NotificationService()
+
+    private let logger = Logger(subsystem: "com.openui", category: "Notifications")
+
+    // MARK: - Notification Identifiers
+
+    /// Category for chat generation complete notifications.
+    static let generationCompleteCategory = "GENERATION_COMPLETE"
+
+    /// Category for voice call notifications.
+    static let voiceCallCategory = "VOICE_CALL"
+
+    /// Category for channel message notifications.
+    static let channelMessageCategory = "CHANNEL_MESSAGE"
+
+    /// Action to open the chat from a notification.
+    static let openChatAction = "OPEN_CHAT"
+
+    /// Action to end a voice call from a notification.
+    static let endCallAction = "END_CALL"
+
+    /// Action to open a channel from a notification.
+    static let openChannelAction = "OPEN_CHANNEL"
+
+    // MARK: - State
+
+    /// Whether the user has granted notification permission.
+    private(set) var isAuthorized = false
+
+    /// The conversation ID the user is currently viewing.
+    /// Set by ChatDetailView on appear/disappear. When a generation
+    /// notification arrives for this conversation, it is suppressed
+    /// since the user is already looking at it.
+    var activeConversationId: String?
+
+    /// The channel ID the user is currently viewing.
+    /// Set by ChannelDetailView on appear/disappear. When a channel
+    /// notification arrives for this channel, it is suppressed in foreground
+    /// since the user is already looking at it.
+    var activeChannelId: String?
+
+    /// When true, the next generation-complete notification bypasses the
+    /// activeConversationId suppression check. Used by recoverFromBackgroundStreaming
+    /// so the user always gets a banner when they return to the app after a
+    /// response completed while they were away — even if they are currently
+    /// looking at that chat.
+    var bypassActiveConversationSuppression: Bool = false
+
+    /// Callback when user taps a notification action.
+    var onOpenChat: ((String) -> Void)?
+    var onEndCall: (() -> Void)?
+    var onOpenChannel: ((String) -> Void)?
+
+    // MARK: - Init
+
+    private override init() {
+        super.init()
+    }
+
+    // MARK: - Setup
+
+    /// Requests notification permissions and registers categories.
+    /// Call this early in the app lifecycle (e.g. in AppDelegate or on first launch).
+    func setup() async {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+
+        // Register notification categories
+        let openAction = UNNotificationAction(
+            identifier: Self.openChatAction,
+            title: "Open Chat",
+            options: [.foreground]
+        )
+
+        let endCallAction = UNNotificationAction(
+            identifier: Self.endCallAction,
+            title: "End Call",
+            options: [.destructive]
+        )
+
+        let openChannelAction = UNNotificationAction(
+            identifier: Self.openChannelAction,
+            title: "Open Channel",
+            options: [.foreground]
+        )
+
+        let generationCategory = UNNotificationCategory(
+            identifier: Self.generationCompleteCategory,
+            actions: [openAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        let voiceCallCategory = UNNotificationCategory(
+            identifier: Self.voiceCallCategory,
+            actions: [endCallAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        let channelCategory = UNNotificationCategory(
+            identifier: Self.channelMessageCategory,
+            actions: [openChannelAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        center.setNotificationCategories([generationCategory, voiceCallCategory, channelCategory])
+
+        // Request permission if not yet determined, otherwise sync cached state
+        let settings = await center.notificationSettings()
+        switch settings.authorizationStatus {
+        case .notDetermined:
+            // Prompt the user immediately so notifications work from the start
+            let granted = await requestPermission()
+            isAuthorized = granted
+        case .authorized:
+            isAuthorized = true
+        default:
+            isAuthorized = false
+        }
+    }
+
+    /// Requests notification permission from the user.
+    func requestPermission() async -> Bool {
+        let center = UNUserNotificationCenter.current()
+        do {
+            let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+            isAuthorized = granted
+            if granted {
+                logger.info("Notification permission granted")
+            } else {
+                logger.warning("Notification permission denied")
+            }
+            return granted
+        } catch {
+            logger.error("Failed to request notification permission: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    // MARK: - Generation Complete
+
+    /// Sends a local notification when a chat generation completes while the app is backgrounded.
+    ///
+    /// - Parameters:
+    ///   - conversationId: The ID of the conversation that completed.
+    ///   - title: The conversation title.
+    ///   - preview: A short preview of the generated response.
+    /// Sends a local notification when a chat generation completes.
+    /// This is `async` so callers (especially background tasks) can `await` it
+    /// and ensure the notification is delivered before iOS suspends the app.
+    func notifyGenerationComplete(
+        conversationId: String,
+        title: String,
+        preview: String
+    ) async {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+
+        // If the user has never been asked, request permission now.
+        // This is the contextual moment Apple HIG recommends — the user
+        // just had a generation complete, so they understand the value.
+        if settings.authorizationStatus == .notDetermined {
+            let granted = await requestPermission()
+            guard granted else { return }
+        } else if settings.authorizationStatus != .authorized {
+            // User previously denied — nothing we can do, don't spam.
+            isAuthorized = false
+            return
+        }
+
+        isAuthorized = true
+
+        // Truncate to ~120 chars for the preview snippet
+        let showPreview = UserDefaults.standard.bool(forKey: "notificationShowResponsePreview")
+        let bodyText: String
+        if showPreview {
+            let cleaned = Self.stripThinkingAndToolBlocks(from: preview)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let snippet = cleaned.prefix(120)
+            bodyText = snippet.isEmpty
+                ? "Response is ready"
+                : (snippet.count < cleaned.count ? "\(snippet)…" : String(snippet))
+        } else {
+            bodyText = "Response is ready"
+        }
+
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = bodyText
+        content.sound = .default
+        content.categoryIdentifier = Self.generationCompleteCategory
+        content.userInfo = ["conversationId": conversationId]
+        content.threadIdentifier = conversationId
+
+        // Use trigger: nil (immediate delivery).
+        // The 2-second delay was intended to let the user background the app
+        // first, but it was the PRIMARY cause of missed notifications:
+        // when iOS suspends the process after endBackgroundTask(), any pending
+        // time-interval triggers are cancelled. With trigger: nil the notification
+        // is delivered to the system immediately and survives process suspension.
+        // The willPresent delegate already handles foreground suppression — if
+        // the user is still viewing the chat, it returns [] (no banner), so
+        // there is no visual noise when the notification fires while in-app.
+        let request = UNNotificationRequest(
+            identifier: "generation-\(conversationId)-\(Date().timeIntervalSince1970)",
+            content: content,
+            trigger: nil
+        )
+
+        do {
+            try await center.add(request)
+            logger.info("Generation notification scheduled for \(conversationId)")
+        } catch {
+            logger.error("Failed to deliver generation notification: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Preview Cleaning
+
+    /// Removes thinking/reasoning blocks and tool-call `<details>` blocks from
+    /// raw AI content so only the main response text appears in notifications.
+    ///
+    /// Handles:
+    /// - Raw model tags: `<think>`, `<thinking>`, `<reasoning>`, `<reason>`,
+    ///   `<thought>`, `<|begin_of_thought|>`, `◁think▷` (and closing variants)
+    /// - Server-normalised: `<details type="reasoning">…</details>`
+    /// - Tool-call blocks: `<details>…</details>` (any remaining)
+    private static func stripThinkingAndToolBlocks(from content: String) -> String {
+        var result = content
+
+        // 1. <details …>…</details> blocks (reasoning + tool calls)
+        if let detailsRegex = try? NSRegularExpression(
+            pattern: #"<details[^>]*>[\s\S]*?</details>"#,
+            options: [.caseInsensitive]
+        ) {
+            result = detailsRegex.stringByReplacingMatches(
+                in: result,
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: ""
+            )
+        }
+
+        // 2. Raw model reasoning tags
+        let rawTagPairs: [(String, String)] = [
+            ("<|begin_of_thought|>", "<|end_of_thought|>"),
+            ("◁think▷", "◁/think▷"),
+            ("<thinking>", "</thinking>"),
+            ("<reasoning>", "</reasoning>"),
+            ("<thought>", "</thought>"),
+            ("<reason>", "</reason>"),
+            ("<think>", "</think>"),
+        ]
+        for (open, close) in rawTagPairs {
+            guard result.contains(open) else { continue }
+            let escapedOpen = NSRegularExpression.escapedPattern(for: open)
+            let escapedClose = NSRegularExpression.escapedPattern(for: close)
+            // Complete pairs
+            if let regex = try? NSRegularExpression(
+                pattern: "\(escapedOpen)[\\s\\S]*?\(escapedClose)",
+                options: [.caseInsensitive]
+            ) {
+                result = regex.stringByReplacingMatches(
+                    in: result,
+                    range: NSRange(result.startIndex..., in: result),
+                    withTemplate: ""
+                )
+            }
+            // Unclosed opening tag (still streaming) — strip from tag to end
+            if result.range(of: open, options: .caseInsensitive) != nil {
+                if let escapedOpenRegex = try? NSRegularExpression(
+                    pattern: "\(escapedOpen)[\\s\\S]*$",
+                    options: [.caseInsensitive]
+                ) {
+                    result = escapedOpenRegex.stringByReplacingMatches(
+                        in: result,
+                        range: NSRange(result.startIndex..., in: result),
+                        withTemplate: ""
+                    )
+                }
+            }
+        }
+
+        return result
+    }
+
+    // MARK: - Channel Messages
+
+    /// Sends a local notification for a new channel message received while the
+    /// user is not actively viewing that channel.
+    ///
+    /// - Parameters:
+    ///   - channelId: The ID of the channel that received the message.
+    ///   - channelName: The display name of the channel (e.g. "#general" or "Alice").
+    ///   - senderName: The display name of the message sender.
+    ///   - preview: A short preview of the message content.
+    func notifyChannelMessage(
+        channelId: String,
+        channelName: String,
+        senderName: String,
+        preview: String
+    ) async {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        guard settings.authorizationStatus == .authorized else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = channelName
+        content.body = preview.isEmpty ? senderName : "\(senderName): \(preview)"
+        content.sound = .default
+        content.categoryIdentifier = Self.channelMessageCategory
+        content.userInfo = ["channelId": channelId]
+        content.threadIdentifier = "channel-\(channelId)"
+
+        let request = UNNotificationRequest(
+            identifier: "channel-\(channelId)-\(Date().timeIntervalSince1970)",
+            content: content,
+            trigger: nil
+        )
+
+        do {
+            try await center.add(request)
+            logger.info("Channel notification scheduled for \(channelId)")
+        } catch {
+            logger.error("Failed to deliver channel notification: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Voice Call
+
+    /// Shows an ongoing-style notification for an active voice call.
+    ///
+    /// - Parameter modelName: The name of the AI model in the call.
+    func showVoiceCallNotification(modelName: String) {
+        guard isAuthorized else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Voice Call"
+        content.body = "In call with \(modelName)"
+        content.sound = nil // No sound for ongoing
+        content.categoryIdentifier = Self.voiceCallCategory
+        content.interruptionLevel = .passive
+
+        let request = UNNotificationRequest(
+            identifier: "voice-call",
+            content: content,
+            trigger: nil
+        )
+
+        UNUserNotificationCenter.current().add(request) { [self] error in
+            if let error {
+                logger.error("Failed to show voice call notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Removes the voice call notification.
+    func cancelVoiceCallNotification() {
+        UNUserNotificationCenter.current().removeDeliveredNotifications(
+            withIdentifiers: ["voice-call"]
+        )
+        UNUserNotificationCenter.current().removePendingNotificationRequests(
+            withIdentifiers: ["voice-call"]
+        )
+    }
+
+    // MARK: - Utility
+
+    /// Clears all delivered notifications.
+    func clearAll() {
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+    }
+
+    /// Clears the badge count.
+    func clearBadge() {
+        UNUserNotificationCenter.current().setBadgeCount(0)
+    }
+}
+
+// MARK: - UNUserNotificationCenterDelegate
+
+extension NotificationService: UNUserNotificationCenterDelegate {
+    /// Handle notification when app is in foreground.
+    /// Shows generation-complete notifications as banners so the user sees them
+    /// even if they're on a different screen within the app. Suppresses other
+    /// notification types (e.g., voice call ongoing) in foreground.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        let category = notification.request.content.categoryIdentifier
+        let conversationId = notification.request.content.userInfo["conversationId"] as? String
+
+        // Use raw string to avoid main-actor isolation issue with the static property
+        if category == "GENERATION_COMPLETE" {
+            // Suppress if user is already viewing this conversation,
+            // UNLESS the bypass flag is set (recovery notification after returning from background).
+            Task { @MainActor in
+                if self.bypassActiveConversationSuppression {
+                    // One-shot bypass: clear the flag immediately after use
+                    self.bypassActiveConversationSuppression = false
+                    completionHandler([.banner, .sound])
+                } else if let conversationId, conversationId == self.activeConversationId {
+                    completionHandler([])
+                } else {
+                    completionHandler([.banner, .sound])
+                }
+            }
+        } else if category == "CHANNEL_MESSAGE" {
+            // Suppress if the user is already viewing that channel.
+            let channelId = notification.request.content.userInfo["channelId"] as? String
+            Task { @MainActor in
+                if let channelId, channelId == self.activeChannelId {
+                    completionHandler([])
+                } else {
+                    completionHandler([.banner, .sound])
+                }
+            }
+        } else {
+            // Suppress other notifications when app is in foreground
+            completionHandler([])
+        }
+    }
+
+    /// Handle notification tap or action button.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let actionId = response.actionIdentifier
+        let conversationId = response.notification.request.content.userInfo["conversationId"] as? String
+
+        let channelId = response.notification.request.content.userInfo["channelId"] as? String
+        let category = response.notification.request.content.categoryIdentifier
+
+        Task { @MainActor in
+            if actionId == Self.openChatAction || (actionId == UNNotificationDefaultActionIdentifier && category == "GENERATION_COMPLETE") {
+                if let conversationId {
+                    onOpenChat?(conversationId)
+                }
+            } else if actionId == Self.openChannelAction || (actionId == UNNotificationDefaultActionIdentifier && category == "CHANNEL_MESSAGE") {
+                if let channelId {
+                    onOpenChannel?(channelId)
+                }
+            } else if actionId == Self.endCallAction {
+                onEndCall?()
+            }
+        }
+
+        completionHandler()
+    }
+}

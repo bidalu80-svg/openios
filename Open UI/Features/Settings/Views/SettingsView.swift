@@ -1,0 +1,2211 @@
+import SwiftUI
+import AVFoundation
+import Speech
+import UserNotifications
+
+/// Main settings view with profile, appearance, server, privacy, and about sections.
+/// Matches the Flutter app's "You" / profile page layout with all customization options.
+struct SettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+    @Environment(AppDependencyContainer.self) private var dependencies
+    @Bindable var viewModel: AuthViewModel
+    @Bindable var appearanceManager: AppearanceManager
+    @State private var showSignOutConfirmation = false
+    @State private var navigationPath = NavigationPath()
+    @State private var showDefaultModelPicker = false
+    @State private var showLanguagePicker = false
+    @State private var showRestartAlert = false
+    @State private var availableModels: [AIModel] = []
+    @State private var defaultModelId: String?
+    @State private var isLoadingModels = false
+
+    var body: some View {
+        NavigationStack(path: $navigationPath) {
+            ScrollView {
+                VStack(spacing: Spacing.sectionGap) {
+                    // Profile header
+                    if let user = viewModel.currentUser {
+                        SettingsSection(header: "Account") {
+                            SettingsProfileHeader(
+                                name: user.displayName,
+                                email: user.email,
+                                avatarURL: profileImageURL(for: user),
+                                authToken: dependencies.apiClient?.network.authToken
+                            ) {
+                                navigationPath.append(SettingsDestination.profile)
+                            }
+                        }
+                    }
+
+                    // Admin Console (only visible to admin users — placed prominently)
+                    if viewModel.currentUser?.role == .admin {
+                        SettingsSection(header: "Administration") {
+                            SettingsCell(
+                                icon: "shield.lefthalf.filled",
+                                title: "Admin Console",
+                                subtitle: "Manage users & roles",
+                                iconColor: .orange,
+                                showDivider: false,
+                                accessory: .chevron
+                            ) {
+                                navigationPath.append(SettingsDestination.adminConsole)
+                            }
+                        }
+                    }
+
+                    // Default Model
+                    SettingsSection(header: "Default Model") {
+                        SettingsCell(
+                            icon: "cpu",
+                            title: "Default Model",
+                            subtitle: defaultModelDisplayName,
+                            showDivider: false,
+                            accessory: isLoadingModels ? .loading : .chevron
+                        ) {
+                            showDefaultModelPicker = true
+                        }
+                    }
+
+                                    // Display & Customization
+                    SettingsSection(header: "Display") {
+                        SettingsCell(
+                            icon: "paintbrush",
+                            title: "Appearance",
+                            subtitle: appearanceManager.colorSchemeMode.displayName,
+                            showDivider: true,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.appearance)
+                        }
+                        SettingsCell(
+                            icon: "textformat.size",
+                            title: "Accessibility",
+                            subtitle: dependencies.accessibilityManager.isCustomized
+                                ? (dependencies.accessibilityManager.matchingPreset?.displayName ?? "Custom")
+                                : "Standard",
+                            iconColor: .purple,
+                            showDivider: true,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.accessibility)
+                        }
+                        SettingsCell(
+                            icon: "globe",
+                            title: "Language",
+                            subtitle: currentLanguageDisplayName,
+                            iconColor: .blue,
+                            showDivider: false,
+                            accessory: .chevron
+                        ) {
+                            showLanguagePicker = true
+                        }
+                    }
+
+                    // Chat Settings
+                    SettingsSection(header: "Chat") {
+                        SettingsCell(
+                            icon: "bubble.left.and.bubble.right",
+                            title: "Chat Behavior",
+                            subtitle: "Haptics, titles, suggestions",
+                            showDivider: false,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.chatSettings)
+                        }
+                    }
+
+                    // Voice
+                    SettingsSection(header: "Voice") {
+                        SettingsCell(
+                            icon: "waveform",
+                            title: "Text-to-Speech",
+                            subtitle: "Voice & speed settings",
+                            showDivider: true,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.ttsSettings)
+                        }
+                        SettingsCell(
+                            icon: "mic",
+                            title: "Speech-to-Text",
+                            subtitle: "Voice input settings",
+                            showDivider: false,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.sttSettings)
+                        }
+                    }
+
+                    // Notifications
+                    SettingsSection(header: "Notifications") {
+                        SettingsCell(
+                            icon: "bell.badge",
+                            title: "Notifications",
+                            subtitle: notificationStatusSubtitle,
+                            showDivider: false,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.notifications)
+                        }
+                    }
+
+                    // Server & Connection
+                    SettingsSection(header: "Server") {
+                        SettingsCell(
+                            icon: "server.rack",
+                            title: "Server Configuration",
+                            subtitle: viewModel.serverURL,
+                            showDivider: true,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.serverManagement)
+                        }
+
+                        SettingsCell(
+                            icon: "arrow.left.arrow.right.circle",
+                            title: "Manage Servers",
+                            subtitle: viewModel.savedServers.count == 1
+                                ? "1 server saved"
+                                : "\(viewModel.savedServers.count) servers saved",
+                            iconColor: .teal,
+                            showDivider: false,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.serverSwitcher)
+                        }
+                    }
+
+                    // Personalization
+                    SettingsSection(header: "Personalization") {
+                        SettingsCell(
+                            icon: "brain",
+                            title: "Memories",
+                            subtitle: "What the AI remembers about you",
+                            iconColor: .purple,
+                            showDivider: false,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.memories)
+                        }
+                    }
+
+                    // Storage
+                    SettingsSection(header: "Storage") {
+                        SettingsCell(
+                            icon: "internaldrive",
+                            title: "Storage",
+                            subtitle: "Files, models & caches",
+                            iconColor: .blue,
+                            showDivider: false,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.storage)
+                        }
+                    }
+
+                    // Privacy & Security
+                    SettingsSection(header: "Privacy & Security") {
+                        SettingsCell(
+                            icon: "lock.shield",
+                            title: "Privacy & Security",
+                            showDivider: false,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.privacySecurity)
+                        }
+                    }
+
+                    // About
+                    SettingsSection(header: "About") {
+                        SettingsCell(
+                            icon: "info.circle",
+                            title: "About Open Relay",
+                            showDivider: false,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.about)
+                        }
+                    }
+
+                    // Sign out
+                    SettingsSection {
+                        DestructiveSettingsCell(
+                            icon: "rectangle.portrait.and.arrow.right",
+                            title: "Sign Out"
+                        ) {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                showSignOutConfirmation = true
+                            }
+                            Haptics.play(.medium)
+                        }
+                    }
+                }
+                .padding(.vertical, Spacing.lg)
+            }
+            .background(theme.background)
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .scaledFont(size: 14, weight: .medium)
+                            .foregroundStyle(Color.secondary)
+                            .frame(width: 32, height: 32)
+                            .background(Color(uiColor: .systemGray5).opacity(0.6))
+                            .clipShape(Circle())
+                    }
+                }
+            }
+            .navigationDestination(for: SettingsDestination.self) { destination in
+                switch destination {
+                case .profile:
+                    ProfileView(viewModel: viewModel)
+                case .appearance:
+                    AppearanceSettingsView(manager: appearanceManager)
+                case .accessibility:
+                    AccessibilitySettingsView(manager: dependencies.accessibilityManager)
+                case .serverManagement:
+                    ServerManagementView(viewModel: viewModel)
+                case .serverSwitcher:
+                    ScrollView {
+                        SavedServersView(viewModel: viewModel, showAddServerButton: true)
+                    }
+                    .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+                    .navigationTitle("Manage Servers")
+                    .navigationBarTitleDisplayMode(.inline)
+                case .privacySecurity:
+                    PrivacySecurityView()
+                case .about:
+                    AboutView(viewModel: viewModel)
+                case .chatSettings:
+                    ChatSettingsView()
+                case .ttsSettings:
+                    TTSSettingsView()
+                case .sttSettings:
+                    STTSettingsView()
+                case .notifications:
+                    NotificationSettingsView()
+                case .adminConsole:
+                    AdminConsoleView()
+                case .memories:
+                    MemoriesView()
+                case .storage:
+                    StorageSettingsView()
+                }
+            }
+            .sheet(isPresented: $showDefaultModelPicker) {
+                DefaultModelPickerView(
+                    models: availableModels,
+                    selectedModelId: $defaultModelId,
+                    onSave: saveDefaultModel
+                )
+            }
+            .sheet(isPresented: $showLanguagePicker) {
+                LanguagePickerView()
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+            }
+            .sheet(isPresented: $showSignOutConfirmation) {
+                SignOutConfirmationSheet(
+                    onSignOut: {
+                        showSignOutConfirmation = false
+                        Task {
+                            await viewModel.signOut()
+                            dismiss()
+                        }
+                    },
+                    onSignOutAndRemove: {
+                        showSignOutConfirmation = false
+                        Task {
+                            await viewModel.signOutAndDisconnect()
+                            dismiss()
+                        }
+                    },
+                    onCancel: {
+                        showSignOutConfirmation = false
+                    }
+                )
+                .presentationDetents([.height(260)])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(24)
+            }
+            .task {
+                await loadModels()
+            }
+        }
+    }
+
+    /// The display name of the currently active app language.
+    private var currentLanguageDisplayName: String {
+        let langs = UserDefaults.standard.stringArray(forKey: "AppleLanguages") ?? []
+        if let first = langs.first, !first.hasPrefix("en") {
+            let locale = Locale(identifier: first)
+            // Show native name in that language
+            if let native = locale.localizedString(forIdentifier: first) {
+                return native
+            }
+        }
+        return String(localized: "System Default")
+    }
+
+    private var notificationStatusSubtitle: String {
+        NotificationService.shared.isAuthorized ? "Enabled" : "Disabled"
+    }
+
+    private var defaultModelDisplayName: String {
+        if isLoadingModels { return "Loading..." }
+        if let id = defaultModelId, let model = availableModels.first(where: { $0.id == id }) {
+            return model.name
+        }
+        return "Auto-select"
+    }
+
+    private func loadModels() async {
+        guard let manager = dependencies.conversationManager else { return }
+        isLoadingModels = true
+        do {
+            availableModels = try await manager.fetchModels()
+            defaultModelId = await manager.fetchDefaultModel()
+        } catch {}
+        isLoadingModels = false
+    }
+
+    private func saveDefaultModel(_ modelId: String?) {
+        // Save to user settings on server.
+        // Use merge helper so we ONLY update `models` without overwriting
+        // `memory`, `pinnedModels`, or any other ui keys.
+        Task {
+            guard let api = dependencies.apiClient else { return }
+            do {
+                let models: [String] = modelId.map { [$0] } ?? []
+                try await api.mergeUserUISettings(["models": models])
+                defaultModelId = modelId
+            } catch {}
+        }
+    }
+
+    private func profileImageURL(for user: User) -> URL? {
+        guard let baseURL = dependencies.apiClient?.baseURL,
+              !user.id.isEmpty, !baseURL.isEmpty else { return nil }
+        return URL(string: "\(baseURL)/api/v1/users/\(user.id)/profile/image?v=\(viewModel.profileImageVersion)")
+    }
+}
+
+// MARK: - Settings Navigation Destinations
+
+enum SettingsDestination: Hashable {
+    case profile
+    case appearance
+    case accessibility
+    case serverManagement
+    case serverSwitcher
+    case privacySecurity
+    case about
+    case chatSettings
+    case ttsSettings
+    case sttSettings
+    case notifications
+    case adminConsole
+    case memories
+    case storage
+}
+
+// MARK: - Default Model Picker
+
+struct DefaultModelPickerView: View {
+    let models: [AIModel]
+    @Binding var selectedModelId: String?
+    let onSave: (String?) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+    @State private var searchText = ""
+    @State private var localSelection: String?
+
+    private var filteredModels: [AIModel] {
+        if searchText.isEmpty { return models }
+        let q = searchText.lowercased()
+        return models.filter {
+            $0.name.lowercased().contains(q) || $0.id.lowercased().contains(q)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                // Auto-select option
+                Button {
+                    localSelection = nil
+                } label: {
+                    HStack {
+                        Image(systemName: "wand.and.stars")
+                            .foregroundStyle(theme.brandPrimary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Auto-select")
+                                .scaledFont(size: 16)
+                                .fontWeight(.semibold)
+                            Text("Use the server default model. ")
+                                .scaledFont(size: 12, weight: .medium)
+                                .foregroundStyle(theme.textTertiary)
+                        }
+                        Spacer()
+                        if localSelection == nil {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(theme.brandPrimary)
+                        }
+                    }
+                }
+                .listRowBackground(
+                    localSelection == nil ? theme.brandPrimary.opacity(0.08) : Color.clear
+                )
+
+                // Model list
+                ForEach(filteredModels) { model in
+                    Button {
+                        localSelection = model.id
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(model.name)
+                                    .scaledFont(size: 16)
+                                    .fontWeight(.medium)
+                                HStack(spacing: 4) {
+                                    if model.isMultimodal {
+                                        Label("Vision", systemImage: "photo")
+                                            .scaledFont(size: 10)
+                                            .foregroundStyle(theme.brandPrimary)
+                                    }
+                                }
+                            }
+                            Spacer()
+                            if localSelection == model.id {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(theme.brandPrimary)
+                            }
+                        }
+                    }
+                    .listRowBackground(
+                        localSelection == model.id ? theme.brandPrimary.opacity(0.08) : Color.clear
+                    )
+                }
+            }
+            .searchable(text: $searchText, prompt: "Search Models")
+            .navigationTitle("Default Model")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        onSave(localSelection)
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+        .onAppear {
+            localSelection = selectedModelId
+        }
+    }
+}
+
+// MARK: - Chat Settings View
+
+struct ChatSettingsView: View {
+    @Environment(\.theme) private var theme
+    @Environment(AppDependencyContainer.self) private var dependencies
+    @AppStorage("sendOnEnter") private var sendOnEnter = true
+    @AppStorage("streamingHaptics") private var streamingHaptics = true
+    @AppStorage("titleGenerationEnabled") private var titleGenerationEnabled = true
+    @AppStorage("suggestionsEnabled") private var suggestionsEnabled = true
+    @AppStorage("temporaryChatDefault") private var temporaryChatDefault = false
+    @AppStorage("expandThinkingWhileStreaming") private var expandThinkingWhileStreaming = true
+    @AppStorage("citationShowDomain") private var citationShowDomain: Bool = true
+    @AppStorage("quickPills") private var quickPillsData: String = ""
+    @State private var availableTools: [ToolItem] = []
+    @State private var isLoadingTools = false
+
+    /// Whether the server admin has enabled title generation globally.
+    private var serverTitleGenEnabled: Bool {
+        dependencies.taskConfig.enableTitleGeneration
+    }
+
+    /// Whether the server admin has enabled follow-up generation globally.
+    private var serverFollowUpGenEnabled: Bool {
+        dependencies.taskConfig.enableFollowUpGeneration
+    }
+
+    private var selectedPillIds: Set<String> {
+        Set(quickPillsData.components(separatedBy: ",").filter { !$0.isEmpty })
+    }
+
+    private func togglePill(_ id: String) {
+        var ids = quickPillsData.components(separatedBy: ",").filter { !$0.isEmpty }
+        if ids.contains(id) {
+            ids.removeAll { $0 == id }
+        } else {
+            ids.append(id)
+        }
+        quickPillsData = ids.joined(separator: ",")
+        Haptics.play(.light)
+    }
+
+    var body: some View {
+        List {
+            Section("Input Behavior") {
+                Toggle("Send on Enter", isOn: $sendOnEnter)
+                    .tint(theme.brandPrimary)
+                Text("When enabled, pressing Enter sends the message. When disabled, Enter creates a new line.")
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+                    .listRowSeparator(.hidden)
+            }
+
+            Section {
+                Toggle("Haptic feedback while streaming", isOn: $streamingHaptics)
+                    .tint(theme.brandPrimary)
+            } header: {
+                Text("Haptics")
+            } footer: {
+                Text("Haptic feedback pulses as each token streams in.")
+            }
+
+            Section {
+                Toggle("Auto-generate chat titles", isOn: $titleGenerationEnabled)
+                    .tint(theme.brandPrimary)
+                    .disabled(!serverTitleGenEnabled)
+                Toggle("Show follow-up suggestions", isOn: $suggestionsEnabled)
+                    .tint(theme.brandPrimary)
+                    .disabled(!serverFollowUpGenEnabled)
+            } header: {
+                Text("Generation")
+            } footer: {
+                if !serverTitleGenEnabled || !serverFollowUpGenEnabled {
+                    Text("Some options are disabled by your server administrator.")
+                } else {
+                    Text("Disabling title generation reduces server load. Follow-up suggestions appear at the end of each response.")
+                }
+            }
+
+            Section {
+                Toggle("Temporary Chat by Default", isOn: $temporaryChatDefault)
+                    .tint(theme.brandPrimary)
+            } header: {
+                Text("Privacy")
+            } footer: {
+                Text("Temporary chats are not saved to the server. You can still save a temporary chat manually.")
+            }
+
+            Section {
+                Toggle("Expand thinking while streaming", isOn: $expandThinkingWhileStreaming)
+                    .tint(theme.brandPrimary)
+            } header: {
+                Text("Thinking...")
+            } footer: {
+                Text("When enabled, reasoning blocks expand automatically while the model is thinking and collapse once done. When disabled, they stay collapsed unless you tap to open them.")
+            }
+
+            Section {
+                Toggle("Show citation domains", isOn: $citationShowDomain)
+                    .tint(theme.brandPrimary)
+            } header: {
+                Text("Citations")
+            } footer: {
+                Text("When enabled, citation badges show the website domain (e.g. bbc.com). When disabled, the page title is shown instead.")
+            }
+
+            Section {
+                Text("Choose which quick actions appear below the message input. Tap to toggle.")
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+                    .listRowSeparator(.hidden)
+
+                // Built-in pills
+                quickPillToggle(id: "web", icon: "magnifyingglass", name: "Web Search")
+                quickPillToggle(id: "image", icon: "photo", name: "Image Generation")
+
+                // Server tools
+                if isLoadingTools {
+                    HStack {
+                        ProgressView().controlSize(.small)
+                        Text("Loading tools…")
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                } else {
+                    ForEach(availableTools, id: \.id) { tool in
+                        quickPillToggle(id: tool.id, icon: "wrench", name: tool.name)
+                    }
+                }
+
+                if !selectedPillIds.isEmpty {
+                    Button(role: .destructive) {
+                        quickPillsData = ""
+                        Haptics.play(.medium)
+                    } label: {
+                        Label("Clear All Quick Actions", systemImage: "xmark.circle")
+                    }
+                }
+            } header: {
+                Text("Quick Actions")
+            } footer: {
+                Text("\(selectedPillIds.count) action\(selectedPillIds.count == 1 ? "" : "s") selected")
+            }
+        }
+        .navigationTitle("Chat Settings")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await loadTools()
+        }
+    }
+
+    private func quickPillToggle(id: String, icon: String, name: String) -> some View {
+        let isSelected = selectedPillIds.contains(id)
+        return Button {
+            withAnimation(.easeOut(duration: 0.15)) {
+                togglePill(id)
+            }
+        } label: {
+            HStack(spacing: Spacing.md) {
+                Image(systemName: icon)
+                    .scaledFont(size: 14, weight: .medium)
+                    .foregroundStyle(isSelected ? theme.brandPrimary : theme.textSecondary)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        (isSelected ? theme.brandPrimary : theme.textSecondary).opacity(0.12)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                Text(name)
+                    .scaledFont(size: 16)
+                    .foregroundStyle(theme.textPrimary)
+
+                Spacer()
+
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .scaledFont(size: 20)
+                    .foregroundStyle(isSelected ? theme.brandPrimary : theme.textTertiary)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func loadTools() async {
+        guard let manager = dependencies.conversationManager else { return }
+        isLoadingTools = true
+        do {
+            availableTools = try await manager.fetchTools()
+        } catch {}
+        isLoadingTools = false
+    }
+}
+
+// MARK: - TTS Settings View
+
+struct TTSSettingsView: View {
+    @Environment(\.theme) private var theme
+    @Environment(AppDependencyContainer.self) private var dependencies
+    @AppStorage("ttsSpeechRate") private var speechRate = 1.0
+    @AppStorage("ttsVoiceIdentifier") private var voiceIdentifier: String = ""
+    @AppStorage("ttsEngine") private var selectedEngine: String = "system"
+    @AppStorage("ttsOnDeviceModel") private var onDeviceModelRaw: String = "kokoro"
+    @AppStorage("ttsKokoroVoice") private var kokoroVoice: String = "af_heart"
+    @AppStorage("ttsKokoroSpeed") private var kokoroSpeed: Double = 1.0
+    @AppStorage("ttsQwen3Voice") private var qwen3Voice: String = "Aiden"
+    @AppStorage("ttsQwen3Language") private var qwen3Language: String = "auto"
+    @AppStorage("ttsServerVoiceId") private var serverVoiceId: String = ""
+    @State private var isSpeaking = false
+    @State private var availableVoices: [AVSpeechSynthesisVoice] = []
+    @State private var isDownloadingModel = false
+    @State private var kokoroModelSize: String = "–"
+    @State private var qwen3ModelSize: String = "–"
+    @State private var serverVoices: [(id: String, name: String)] = []
+    @State private var isLoadingServerVoices = false
+    /// Model name configured on the server (from /api/v1/audio/config).
+    @State private var serverConfiguredModel: String = ""
+    /// Whether we're currently loading the audio config from the server.
+    @State private var isLoadingServerConfig = false
+
+    private var ttsService: TextToSpeechService {
+        dependencies.textToSpeechService
+    }
+
+    private var selectedOnDeviceModel: OnDeviceTTSModel {
+        OnDeviceTTSModel(rawValue: onDeviceModelRaw) ?? .kokoro
+    }
+
+    private var engineOptions: [(String, String, String)] {
+        var options: [(String, String, String)] = [
+            ("auto",     "Auto",           "Best available: On-Device → Server → System"),
+            ("system",   "System (Apple)", "Built-in AVSpeechSynthesizer"),
+        ]
+        if ttsService.isServerAvailable {
+            options.insert(
+                ("server", "Server", "OpenWebUI server-side TTS"),
+                at: options.count - 1
+            )
+        }
+        if ttsService.isKokoroAvailable {
+            options.insert(
+                ("ondevice", "On-Device", "Neural TTS running locally on your device"),
+                at: 1
+            )
+        }
+        return options
+    }
+
+    var body: some View {
+        List {
+            // Engine Selection
+            Section {
+                ForEach(engineOptions, id: \.0) { value, label, description in
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            selectedEngine = value
+                        }
+                        syncEngineToService()
+                        Haptics.play(.light)
+                    } label: {
+                        HStack(spacing: Spacing.md) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: Spacing.xs) {
+                                    Text(label)
+                                        .scaledFont(size: 16)
+                                        .fontWeight(.medium)
+                                        .foregroundStyle(theme.textPrimary)
+
+                                    if value == "qwen3" {
+                                        Text("New")
+                                            .scaledFont(size: 9, weight: .heavy)
+                                            .foregroundStyle(.white)
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 2)
+                                            .background(
+                                                Capsule().fill(
+                                                    LinearGradient(
+                                                        colors: [theme.brandPrimary, theme.brandPrimary.opacity(0.7)],
+                                                        startPoint: .leading,
+                                                        endPoint: .trailing
+                                                    )
+                                                )
+                                            )
+                                    }
+                                }
+
+                                Text(description)
+                                    .scaledFont(size: 12, weight: .medium)
+                                    .foregroundStyle(theme.textTertiary)
+                            }
+
+                            Spacer()
+
+                            Image(systemName: selectedEngine == value ? "checkmark.circle.fill" : "circle")
+                                .scaledFont(size: 22)
+                                .foregroundStyle(
+                                    selectedEngine == value ? theme.brandPrimary : theme.textTertiary.opacity(0.4)
+                                )
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            } header: {
+                Text("TTS Engine")
+            } footer: {
+                if selectedEngine == "auto" {
+                    Text("Auto mode uses the on-device model when loaded, otherwise falls back to server or system.")
+                } else if selectedEngine == "kokoro" {
+                    Text("Kokoro runs locally on your device. Supports 54 voices across 9 languages.")
+                } else if selectedEngine == "qwen3" {
+                    Text("Qwen3 runs locally on your device. Supports English, Korean, German, Spanish, and 7 more languages.")
+                }
+            }
+
+            // On-Device Model Settings (unified section with model picker)
+            if selectedEngine == "ondevice" && ttsService.isKokoroAvailable {
+                let isKokoro = selectedOnDeviceModel == .kokoro
+
+                Section {
+                    // Model selector — segmented picker inside the section
+                    Picker("Model", selection: $onDeviceModelRaw) {
+                        Text("Kokoro").tag(OnDeviceTTSModel.kokoro.rawValue)
+                        Text("Qwen3").tag(OnDeviceTTSModel.qwen3.rawValue)
+                    }
+                    .pickerStyle(.segmented)
+                    .listRowInsets(EdgeInsets(top: Spacing.sm, leading: Spacing.md, bottom: Spacing.sm, trailing: Spacing.md))
+                    .onChange(of: onDeviceModelRaw) { _, _ in syncEngineToService() }
+
+                    // Model status
+                    HStack {
+                        Text("Status")
+                            .scaledFont(size: 16)
+                            .foregroundStyle(theme.textPrimary)
+                        Spacer()
+                        onDeviceStatusBadge
+                    }
+
+                    if isKokoro {
+                        // Kokoro: Voice picker grouped by language
+                        Picker("Voice", selection: $kokoroVoice) {
+                            ForEach(KokoroVoiceCatalog.groups, id: \.language) { group in
+                                Section(header: Text("\(group.flag) \(group.language)")) {
+                                    ForEach(group.voices, id: \.id) { voice in
+                                        Text(voice.name).tag(voice.id)
+                                    }
+                                }
+                            }
+                        }
+                        .onChange(of: kokoroVoice) { _, _ in syncKokoroConfig() }
+
+                        // Speed slider (Kokoro only)
+                        VStack(alignment: .leading, spacing: Spacing.xs) {
+                            HStack {
+                                Text("Speed")
+                                    .scaledFont(size: 16)
+                                    .foregroundStyle(theme.textPrimary)
+                                Spacer()
+                                Text(String(format: "%.1f×", kokoroSpeed))
+                                    .scaledFont(size: 14, weight: .medium)
+                                    .foregroundStyle(theme.textSecondary)
+                            }
+                            Slider(value: $kokoroSpeed, in: 0.5...2.0, step: 0.1)
+                                .tint(theme.brandPrimary)
+                                .onChange(of: kokoroSpeed) { _, _ in syncKokoroConfig() }
+                        }
+                    } else {
+                        // Qwen3: Speaker picker
+                        Picker("Speaker", selection: $qwen3Voice) {
+                            ForEach(Qwen3VoiceCatalog.groups, id: \.language) { group in
+                                Section(header: Text("\(group.flag) \(group.language)")) {
+                                    ForEach(group.voices, id: \.id) { voice in
+                                        Text(voice.name).tag(voice.id)
+                                    }
+                                }
+                            }
+                        }
+                        .onChange(of: qwen3Voice) { _, _ in syncQwen3Config() }
+
+                        // Qwen3: Language picker
+                        Picker("Language", selection: $qwen3Language) {
+                            ForEach(Qwen3VoiceCatalog.supportedLanguages, id: \.id) { lang in
+                                Text(lang.name).tag(lang.id)
+                            }
+                        }
+                        .onChange(of: qwen3Language) { _, _ in syncQwen3Config() }
+
+                    }
+
+                    // Load / Download / Unload controls
+                    onDeviceModelControls(isKokoro: isKokoro)
+
+                } header: {
+                    Text("On-Device Neural Voice")
+                } footer: {
+                    if isKokoro {
+                        Text("Kokoro · 54 voices · 9 languages. Downloads from HuggingFace on first use.")
+                    } else {
+                        Text("Qwen3 · 7 speakers · 11 languages including Korean, German & Spanish. Speaker sets the voice timbre — any speaker can speak any language.")
+                    }
+                }
+            }
+
+            // Server TTS Settings (shown when server engine is selected)
+            if selectedEngine == "server" && ttsService.isServerAvailable {
+                // --- Model info (from /api/v1/audio/config) ---
+                Section {
+                    if isLoadingServerConfig {
+                        HStack(spacing: Spacing.sm) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading server config…")
+                                .scaledFont(size: 14)
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                    } else {
+                        HStack {
+                            Text("Model")
+                            Spacer()
+                            Text(serverConfiguredModel.isEmpty ? "Not configured" : serverConfiguredModel)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Button {
+                            Task { await loadServerConfig() }
+                        } label: {
+                            HStack(spacing: Spacing.sm) {
+                                Image(systemName: "arrow.clockwise.circle")
+                                    .scaledFont(size: 14, weight: .medium)
+                                Text("Refresh Config")
+                                    .scaledFont(size: 14)
+                            }
+                            .foregroundStyle(theme.brandPrimary)
+                        }
+                    }
+                } header: {
+                    Text("Server TTS Model")
+                } footer: {
+                    Text("The TTS model configured on your OpenWebUI server (/api/v1/audio/config).")
+                }
+
+                // --- Voice picker ---
+                Section {
+                    if isLoadingServerVoices {
+                        HStack(spacing: Spacing.sm) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading voices from server…")
+                                .scaledFont(size: 14)
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                    } else if serverVoices.isEmpty {
+                        HStack {
+                            Text("Voice")
+                            Spacer()
+                            Text(serverVoiceId.isEmpty ? "Server Default" : serverVoiceId)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Button {
+                            Task { await loadServerVoices() }
+                        } label: {
+                            HStack(spacing: Spacing.sm) {
+                                Image(systemName: "arrow.clockwise.circle")
+                                    .scaledFont(size: 14, weight: .medium)
+                                Text("Load Available Voices")
+                                    .scaledFont(size: 14)
+                            }
+                            .foregroundStyle(theme.brandPrimary)
+                        }
+                    } else {
+                        Picker("Voice", selection: $serverVoiceId) {
+                            Text("Server Default").tag("")
+                            ForEach(serverVoices, id: \.id) { voice in
+                                Text(voice.name).tag(voice.id)
+                            }
+                        }
+                        .onChange(of: serverVoiceId) { _, newValue in
+                            ttsService.serverVoiceId = newValue.isEmpty ? nil : newValue
+                        }
+                    }
+                } header: {
+                    Text("Server Voice")
+                } footer: {
+                    Text("Voices available on your OpenWebUI server. The default uses the server's configured voice.")
+                }
+            }
+
+            // System Voice Settings (only when system engine is selected)
+            if selectedEngine == "system" || selectedEngine == "auto" {
+                Section {
+                    NavigationLink {
+                        TTSVoicePickerView(
+                            voiceIdentifier: $voiceIdentifier,
+                            voices: availableVoices
+                        )
+                        .onChange(of: voiceIdentifier) { _, _ in
+                            syncSettingsToService()
+                        }
+                    } label: {
+                        HStack {
+                            Text("Voice")
+                            Spacer()
+                            Text(
+                                voiceIdentifier.isEmpty
+                                    ? "Auto (detect language)"
+                                    : (AVSpeechSynthesisVoice(identifier: voiceIdentifier)?.name ?? voiceIdentifier)
+                            )
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        }
+                    }
+
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Speed")
+                            Spacer()
+                            Text("\(Int(speechRate * 100))%")
+                                .scaledFont(size: 12, weight: .medium)
+                                .foregroundStyle(theme.brandPrimary)
+                        }
+                        Slider(value: $speechRate, in: 0.25...2.0, step: 0.05)
+                            .tint(theme.brandPrimary)
+                            .onChange(of: speechRate) { _, _ in
+                                syncSettingsToService()
+                            }
+                    }
+                } header: {
+                    Text("System Voice")
+                } footer: {
+                    Text("These settings apply when using Apple's built-in speech synthesizer.")
+                }
+            }
+
+            // Preview
+            Section {
+                Button {
+                    previewVoice()
+                } label: {
+                    HStack(spacing: Spacing.sm) {
+                        Image(systemName: isSpeaking ? "stop.fill" : "play.fill")
+                            .scaledFont(size: 14, weight: .medium)
+                            .foregroundStyle(isSpeaking ? theme.error : theme.brandPrimary)
+                        Text(isSpeaking ? "Stop Preview" : "Preview Voice")
+                            .scaledFont(size: 16)
+                            .foregroundStyle(theme.textPrimary)
+                        Spacer()
+                        if isSpeaking {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            let engineLabel: String = {
+                                switch selectedEngine {
+                                case "ondevice": return selectedOnDeviceModel == .qwen3 ? "Qwen3" : "Kokoro"
+                                case "kokoro":   return "Kokoro"
+                                case "qwen3":    return "Qwen3"
+                                case "server":   return "Server"
+                                case "system":   return "System"
+                                default:         return "Auto"
+                                }
+                            }()
+                            Text(engineLabel)
+                                .scaledFont(size: 12, weight: .medium)
+                                .foregroundStyle(theme.textTertiary)
+                        }
+                    }
+                }
+            } footer: {
+                Text("Tap preview to hear how the selected voice sounds.")
+            }
+
+            // Model Storage Management
+            Section {
+                HStack {
+                    Text("Kokoro TTS")
+                        .scaledFont(size: 16)
+                        .foregroundStyle(theme.textPrimary)
+                    Spacer()
+                    Text(kokoroModelSize)
+                        .scaledFont(size: 14)
+                        .foregroundStyle(theme.textSecondary)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button(role: .destructive) {
+                        ttsService.kokoroService.config.activeModel = .kokoro
+                        ttsService.kokoroService.unloadAndDeleteModel()
+                        refreshModelSizes()
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+
+                HStack {
+                    Text("Qwen3 TTS")
+                        .scaledFont(size: 16)
+                        .foregroundStyle(theme.textPrimary)
+                    Spacer()
+                    Text(qwen3ModelSize)
+                        .scaledFont(size: 14)
+                        .foregroundStyle(theme.textSecondary)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button(role: .destructive) {
+                        ttsService.kokoroService.config.activeModel = .qwen3
+                        ttsService.kokoroService.unloadAndDeleteModel()
+                        refreshModelSizes()
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+            } header: {
+                Text("Model Storage")
+            } footer: {
+                Text("Swipe left on a model row to delete it from disk and free storage.")
+            }
+        }
+        .navigationTitle("Text-to-Speech")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            availableVoices = dependencies.textToSpeechService.availableVoices()
+            syncSettingsToService()
+            syncEngineToService()
+            syncKokoroConfig()
+            syncQwen3Config()
+            refreshModelSizes()
+        }
+        .task {
+            // Always fetch fresh config from server when the user opens this screen
+            if ttsService.isServerAvailable {
+                await loadServerConfig()
+                await loadServerVoices()
+            }
+        }
+    }
+
+    // MARK: - On-Device Status Badge
+
+    @ViewBuilder
+    private var onDeviceStatusBadge: some View {
+        switch ttsService.kokoroState {
+        case .unloaded:
+            statusPill("Not Loaded", color: theme.textTertiary)
+        case .downloading:
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.mini)
+                Text("Downloading…")
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.warning)
+            }
+        case .loading:
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.mini)
+                Text("Loading...")
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.brandPrimary)
+            }
+        case .ready:
+            statusPill("Ready", color: theme.success)
+        case .generating:
+            statusPill("Generating...", color: theme.brandPrimary)
+        case .error(let msg):
+            statusPill("Error", color: theme.error)
+                .help(msg)
+        }
+    }
+
+    @ViewBuilder
+    private func onDeviceModelControls(isKokoro: Bool) -> some View {
+        switch ttsService.kokoroState {
+        case .unloaded:
+            Button {
+                preloadOnDeviceModel()
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    Image(systemName: "arrow.down.circle")
+                        .scaledFont(size: 16, weight: .medium)
+                    Text("Download & Load Model")
+                        .scaledFont(size: 16)
+                        .fontWeight(.medium)
+                }
+                .foregroundStyle(theme.brandPrimary)
+            }
+        case .downloading:
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                HStack(spacing: Spacing.sm) {
+                    ProgressView().controlSize(.small)
+                    Text("Downloading model…")
+                        .scaledFont(size: 16)
+                        .foregroundStyle(theme.textSecondary)
+                    Spacer()
+                }
+                ProgressView()
+                    .tint(theme.brandPrimary)
+                Text("Please keep the app open")
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+            }
+        case .ready:
+            Button(role: .destructive) {
+                ttsService.unloadKokoroModel()
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    Image(systemName: "xmark.circle")
+                        .scaledFont(size: 16, weight: .medium)
+                    Text("Unload Model (Free Memory)")
+                        .scaledFont(size: 16)
+                        .fontWeight(.medium)
+                }
+            }
+            Button(role: .destructive) {
+                ttsService.kokoroService.unloadAndDeleteModel()
+                refreshModelSizes()
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    Image(systemName: "trash.circle")
+                        .scaledFont(size: 16, weight: .medium)
+                    Text("Delete Downloaded Model")
+                        .scaledFont(size: 16)
+                        .fontWeight(.medium)
+                }
+            }
+        case .error:
+            Button {
+                retryOnDeviceLoad()
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .scaledFont(size: 16, weight: .medium)
+                    Text("Retry Download")
+                        .scaledFont(size: 16)
+                        .fontWeight(.medium)
+                }
+                .foregroundStyle(theme.warning)
+            }
+        case .loading, .generating:
+            EmptyView()
+        }
+    }
+
+    private func statusPill(_ text: String, color: Color) -> some View {
+        Text(LocalizedStringKey(text))
+            .scaledFont(size: 11, weight: .semibold)
+            .foregroundStyle(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.12))
+            .clipShape(Capsule())
+    }
+
+    // MARK: - Actions
+
+    private func syncSettingsToService() {
+        let service = dependencies.textToSpeechService
+        service.speechRate = Float(speechRate) * AVSpeechUtteranceDefaultSpeechRate
+        service.voiceIdentifier = voiceIdentifier.isEmpty ? nil : voiceIdentifier
+        service.serverVoiceId = serverVoiceId.isEmpty ? nil : serverVoiceId
+    }
+
+    /// Fetches the server's audio config from `/api/v1/audio/config`.
+    @MainActor
+    private func loadServerConfig() async {
+        guard let apiClient = dependencies.apiClient else { return }
+        isLoadingServerConfig = true
+        defer { isLoadingServerConfig = false }
+        do {
+            let config = try await apiClient.getAudioConfig()
+            if let tts = config["tts"] as? [String: Any] {
+                let model = (tts["MODEL"] as? String) ?? ""
+                serverConfiguredModel = model
+                let configVoice = (tts["VOICE"] as? String) ?? ""
+                if !configVoice.isEmpty {
+                    ttsService.serverDefaultVoice = configVoice
+                    if serverVoiceId.isEmpty {
+                        ttsService.serverVoiceId = configVoice
+                    }
+                }
+            }
+        } catch {
+            // Non-critical — keep whatever was there before
+        }
+    }
+
+    /// Fetches available voices from the server's `/api/v1/audio/voices` endpoint.
+    @MainActor
+    private func loadServerVoices() async {
+        guard let apiClient = dependencies.apiClient else { return }
+        isLoadingServerVoices = true
+        defer { isLoadingServerVoices = false }
+        do {
+            let raw = try await apiClient.getVoices()
+            serverVoices = raw.compactMap { entry -> (id: String, name: String)? in
+                guard let id = entry["id"] as? String else { return nil }
+                let name = entry["name"] as? String ?? id
+                return (id: id, name: name)
+            }
+        } catch {
+            // Non-critical — leave serverVoices empty so the fallback text input shows
+        }
+    }
+
+    private func syncEngineToService() {
+        let service = dependencies.textToSpeechService
+        switch selectedEngine {
+        case "ondevice":
+            // Sub-model is governed by onDeviceModelRaw (Kokoro or Qwen3)
+            let model = OnDeviceTTSModel(rawValue: onDeviceModelRaw) ?? .kokoro
+            service.kokoroService.config.activeModel = model
+            if model == .qwen3 {
+                service.preferredEngine = .qwen3
+            } else {
+                service.preferredEngine = .kokoro
+            }
+        case "kokoro", "marvis", "mlx":
+            service.preferredEngine = .kokoro
+            service.kokoroService.config.activeModel = .kokoro
+            onDeviceModelRaw = "kokoro"
+        case "qwen3":
+            service.preferredEngine = .qwen3
+            service.kokoroService.config.activeModel = .qwen3
+            onDeviceModelRaw = "qwen3"
+        case "server":
+            service.preferredEngine = .server
+        case "system":
+            service.preferredEngine = .system
+        default:
+            service.preferredEngine = .auto
+        }
+        UserDefaults.standard.set(selectedEngine, forKey: "ttsEngine")
+    }
+
+    private func syncKokoroConfig() {
+        let service = dependencies.textToSpeechService
+        service.kokoroConfig.voice = kokoroVoice
+        service.kokoroConfig.speed = Float(kokoroSpeed)
+        UserDefaults.standard.set(kokoroVoice, forKey: "ttsKokoroVoice")
+        UserDefaults.standard.set(Float(kokoroSpeed), forKey: "ttsKokoroSpeed")
+        service.kokoroService.prepareG2PForVoice(kokoroVoice)
+    }
+
+    private func syncQwen3Config() {
+        let service = dependencies.textToSpeechService
+        service.kokoroService.config.qwen3Voice = qwen3Voice
+        service.kokoroService.config.qwen3Language = qwen3Language
+        service.kokoroService.config.qwen3Speed = 1.1
+        UserDefaults.standard.set(qwen3Voice, forKey: "ttsQwen3Voice")
+        UserDefaults.standard.set(qwen3Language, forKey: "ttsQwen3Language")
+    }
+
+    private func preloadOnDeviceModel() {
+        isDownloadingModel = true
+        Task {
+            await ttsService.preloadKokoroModel()
+            isDownloadingModel = false
+            refreshModelSizes()
+        }
+    }
+
+    private func retryOnDeviceLoad() {
+        ttsService.unloadKokoroModel()
+        isDownloadingModel = true
+        Task {
+            await ttsService.preloadKokoroModel()
+            isDownloadingModel = false
+        }
+    }
+
+    private func refreshModelSizes() {
+        let kokoro = StorageManager.shared.kokoroTTSModelSize()
+        let qwen3  = StorageManager.shared.qwen3TTSModelSize()
+        kokoroModelSize = kokoro > 0 ? ByteCountFormatter.string(fromByteCount: kokoro, countStyle: .file) : "Not downloaded"
+        qwen3ModelSize  = qwen3  > 0 ? ByteCountFormatter.string(fromByteCount: qwen3,  countStyle: .file) : "Not downloaded"
+    }
+
+    private func previewVoice() {
+        let service = dependencies.textToSpeechService
+        if isSpeaking {
+            service.stop()
+            isSpeaking = false
+        } else {
+            syncSettingsToService()
+            syncEngineToService()
+            syncKokoroConfig()
+            syncQwen3Config()
+            isSpeaking = true
+            service.onComplete = { [self] in
+                isSpeaking = false
+            }
+            service.speak(
+                "Hello! This is a preview of the text-to-speech voice. I can read your AI assistant's responses aloud."
+            )
+        }
+    }
+
+    private func refreshKokoroModelSize() {
+        let size = StorageManager.shared.kokoroTTSModelSize()
+        if size > 0 {
+            kokoroModelSize = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+        } else {
+            kokoroModelSize = "Not downloaded"
+        }
+    }
+
+}
+
+// MARK: - STT Settings View
+
+struct STTSettingsView: View {
+@Environment(\.theme) private var theme
+    @Environment(AppDependencyContainer.self) private var dependencies
+    @AppStorage("sttEngine") private var selectedSTTEngine: String = "device"
+    @AppStorage("audioFileTranscriptionMode") private var audioFileMode: String = "server"
+    @AppStorage("voiceSilenceDuration") private var silenceDuration: Double = 2.0
+    @AppStorage("sttLocale") private var sttLocale: String = ""
+    @State private var micPermissionGranted = false
+    @State private var speechPermissionGranted = false
+    @State private var asrModelSize: String = "–"
+
+    /// True when ASR model files are already cached on disk (but not necessarily loaded into memory).
+    private var asrFilesOnDisk: Bool {
+        asrModelSize != "–" && asrModelSize != "Not downloaded"
+    }
+
+    private var asr: OnDeviceASRService { dependencies.asrService }
+
+    /// All locales supported by Apple's on-device speech recognizer, sorted by display name.
+    private var supportedSTTLocales: [Locale] {
+        SFSpeechRecognizer.supportedLocales()
+            .sorted {
+                (Locale.current.localizedString(forIdentifier: $0.identifier) ?? $0.identifier)
+                    < (Locale.current.localizedString(forIdentifier: $1.identifier) ?? $1.identifier)
+            }
+    }
+
+    private var hasServerSTT: Bool {
+        dependencies.apiClient != nil
+    }
+
+    var body: some View {
+        List {
+            // Live Voice Transcription (microphone / call)
+            Section {
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        selectedSTTEngine = "device"
+                    }
+                    Haptics.play(.light)
+                } label: {
+                    engineRow(
+                        value: "device",
+                        label: "On-Device (Apple)",
+                        description: "Apple Speech framework",
+                        selected: selectedSTTEngine == "device"
+                    )
+                }
+                .buttonStyle(.plain)
+
+                if hasServerSTT {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            selectedSTTEngine = "server"
+                        }
+                        Haptics.play(.light)
+                    } label: {
+                        engineRow(
+                            value: "server",
+                            label: "Server (OpenWebUI)",
+                            description: "Server-side transcription via /api/v1/audio/transcriptions",
+                            selected: selectedSTTEngine == "server"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            } header: {
+                Text("Voice Transcription Engine")
+            } footer: {
+                if selectedSTTEngine == "device" {
+                    Text("Used for live microphone input. Apple's Speech framework works offline with no data sent to external servers.")
+                } else if selectedSTTEngine == "server" {
+                    Text("Used for live microphone input. Sends audio to your OpenWebUI server for transcription. Requires internet.")
+                } else {
+                    Text("Select the engine used for live microphone input and voice calls.")
+                }
+            }
+
+            // Audio File Transcription (attach audio file in chat)
+            Section {
+                // Server option (default)
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        audioFileMode = "server"
+                    }
+                    Haptics.play(.light)
+                } label: {
+                    engineRow(
+                        value: "server",
+                        label: "Server",
+                        description: "Uploads audio to your OpenWebUI server — transcription happens automatically",
+                        selected: audioFileMode == "server"
+                    )
+                }
+                .buttonStyle(.plain)
+
+                // On-device option (only shown if Parakeet is available)
+                if asr.isAvailable {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            audioFileMode = "device"
+                            asr.switchVariant(.qwen3ASR)
+                        }
+                        Haptics.play(.light)
+                    } label: {
+                        HStack(spacing: Spacing.md) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("On-Device (Qwen3 ASR)")
+                                    .scaledFont(size: 16)
+                                    .fontWeight(.medium)
+                                    .foregroundStyle(theme.textPrimary)
+                                Text("Multilingual with auto language detection, fully on-device")
+                                    .scaledFont(size: 12, weight: .medium)
+                                    .foregroundStyle(theme.textTertiary)
+                            }
+                            Spacer()
+                            Image(systemName: audioFileMode == "device" ? "checkmark.circle.fill" : "circle")
+                                .scaledFont(size: 22)
+                                .foregroundStyle(
+                                    audioFileMode == "device" ? theme.brandPrimary : theme.textTertiary.opacity(0.4)
+                                )
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            } header: {
+                Text("Audio File Transcription")
+            } footer: {
+                if audioFileMode == "server" {
+                    Text("Audio files attached in chat are uploaded to your server, which handles transcription automatically. No extra downloads needed.")
+                } else {
+                    Text("Audio files are transcribed locally on your device using Qwen3 ASR. Fully private — no audio sent to the server. Supports multiple languages with auto-detection.")
+                }
+            }
+
+            // On-Device Model Settings (Qwen3 ASR) — only when device mode is selected
+            if audioFileMode == "device" && asr.isAvailable {
+                let activeVariant: ASRModelVariant = .qwen3ASR
+                let currentModelSize = asrModelSize
+                let modelLabel = activeVariant.displayName
+                Section {
+                    HStack {
+                        Text("Status")
+                            .scaledFont(size: 16)
+                            .foregroundStyle(theme.textPrimary)
+                        Spacer()
+                        asrStatusBadge
+                    }
+
+                    if currentModelSize != "–" {
+                        HStack {
+                            Text("Model Size on Disk")
+                                .scaledFont(size: 16)
+                                .foregroundStyle(theme.textPrimary)
+                            Spacer()
+                            Text(currentModelSize)
+                                .scaledFont(size: 14)
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                    }
+
+                    if case .unloaded = asr.state {
+                        Button {
+                            Task { try? await asr.loadModel() }
+                        } label: {
+                            HStack(spacing: Spacing.sm) {
+                                Image(systemName: asrFilesOnDisk ? "bolt.circle" : "arrow.down.circle")
+                                    .scaledFont(size: 16, weight: .medium)
+                                Text(asrFilesOnDisk ? "Load Model" : "Download & Load Model")
+                                    .scaledFont(size: 16)
+                                    .fontWeight(.medium)
+                            }
+                            .foregroundStyle(theme.brandPrimary)
+                        }
+                    } else if case .loading = asr.state {
+                        HStack(spacing: Spacing.sm) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Loading model…")
+                                .scaledFont(size: 16)
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                    } else if case .ready = asr.state {
+                        Button(role: .destructive) {
+                            asr.unloadModel()
+                        } label: {
+                            HStack(spacing: Spacing.sm) {
+                                Image(systemName: "xmark.circle")
+                                    .scaledFont(size: 16, weight: .medium)
+                                Text("Unload Model (Free Memory)")
+                                    .scaledFont(size: 16)
+                                    .fontWeight(.medium)
+                            }
+                        }
+
+                        Button(role: .destructive) {
+                            asr.unloadAndDeleteVariant(activeVariant)
+                            refreshModelSizes()
+                        } label: {
+                            HStack(spacing: Spacing.sm) {
+                                Image(systemName: "trash.circle")
+                                    .scaledFont(size: 16, weight: .medium)
+                                Text("Delete Downloaded Model")
+                                    .scaledFont(size: 16)
+                                    .fontWeight(.medium)
+                            }
+                        }
+                    } else if case .error = asr.state {
+                        Button {
+                            asr.unloadModel()
+                            Task { try? await asr.loadModel() }
+                        } label: {
+                            HStack(spacing: Spacing.sm) {
+                                Image(systemName: "arrow.clockwise.circle")
+                                    .scaledFont(size: 16, weight: .medium)
+                                Text("Retry Download")
+                                    .scaledFont(size: 16)
+                                    .fontWeight(.medium)
+                            }
+                            .foregroundStyle(theme.warning)
+                        }
+                    }
+                } header: {
+                    Text("\(modelLabel)")
+                } footer: {
+                    Text("The model downloads from HuggingFace on first use and is cached locally. Unloading frees memory; deleting removes the download.")
+                }
+            }
+
+            // Language (only for on-device Apple STT)
+            if selectedSTTEngine == "device" {
+                Section {
+                    NavigationLink {
+                        STTLanguagePickerView(
+                            sttLocale: $sttLocale,
+                            locales: supportedSTTLocales
+                        )
+                        .onChange(of: sttLocale) { _, newValue in
+                            dependencies.speechRecognitionService.updateLocale(newValue)
+                        }
+                    } label: {
+                        HStack {
+                            Text("Language")
+                            Spacer()
+                            Text(
+                                sttLocale.isEmpty
+                                    ? "Auto"
+                                    : (Locale.current.localizedString(forIdentifier: sttLocale) ?? sttLocale)
+                            )
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("Language")
+                } footer: {
+                    Text("Choose the language you'll speak. \"Auto\" uses your device's current language.")
+                }
+            }
+
+            // Voice Activity Detection
+            Section {
+                VStack(alignment: .leading) {
+                    HStack {
+                        Text("Silence Duration")
+                        Spacer()
+                        Text("\(String(format: "%.1f", silenceDuration))s")
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.brandPrimary)
+                    }
+                    Slider(value: $silenceDuration, in: 0.5...5.0, step: 0.5)
+                        .tint(theme.brandPrimary)
+                }
+            } header: {
+                Text("Voice Activity Detection")
+            } footer: {
+                Text("How long to wait after you stop speaking before finalizing the transcript. Shorter = faster, longer = catches pauses mid-sentence.")
+            }
+
+            // Permissions
+            Section {
+                HStack {
+                    Image(systemName: "mic.fill")
+                        .scaledFont(size: 14)
+                        .foregroundStyle(theme.brandPrimary)
+                    Text("Microphone")
+                        .scaledFont(size: 16)
+                    Spacer()
+                    if micPermissionGranted {
+                        statusPill("Granted", color: theme.success)
+                    } else {
+                        statusPill("Not Granted", color: theme.warning)
+                    }
+                }
+
+                HStack {
+                    Image(systemName: "waveform")
+                        .scaledFont(size: 14)
+                        .foregroundStyle(theme.brandPrimary)
+                    Text("Speech Recognition")
+                        .scaledFont(size: 16)
+                    Spacer()
+                    if speechPermissionGranted {
+                        statusPill("Granted", color: theme.success)
+                    } else {
+                        statusPill("Not Granted", color: theme.warning)
+                    }
+                }
+
+                if !micPermissionGranted || !speechPermissionGranted {
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        HStack(spacing: Spacing.sm) {
+                            Image(systemName: "gear")
+                                .scaledFont(size: 14, weight: .medium)
+                            Text("Open Settings to Grant Permissions")
+                                .scaledFont(size: 16)
+                                .fontWeight(.medium)
+                        }
+                        .foregroundStyle(theme.brandPrimary)
+                    }
+                }
+            } header: {
+                Text("Permissions")
+            }
+            // Model Storage Management
+            Section {
+                HStack {
+                    Text("Qwen3 ASR")
+                        .scaledFont(size: 16)
+                        .foregroundStyle(theme.textPrimary)
+                    Spacer()
+                    Text(asrModelSize)
+                        .scaledFont(size: 14)
+                        .foregroundStyle(theme.textSecondary)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button(role: .destructive) {
+                        asr.unloadAndDeleteVariant(.qwen3ASR)
+                        refreshModelSizes()
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+
+            } header: {
+                Text("Model Storage")
+            } footer: {
+                Text("Swipe left on a model row to delete it from disk and free storage.")
+            }
+        }
+        .navigationTitle("Audio & Transcription")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            refreshPermissions()
+            refreshModelSizes()
+        }
+    }
+
+    /// Checks microphone and speech recognition permissions independently.
+    private func refreshPermissions() {
+        // Check microphone permission
+        if #available(iOS 17.0, *) {
+            micPermissionGranted = AVAudioApplication.shared.recordPermission == .granted
+        } else {
+            micPermissionGranted = AVAudioSession.sharedInstance().recordPermission == .granted
+        }
+
+        // Check speech recognition permission
+        speechPermissionGranted = SFSpeechRecognizer.authorizationStatus() == .authorized
+    }
+
+    // MARK: - ASR Status Badge (shared for both variants)
+
+    @ViewBuilder
+    private var asrStatusBadge: some View {
+        switch asr.state {
+        case .unloaded:
+            statusPill(asrFilesOnDisk ? "Not Loaded" : "Not Downloaded", color: theme.textTertiary)
+        case .loading:
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.mini)
+                Text("Loading...")
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.brandPrimary)
+            }
+        case .ready:
+            statusPill("Ready", color: theme.success)
+        case .transcribing:
+            statusPill("Transcribing…", color: theme.brandPrimary)
+        case .paused:
+            statusPill("Paused", color: theme.textTertiary)
+        case .error(let msg):
+            statusPill("Error", color: theme.error)
+                .help(msg)
+        }
+    }
+
+    private func engineRow(value: String, label: String, description: String, selected: Bool) -> some View {
+        HStack(spacing: Spacing.md) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .scaledFont(size: 16)
+                    .fontWeight(.medium)
+                    .foregroundStyle(theme.textPrimary)
+                Text(description)
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+            }
+            Spacer()
+            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                .scaledFont(size: 22)
+                .foregroundStyle(selected ? theme.brandPrimary : theme.textTertiary.opacity(0.4))
+        }
+    }
+
+    private func statusPill(_ text: String, color: Color) -> some View {
+        Text(LocalizedStringKey(text))
+            .scaledFont(size: 11, weight: .semibold)
+            .foregroundStyle(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.12))
+            .clipShape(Capsule())
+    }
+
+    private func refreshModelSizes() {
+        let p = asr.modelSize(for: .qwen3ASR)
+        asrModelSize = p > 0 ? ByteCountFormatter.string(fromByteCount: p, countStyle: .file) : "Not downloaded"
+    }
+
+}
+
+// MARK: - STT Language Picker
+
+/// Full-screen scrollable list of all SFSpeechRecognizer-supported locales.
+/// Uses a plain List so there's no nested-scroll conflict with the parent.
+struct STTLanguagePickerView: View {
+    @Binding var sttLocale: String
+    let locales: [Locale]
+    @Environment(\.dismiss) private var dismiss
+    @State private var searchText = ""
+
+    private var filteredLocales: [Locale] {
+        guard !searchText.isEmpty else { return locales }
+        let q = searchText.lowercased()
+        return locales.filter { locale in
+            let name = (Locale.current.localizedString(forIdentifier: locale.identifier) ?? locale.identifier).lowercased()
+            return name.contains(q) || locale.identifier.lowercased().contains(q)
+        }
+    }
+
+    var body: some View {
+        List {
+            if searchText.isEmpty {
+                Button {
+                    sttLocale = ""
+                    dismiss()
+                } label: {
+                    HStack {
+                        Text("Auto (Device Language)")
+                        Spacer()
+                        if sttLocale.isEmpty {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.blue)
+                        }
+                    }
+                }
+                .foregroundStyle(.primary)
+            }
+
+            ForEach(filteredLocales, id: \.identifier) { locale in
+                Button {
+                    sttLocale = locale.identifier
+                    dismiss()
+                } label: {
+                    HStack {
+                        Text(Locale.current.localizedString(forIdentifier: locale.identifier) ?? locale.identifier)
+                        Spacer()
+                        if sttLocale == locale.identifier {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.blue)
+                        }
+                    }
+                }
+                .foregroundStyle(.primary)
+            }
+        }
+        .searchable(text: $searchText, prompt: "Search language…")
+        .navigationTitle("STT Language")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - TTS Voice Picker
+
+/// Full-screen scrollable list of all installed AVSpeechSynthesisVoice entries.
+/// Uses a plain List so there's no nested-scroll conflict with the parent.
+struct TTSVoicePickerView: View {
+    @Binding var voiceIdentifier: String
+    let voices: [AVSpeechSynthesisVoice]
+    @Environment(\.dismiss) private var dismiss
+    @State private var searchText = ""
+
+    private var filteredVoices: [AVSpeechSynthesisVoice] {
+        guard !searchText.isEmpty else { return voices }
+        let q = searchText.lowercased()
+        return voices.filter { voice in
+            voice.name.lowercased().contains(q) || voice.language.lowercased().contains(q)
+        }
+    }
+
+    var body: some View {
+        List {
+            if searchText.isEmpty {
+                Button {
+                    voiceIdentifier = ""
+                    dismiss()
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Auto (detect language)")
+                                .fontWeight(.medium)
+                            Text("Picks the best voice for each message's language")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if voiceIdentifier.isEmpty {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.blue)
+                        }
+                    }
+                }
+                .foregroundStyle(.primary)
+            }
+
+            ForEach(filteredVoices, id: \.identifier) { voice in
+                Button {
+                    voiceIdentifier = voice.identifier
+                    dismiss()
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(voice.name)
+                                .fontWeight(.medium)
+                            Text(voice.language)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if voiceIdentifier == voice.identifier {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.blue)
+                        }
+                    }
+                }
+                .foregroundStyle(.primary)
+            }
+        }
+        .searchable(text: $searchText, prompt: "Search voice or language…")
+        .navigationTitle("TTS Voice")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Notification Settings View
+
+struct NotificationSettingsView: View {
+    @Environment(\.theme) private var theme
+    @AppStorage("notificationsEnabled") private var notificationsEnabled = true
+    @AppStorage("notificationShowResponsePreview") private var showResponsePreview = false
+    @State private var systemPermissionGranted = NotificationService.shared.isAuthorized
+
+    var body: some View {
+        List {
+            Section {
+                Toggle("Generation Complete", isOn: $notificationsEnabled)
+                    .tint(theme.brandPrimary)
+                Toggle("Show Response Preview", isOn: $showResponsePreview)
+                    .tint(theme.brandPrimary)
+                    .disabled(!notificationsEnabled)
+            } header: {
+                Text("Notification Types")
+            } footer: {
+                Text("Receive a notification when an AI response finishes generating. When \"Show Response Preview\" is on, the first lines of the response appear in the notification.")
+            }
+
+            Section {
+                HStack {
+                    Image(systemName: "bell.fill")
+                        .scaledFont(size: 14)
+                        .foregroundStyle(theme.brandPrimary)
+                    Text("System Permission")
+                        .scaledFont(size: 16)
+                    Spacer()
+                    if systemPermissionGranted {
+                        permissionPill("Granted", color: theme.success)
+                    } else {
+                        permissionPill("Not Granted", color: theme.warning)
+                    }
+                }
+
+                if !systemPermissionGranted {
+                    Button {
+                        Task {
+                            let granted = await NotificationService.shared.requestPermission()
+                            systemPermissionGranted = granted
+                        }
+                    } label: {
+                        HStack(spacing: Spacing.sm) {
+                            Image(systemName: "bell.badge")
+                                .scaledFont(size: 14, weight: .medium)
+                            Text("Request Permission")
+                                .scaledFont(size: 16)
+                                .fontWeight(.medium)
+                        }
+                        .foregroundStyle(theme.brandPrimary)
+                    }
+
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        HStack(spacing: Spacing.sm) {
+                            Image(systemName: "gear")
+                                .scaledFont(size: 14, weight: .medium)
+                            Text("Open iOS Settings")
+                                .scaledFont(size: 16)
+                                .fontWeight(.medium)
+                        }
+                        .foregroundStyle(theme.textSecondary)
+                    }
+                }
+            } header: {
+                Text("Permission")
+            } footer: {
+                if systemPermissionGranted {
+                    Text("Notifications are authorized. You can manage notification style in iOS Settings.")
+                } else {
+                    Text("Notifications require system permission. Tap \"Request Permission\" or enable them in iOS Settings → Open Relay → Notifications.")
+                }
+            }
+        }
+        .navigationTitle("Notifications")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            // Refresh permission state
+            Task {
+                let settings = await UNUserNotificationCenter.current().notificationSettings()
+                systemPermissionGranted = settings.authorizationStatus == .authorized
+            }
+        }
+    }
+
+    private func permissionPill(_ text: String, color: Color) -> some View {
+        Text(text)
+            .scaledFont(size: 11, weight: .semibold)
+            .foregroundStyle(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.12))
+            .clipShape(Capsule())
+    }
+}
+
+// MARK: - Sign Out Confirmation Sheet
+
+/// A beautiful bottom sheet for sign-out confirmation, replacing the system confirmationDialog.
+struct SignOutConfirmationSheet: View {
+    let onSignOut: () -> Void
+    let onSignOutAndRemove: () -> Void
+    let onCancel: () -> Void
+
+    @Environment(\.theme) private var theme
+    @State private var appeared = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            VStack(spacing: Spacing.sm) {
+                ZStack {
+                    Circle()
+                        .fill(theme.error.opacity(0.1))
+                        .frame(width: 56, height: 56)
+                    Image(systemName: "rectangle.portrait.and.arrow.right")
+                        .scaledFont(size: 22, weight: .medium)
+                        .foregroundStyle(theme.error)
+                }
+                .scaleEffect(appeared ? 1 : 0.7)
+                .animation(.spring(response: 0.4, dampingFraction: 0.7).delay(0.05), value: appeared)
+
+                Text("Sign Out")
+                    .scaledFont(size: 18, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+
+                Text("Are you sure you want to sign out?")
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.top, Spacing.lg)
+            .padding(.bottom, Spacing.md)
+            .opacity(appeared ? 1 : 0)
+            .animation(.easeOut(duration: 0.2).delay(0.05), value: appeared)
+
+            Divider()
+                .background(theme.divider)
+                .padding(.horizontal, Spacing.screenPadding)
+
+            // Action buttons
+            VStack(spacing: Spacing.sm) {
+                signOutButton(
+                    title: "Sign Out",
+                    subtitle: "Keep server connection",
+                    icon: "arrow.right.circle",
+                    action: onSignOut,
+                    index: 0
+                )
+
+                signOutButton(
+                    title: "Sign Out & Remove Server",
+                    subtitle: "Clear all connection data",
+                    icon: "trash.circle",
+                    action: onSignOutAndRemove,
+                    index: 1
+                )
+
+                // Cancel
+                Button(action: onCancel) {
+                    Text("Cancel")
+                        .scaledFont(size: 16, weight: .medium)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                }
+                .background(theme.surfaceContainer)
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.button, style: .continuous))
+                .opacity(appeared ? 1 : 0)
+                .animation(.easeOut(duration: 0.2).delay(0.25), value: appeared)
+            }
+            .padding(.horizontal, Spacing.screenPadding)
+            .padding(.vertical, Spacing.md)
+        }
+        .background(theme.background)
+        .onAppear { appeared = true }
+    }
+
+    private func signOutButton(
+        title: String,
+        subtitle: String,
+        icon: String,
+        action: @escaping () -> Void,
+        index: Int
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: Spacing.md) {
+                Image(systemName: icon)
+                    .scaledFont(size: 18, weight: .medium)
+                    .foregroundStyle(theme.error)
+                    .frame(width: 36, height: 36)
+                    .background(theme.error.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.sm, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .scaledFont(size: 16, weight: .medium)
+                        .foregroundStyle(theme.error)
+                    Text(subtitle)
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal, Spacing.md)
+            .padding(.vertical, Spacing.sm)
+            .frame(maxWidth: .infinity)
+            .background(theme.error.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.button, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: CornerRadius.button, style: .continuous)
+                    .strokeBorder(theme.error.opacity(0.15), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .pressEffect(scale: 0.98)
+        .opacity(appeared ? 1 : 0)
+        .offset(y: appeared ? 0 : 8)
+        .animation(.spring(response: 0.35, dampingFraction: 0.8).delay(0.1 + Double(index) * 0.05), value: appeared)
+    }
+}

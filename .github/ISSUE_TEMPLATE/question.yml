@@ -1,0 +1,31 @@
+name: "❓ Question / Help"
+description: "Ask about setup, configuration, or how to use Open UI."
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before asking, check the [README](https://github.com/Ichigo3766/Open-UI/blob/main/README.md) — your answer might already be there!
+
+  - type: dropdown
+    id: topic
+    attributes:
+      label: "What's your question about?"
+      options:
+        - "Server setup / connection"
+        - "Authentication (login, SSO, LDAP)"
+        - "Model configuration"
+        - "Voice / TTS / STT"
+        - "Folders and organization"
+        - "Settings and customization"
+        - "Building from source"
+        - "Other"
+    validations:
+      required: false
+
+  - type: textarea
+    id: question
+    attributes:
+      label: "Your question"
+    validations:
+      required: true

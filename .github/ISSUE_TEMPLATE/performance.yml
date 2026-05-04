@@ -1,0 +1,45 @@
+name: "⚡ Performance Issue"
+description: "Report slow loading, lag, high battery usage, or crashes."
+labels: ["performance", "bug", "triage"]
+body:
+  - type: dropdown
+    id: issue_type
+    attributes:
+      label: "What kind of issue?"
+      options:
+        - "Slow / laggy UI"
+        - "Streaming is slow or stuttering"
+        - "High battery usage"
+        - "App crash"
+        - "Long startup time"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: "Describe the problem"
+      placeholder: "e.g. After 20+ messages, scrolling becomes laggy..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: "How often?"
+      options:
+        - "Every time"
+        - "Most of the time"
+        - "Sometimes"
+        - "Rarely / once"
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: "Additional context (optional)"
+      description: "Model being used, conversation length, etc."
+    validations:
+      required: false

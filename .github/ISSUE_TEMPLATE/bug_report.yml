@@ -1,0 +1,48 @@
+name: "🐛 Bug Report"
+description: "Something is broken, crashing, or not working as expected."
+labels: ["bug", "triage"]
+body:
+  - type: input
+    id: app_version
+    attributes:
+      label: "App Version (optional)"
+      description: "Found in Settings → About Open UI"
+      placeholder: "e.g. 1.4.2"
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: "What happened?"
+      description: "A clear description of the bug."
+      placeholder: "Describe what went wrong..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Steps to Reproduce"
+      placeholder: |
+        1. Go to '...'
+        2. Tap '...'
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Expected Behavior"
+      placeholder: "What should have happened?"
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: "Screenshots / Recording (optional)"
+      description: "Drag and drop images here."
+    validations:
+      required: false

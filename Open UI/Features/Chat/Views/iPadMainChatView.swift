@@ -1,0 +1,2229 @@
+import SwiftUI
+
+// MARK: - iPad Main Chat View
+//
+// Purpose-built split-column layout for iPad using NavigationSplitView.
+// - Sidebar (Column 1, ~300pt): Persistent conversation list + folders — always visible.
+// - Detail (Column 2): ChatDetailView — fills remaining space with max reading width.
+// - Optional trailing column: TerminalBrowserView when terminal is active.
+//
+// iPhone uses MainChatView (unchanged). This view is only shown when
+// horizontalSizeClass == .regular (iPad, or iPhone in landscape with a keyboard
+// connected if it reports regular).
+
+struct iPadMainChatView: View {
+    @Environment(AppDependencyContainer.self) private var dependencies
+    @Environment(AppRouter.self) private var router
+    @Environment(\.theme) private var theme
+    @Environment(\.colorScheme) private var systemColorScheme
+    @Environment(\.scenePhase) private var scenePhase
+
+    // MARK: State
+
+    /// The conversation currently being viewed. `nil` = new chat.
+    @State private var activeConversationId: String?
+
+    /// Monotonically increasing counter to force new-chat view recreation.
+    @State private var newChatGeneration: Int = 0
+
+    /// Conversation list view model (shared with sidebar).
+    @State private var listViewModel = ChatListViewModel()
+
+    /// Whether the "create folder" sheet is visible.
+    @State private var showCreateFolderSheet = false
+
+    /// Whether the settings sheet is visible.
+    @State private var showSettings = false
+
+    /// Whether the notes sheet is visible.
+    @State private var showNotes = false
+
+    /// Whether the workspace sheet is visible.
+    @State private var showWorkspace = false
+
+    /// Whether the memories sheet is visible.
+    @State private var showMemories = false
+
+    /// Whether the calendar sheet is visible.
+    @State private var showCalendar = false
+
+    /// Whether the automations sheet is visible.
+    @State private var showAutomations = false
+
+    /// Controls column visibility for the NavigationSplitView.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
+    /// Whether socket reconnect handler has been registered.
+    @State private var hasRegisteredSocketHandlers = false
+
+    /// The channel currently being viewed. When set, replaces detail with ChannelDetailView.
+    @State private var activeChannelId: String?
+
+    /// When set, the detail area shows a folder workspace view so new chats
+    /// are created inside this folder (mirrors MainChatView behaviour).
+    @State private var activeFolderWorkspaceId: String?
+
+    /// Channel list view model for sidebar display.
+    @State private var channelListVM = ChannelListViewModel()
+
+    /// Whether the "create channel" sheet is visible.
+    @State private var showCreateChannel = false
+
+    /// Controls the archived chats sheet presentation.
+    @State private var showArchivedChats = false
+
+    /// Controls the shared chats sheet presentation.
+    @State private var showSharedChats = false
+
+    /// Controls the admin console sheet presentation (admin users only).
+    @State private var showAdminConsole = false
+
+    /// Rename conversation state.
+    @State private var renamingConversation: Conversation?
+    @State private var renameText = ""
+    @State private var isGeneratingTitle = false
+
+    /// Export state.
+    @State private var exportFileURL: URL?
+    @State private var showExportShareSheet = false
+    @State private var isExporting = false
+    @State private var exportError: String?
+
+    /// Share chat sheet state.
+    @State private var sharingConversation: Conversation?
+
+    /// Deletion confirmation dialogs.
+    @State private var showDeleteAllConfirmation = false
+    @State private var showDeleteSelectedConfirmation = false
+    /// Single-conversation delete confirmation (from context menu or folder).
+    @State private var deletingConversation: Conversation?
+    /// Channel delete confirmation.
+    @State private var deletingChannelId: String?
+
+    /// Terminal file browser (trailing column).
+    @State private var terminalBrowserVM = TerminalBrowserViewModel()
+
+    /// Whether the terminal file browser panel is visible (independent of terminal being enabled).
+    @State private var showTerminalBrowser: Bool = true
+
+    // MARK: - Body
+
+    var body: some View {
+        @Bindable var bindableRouter = router
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            sidebarContent
+                .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 360)
+        } detail: {
+            detailContent(voiceCallBinding: $bindableRouter.isVoiceCallPresented)
+        }
+        .navigationSplitViewStyle(.balanced)
+        .applySheets(
+            showSettings: $showSettings,
+            showNotes: $showNotes,
+            showCreateFolderSheet: $showCreateFolderSheet,
+            sharingConversation: $sharingConversation,
+            renamingConversation: $renamingConversation,
+            renameText: $renameText,
+            isGeneratingTitle: $isGeneratingTitle,
+            exportFileURL: $exportFileURL,
+            showExportShareSheet: $showExportShareSheet,
+            showDeleteAllConfirmation: $showDeleteAllConfirmation,
+            showDeleteSelectedConfirmation: $showDeleteSelectedConfirmation,
+            showArchivedChats: $showArchivedChats,
+            showSharedChats: $showSharedChats,
+            listViewModel: listViewModel,
+            activeConversationId: $activeConversationId,
+            voiceCallBinding: $bindableRouter.isVoiceCallPresented,
+            systemColorScheme: systemColorScheme,
+            dependencies: dependencies,
+            router: router,
+            onExport: { conv, format in Task { await exportChat(conv, format: format) } },
+            onGenerateTitle: { conv in Task { await generateTitleForRename(conv) } }
+        )
+        .applyAlerts(
+            showDeleteAllConfirmation: $showDeleteAllConfirmation,
+            showDeleteSelectedConfirmation: $showDeleteSelectedConfirmation,
+            deletingConversation: $deletingConversation,
+            deletingChannelId: $deletingChannelId,
+            exportError: $exportError,
+            listViewModel: listViewModel,
+            activeConversationId: $activeConversationId,
+            activeChannelId: $activeChannelId,
+            channelListVM: channelListVM,
+            dependencies: dependencies,
+            onStartNewChat: { startNewChat() }
+        )
+        .applyLifecycle(
+            listViewModel: listViewModel,
+            dependencies: dependencies,
+            scenePhase: scenePhase,
+            activeConversationId: $activeConversationId,
+            activeChannelId: $activeChannelId,
+            activeFolderWorkspaceId: $activeFolderWorkspaceId,
+            newChatGeneration: $newChatGeneration,
+            channelListVM: channelListVM,
+            hasRegisteredSocketHandlers: $hasRegisteredSocketHandlers,
+            showCreateChannel: $showCreateChannel,
+            showSettings: $showSettings,
+            showNotes: $showNotes,
+            showCreateFolderSheet: $showCreateFolderSheet,
+            showExportShareSheet: $showExportShareSheet,
+            onSocketSetup: { registerSocketReconnectHandler() }
+        )
+        // Channel-specific lifecycle wiring
+        .task {
+            // Configure and load channels — must pass currentUserId for DM participant filtering
+            if let apiClient = dependencies.apiClient {
+                var userId = dependencies.authViewModel.currentUser?.id
+                if userId == nil || userId?.isEmpty == true {
+                    userId = try? await apiClient.getCurrentUser().id
+                }
+                channelListVM.configure(apiClient: apiClient, socket: dependencies.socketService, currentUserId: userId)
+            }
+            await channelListVM.loadChannels()
+            // Wire up channel notification tap → navigate to that channel
+            NotificationService.shared.onOpenChannel = { channelId in
+                NotificationCenter.default.post(name: .navigateToChannel, object: channelId)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .navigateToChannel)) { notification in
+            if let channelId = notification.object as? String {
+                activeChannelId = channelId
+                activeConversationId = nil
+                Haptics.play(.light)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openUINewChatWithFocus)) { _ in
+            // Widget "Ask Open Relay" bar — start new chat and auto-focus keyboard
+            startNewChat()
+            // Give the view time to settle before requesting keyboard focus
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                NotificationCenter.default.post(name: .chatInputFieldRequestFocus, object: nil)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openUIWidgetVoiceCall)) { _ in
+            // Widget mic button — start a voice call with full configuration
+            // (mirrors ChatDetailView's startVoiceCall pattern)
+            let voiceCallVM = dependencies.makeVoiceCallViewModel()
+            let chatVM = dependencies.activeChatStore.viewModel(for: nil)
+            if let manager = dependencies.conversationManager {
+                let modelName = dependencies.activeChatStore.cachedModels
+                    .first(where: { $0.id == dependencies.activeChatStore.cachedSelectedModelId })?.name
+                    ?? "AI Assistant"
+                voiceCallVM.configure(
+                    conversationManager: manager,
+                    chatViewModel: chatVM,
+                    modelName: modelName
+                )
+            }
+            router.presentVoiceCall(viewModel: voiceCallVM)
+        }
+        .onChange(of: activeChannelId) { _, newId in
+            // When entering a channel, the server marks it as read via GET /channels/{id}.
+            // Refresh the channel list after a short delay to clear the unread badge.
+            if newId != nil {
+                Task {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    await channelListVM.refreshChannels()
+                }
+            }
+        }
+        .sheet(isPresented: $showCreateChannel) {
+            CreateChannelSheet(
+                onCreate: { name, description, type, isPrivate, memberIds in
+                    Task {
+                        let channelName = name.isEmpty ? "new-channel" : name
+                        if let channel = await channelListVM.createChannel(
+                            name: channelName, description: description, type: type,
+                            isPrivate: type == .dm ? true : isPrivate
+                        ) {
+                            if !memberIds.isEmpty {
+                                try? await dependencies.apiClient?.addChannelMembers(
+                                    id: channel.id, userIds: memberIds
+                                )
+                            }
+                            activeChannelId = channel.id
+                            activeConversationId = nil
+                        }
+                    }
+                },
+                apiClient: dependencies.apiClient,
+                allUsers: channelListVM.allServerUsers
+            )
+        }
+        // Admin Console sheet (admin-only)
+        .sheet(isPresented: $showAdminConsole) {
+            NavigationStack {
+                AdminConsoleView()
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button {
+                                showAdminConsole = false
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(Color.secondary)
+                                    .frame(width: 32, height: 32)
+                                    .background(Color(uiColor: .systemGray5).opacity(0.6))
+                                    .clipShape(Circle())
+                            }
+                        }
+                    }
+            }
+            .environment(dependencies)
+            .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+            .presentationCornerRadius(20)
+        }
+        // Workspace sheet
+        .sheet(isPresented: $showWorkspace) {
+            WorkspaceView()
+                .environment(dependencies)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+        }
+        // Memories sheet
+        .sheet(isPresented: $showMemories) {
+            NavigationStack {
+                MemoriesView()
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button {
+                                showMemories = false
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(Color.secondary)
+                                    .frame(width: 32, height: 32)
+                                    .background(Color(uiColor: .systemGray5).opacity(0.6))
+                                    .clipShape(Circle())
+                            }
+                        }
+                    }
+            }
+            .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+        }
+        // Calendar sheet
+        .sheet(isPresented: $showCalendar) {
+            CalendarView()
+                .environment(dependencies)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+        }
+        // Automations sheet
+        .sheet(isPresented: $showAutomations) {
+            AutomationsListView()
+                .environment(dependencies)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+        }
+        .overlay {
+            if isExporting {
+                exportingOverlay
+            }
+            if listViewModel.isDeletingBulk {
+                deletingOverlay
+            }
+        }
+    }
+
+    // MARK: - Sidebar
+
+    private var sidebarContent: some View {
+        iPadSidebarContent(
+            listViewModel: listViewModel,
+            channelListVM: channelListVM,
+            activeConversationId: $activeConversationId,
+            activeChannelId: $activeChannelId,
+            activeFolderWorkspaceId: $activeFolderWorkspaceId,
+            showCreateFolderSheet: $showCreateFolderSheet,
+            showCreateChannel: $showCreateChannel,
+            showSettings: $showSettings,
+            showNotes: $showNotes,
+            showWorkspace: $showWorkspace,
+            showMemories: $showMemories,
+            showCalendar: $showCalendar,
+            showAutomations: $showAutomations,
+            showAdminConsole: $showAdminConsole,
+            showDeleteAllConfirmation: $showDeleteAllConfirmation,
+            showDeleteSelectedConfirmation: $showDeleteSelectedConfirmation,
+            deletingConversation: $deletingConversation,
+            deletingChannelId: $deletingChannelId,
+            sharingConversation: $sharingConversation,
+            renamingConversation: $renamingConversation,
+            renameText: $renameText,
+            dependencies: dependencies,
+            onNewChat: { startNewChat() },
+            onSelectFolder: { folderId in
+                let folderVM = listViewModel.folderViewModel
+                Task { await folderVM.setActiveFolder(folderId) }
+                // Reset the new-chat VM so the folder workspace always starts fresh.
+                dependencies.activeChatStore.remove(nil)
+                newChatGeneration += 1
+                activeFolderWorkspaceId = folderId
+                activeConversationId = nil
+                activeChannelId = nil
+            },
+            onExport: { conv, format in Task { await exportChat(conv, format: format) } },
+            onShowArchivedChats: { showArchivedChats = true },
+            onShowSharedChats: { showSharedChats = true }
+        )
+    }
+
+    // MARK: - Detail
+
+    @ViewBuilder
+    private func detailContent(voiceCallBinding: Binding<Bool>) -> some View {
+        if isTerminalActiveInCurrentChat {
+            // Three-column layout: chat + terminal browser side by side
+            HStack(spacing: 0) {
+                chatDetailContent
+                    .frame(maxWidth: .infinity)
+
+                if showTerminalBrowser {
+                    Divider()
+
+                    TerminalBrowserView(
+                        viewModel: terminalBrowserVM,
+                        onDismiss: {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                showTerminalBrowser = false
+                            }
+                        }
+                    )
+                    .frame(width: 340)
+                    .background(theme.background)
+                    .transition(.move(edge: .trailing))
+                    .onAppear {
+                        configureTerminalBrowserIfNeeded()
+                        terminalBrowserVM.refresh()
+                    }
+                }
+            }
+            // ChatDetailView handles its own keyboard via KeyboardTracker.
+            // TerminalBrowserView is a fixed side column — no keyboard adjustment needed.
+            .ignoresSafeArea(.keyboard)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                            if showTerminalBrowser {
+                                showTerminalBrowser = false
+                            } else {
+                                configureTerminalBrowserIfNeeded()
+                                showTerminalBrowser = true
+                                terminalBrowserVM.refresh()
+                            }
+                        }
+                        Haptics.play(.light)
+                    } label: {
+                        Image(systemName: showTerminalBrowser ? "sidebar.right" : "sidebar.right")
+                            .scaledFont(size: 14, weight: .medium)
+                            .foregroundStyle(showTerminalBrowser ? theme.brandPrimary : theme.textSecondary)
+                            .symbolVariant(showTerminalBrowser ? .fill : .none)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(showTerminalBrowser ? "Hide Files" : "Show Files")
+                }
+            }
+        } else {
+            chatDetailContent
+        }
+    }
+
+    @ViewBuilder
+    private var chatDetailContent: some View {
+        if let channelId = activeChannelId {
+            ChannelDetailView(channelId: channelId, channelListVM: channelListVM)
+                .id("channel-\(channelId)")
+                .transition(.opacity)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { startNewChat() } label: {
+                            Image(systemName: "square.and.pencil")
+                                .scaledFont(size: 14, weight: .medium)
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("New Chat")
+                    }
+                }
+        } else if let conversationId = activeConversationId {
+            ChatDetailView(
+                conversationId: conversationId,
+                viewModel: dependencies.activeChatStore.viewModel(for: conversationId)
+            )
+            .id(conversationId)
+            .transition(.opacity)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { startNewChat() } label: {
+                        Image(systemName: "square.and.pencil")
+                            .scaledFont(size: 14, weight: .medium)
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("New Chat")
+                }
+            }
+        } else if let folderWorkspaceId = activeFolderWorkspaceId {
+            let vm = dependencies.activeChatStore.viewModel(for: nil)
+            let folder = listViewModel.folderViewModel.folders.first { $0.id == folderWorkspaceId }
+                ?? listViewModel.folderViewModel.activeFolderDetail
+            ChatDetailView(viewModel: vm, folderWorkspace: folder)
+                .id("folder-workspace-\(folderWorkspaceId)-\(newChatGeneration)")
+                .transition(.opacity)
+                .onAppear {
+                    let folderDetail = listViewModel.folderViewModel.activeFolderDetail
+                    vm.setFolderContext(
+                        folderId: folderWorkspaceId,
+                        systemPrompt: folderDetail?.systemPrompt ?? folder?.systemPrompt,
+                        modelIds: folderDetail?.modelIds ?? folder?.modelIds ?? []
+                    )
+                }
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { startNewChat() } label: {
+                            Image(systemName: "square.and.pencil")
+                                .scaledFont(size: 14, weight: .medium)
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("New Chat")
+                    }
+                }
+        } else {
+            ChatDetailView(viewModel: dependencies.activeChatStore.viewModel(for: nil))
+                .id("new-chat-\(newChatGeneration)")
+                .transition(.opacity)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { startNewChat() } label: {
+                            Image(systemName: "square.and.pencil")
+                                .scaledFont(size: 14, weight: .medium)
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("New Chat")
+                    }
+                }
+        }
+    }
+
+    // MARK: - Overlays
+
+    private var exportingOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.3).ignoresSafeArea()
+            VStack(spacing: Spacing.md) {
+                ProgressView().controlSize(.large).tint(.white)
+                Text("Preparing export…")
+                    .scaledFont(size: 16)
+                    .foregroundStyle(.white)
+            }
+            .padding(Spacing.xl)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        }
+        .transition(.opacity)
+    }
+
+    private var deletingOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.3).ignoresSafeArea()
+            VStack(spacing: Spacing.md) {
+                ProgressView().controlSize(.large).tint(.white)
+                Text("Deleting…")
+                    .scaledFont(size: 16)
+                    .foregroundStyle(.white)
+            }
+            .padding(Spacing.xl)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        }
+        .transition(.opacity)
+    }
+
+    // MARK: - Computed Helpers
+
+    private var isTerminalActiveInCurrentChat: Bool {
+        let vm = dependencies.activeChatStore.viewModel(for: activeConversationId)
+        return vm.terminalEnabled && vm.selectedTerminalServer != nil
+    }
+
+    // MARK: - Terminal Configuration
+
+    private func configureTerminalBrowserIfNeeded() {
+        guard let apiClient = dependencies.apiClient else { return }
+        let vm = dependencies.activeChatStore.viewModel(for: activeConversationId)
+        guard vm.terminalEnabled, let server = vm.selectedTerminalServer else { return }
+        terminalBrowserVM.configure(apiClient: apiClient, serverId: server.id)
+    }
+
+    // MARK: - Actions
+
+    private func startNewChat() {
+        // If we're already on the new-chat screen AND a transcription is in
+        // progress, stay put — destroying the VM would silently discard the work.
+        let alreadyOnNewChat = activeConversationId == nil && activeChannelId == nil
+        let currentNewVM = dependencies.activeChatStore.viewModel(for: nil)
+        if alreadyOnNewChat && currentNewVM.hasActiveTranscriptions {
+            return
+        }
+
+        // Only remove + recreate the VM when there's no ongoing transcription work.
+        if !currentNewVM.hasActiveTranscriptions {
+            dependencies.activeChatStore.remove(nil)
+            newChatGeneration += 1
+        }
+
+        activeConversationId = nil
+        activeChannelId = nil
+        activeFolderWorkspaceId = nil
+        terminalBrowserVM.reset()
+        showTerminalBrowser = true
+        Haptics.play(.light)
+    }
+
+    private func generateTitleForRename(_ conversation: Conversation) async {
+        guard let api = dependencies.apiClient,
+              let manager = dependencies.conversationManager else { return }
+        isGeneratingTitle = true
+        do {
+            let fullConv = try await manager.fetchConversation(id: conversation.id)
+            let messages: [[String: Any]] = fullConv.messages.map { msg in
+                ["role": msg.role.rawValue, "content": msg.content]
+            }
+            let model = fullConv.model ?? dependencies.activeChatStore.cachedSelectedModelId ?? ""
+            if let title = try await api.generateTitle(model: model, messages: messages, chatId: conversation.id) {
+                renameText = title
+            }
+        } catch {}
+        isGeneratingTitle = false
+    }
+
+    enum ExportFormat { case json, txt, pdf }
+
+    private func exportChat(_ conversation: Conversation, format: ExportFormat) async {
+        guard let manager = dependencies.conversationManager else { return }
+        isExporting = true
+        defer { isExporting = false }
+        do {
+            let fullConversation = try await manager.fetchConversation(id: conversation.id)
+            let title = fullConversation.title
+            let messages = fullConversation.messages
+            let tmpDir = FileManager.default.temporaryDirectory
+
+            switch format {
+            case .json:
+                let payload: [[String: Any]] = messages.map { msg in
+                    ["role": msg.role.rawValue, "content": msg.content, "timestamp": msg.timestamp.timeIntervalSince1970]
+                }
+                let wrapper: [String: Any] = ["title": title, "messages": payload]
+                let data = try JSONSerialization.data(withJSONObject: wrapper, options: .prettyPrinted)
+                let url = tmpDir.appendingPathComponent("\(title).json")
+                try data.write(to: url)
+                exportFileURL = url
+                showExportShareSheet = true
+            case .txt:
+                var text = "# \(title)\n\n"
+                for msg in messages {
+                    let role = msg.role == .user ? "User" : (msg.role == .assistant ? "Assistant" : msg.role.rawValue)
+                    text += "[\(role)]\n\(msg.content)\n\n"
+                }
+                let url = tmpDir.appendingPathComponent("\(title).txt")
+                try text.write(to: url, atomically: true, encoding: .utf8)
+                exportFileURL = url
+                showExportShareSheet = true
+            case .pdf:
+                guard let api = dependencies.apiClient else { return }
+                let pdfData = try await api.downloadChatAsPDF(chatId: fullConversation.id)
+                let url = tmpDir.appendingPathComponent("\(title).pdf")
+                try pdfData.write(to: url)
+                exportFileURL = url
+                showExportShareSheet = true
+            }
+        } catch {
+            exportError = error.localizedDescription
+        }
+    }
+
+    private func registerSocketReconnectHandler() {
+        guard !hasRegisteredSocketHandlers else { return }
+        hasRegisteredSocketHandlers = true
+
+        dependencies.socketService?.onReconnect = { [self] in
+            Task { @MainActor in
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { await listViewModel.refreshIfStale() }
+                    group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                    group.addTask { await channelListVM.refreshChannels() }
+                }
+                if let activeId = activeConversationId {
+                    let vm = dependencies.activeChatStore.viewModel(for: activeId)
+                    if !vm.isStreaming { await vm.syncWithServer() }
+                }
+            }
+        }
+
+        dependencies.socketService?.onConnect = { [self] in
+            Task { @MainActor in
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { await listViewModel.refreshIfStale() }
+                    group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                    group.addTask { await channelListVM.refreshChannels() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - iPad Sidebar Content
+
+struct iPadSidebarContent: View {
+    @Bindable var listViewModel: ChatListViewModel
+    var channelListVM: ChannelListViewModel
+    @Binding var activeConversationId: String?
+    @Binding var activeChannelId: String?
+    @Binding var activeFolderWorkspaceId: String?
+    @Binding var showCreateFolderSheet: Bool
+    @Binding var showCreateChannel: Bool
+    @Binding var showSettings: Bool
+    @Binding var showNotes: Bool
+    @Binding var showWorkspace: Bool
+    @Binding var showMemories: Bool
+    @Binding var showCalendar: Bool
+    @Binding var showAutomations: Bool
+    @Binding var showAdminConsole: Bool
+    @Binding var showDeleteAllConfirmation: Bool
+    @Binding var showDeleteSelectedConfirmation: Bool
+    @Binding var deletingConversation: Conversation?
+    @Binding var deletingChannelId: String?
+    @Binding var sharingConversation: Conversation?
+    @Binding var renamingConversation: Conversation?
+    @Binding var renameText: String
+    let dependencies: AppDependencyContainer
+    let onNewChat: () -> Void
+    /// Called when the folder name/icon is tapped — opens folder workspace in the detail pane.
+    var onSelectFolder: ((String) -> Void)?
+    let onExport: (Conversation, iPadMainChatView.ExportFormat) -> Void
+    var onShowArchivedChats: (() -> Void)? = nil
+    var onShowSharedChats: (() -> Void)? = nil
+
+    @Environment(\.theme) private var theme
+    @State private var drawerChatsDropActive = false
+
+    /// Top-level section collapse states (shared with iPhone via same AppStorage keys).
+    @AppStorage("sidebar_folders_expanded") private var foldersExpanded: Bool = true
+    @AppStorage("sidebar_channels_expanded") private var channelsExpanded: Bool = true
+    @AppStorage("sidebar_chats_expanded") private var chatsExpanded: Bool = true
+    /// Tracks which time-group sub-sections are collapsed (e.g. "Pinned", "Today").
+    @State private var collapsedSections: Set<String> = []
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Search / selection header
+            if listViewModel.isSelectionMode {
+                selectionModeHeader
+            } else {
+                sidebarSearchBar
+            }
+
+            // Conversation list
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    let folderVM = listViewModel.folderViewModel
+
+                    // Pinned models section (quick-switch shortcuts)
+                    pinnedModelsSection
+
+                    // Folders section
+                    let foldersEnabled = dependencies.authViewModel.featurePermissions.folders
+                    if foldersEnabled && !folderVM.featureDisabled {
+                        foldersSection(folderVM: folderVM)
+                    }
+
+                    // Divider between folders and channels
+                    let channelsEnabled = dependencies.authViewModel.featurePermissions.channels
+                    if (foldersEnabled && !folderVM.featureDisabled && !folderVM.folders.isEmpty) || (channelsEnabled && !channelListVM.channels.isEmpty) {
+                        Rectangle()
+                            .fill(theme.textTertiary.opacity(0.12))
+                            .frame(height: 1)
+                            .padding(.horizontal, Spacing.md)
+                            .padding(.vertical, Spacing.sm)
+                    }
+
+                    // Channels section (shown only when enabled on server)
+                    if channelsEnabled {
+                        channelsSection
+                    }
+
+                    // Divider between channels and chats
+                    if channelsEnabled && !channelListVM.channels.isEmpty {
+                        Rectangle()
+                            .fill(theme.textTertiary.opacity(0.12))
+                            .frame(height: 1)
+                            .padding(.horizontal, Spacing.md)
+                            .padding(.vertical, Spacing.sm)
+                    }
+
+                    // Chats section
+                    let hasAnyChats = !listViewModel.pinnedConversations.isEmpty
+                        || !listViewModel.groupedConversations.isEmpty
+
+                    if hasAnyChats || !folderVM.folders.isEmpty {
+                        chatsSection(folderVM: folderVM)
+                    }
+                }
+                .padding(.bottom, Spacing.md)
+            }
+
+            if listViewModel.isSelectionMode {
+                selectionBottomBar
+            } else {
+                sidebarBottomBar
+            }
+        }
+        .background(theme.background)
+        // Sidebar has no text inputs that need keyboard avoidance — ignore
+        // keyboard safe area so the sidebar layout doesn't shift when a
+        // floating keyboard appears/disappears or changes size on iPad.
+        .ignoresSafeArea(.keyboard)
+        .navigationTitle("Chats")
+        .navigationBarTitleDisplayMode(.inline)
+        // Bridge folderVM.showCreateSheet → showCreateFolderSheet (mirrors MainChatView)
+        .onChange(of: listViewModel.folderViewModel.showCreateSheet) { _, show in
+            if show {
+                listViewModel.folderViewModel.showCreateSheet = false
+                showCreateFolderSheet = true
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                if listViewModel.isSelectionMode {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            listViewModel.exitSelectionMode()
+                        }
+                    } label: {
+                        Text("Cancel").foregroundStyle(theme.brandPrimary)
+                    }
+                } else {
+                    Menu {
+                        if !listViewModel.conversations.isEmpty {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    listViewModel.toggleSelectionMode()
+                                }
+                            } label: {
+                                Label("Select Chats", systemImage: "checkmark.circle")
+                            }
+                            Button {
+                                listViewModel.showArchiveAllConfirmation = true
+                            } label: {
+                                Label("Archive All", systemImage: "archivebox")
+                            }
+                            Button(role: .destructive) {
+                                showDeleteAllConfirmation = true
+                            } label: {
+                                Label("Delete All", systemImage: "trash")
+                            }
+                        }
+
+                        Divider()
+
+                        Button {
+                            onShowArchivedChats?()
+                        } label: {
+                            Label("Archived Chats", systemImage: "archivebox")
+                        }
+
+                        Button {
+                            onShowSharedChats?()
+                        } label: {
+                            Label("Shared Chats", systemImage: "link.circle")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .scaledFont(size: 15, weight: .medium, context: .list)
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(action: onNewChat) {
+                    Image(systemName: "square.and.pencil")
+                        .scaledFont(size: 15, weight: .medium, context: .list)
+                        .foregroundStyle(theme.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("New Chat")
+            }
+        }
+    }
+
+    // MARK: - Search Bar
+
+    private var sidebarSearchBar: some View {
+        HStack(spacing: Spacing.sm) {
+            Image(systemName: "magnifyingglass")
+                .scaledFont(size: 13, context: .list)
+                .foregroundStyle(theme.textTertiary)
+
+            TextField("Search conversations…", text: $listViewModel.searchText)
+                .scaledFont(size: 14, context: .list)
+                .foregroundStyle(theme.textPrimary)
+
+            if !listViewModel.searchText.isEmpty {
+                Button {
+                    listViewModel.searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .scaledFont(size: 13, context: .list)
+                        .foregroundStyle(theme.textTertiary)
+                }
+            }
+        }
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, 9)
+        .background(theme.surfaceContainer.opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+        .padding(.horizontal, Spacing.md)
+        .padding(.top, Spacing.sm)
+        .padding(.bottom, Spacing.xs)
+    }
+
+    // MARK: - Selection Mode Header
+
+    private var selectionModeHeader: some View {
+        HStack(spacing: Spacing.sm) {
+            Spacer()
+            Text("\(listViewModel.selectedCount) selected")
+                .scaledFont(size: 14, weight: .medium, context: .list)
+                .fontWeight(.semibold)
+                .foregroundStyle(theme.textPrimary)
+            Spacer()
+            Button {
+                if listViewModel.selectedCount == listViewModel.filteredConversations.count {
+                    listViewModel.selectedConversationIds.removeAll()
+                } else {
+                    listViewModel.selectAll()
+                }
+            } label: {
+                Text(listViewModel.selectedCount == listViewModel.filteredConversations.count ? "Deselect All" : "Select All")
+                    .scaledFont(size: 12, weight: .medium, context: .list)
+                    .fontWeight(.medium)
+                    .foregroundStyle(theme.brandPrimary)
+            }
+        }
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.sm)
+        .background(theme.surfaceContainer.opacity(0.4))
+        .padding(.top, Spacing.sm)
+        .padding(.bottom, Spacing.xs)
+    }
+
+    // MARK: - Pinned Models Section
+
+    /// Shows pinned models as quick-switch shortcuts in the sidebar,
+    /// matching the web UI's "Models" section above folders.
+    @ViewBuilder
+    private var pinnedModelsSection: some View {
+        let vm = dependencies.activeChatStore.viewModel(for: activeConversationId)
+        let pinnedIds = vm.pinnedModelIds
+        let models = vm.availableModels
+        let pinnedModels = pinnedIds.compactMap { id in models.first(where: { $0.id == id }) }
+
+        if !pinnedModels.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                // Section header
+                HStack(spacing: 6) {
+                    Image(systemName: "cpu")
+                        .scaledFont(size: 9, weight: .semibold, context: .list)
+                        .foregroundStyle(theme.textTertiary)
+                    Text("Models")
+                        .scaledFont(size: 12, weight: .medium, context: .list)
+                        .fontWeight(.bold)
+                        .foregroundStyle(theme.textTertiary)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+                    Spacer()
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, Spacing.sm)
+
+                // Pinned model rows
+                ForEach(pinnedModels) { model in
+                    let isSelected = model.id == vm.selectedModelId
+                    Button {
+                        let modelId = model.id
+                        onNewChat()
+                        let newVM = dependencies.activeChatStore.viewModel(for: nil)
+                        newVM.selectModel(modelId)
+                    } label: {
+                        HStack(spacing: 8) {
+                            ModelAvatar(
+                                size: 22,
+                                imageURL: vm.resolvedImageURL(for: model),
+                                label: model.shortName,
+                                authToken: vm.serverAuthToken
+                            )
+                            Text(model.shortName)
+                                .scaledFont(size: 14, context: .list)
+                                .fontWeight(isSelected ? .semibold : .regular)
+                                .foregroundStyle(isSelected ? theme.textPrimary : theme.textSecondary)
+                                .lineLimit(1)
+                            Spacer()
+                            if isSelected {
+                                Image(systemName: "checkmark")
+                                    .scaledFont(size: 11, weight: .semibold, context: .list)
+                                    .foregroundStyle(theme.brandPrimary)
+                            }
+                        }
+                        .padding(.horizontal, Spacing.md)
+                        .padding(.vertical, 7)
+                        .background(isSelected ? theme.brandPrimary.opacity(0.1) : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.sm, style: .continuous))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            vm.togglePinModel(model.id)
+                            Haptics.play(.medium)
+                        } label: {
+                            Label("Unpin", systemImage: "pin.slash")
+                        }
+                    }
+                }
+            }
+
+            // Divider below models
+            Rectangle()
+                .fill(theme.textTertiary.opacity(0.12))
+                .frame(height: 1)
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, Spacing.sm)
+        }
+    }
+
+    // MARK: - Folders Section
+
+    @ViewBuilder
+    private func foldersSection(folderVM: FolderListViewModel) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Collapsible header
+            Button {
+                withAnimation(.easeInOut(duration: AnimDuration.fast)) {
+                    foldersExpanded.toggle()
+                }
+                Haptics.play(.light)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.down")
+                        .scaledFont(size: 8, weight: .bold, context: .list)
+                        .foregroundStyle(theme.textTertiary)
+                        .rotationEffect(.degrees(foldersExpanded ? 0 : -90))
+                        .animation(.easeInOut(duration: AnimDuration.fast), value: foldersExpanded)
+
+                    Image(systemName: "folder")
+                        .scaledFont(size: 9, weight: .semibold, context: .list)
+                        .foregroundStyle(theme.textTertiary)
+                    Text("Folders")
+                        .scaledFont(size: 12, weight: .medium, context: .list)
+                        .fontWeight(.bold)
+                        .foregroundStyle(theme.textTertiary)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+                    Spacer()
+                    Button { showCreateFolderSheet = true } label: {
+                        Image(systemName: "folder.badge.plus")
+                            .scaledFont(size: 13, context: .list)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.top, Spacing.sm)
+                .padding(.bottom, Spacing.xs)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            // Use rootFolders (tree with childFolders populated) for proper subfolder nesting
+            if foldersExpanded {
+                ForEach(folderVM.rootFolders) { folder in
+                    DrawerFolderRow(
+                        folder: folder,
+                        folderVM: folderVM,
+                        allConversations: listViewModel.conversations,
+                        activeConversationId: activeConversationId,
+                        activeFolderWorkspaceId: activeFolderWorkspaceId,
+                        onSelectChat: { chatId in
+                            activeConversationId = chatId
+                            activeFolderWorkspaceId = nil
+                            SharedDataService.shared.saveLastActiveConversationId(chatId)
+                            // No drawer to close on iPad — sidebar stays visible
+                        },
+                        onSelectFolder: onSelectFolder,
+                        onChatMoved: { chatId, targetFolderId in
+                            if let idx = listViewModel.conversations.firstIndex(where: { $0.id == chatId }) {
+                                listViewModel.conversations[idx].folderId = targetFolderId
+                            } else if targetFolderId == nil {
+                                let folderChats = folderVM.folders.flatMap(\.chats)
+                                if var conv = folderChats.first(where: { $0.id == chatId }) {
+                                    conv.folderId = nil
+                                    listViewModel.conversations.insert(conv, at: 0)
+                                }
+                            }
+                        },
+                        onDeleteChat: { chatId in
+                            Task {
+                                await listViewModel.deleteConversation(id: chatId)
+                                // Clear from all folders (root + subfolders) to avoid stale UI
+                                for fIdx in folderVM.folders.indices {
+                                    folderVM.folders[fIdx].chats.removeAll { $0.id == chatId }
+                                }
+                                if activeConversationId == chatId { onNewChat() }
+                            }
+                        },
+                        onTogglePin: { conversation in
+                            Task { await listViewModel.togglePin(conversation: conversation) }
+                        }
+                    )
+                    .padding(.horizontal, Spacing.sm)
+                }
+            }
+        }
+        .animation(.easeInOut(duration: AnimDuration.medium), value: folderVM.folders.map(\.id))
+    }
+
+    // MARK: - Channels Section
+
+    private var channelsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Collapsible header
+            Button {
+                withAnimation(.easeInOut(duration: AnimDuration.fast)) {
+                    channelsExpanded.toggle()
+                }
+                Haptics.play(.light)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.down")
+                        .scaledFont(size: 8, weight: .bold, context: .list)
+                        .foregroundStyle(theme.textTertiary)
+                        .rotationEffect(.degrees(channelsExpanded ? 0 : -90))
+                        .animation(.easeInOut(duration: AnimDuration.fast), value: channelsExpanded)
+
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .scaledFont(size: 9, weight: .semibold, context: .list)
+                        .foregroundStyle(theme.textTertiary)
+                    Text("Channels")
+                        .scaledFont(size: 12, weight: .medium, context: .list)
+                        .fontWeight(.bold)
+                        .foregroundStyle(theme.textTertiary)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+                    Spacer()
+                    Button { showCreateChannel = true } label: {
+                        Image(systemName: "plus.bubble")
+                            .scaledFont(size: 13, context: .list)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, Spacing.sm)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if channelsExpanded {
+                if channelListVM.channels.isEmpty {
+                    Text("No channels yet")
+                        .scaledFont(size: 13, context: .list)
+                        .foregroundStyle(theme.textTertiary)
+                        .padding(.horizontal, Spacing.md)
+                        .padding(.vertical, 4)
+                } else {
+                    // DMs first
+                    if !channelListVM.dmChannels.isEmpty {
+                        channelGroupLabel("Direct Messages", icon: "person.crop.circle")
+                        ForEach(channelListVM.dmChannels) { channel in
+                            channelRow(channel)
+                        }
+                    }
+                    // Groups
+                    if !channelListVM.groupChannels.isEmpty {
+                        channelGroupLabel("Groups", icon: "person.3")
+                        ForEach(channelListVM.groupChannels) { channel in
+                            channelRow(channel)
+                        }
+                    }
+                    // Standard channels
+                    if !channelListVM.standardChannels.isEmpty {
+                        channelGroupLabel("Channels", icon: "number")
+                        ForEach(channelListVM.standardChannels) { channel in
+                            channelRow(channel)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Small sub-group label inside the channels section (mirrors iPhone drawer).
+    @ViewBuilder
+    private func channelGroupLabel(_ title: String, icon: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .scaledFont(size: 9, weight: .medium, context: .list)
+                .foregroundStyle(theme.textTertiary.opacity(0.7))
+            Text(title)
+                .scaledFont(size: 10, weight: .medium, context: .list)
+                .foregroundStyle(theme.textTertiary.opacity(0.7))
+                .textCase(.uppercase)
+                .tracking(0.4)
+        }
+        .padding(.horizontal, Spacing.md)
+        .padding(.top, 6)
+        .padding(.bottom, 2)
+    }
+
+    /// A single channel row in the sidebar (with context menu for hide/delete).
+    @ViewBuilder
+    private func channelRow(_ channel: Channel) -> some View {
+        Button {
+            activeChannelId = channel.id
+            activeConversationId = nil
+        } label: {
+            HStack(spacing: 6) {
+                if channel.type == .dm, let participant = channel.dmParticipants.first {
+                    UserAvatar(
+                        size: 22,
+                        imageURL: participant.resolveAvatarURL(serverBaseURL: dependencies.apiClient?.baseURL ?? ""),
+                        name: participant.displayName,
+                        authToken: dependencies.apiClient?.network.authToken
+                    )
+                } else {
+                    Image(systemName: channel.sidebarIcon)
+                        .scaledFont(size: 11, context: .list)
+                        .foregroundStyle(activeChannelId == channel.id ? theme.brandPrimary : theme.textTertiary)
+                }
+                Text(channel.type == .dm
+                    ? (channel.dmParticipants.first?.displayName ?? channel.displayName)
+                    : channel.displayName)
+                    .scaledFont(size: 14, context: .list)
+                    .fontWeight(activeChannelId == channel.id || channel.unreadCount > 0 ? .semibold : .regular)
+                    .foregroundStyle(activeChannelId == channel.id ? theme.textPrimary : theme.textSecondary)
+                    .lineLimit(1)
+                Spacer()
+                if activeChannelId == channel.id {
+                    Circle()
+                        .fill(theme.brandPrimary)
+                        .frame(width: 6, height: 6)
+                } else if channel.unreadCount > 0 {
+                    Text("\(channel.unreadCount)")
+                        .scaledFont(size: 11, weight: .bold, context: .list)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(theme.brandPrimary)
+                        .clipShape(Capsule())
+                }
+            }
+            .padding(.horizontal, Spacing.md)
+            .padding(.vertical, 7)
+            .background(
+                activeChannelId == channel.id
+                    ? theme.brandPrimary.opacity(0.1)
+                    : Color.clear
+            )
+            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.sm, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            if channel.type == .dm {
+                Button {
+                    channelListVM.hideDM(channelId: channel.id)
+                    Haptics.play(.light)
+                } label: {
+                    Label("Hide Conversation", systemImage: "eye.slash")
+                }
+            } else {
+                Button(role: .destructive) {
+                    deletingChannelId = channel.id
+                } label: {
+                    Label("Delete Channel", systemImage: "trash")
+                }
+            }
+        }
+    }
+
+    // MARK: - Chats Section
+
+    @ViewBuilder
+    private func chatsSection(folderVM: FolderListViewModel) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Collapsible header
+            Button {
+                withAnimation(.easeInOut(duration: AnimDuration.fast)) {
+                    chatsExpanded.toggle()
+                }
+                Haptics.play(.light)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.down")
+                        .scaledFont(size: 8, weight: .bold, context: .list)
+                        .foregroundStyle(drawerChatsDropActive ? theme.brandPrimary : theme.textTertiary)
+                        .rotationEffect(.degrees(chatsExpanded ? 0 : -90))
+                        .animation(.easeInOut(duration: AnimDuration.fast), value: chatsExpanded)
+
+                    Image(systemName: "bubble.left.and.text.bubble.right")
+                        .scaledFont(size: 9, weight: .semibold, context: .list)
+                        .foregroundStyle(drawerChatsDropActive ? theme.brandPrimary : theme.textTertiary)
+                    Text("Chats")
+                        .scaledFont(size: 12, weight: .medium, context: .list)
+                        .fontWeight(.bold)
+                        .foregroundStyle(drawerChatsDropActive ? theme.brandPrimary : theme.textTertiary)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+                    if drawerChatsDropActive {
+                        Text("Drop here")
+                            .scaledFont(size: 12, weight: .medium, context: .list)
+                            .foregroundStyle(theme.brandPrimary)
+                            .transition(.opacity)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.top, Spacing.sm)
+                .padding(.bottom, Spacing.xs)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if chatsExpanded {
+                // LazyVStack so only visible rows are created.
+                // Section headers are inlined as direct children
+                // so they don't prevent lazy row creation.
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
+                    // ── Pinned sub-section ────────────────────
+                    if !listViewModel.pinnedConversations.isEmpty {
+                        sidebarSubSectionHeader(title: "Pinned", sectionKey: "Pinned")
+
+                        if !collapsedSections.contains("Pinned") {
+                            ForEach(listViewModel.pinnedConversations) { conversation in
+                                conversationRow(conversation)
+                                    .frame(minHeight: 36)
+                            }
+                        }
+                    }
+
+                    // ── Time-grouped sub-sections ─────────────
+                    ForEach(listViewModel.groupedConversations, id: \.0) { group in
+                        let sectionKey = group.0
+                        let isCollapsed = collapsedSections.contains(sectionKey)
+
+                        sidebarSubSectionHeader(
+                            title: sectionKey,
+                            count: group.1.count,
+                            sectionKey: sectionKey
+                        )
+
+                        if !isCollapsed {
+                            ForEach(group.1) { conversation in
+                                conversationRow(conversation)
+                                    .frame(minHeight: 36)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .background(drawerChatsDropActive ? theme.brandPrimary.opacity(0.05) : Color.clear)
+        .overlay(
+            RoundedRectangle(cornerRadius: CornerRadius.md)
+                .stroke(theme.brandPrimary, lineWidth: drawerChatsDropActive ? 1.5 : 0)
+                .padding(.horizontal, 2)
+        )
+        .animation(.easeInOut(duration: AnimDuration.fast), value: drawerChatsDropActive)
+        .dropDestination(for: DraggableChat.self) { items, _ in
+            guard let item = items.first, item.currentFolderId != nil else { return false }
+            let chatId = item.conversationId
+            let folderChats = folderVM.folders.flatMap(\.chats)
+            let conversation = folderChats.first(where: { $0.id == chatId })
+                ?? listViewModel.conversations.first(where: { $0.id == chatId })
+            guard let conversation else { return false }
+            withAnimation { drawerChatsDropActive = false; folderVM.dragCompleted() }
+            if let idx = listViewModel.conversations.firstIndex(where: { $0.id == chatId }) {
+                listViewModel.conversations[idx].folderId = nil
+            } else {
+                var conv = conversation; conv.folderId = nil
+                listViewModel.conversations.insert(conv, at: 0)
+            }
+            Task { await folderVM.moveChat(conversation: conversation, to: nil) }
+            return true
+        } isTargeted: { isTargeted in
+            withAnimation(.easeInOut(duration: AnimDuration.fast)) { drawerChatsDropActive = isTargeted }
+        }
+    }
+
+    // MARK: - Sidebar Sub-Section Header (for LazyVStack chat groups)
+
+    @ViewBuilder
+    private func sidebarSubSectionHeader(title: String, count: Int? = nil, sectionKey: String) -> some View {
+        let isCollapsed = collapsedSections.contains(sectionKey)
+        Button {
+            withAnimation(.easeInOut(duration: AnimDuration.fast)) {
+                if isCollapsed { collapsedSections.remove(sectionKey) }
+                else { collapsedSections.insert(sectionKey) }
+            }
+            Haptics.play(.light)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.down")
+                    .scaledFont(size: 8, weight: .bold, context: .list)
+                    .foregroundStyle(theme.textTertiary)
+                    .rotationEffect(.degrees(isCollapsed ? -90 : 0))
+                    .animation(.easeInOut(duration: AnimDuration.fast), value: isCollapsed)
+                Text(title)
+                    .scaledFont(size: 12, weight: .medium, context: .list)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(theme.textTertiary)
+                    .textCase(.uppercase)
+                    .tracking(0.5)
+                if let count {
+                    Text("\(count)")
+                        .scaledFont(size: 10, weight: .medium, context: .list)
+                        .foregroundStyle(theme.textTertiary)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(theme.surfaceContainer).clipShape(Capsule())
+                }
+                Spacer()
+            }
+            .padding(.horizontal, Spacing.md).padding(.vertical, 10).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Conversation Row
+
+    private func conversationRow(_ conversation: Conversation) -> some View {
+        Group {
+            if listViewModel.isSelectionMode {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        listViewModel.toggleSelection(for: conversation.id)
+                    }
+                    Haptics.play(.light)
+                } label: {
+                    HStack(spacing: Spacing.sm) {
+                        Image(systemName: listViewModel.isSelected(conversation.id)
+                            ? "checkmark.circle.fill" : "circle")
+                            .scaledFont(size: 18, context: .list)
+                            .foregroundStyle(listViewModel.isSelected(conversation.id)
+                                ? theme.brandPrimary : theme.textTertiary)
+                        Text(conversation.title)
+                            .scaledFont(size: 14, context: .list)
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .padding(.horizontal, Spacing.md)
+                    .padding(.vertical, 8)
+                    .background(listViewModel.isSelected(conversation.id)
+                        ? theme.brandPrimary.opacity(0.1) : Color.clear)
+                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.sm, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            } else {
+                Button {
+                    activeConversationId = conversation.id
+                    activeChannelId = nil
+                    activeFolderWorkspaceId = nil
+                    SharedDataService.shared.saveLastActiveConversationId(conversation.id)
+                } label: {
+                    HStack {
+                        Text(conversation.title)
+                            .scaledFont(size: 14, context: .list)
+                            .fontWeight(activeConversationId == conversation.id ? .semibold : .regular)
+                            .foregroundStyle(activeConversationId == conversation.id
+                                ? theme.textPrimary : theme.textSecondary)
+                            .lineLimit(1)
+                        Spacer()
+                        if activeConversationId == conversation.id {
+                            Circle()
+                                .fill(theme.brandPrimary)
+                                .frame(width: 6, height: 6)
+                        }
+                    }
+                    .padding(.horizontal, Spacing.md)
+                    .padding(.vertical, 8)
+                    .background(
+                        activeConversationId == conversation.id
+                            ? theme.brandPrimary.opacity(0.1)
+                            : Color.clear
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.sm, style: .continuous))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .draggable(DraggableChat(
+                    conversationId: conversation.id,
+                    currentFolderId: conversation.folderId
+                )) {
+                    HStack(spacing: Spacing.xs) {
+                        Image(systemName: "bubble.left").scaledFont(size: 12, context: .list)
+                        Text(conversation.title)
+                            .scaledFont(size: 12, weight: .medium, context: .list)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, Spacing.sm)
+                    .padding(.vertical, Spacing.xs)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .contextMenu {
+                    iPadConversationContextMenu(
+                        conversation: conversation,
+                        listViewModel: listViewModel,
+                        dependencies: dependencies,
+                        activeConversationId: $activeConversationId,
+                        sharingConversation: $sharingConversation,
+                        renamingConversation: $renamingConversation,
+                        renameText: $renameText,
+                        deletingConversation: $deletingConversation,
+                        onExport: onExport
+                    )
+                }
+            }
+        }
+    }
+
+    // MARK: - Bottom Bars
+
+    private var selectionBottomBar: some View {
+        Button(role: .destructive) {
+            showDeleteSelectedConfirmation = true
+        } label: {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "trash")
+                Text("Delete (\(listViewModel.selectedCount))")
+            }
+            .scaledFont(size: 14, weight: .medium, context: .list)
+            .fontWeight(.semibold)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, Spacing.sm)
+            .background(listViewModel.selectedCount > 0 ? Color.red : Color.red.opacity(0.3))
+            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+        }
+        .disabled(listViewModel.selectedCount == 0)
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.md)
+        .background(theme.surfaceContainer.opacity(0.3))
+    }
+
+    private var sidebarBottomBar: some View {
+        VStack(spacing: 0) {
+            // Subtle top separator
+            Rectangle()
+                .fill(theme.textTertiary.opacity(0.12))
+                .frame(height: 0.5)
+
+            HStack(spacing: Spacing.sm) {
+                // Real user avatar + full name — tap → Settings, long-press → Account Picker
+                HStack(spacing: 8) {
+                    ZStack(alignment: .bottomTrailing) {
+                        UserAvatar(
+                            size: 30,
+                            imageURL: {
+                                guard let userId = dependencies.authViewModel.currentUser?.id,
+                                      let baseURL = dependencies.apiClient?.baseURL,
+                                      !userId.isEmpty, !baseURL.isEmpty else { return nil }
+                                let v = dependencies.authViewModel.profileImageVersion
+                                return URL(string: "\(baseURL)/api/v1/users/\(userId)/profile/image?v=\(v)")
+                            }(),
+                            name: dependencies.authViewModel.currentUser?.displayName ?? "User",
+                            authToken: dependencies.apiClient?.network.authToken
+                        )
+
+                    }
+                    Text(dependencies.authViewModel.currentUser?.displayName ?? "User")
+                        .scaledFont(size: 13, weight: .medium)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+                }
+                .contentShape(Rectangle())
+                .onLongPressGesture(minimumDuration: 0.5) {
+                    Haptics.play(.medium)
+                    dependencies.authViewModel.showAccountPicker = true
+                }
+                .simultaneousGesture(TapGesture().onEnded {
+                    showSettings = true
+                })
+
+                Spacer()
+
+                // New Chat — primary action, always visible
+                Button(action: onNewChat) {
+                    Image(systemName: "square.and.pencil")
+                        .scaledFont(size: 15, weight: .medium)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("New Chat")
+
+                // More menu — secondary actions tucked away cleanly
+                Menu {
+                    if dependencies.authViewModel.featurePermissions.memories {
+                        Button { showMemories = true } label: {
+                            Label("Memories", systemImage: "brain.head.profile")
+                        }
+                    }
+                    if dependencies.authViewModel.hasAnyWorkspaceAccess {
+                        Button { showWorkspace = true } label: {
+                            Label("Workspace", systemImage: "square.grid.2x2")
+                        }
+                    }
+
+                    if dependencies.authViewModel.featurePermissions.notes {
+                        Button { showNotes = true } label: {
+                            Label("Notes", systemImage: "note.text")
+                        }
+                    }
+
+                    if dependencies.authViewModel.featurePermissions.calendar {
+                        Button { showCalendar = true } label: {
+                            Label("Calendar", systemImage: "calendar")
+                        }
+                    }
+
+                    if dependencies.authViewModel.featurePermissions.automations {
+                        Button { showAutomations = true } label: {
+                            Label("Automations", systemImage: "clock.arrow.circlepath")
+                        }
+                    }
+
+                    Divider()
+
+                    Button { showSettings = true } label: {
+                        Label("Settings", systemImage: "gearshape")
+                    }
+
+                    if dependencies.authViewModel.currentUser?.role == .admin {
+                        Button { showAdminConsole = true } label: {
+                            Label("Admin Console", systemImage: "shield.lefthalf.filled")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .scaledFont(size: 17, weight: .medium)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+            }
+            .padding(.horizontal, Spacing.md)
+            .padding(.vertical, 10)
+        }
+        .background(theme.background)
+    }
+}
+
+// MARK: - Context Menu (iPad Sidebar)
+
+private struct iPadConversationContextMenu: View {
+    let conversation: Conversation
+    let listViewModel: ChatListViewModel
+    let dependencies: AppDependencyContainer
+    @Binding var activeConversationId: String?
+    @Binding var sharingConversation: Conversation?
+    @Binding var renamingConversation: Conversation?
+    @Binding var renameText: String
+    @Binding var deletingConversation: Conversation?
+    let onExport: (Conversation, iPadMainChatView.ExportFormat) -> Void
+
+    var body: some View {
+        // Share
+        Button {
+            sharingConversation = conversation
+        } label: {
+            Label("Share", systemImage: "square.and.arrow.up")
+        }
+
+        // Download submenu (matching WebUI)
+        Menu {
+            Button { onExport(conversation, .json) } label: {
+                Label("Export chat (.json)", systemImage: "doc")
+            }
+            Button { onExport(conversation, .txt) } label: {
+                Label("Plain text (.txt)", systemImage: "doc.plaintext")
+            }
+            Button { onExport(conversation, .pdf) } label: {
+                Label("PDF document (.pdf)", systemImage: "doc.richtext")
+            }
+        } label: {
+            Label("Download", systemImage: "arrow.down.circle")
+        }
+
+        Divider()
+
+        // Rename
+        Button {
+            renamingConversation = conversation
+            renameText = conversation.title
+        } label: {
+            Label("Rename", systemImage: "pencil")
+        }
+
+        // Pin
+        Button {
+            Task { await listViewModel.togglePin(conversation: conversation) }
+        } label: {
+            Label(conversation.pinned ? "Unpin" : "Pin",
+                  systemImage: conversation.pinned ? "pin.slash" : "pin")
+        }
+
+        // Clone
+        Button {
+            Task {
+                guard let manager = dependencies.conversationManager else { return }
+                if let cloned = try? await manager.cloneConversation(id: conversation.id) {
+                    await listViewModel.refreshConversations()
+                    activeConversationId = cloned.id
+                }
+            }
+        } label: {
+            Label("Clone", systemImage: "doc.on.doc")
+        }
+
+        // Archive
+        Button {
+            Task {
+                await listViewModel.toggleArchive(conversation: conversation)
+                if !conversation.archived && activeConversationId == conversation.id {
+                    activeConversationId = nil
+                }
+            }
+        } label: {
+            Label("Archive", systemImage: "archivebox")
+        }
+
+        // Move to folder submenu
+        let folders = listViewModel.folderViewModel.folders
+        if !folders.isEmpty {
+            Menu("Move to Folder") {
+                // Remove from folder option when the chat is currently in one
+                if conversation.folderId != nil {
+                    Button {
+                        let conv = conversation
+                        Task {
+                            await listViewModel.folderViewModel.moveChat(conversation: conv, to: nil)
+                            if let idx = listViewModel.conversations.firstIndex(where: { $0.id == conv.id }) {
+                                listViewModel.conversations[idx].folderId = nil
+                            }
+                        }
+                    } label: {
+                        Label("Remove from Folder", systemImage: "folder.badge.minus")
+                    }
+                }
+                ForEach(folders) { folder in
+                    Button {
+                        let conv = conversation
+                        Task {
+                            await listViewModel.folderViewModel.moveChat(conversation: conv, to: folder.id)
+                            if let idx = listViewModel.conversations.firstIndex(where: { $0.id == conv.id }) {
+                                listViewModel.conversations[idx].folderId = folder.id
+                            }
+                        }
+                    } label: {
+                        Label(folder.name, systemImage: "folder")
+                    }
+                    .disabled(folder.id == conversation.folderId)
+                }
+            }
+        }
+
+        Divider()
+
+        Button(role: .destructive) {
+            Haptics.notify(.warning)
+            deletingConversation = conversation
+        } label: {
+            Label("Delete", systemImage: "trash")
+        }
+    }
+}
+
+// MARK: - View Modifier Helpers
+
+private extension View {
+    func applySheets(
+        showSettings: Binding<Bool>,
+        showNotes: Binding<Bool>,
+        showCreateFolderSheet: Binding<Bool>,
+        sharingConversation: Binding<Conversation?>,
+        renamingConversation: Binding<Conversation?>,
+        renameText: Binding<String>,
+        isGeneratingTitle: Binding<Bool>,
+        exportFileURL: Binding<URL?>,
+        showExportShareSheet: Binding<Bool>,
+        showDeleteAllConfirmation: Binding<Bool>,
+        showDeleteSelectedConfirmation: Binding<Bool>,
+        showArchivedChats: Binding<Bool>,
+        showSharedChats: Binding<Bool>,
+        listViewModel: ChatListViewModel,
+        activeConversationId: Binding<String?>,
+        voiceCallBinding: Binding<Bool>,
+        systemColorScheme: ColorScheme,
+        dependencies: AppDependencyContainer,
+        router: AppRouter,
+        onExport: @escaping (Conversation, iPadMainChatView.ExportFormat) -> Void,
+        onGenerateTitle: @escaping (Conversation) -> Void
+    ) -> some View {
+        self
+            .sheet(isPresented: showSettings) {
+                SettingsView(
+                    viewModel: dependencies.authViewModel,
+                    appearanceManager: dependencies.appearanceManager
+                )
+                .preferredColorScheme(dependencies.appearanceManager.resolvedColorScheme ?? systemColorScheme)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+                .presentationCornerRadius(20)
+            }
+            .sheet(isPresented: showNotes) {
+                NavigationStack {
+                    NotesListView()
+                        .toolbar {
+                            ToolbarItem(placement: .navigationBarLeading) {
+                                Button {
+                                    showNotes.wrappedValue = false
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 14, weight: .medium))
+                                        .foregroundStyle(Color.secondary)
+                                        .frame(width: 32, height: 32)
+                                        .background(Color(uiColor: .systemGray5).opacity(0.6))
+                                        .clipShape(Circle())
+                                }
+                            }
+                        }
+                }
+                .presentationCornerRadius(20)
+            }
+            .sheet(isPresented: voiceCallBinding, onDismiss: {
+                // Dragging the sheet down counts as minimizing if the call is still active.
+                if !router.isVoiceCallMinimized, router.voiceCallViewModel != nil {
+                    router.minimizeVoiceCall()
+                }
+            }) {
+                if let voiceCallVM = router.voiceCallViewModel {
+                    VoiceCallView(viewModel: voiceCallVM)
+                        .environment(dependencies)
+                        .presentationDetents([.medium, .large])
+                        .presentationDragIndicator(.hidden)
+                        .presentationCornerRadius(24)
+                        .presentationBackground(.ultraThinMaterial)
+                        .interactiveDismissDisabled(false)
+                }
+            }
+            .onChange(of: router.isVoiceCallPresented) { _, isPresented in
+                if !isPresented && !router.isVoiceCallMinimized { router.voiceCallViewModel = nil }
+            }
+            .sheet(isPresented: showCreateFolderSheet) {
+                CreateFolderSheet(apiClient: dependencies.apiClient) { name, data, meta in
+                    let parentId = listViewModel.folderViewModel.createSubfolderParentId
+                    listViewModel.folderViewModel.createSubfolderParentId = nil
+                    Task {
+                        await listViewModel.folderViewModel.createFolder(
+                            name: name, parentId: parentId, data: data, meta: meta
+                        )
+                    }
+                }
+            }
+            // Edit folder sheet — allows changing name, system prompt, knowledge
+            .sheet(item: Binding(
+                get: { listViewModel.folderViewModel.editingFolder },
+                set: { listViewModel.folderViewModel.editingFolder = $0 }
+            )) { folder in
+                EditFolderSheet(
+                    folder: folder,
+                    apiClient: dependencies.apiClient
+                ) { name, data, meta in
+                    Task {
+                        await listViewModel.folderViewModel.updateFolderSettings(
+                            id: folder.id,
+                            name: name,
+                            data: data,
+                            meta: meta
+                        )
+                    }
+                }
+            }
+            .alert("Rename Folder", isPresented: .init(
+                get: { listViewModel.folderViewModel.renamingFolder != nil },
+                set: { if !$0 { listViewModel.folderViewModel.renamingFolder = nil } }
+            )) {
+                TextField("Folder Name", text: Bindable(listViewModel.folderViewModel).renameText)
+                Button("Cancel", role: .cancel) { listViewModel.folderViewModel.renamingFolder = nil }
+                Button("Rename") { Task { await listViewModel.folderViewModel.commitRename() } }
+            }
+            .sheet(item: renamingConversation) { conv in
+                iPadRenameSheet(
+                    conversation: conv,
+                    renameText: renameText,
+                    isGeneratingTitle: isGeneratingTitle,
+                    listViewModel: listViewModel,
+                    activeConversationId: activeConversationId,
+                    onGenerateTitle: onGenerateTitle
+                )
+            }
+            .sheet(isPresented: showExportShareSheet, onDismiss: {
+                if let url = exportFileURL.wrappedValue {
+                    try? FileManager.default.removeItem(at: url)
+                    exportFileURL.wrappedValue = nil
+                }
+            }) {
+                if let url = exportFileURL.wrappedValue {
+                    ShareSheet(items: [url])
+                }
+            }
+            // Share chat sheet (matching iPhone)
+            .sheet(item: sharingConversation) { conversation in
+                if let apiClient = dependencies.apiClient {
+                    ShareChatSheet(
+                        conversation: conversation,
+                        apiClient: apiClient,
+                        serverBaseURL: apiClient.baseURL,
+                        onShareIdUpdated: { shareId in
+                            listViewModel.updateShareId(for: conversation.id, shareId: shareId)
+                        },
+                        onClone: { cloned in
+                            activeConversationId.wrappedValue = cloned.id
+                            SharedDataService.shared.saveLastActiveConversationId(cloned.id)
+                        }
+                    )
+                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+                }
+            }
+            // Archived chats sheet
+            .sheet(isPresented: showArchivedChats) {
+                ArchivedChatsView()
+                    .environment(dependencies)
+                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+            }
+            // Shared chats sheet
+            .sheet(isPresented: showSharedChats) {
+                SharedChatsView()
+                    .environment(dependencies)
+                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+            }
+            // Account picker sheet (multi-account per server)
+            .sheet(isPresented: Bindable(dependencies.authViewModel).showAccountPicker) {
+                AccountPickerSheet(
+                    viewModel: dependencies.authViewModel,
+                    onDismiss: { dependencies.authViewModel.showAccountPicker = false }
+                )
+                .environment(dependencies)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+            }
+    }
+
+    func applyAlerts(
+        showDeleteAllConfirmation: Binding<Bool>,
+        showDeleteSelectedConfirmation: Binding<Bool>,
+        deletingConversation: Binding<Conversation?>,
+        deletingChannelId: Binding<String?>,
+        exportError: Binding<String?>,
+        listViewModel: ChatListViewModel,
+        activeConversationId: Binding<String?>,
+        activeChannelId: Binding<String?>,
+        channelListVM: ChannelListViewModel,
+        dependencies: AppDependencyContainer,
+        onStartNewChat: @escaping () -> Void
+    ) -> some View {
+        self
+            .confirmationDialog("Archive All Chats",
+                isPresented: .constant(listViewModel.showArchiveAllConfirmation),
+                titleVisibility: .visible) {
+                Button("Archive All", role: .destructive) {
+                    Task {
+                        await listViewModel.archiveAllConversations()
+                        activeConversationId.wrappedValue = nil
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This will archive all your conversations. You can unarchive them later from the web interface.")
+            }
+            .confirmationDialog("Delete All Chats",
+                isPresented: showDeleteAllConfirmation,
+                titleVisibility: .visible) {
+                Button("Delete All", role: .destructive) {
+                    Task {
+                        await listViewModel.deleteAllConversations()
+                        onStartNewChat()
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This will permanently delete all your conversations. This action cannot be undone.")
+            }
+            .confirmationDialog("Delete Selected Chats",
+                isPresented: showDeleteSelectedConfirmation,
+                titleVisibility: .visible) {
+                Button("Delete \(listViewModel.selectedCount) Chat\(listViewModel.selectedCount == 1 ? "" : "s")", role: .destructive) {
+                    let shouldResetToNewChat = activeConversationId.wrappedValue.map { listViewModel.selectedConversationIds.contains($0) } ?? false
+                    Task {
+                        await listViewModel.deleteSelectedConversations()
+                        if shouldResetToNewChat { onStartNewChat() }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This will permanently delete \(listViewModel.selectedCount) selected conversation\(listViewModel.selectedCount == 1 ? "" : "s"). This action cannot be undone.")
+            }
+            // Single-conversation delete confirmation
+            .confirmationDialog(
+                "Delete \"\(deletingConversation.wrappedValue?.title ?? "")\"?",
+                isPresented: .init(
+                    get: { deletingConversation.wrappedValue != nil },
+                    set: { if !$0 { deletingConversation.wrappedValue = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) {
+                    if let conversation = deletingConversation.wrappedValue {
+                        let deletedId = conversation.id
+                        deletingConversation.wrappedValue = nil
+                        Task {
+                            await listViewModel.deleteConversation(id: deletedId)
+                            if activeConversationId.wrappedValue == deletedId {
+                                onStartNewChat()
+                            }
+                        }
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    deletingConversation.wrappedValue = nil
+                }
+            } message: {
+                Text("This action cannot be undone.")
+            }
+            // Channel delete confirmation
+            .confirmationDialog(
+                "Delete Channel?",
+                isPresented: .init(
+                    get: { deletingChannelId.wrappedValue != nil },
+                    set: { if !$0 { deletingChannelId.wrappedValue = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Delete Channel", role: .destructive) {
+                    if let channelId = deletingChannelId.wrappedValue {
+                        let wasActive = activeChannelId.wrappedValue == channelId
+                        deletingChannelId.wrappedValue = nil
+                        Task {
+                            try? await dependencies.apiClient?.deleteChannel(id: channelId)
+                            await channelListVM.refreshChannels()
+                            if wasActive { onStartNewChat() }
+                        }
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    deletingChannelId.wrappedValue = nil
+                }
+            } message: {
+                Text("This will permanently delete this channel and all its messages.")
+            }
+            .alert("Export Failed",
+                   isPresented: .init(get: { exportError.wrappedValue != nil },
+                                      set: { if !$0 { exportError.wrappedValue = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: { Text(exportError.wrappedValue ?? "") }
+    }
+
+    func applyLifecycle(
+        listViewModel: ChatListViewModel,
+        dependencies: AppDependencyContainer,
+        scenePhase: ScenePhase,
+        activeConversationId: Binding<String?>,
+        activeChannelId: Binding<String?> = .constant(nil),
+        activeFolderWorkspaceId: Binding<String?> = .constant(nil),
+        newChatGeneration: Binding<Int> = .constant(0),
+        channelListVM: ChannelListViewModel? = nil,
+        hasRegisteredSocketHandlers: Binding<Bool>,
+        showCreateChannel: Binding<Bool> = .constant(false),
+        showSettings: Binding<Bool> = .constant(false),
+        showNotes: Binding<Bool> = .constant(false),
+        showCreateFolderSheet: Binding<Bool> = .constant(false),
+        showExportShareSheet: Binding<Bool> = .constant(false),
+        onSocketSetup: @escaping () -> Void
+    ) -> some View {
+        self
+            .task {
+                if let manager = dependencies.conversationManager {
+                    listViewModel.configure(with: manager)
+                }
+                if let folderManager = dependencies.folderManager {
+                    listViewModel.folderViewModel.configure(with: folderManager)
+                }
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { await listViewModel.loadConversations() }
+                    group.addTask { await listViewModel.folderViewModel.loadFolders() }
+                    group.addTask { await dependencies.fetchTaskConfig() }
+                }
+                onSocketSetup()
+            }
+            .onChange(of: scenePhase) { oldPhase, newPhase in
+                if newPhase == .active && oldPhase != .active {
+                    Task {
+                        if let socket = dependencies.socketService,
+                           !socket.isConnected, !socket.isConnecting {
+                            socket.connect()
+                        }
+                        // Refresh conversations, folders, AND channels on foreground
+                        // (mirrors iPhone's refreshAllDataOnForeground)
+                        await withTaskGroup(of: Void.self) { group in
+                            group.addTask { await listViewModel.refreshIfStale() }
+                            group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                        }
+                        dependencies.updateWidgetData(conversations: listViewModel.conversations)
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .conversationTitleUpdated)) { notification in
+                guard let userInfo = notification.userInfo,
+                      let conversationId = userInfo["conversationId"] as? String,
+                      let title = userInfo["title"] as? String else { return }
+                listViewModel.updateTitle(for: conversationId, title: title)
+                let folderVM = listViewModel.folderViewModel
+                for idx in folderVM.folders.indices {
+                    if let chatIdx = folderVM.folders[idx].chats.firstIndex(where: { $0.id == conversationId }) {
+                        folderVM.folders[idx].chats[chatIdx].title = title
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .conversationListNeedsRefresh)) { _ in
+                Task {
+                    await withTaskGroup(of: Void.self) { group in
+                        group.addTask { await listViewModel.refreshConversations() }
+                        group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .adminClonedChat)) { notification in
+                if let conversationId = notification.object as? String {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        activeConversationId.wrappedValue = conversationId
+                        SharedDataService.shared.saveLastActiveConversationId(conversationId)
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openUIDismissOverlays)) { _ in
+                // Quick action requested — dismiss any active sheet/cover so
+                // the new action doesn't stack on top of the old one.
+                showSettings.wrappedValue = false
+                showNotes.wrappedValue = false
+                showCreateChannel.wrappedValue = false
+                showCreateFolderSheet.wrappedValue = false
+                showExportShareSheet.wrappedValue = false
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openUINewChannel)) { _ in
+                // Widget "Channel" button — open the create-channel sheet
+                showCreateChannel.wrappedValue = true
+            }
+            .onChange(of: dependencies.authViewModel.accountSwitchCount) {
+                // Account was switched — perform a full reset so the new account's
+                // conversations, folders, channels, and model selector all load fresh.
+                // 1. Clear navigation state so no stale conversation/channel is shown.
+                activeConversationId.wrappedValue = nil
+                activeChannelId.wrappedValue = nil
+                activeFolderWorkspaceId.wrappedValue = nil
+                // 2. Clear the conversation/folder list immediately so stale chats vanish.
+                listViewModel.clearAll()
+                // 3. Purge all cached ChatViewModels (holds old account's messages/models).
+                dependencies.activeChatStore.clear()
+                // 4. Force the new-chat view to recreate so it picks up the new account's
+                //    default model (cachedSelectedModelId was cleared by activeChatStore.clear()).
+                newChatGeneration.wrappedValue += 1
+                // 5. Reload all lists from the server for the new account.
+                Task {
+                    await withTaskGroup(of: Void.self) { group in
+                        group.addTask { await listViewModel.refreshConversations() }
+                        group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                        if let channelListVM {
+                            group.addTask { await channelListVM.refreshChannels() }
+                        }
+                    }
+                }
+            }
+    }
+}
+
+// MARK: - Rename Sheet (iPad)
+
+private struct iPadRenameSheet: View {
+    let conversation: Conversation
+    @Binding var renameText: String
+    @Binding var isGeneratingTitle: Bool
+    let listViewModel: ChatListViewModel
+    @Binding var activeConversationId: String?
+    let onGenerateTitle: (Conversation) -> Void
+
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: Spacing.lg) {
+                TextField("Chat title", text: $renameText)
+                    .scaledFont(size: 16)
+                    .padding(Spacing.md)
+                    .background(theme.surfaceContainer)
+                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md))
+
+                Button {
+                    onGenerateTitle(conversation)
+                } label: {
+                    HStack(spacing: Spacing.xs) {
+                        if isGeneratingTitle {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "sparkles")
+                        }
+                        Text(isGeneratingTitle ? "Generating..." : "Generate Title")
+                    }
+                    .scaledFont(size: 14, weight: .medium)
+                    .fontWeight(.medium)
+                }
+                .buttonStyle(.bordered)
+                .tint(theme.brandPrimary)
+                .disabled(isGeneratingTitle)
+
+                Spacer()
+            }
+            .padding(Spacing.lg)
+            .navigationTitle("Rename Conversation")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let newTitle = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !newTitle.isEmpty else { return }
+                        listViewModel.renamingConversation = conversation
+                        listViewModel.renameText = newTitle
+                        Task { await listViewModel.commitRename() }
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                    .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .presentationDetents([.height(220)])
+        .presentationDragIndicator(.visible)
+        .presentationCornerRadius(20)
+    }
+}

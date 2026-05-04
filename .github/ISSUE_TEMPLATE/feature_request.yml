@@ -1,0 +1,47 @@
+name: "✨ Feature Request"
+description: "Suggest a new feature or capability."
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: "What would you like?"
+      placeholder: "e.g. Add ability to pin messages in a conversation"
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: "Why would this be useful?"
+      placeholder: "Describe the problem it solves or the value it adds."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: "Which part of the app?"
+      options:
+        - "Chat / Conversations"
+        - "Voice Calls"
+        - "Settings"
+        - "Authentication / Servers"
+        - "Channels"
+        - "Notes"
+        - "Folders / Organization"
+        - "Attachments / Files"
+        - "Appearance / Theming"
+        - "Notifications"
+        - "Widgets"
+        - "Other"
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: "Anything else? (optional)"
+      description: "Mockups, references to other apps, or extra context."
+    validations:
+      required: false
