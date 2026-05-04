@@ -237,7 +237,7 @@ struct ServerConnectionView: View {
                             .opacity(appeared ? 1 : 0)
                             .offset(y: appeared ? 0 : 10)
 
-                        Text("Connect to any OpenAI-compatible API")
+                        Text("连接任意 OpenAI 兼容接口")
                             .scaledFont(size: 16)
                             .foregroundStyle(theme.textSecondary)
                             .opacity(appeared ? 1 : 0)
@@ -261,7 +261,7 @@ struct ServerConnectionView: View {
 
                         ModernTextField(
                             label: "APIKEY",
-                            placeholder: "Enter your API key",
+                            placeholder: "请输入 API 密钥",
                             text: $viewModel.apiKey,
                             isSecure: true,
                             textContentType: .password,
@@ -277,11 +277,11 @@ struct ServerConnectionView: View {
                             VStack(spacing: Spacing.lg) {
                                 HStack {
                                     VStack(alignment: .leading, spacing: Spacing.xxs) {
-                                        Text("Self-Signed Certificates")
+                                        Text("自签名证书")
                                             .scaledFont(size: 14)
                                             .foregroundStyle(theme.textPrimary)
 
-                                        Text("For private servers with custom certs")
+                                        Text("用于使用自定义证书的私有服务器")
                                             .scaledFont(size: 12, weight: .medium)
                                             .foregroundStyle(theme.textTertiary)
                                     }
@@ -301,7 +301,7 @@ struct ServerConnectionView: View {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: "gearshape")
                                     .scaledFont(size: 14)
-                                Text("Advanced")
+                                Text("高级设置")
                                     .scaledFont(size: 14, weight: .medium)
                             }
                             .foregroundStyle(theme.textTertiary)
@@ -328,7 +328,7 @@ struct ServerConnectionView: View {
 
                         // Connect button
                         AuthPrimaryButton(
-                            title: viewModel.isConnecting ? "Connecting..." : "Connect",
+                            title: viewModel.isConnecting ? "连接中..." : "连接",
                             icon: viewModel.isConnecting ? nil : "link",
                             isLoading: viewModel.isConnecting,
                             isDisabled: viewModel.serverURL.isEmpty || viewModel.apiKey.isEmpty
@@ -373,11 +373,11 @@ struct ServerConnectionView: View {
 
                     // Help text
                     VStack(spacing: Spacing.sm) {
-                        Text("Need help?")
+                        Text("需要帮助？")
                             .scaledFont(size: 14, weight: .medium)
                             .foregroundStyle(theme.textSecondary)
 
-                        Text("Enter an OpenAI-compatible BASEURL, for example https://api.example.com/v1, and your APIKEY.")
+                        Text("请输入 OpenAI 兼容的 BASEURL，例如 https://api.example.com/v1，以及你的 APIKEY。")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textTertiary)
                             .multilineTextAlignment(.center)

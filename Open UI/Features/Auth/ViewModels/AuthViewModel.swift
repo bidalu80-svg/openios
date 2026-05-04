@@ -265,13 +265,13 @@ final class AuthViewModel {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !trimmed.isEmpty, URL(string: trimmed) != nil else {
-            errorMessage = "Please enter a valid BASEURL."
+            errorMessage = "请输入有效的 BASEURL。"
             return
         }
 
         let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedAPIKey.isEmpty else {
-            errorMessage = "Please enter your APIKEY."
+            errorMessage = "请输入 APIKEY。"
             return
         }
 
@@ -294,7 +294,7 @@ final class AuthViewModel {
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
               url.host != nil else {
-            errorMessage = "Invalid URL format. Please enter a valid HTTP or HTTPS server address."
+            errorMessage = "URL 格式无效，请输入有效的 HTTP 或 HTTPS 服务器地址。"
             isConnecting = false
             return
         }
@@ -328,13 +328,13 @@ final class AuthViewModel {
         do {
             let models = try await activeClient.getModels()
             guard !models.isEmpty else {
-                errorMessage = "Connected, but no models were returned. Check your BASEURL and APIKEY."
+                errorMessage = "已连接，但没有返回任何模型。请检查 BASEURL 和 APIKEY。"
                 isConnecting = false
                 return
             }
         } catch {
             let apiError = APIError.from(error)
-            errorMessage = apiError.errorDescription ?? "Could not load models. Check your BASEURL and APIKEY."
+            errorMessage = apiError.errorDescription ?? "无法加载模型。请检查 BASEURL 和 APIKEY。"
             isConnecting = false
             return
         }
