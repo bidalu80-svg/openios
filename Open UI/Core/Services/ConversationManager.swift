@@ -167,6 +167,10 @@ final class ConversationManager: @unchecked Sendable {
         try await apiClient.sendMessageHTTP(request: request)
     }
 
+    func generateImage(model: String, prompt: String) async throws -> [GeneratedImage] {
+        try await apiClient.generateImage(request: ImageGenerationRequest(model: model, prompt: prompt))
+    }
+
     func syncConversationMessages(
         id: String,
         messages: [ChatMessage],

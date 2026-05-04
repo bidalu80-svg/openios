@@ -713,7 +713,7 @@ struct ChatDetailView: View {
                 imageGenerationEnabled: $vm.imageGenerationEnabled,
                 codeInterpreterEnabled: $vm.codeInterpreterEnabled,
                 isWebSearchAvailable: dependencies.authViewModel.featurePermissions.webSearch && isFeatureAvailable("web_search", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableWebSearch),
-                isImageGenerationAvailable: dependencies.authViewModel.featurePermissions.imageGeneration && isFeatureAvailable("image_generation", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableImageGeneration),
+                isImageGenerationAvailable: dependencies.authViewModel.featurePermissions.imageGeneration && (viewModel.providerType == .openAICompatible || isFeatureAvailable("image_generation", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableImageGeneration)),
                 isCodeInterpreterAvailable: dependencies.authViewModel.featurePermissions.codeInterpreter && isFeatureAvailable("code_interpreter", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableCodeInterpreter),
                 tools: vm.availableTools,
                 selectedToolIds: $vm.selectedToolIds,
@@ -2339,20 +2339,55 @@ struct ChatDetailView: View {
             LazyVGrid(columns: columns, spacing: Spacing.sm) {
                 ForEach(Array(imageFiles.enumerated()), id: \.element) { _, file in
                     if let fileUrl = file.url, !fileUrl.isEmpty {
-                        let fileId: String = {
-                            if !fileUrl.contains("/") { return fileUrl }
-                            let parts = fileUrl.split(separator: "/")
-                            if let idx = parts.firstIndex(of: "files"), idx + 1 < parts.count {
-                                return String(parts[idx + 1])
-                            }
-                            return fileUrl
-                        }()
-                        AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                        directOrAuthenticatedImage(fileUrl: fileUrl)
                             .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
                     }
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func directOrAuthenticatedImage(fileUrl: String) -> some View {
+        if fileUrl.hasPrefix("data:image/"), let image = imageFromDataURL(fileUrl) {
+            Image(uiImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+        } else if let url = URL(string: fileUrl), ["http", "https"].contains(url.scheme?.lowercased()) {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().aspectRatio(contentMode: .fit)
+                case .failure:
+                    Image(systemName: "photo")
+                        .scaledFont(size: 28)
+                        .foregroundStyle(theme.textTertiary)
+                        .frame(maxWidth: .infinity, minHeight: 120)
+                        .background(theme.surfaceContainer)
+                default:
+                    ProgressView()
+                        .frame(maxWidth: .infinity, minHeight: 120)
+                        .background(theme.surfaceContainer)
+                }
+            }
+        } else {
+            let fileId: String = {
+                if !fileUrl.contains("/") { return fileUrl }
+                let parts = fileUrl.split(separator: "/")
+                if let idx = parts.firstIndex(of: "files"), idx + 1 < parts.count {
+                    return String(parts[idx + 1])
+                }
+                return fileUrl
+            }()
+            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+        }
+    }
+
+    private func imageFromDataURL(_ dataURL: String) -> UIImage? {
+        guard let commaIndex = dataURL.firstIndex(of: ",") else { return nil }
+        let base64 = String(dataURL[dataURL.index(after: commaIndex)...])
+        guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else { return nil }
+        return UIImage(data: data)
     }
 
     // MARK: - Sources Bar

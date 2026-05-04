@@ -248,6 +248,10 @@ final class ChatViewModel {
     /// Independent from backgroundTaskId (which covers streaming completion).
     @ObservationIgnored nonisolated(unsafe) private var transcriptionBackgroundTaskId: UIBackgroundTaskIdentifier = .invalid
 
+    var providerType: ServerConfig.ProviderType? {
+        manager?.providerType
+    }
+
     private var isOpenAICompatibleProvider: Bool {
         manager?.providerType == .openAICompatible
     }
@@ -474,6 +478,11 @@ final class ChatViewModel {
         // Skip audio only when in on-device transcription mode — server mode uploads audio like any file
         let audioFileMode = UserDefaults.standard.string(forKey: "audioFileTranscriptionMode") ?? "server"
         guard !(attachments[index].type == .audio && audioFileMode == "device") else { return }
+
+        if isOpenAICompatibleProvider {
+            attachments[index].uploadStatus = .completed
+            return
+        }
 
         attachments[index].uploadStatus = .uploading
 
@@ -2472,13 +2481,48 @@ final class ChatViewModel {
         attachments = []
         errorMessage = nil
 
-        // Build file references from pre-uploaded attachments.
-        // Files are uploaded at attach time (uploadAttachmentImmediately),
-        // so we just collect the already-assigned file IDs here.
-        // Only fall back to uploading at send time for attachments that
-        // somehow don't have a file ID yet (e.g., audio transcription text files).
+        var messageContent = currentText
+
+        // Build file references from attachments.
+        // OpenWebUI uses its file APIs. OpenAI-compatible providers usually do not,
+        // so keep images as data URLs and inline readable documents into the prompt.
         var fileRefs: [[String: Any]] = []
         for attachment in currentAttachments {
+            if isOpenAICompatibleProvider {
+                if attachment.type == .image, let data = attachment.data {
+                    let detectedContentType = mimeType(for: attachment.name)
+                    let contentType = detectedContentType.hasPrefix("image/") ? detectedContentType : "image/jpeg"
+                    let dataUrl = "data:\(contentType);base64,\(data.base64EncodedString())"
+                    fileRefs.append([
+                        "type": "image",
+                        "id": dataUrl,
+                        "url": dataUrl,
+                        "name": attachment.name,
+                        "status": "uploaded",
+                        "size": data.count,
+                        "error": "",
+                        "content_type": contentType
+                    ])
+                } else if let data = attachment.data {
+                    if let extracted = extractTextAttachmentContent(data: data, fileName: attachment.name), !extracted.isEmpty {
+                        messageContent += "\n\n[附件：\(attachment.name)]\n\(extracted)"
+                        fileRefs.append([
+                            "type": "file",
+                            "id": "local:\(attachment.name)",
+                            "url": "local:\(attachment.name)",
+                            "name": attachment.name,
+                            "status": "uploaded",
+                            "size": data.count,
+                            "error": "",
+                            "content_type": mimeType(for: attachment.name)
+                        ])
+                    } else {
+                        messageContent += "\n\n[附件：\(attachment.name)]\n该文件类型无法直接发送到当前 OpenAI 兼容接口。请改用图片、PDF、TXT、Markdown、CSV、JSON、HTML、CSS、JS 或其他文本文件。"
+                    }
+                }
+                continue
+            }
+
             if let fileId = attachment.uploadedFileId {
                 // Already uploaded + processed — build rich web-UI-format ref
                 let fileObject = attachment.uploadedFileObject ?? [:]
@@ -2532,19 +2576,14 @@ final class ChatViewModel {
             // intentionally skipped — they failed at attach-time and must be retried or removed.
         }
 
-        // Create user message - store file IDs (not base64) matching Flutter behavior
+        // Create user message - store file IDs/data URLs matching provider behavior
         let uploadedAttachmentIds = fileRefs.compactMap { $0["id"] as? String }
         var messageFiles: [ChatMessageFile] = fileRefs.map { ref in
-            // Derive content_type from filename so the Open WebUI web client
-            // knows to append `/content` to the file URL. Without content_type,
-            // the web client constructs `/files/{id}` (returns JSON metadata)
-            // instead of `/files/{id}/content` (returns actual file bytes).
-            // This affects images (broken thumbnails), PDFs, docs, and all files.
             let name = ref["name"] as? String
-            let contentType: String? = mimeType(for: name ?? "file")
+            let contentType = ref["content_type"] as? String ?? mimeType(for: name ?? "file")
             return ChatMessageFile(
                 type: ref["type"] as? String,
-                url: ref["id"] as? String,  // Store file ID, not base64
+                url: (ref["url"] as? String) ?? (ref["id"] as? String),
                 name: name,
                 contentType: contentType
             )
@@ -2561,7 +2600,7 @@ final class ChatViewModel {
         }
         let userMessage = ChatMessage(
             role: .user,
-            content: currentText,
+            content: messageContent,
             timestamp: .now,
             attachmentIds: uploadedAttachmentIds,
             files: messageFiles
@@ -2573,7 +2612,7 @@ final class ChatViewModel {
 
         // Ensure conversation exists on server (skip for temporary chats)
         if conversation == nil {
-            let chatTitle = String(currentText.prefix(50))
+            let chatTitle = String(messageContent.prefix(50))
             var serverId: String?
             if !isTemporaryChat && !isOpenAICompatibleProvider {
                 do {
@@ -2619,7 +2658,7 @@ final class ChatViewModel {
             parentId: userMessageParentId,
             childrenIds: [assistantMessageId],
             role: .user,
-            content: currentText,
+            content: messageContent,
             timestamp: userMessage.timestamp,
             files: messageFiles,
             models: userNodeModels
@@ -2667,6 +2706,48 @@ final class ChatViewModel {
         if isOpenAICompatibleProvider {
             streamingTask = Task { [weak self] in
                 guard let self else { return }
+
+                if self.imageGenerationEnabled {
+                    do {
+                        let images = try await manager.generateImage(model: modelId, prompt: currentText)
+                        let files = images.map { image in
+                            ChatMessageFile(
+                                type: "image",
+                                url: image.url,
+                                name: image.name,
+                                contentType: image.contentType
+                            )
+                        }
+                        self.updateAssistantMessageWithFiles(
+                            id: assistantMessageId,
+                            content: "已生成 \(files.count) 张图片。",
+                            files: files
+                        )
+                    } catch {
+                        if !Task.isCancelled {
+                            self.updateAssistantMessage(
+                                id: assistantMessageId,
+                                content: "",
+                                isStreaming: false,
+                                error: ChatMessageError(content: error.localizedDescription)
+                            )
+                            self.cleanupStreaming()
+                        }
+                        return
+                    }
+
+                    if Task.isCancelled { return }
+
+                    self.hasFinishedStreaming = true
+                    self.isStreaming = false
+                    self.selfInitiatedStream = false
+                    self.activeTaskId = nil
+                    self.lastTaskExtractionLength = 0
+                    await self.sendCompletionNotificationIfNeeded(content: "图片已生成")
+                    NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                    return
+                }
+
                 let acc = ContentAccumulator()
 
                 do {
@@ -2790,7 +2871,7 @@ final class ChatViewModel {
                     "parentId": (userMessageParentId as Any?) ?? NSNull(),
                     "childrenIds": [assistantMessageId],
                     "role": "user",
-                    "content": currentText,
+                    "content": messageContent,
                     "timestamp": Int(userMessage.timestamp.timeIntervalSince1970),
                     "models": [modelId]
                 ]
@@ -5081,7 +5162,7 @@ final class ChatViewModel {
                     "content": contentArray
                 ]
 
-                if !nonImageFiles.isEmpty {
+                if !nonImageFiles.isEmpty && !isOpenAICompatibleProvider {
                     msgDict["files"] = nonImageFiles.compactMap { f -> [String: Any]? in
                         guard let id = f.url else { return nil }
                         return ["type": "file", "id": id, "url": id]
@@ -5089,6 +5170,11 @@ final class ChatViewModel {
                 }
 
                 apiMessages.append(msgDict)
+            } else if isOpenAICompatibleProvider {
+                apiMessages.append([
+                    "role": message.role.rawValue,
+                    "content": message.content
+                ])
             } else {
                 var msgDict: [String: Any] = [
                     "role": message.role.rawValue,
@@ -5396,6 +5482,46 @@ final class ChatViewModel {
         }
 
         return nil
+    }
+
+    private func extractTextAttachmentContent(data: Data, fileName: String) -> String? {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+
+        if ext == "pdf", let document = PDFDocument(data: data) {
+            var pages: [String] = []
+            for index in 0..<document.pageCount {
+                if let text = document.page(at: index)?.string, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    pages.append(text)
+                }
+            }
+            return pages.joined(separator: "\n\n")
+        }
+
+        let textExtensions: Set<String> = [
+            "txt", "md", "markdown", "csv", "json", "jsonl", "xml", "yaml", "yml",
+            "html", "htm", "css", "js", "ts", "jsx", "tsx", "swift", "py", "java",
+            "c", "cpp", "h", "hpp", "go", "rs", "rb", "php", "sql", "log", "ini", "toml"
+        ]
+        guard textExtensions.contains(ext) || mimeType(for: fileName).hasPrefix("text/") else { return nil }
+        return String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .utf16)
+            ?? String(data: data, encoding: .ascii)
+    }
+
+    private func updateAssistantMessageWithFiles(id: String, content: String, files: [ChatMessageFile]) {
+        if streamingStore.streamingMessageId == id {
+            _ = streamingStore.endStreaming()
+        }
+
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == id }) else { return }
+        conversation?.messages[index].content = content
+        conversation?.messages[index].files = files
+        conversation?.messages[index].isStreaming = false
+        conversation?.history.updateNode(id: id) { node in
+            node.content = content
+            node.files = files
+            node.done = true
+        }
     }
 
     private func updateAssistantMessage(

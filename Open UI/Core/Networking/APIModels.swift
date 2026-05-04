@@ -379,6 +379,47 @@ struct ChatCompletionRequest: Sendable {
     }
 }
 
+// MARK: - Image Generation
+
+struct ImageGenerationRequest: Sendable {
+    var model: String
+    var prompt: String
+    var n: Int = 1
+    var size: String = "1024x1024"
+
+    func toOpenAICompatibleJSON() -> [String: Any] {
+        [
+            "model": model,
+            "prompt": prompt,
+            "n": n,
+            "size": size
+        ]
+    }
+}
+
+struct GeneratedImage: Hashable, Sendable {
+    var url: String
+    var contentType: String
+    var name: String
+
+    static func parse(from payload: [String: Any]) -> [GeneratedImage] {
+        guard let data = payload["data"] as? [[String: Any]] else { return [] }
+
+        return data.enumerated().compactMap { index, item -> GeneratedImage? in
+            if let url = item["url"] as? String, !url.isEmpty {
+                return GeneratedImage(url: url, contentType: "image/png", name: "generated-image-\(index + 1).png")
+            }
+
+            if let b64 = item["b64_json"] as? String, !b64.isEmpty {
+                let mimeType = (item["content_type"] as? String) ?? (item["mime_type"] as? String) ?? "image/png"
+                return GeneratedImage(url: "data:\(mimeType);base64,\(b64)", contentType: mimeType, name: "generated-image-\(index + 1).png")
+            }
+
+            return nil
+        }
+    }
+}
+
 // MARK: - File Info
 
 /// Metadata about an uploaded file.
