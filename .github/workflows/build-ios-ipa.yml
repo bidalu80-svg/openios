@@ -158,6 +158,8 @@ jobs:
             -archivePath "$RUNNER_TEMP/OpenRelay.xcarchive" \
             DEVELOPMENT_TEAM="$IOS_TEAM_ID" \
             CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="$IOS_SIGNING_IDENTITY" \
+            CODE_SIGN_ENTITLEMENTS="" \
             PROVISIONING_PROFILE_SPECIFIER="$IOS_PROVISIONING_PROFILE_SPECIFIER" \
             PRODUCT_BUNDLE_IDENTIFIER="$APP_BUNDLE_ID" \
             archive
