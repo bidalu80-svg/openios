@@ -201,13 +201,30 @@ jobs:
             -exportOptionsPlist ExportOptions.plist \
             -exportPath "$RUNNER_TEMP/exported"
 
+      - name: Strip embedded extensions from IPA
+        run: |
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          ipa = next(Path('${{ runner.temp }}/exported').glob('*.ipa'))
+          clean = ipa.with_suffix('.clean.ipa')
+
+          with zipfile.ZipFile(ipa, 'r') as src, zipfile.ZipFile(clean, 'w', zipfile.ZIP_DEFLATED) as dst:
+            for item in src.infolist():
+              if '/PlugIns/' in item.filename or item.filename.endswith('/PlugIns') or item.filename.endswith('/PlugIns/'):
+                continue
+              dst.writestr(item, src.read(item.filename))
+
+          ipa.unlink()
+          clean.rename(ipa)
+          PY
+
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: open-relay-ipa
-          path: |
-            ${{ runner.temp }}/exported/*.ipa
-            ${{ runner.temp }}/OpenRelay.xcarchive
+          path: ${{ runner.temp }}/exported/*.ipa
 
       - name: Cleanup signing assets
         if: always()
