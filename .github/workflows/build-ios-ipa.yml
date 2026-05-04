@@ -133,12 +133,14 @@ jobs:
           s = s.replace('CODE_SIGN_ENTITLEMENTS = "Open UI/Open UI.entitlements";', 'CODE_SIGN_ENTITLEMENTS = "";')
           s = s.replace('CODE_SIGN_ENTITLEMENTS = OpenUIWidgets/OpenUIWidgets.entitlements;', 'CODE_SIGN_ENTITLEMENTS = "";')
 
-          # Do not build/embed the widget in CI because the supplied profile does not
-          # include the required App Groups capability for the extension.
+          # Remove the widget target/embed completely in CI because the supplied
+          # profile does not include the required App Groups capability.
           s = s.replace('\t\t\t\t\t38A141942F4B9A1A00697C6F /* Embed Foundation Extensions */,\n', '')
           s = s.replace('\t\t\t\t\t3852C7212F71110900283682 /* PBXTargetDependency */,\n', '')
+          s = s.replace('\t\t\t\t\t3852C70B2F71110800283682 /* OpenUIWidgetsExtension */,\n', '')
+          s = s.replace('\t\t\t\t\t3852C70C2F71110800283682 /* OpenUIWidgetsExtension.appex */,\n', '')
 
-          # Scope manual signing to app/extension target build settings instead of
+          # Scope manual signing to the app target build settings instead of
           # passing PROVISIONING_PROFILE_SPECIFIER to xcodebuild globally; global
           # overrides also hit Swift package targets and make archive fail.
           s = s.replace('CODE_SIGN_STYLE = Automatic;', 'CODE_SIGN_STYLE = Manual;')
@@ -153,7 +155,6 @@ jobs:
       - name: Create export options
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
-          WIDGET_BUNDLE_ID="${IOS_WIDGET_BUNDLE_ID:-$APP_BUNDLE_ID.OpenUIWidget}"
           EFFECTIVE_EXPORT_METHOD="${IOS_EFFECTIVE_EXPORT_METHOD:-release-testing}"
           cat > ExportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -165,8 +166,6 @@ jobs:
             <key>provisioningProfiles</key>
             <dict>
               <key>${APP_BUNDLE_ID}</key>
-              <string>${IOS_PROVISIONING_PROFILE_SPECIFIER}</string>
-              <key>${WIDGET_BUNDLE_ID}</key>
               <string>${IOS_PROVISIONING_PROFILE_SPECIFIER}</string>
             </dict>
             <key>signingCertificate</key>
