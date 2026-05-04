@@ -113,6 +113,43 @@ jobs:
             echo "IOS_EFFECTIVE_EXPORT_METHOD=$IOS_EXPORT_METHOD" >> "$GITHUB_ENV"
           fi
 
+      - name: Prepare CI signing overrides
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          app_bundle_id = os.environ.get('IOS_BUNDLE_ID') or 'com.openui.openui'
+          widget_bundle_id = os.environ.get('IOS_WIDGET_BUNDLE_ID') or f'{app_bundle_id}.OpenUIWidget'
+          team_id = os.environ['IOS_TEAM_ID']
+          identity = os.environ['IOS_SIGNING_IDENTITY']
+          profile = os.environ['IOS_PROVISIONING_PROFILE_SPECIFIER']
+
+          p = Path('Open UI.xcodeproj/project.pbxproj')
+          s = p.read_text()
+
+          # The available provisioning profile does not include Open Relay's optional
+          # app-group/GPU/memory entitlements, so disable them for CI packaging.
+          s = s.replace('CODE_SIGN_ENTITLEMENTS = "Open UI/Open UI.entitlements";', 'CODE_SIGN_ENTITLEMENTS = "";')
+          s = s.replace('CODE_SIGN_ENTITLEMENTS = OpenUIWidgets/OpenUIWidgets.entitlements;', 'CODE_SIGN_ENTITLEMENTS = "";')
+
+          # Do not build/embed the widget in CI because the supplied profile does not
+          # include the required App Groups capability for the extension.
+          s = s.replace('\t\t\t\t\t38A141942F4B9A1A00697C6F /* Embed Foundation Extensions */,\n', '')
+          s = s.replace('\t\t\t\t\t3852C7212F71110900283682 /* PBXTargetDependency */,\n', '')
+
+          # Scope manual signing to app/extension target build settings instead of
+          # passing PROVISIONING_PROFILE_SPECIFIER to xcodebuild globally; global
+          # overrides also hit Swift package targets and make archive fail.
+          s = s.replace('CODE_SIGN_STYLE = Automatic;', 'CODE_SIGN_STYLE = Manual;')
+          s = s.replace('DEVELOPMENT_TEAM = 6ARX8PF3MT;', f'DEVELOPMENT_TEAM = {team_id};')
+          s = s.replace('PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.OpenUIWidget;', f'PRODUCT_BUNDLE_IDENTIFIER = {widget_bundle_id};')
+          s = s.replace('PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui;', f'PRODUCT_BUNDLE_IDENTIFIER = {app_bundle_id};')
+          s = s.replace('CODE_SIGN_STYLE = Manual;\n', f'CODE_SIGN_STYLE = Manual;\n\t\t\t\t\tCODE_SIGN_IDENTITY = "{identity}";\n\t\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "{profile}";\n')
+
+          p.write_text(s)
+          PY
+
       - name: Create export options
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
@@ -149,18 +186,12 @@ jobs:
       - name: Archive app
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
-          WIDGET_BUNDLE_ID="${IOS_WIDGET_BUNDLE_ID:-$APP_BUNDLE_ID.OpenUIWidget}"
           xcodebuild \
             -project "Open UI.xcodeproj" \
             -scheme "Open UI" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/OpenRelay.xcarchive" \
-            DEVELOPMENT_TEAM="$IOS_TEAM_ID" \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="$IOS_SIGNING_IDENTITY" \
-            CODE_SIGN_ENTITLEMENTS="" \
-            PROVISIONING_PROFILE_SPECIFIER="$IOS_PROVISIONING_PROFILE_SPECIFIER" \
             PRODUCT_BUNDLE_IDENTIFIER="$APP_BUNDLE_ID" \
             archive
 
