@@ -301,6 +301,17 @@ struct StreamingMarkdownView: View {
         case visualization(String)
     }
 
+    private struct ParsedBlock {
+        let language: String
+        let content: String
+    }
+
+    private enum EitherContent {
+        case markdown(String)
+        case block(_ block: ParsedBlock)
+        case segment(_ segment: ContentSegment)
+    }
+
     // MARK: - Markdown Image Regex Patterns
 
     /// Matches linked images: [![alt](imageUrl)](linkUrl)
@@ -469,44 +480,45 @@ struct StreamingMarkdownView: View {
     private func parseCodeBlocks(_ text: String) -> [ContentSegment] {
         guard text.contains("```") else { return [.markdown(text)] }
 
-        var segments: [ContentSegment] = []
+        var units: [EitherContent] = []
         var remaining = text[text.startIndex...]
 
         while let openRange = remaining.range(of: "```") {
             let afterOpen = remaining[openRange.upperBound...]
             guard let newlineIdx = afterOpen.firstIndex(of: "\n") else {
-                segments.append(.markdown(String(remaining)))
-                return segments
+                units.append(.markdown(String(remaining)))
+                return collapseParsedUnits(units, fallback: text)
             }
             let lang = afterOpen[afterOpen.startIndex..<newlineIdx]
                 .trimmingCharacters(in: .whitespaces).lowercased()
             let contentStart = afterOpen.index(after: newlineIdx)
             let searchArea = remaining[contentStart...]
             guard let closeRange = searchArea.range(of: "\n```") else {
-                segments.append(.markdown(String(remaining)))
-                return segments
+                units.append(.markdown(String(remaining)))
+                return collapseParsedUnits(units, fallback: text)
             }
             let codeContent = String(remaining[contentStart..<closeRange.lowerBound])
             let isChart = chartLanguageTags.contains(lang) && looksLikeChartJSON(codeContent)
             let isHTML = lang == "html" && codeContent.contains("<") && codeContent.contains(">") && codeContent.count >= 10
+            let isLinkedWebAsset = lang == "css" || lang == "js" || lang == "javascript"
             let isMermaid = lang == "mermaid" && codeContent.trimmingCharacters(in: .whitespacesAndNewlines).count >= 5
             let isSVG = lang == "svg" && looksLikeSVG(codeContent)
             let isPython = pythonLanguageTags.contains(lang) && codeContent.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
 
-            if isChart || isHTML || isMermaid || isSVG || isPython {
+            if isChart || isHTML || isLinkedWebAsset || isMermaid || isSVG || isPython {
                 let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
                 if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    segments.append(.markdown(preceding))
+                    units.append(.markdown(preceding))
                 }
-                if isChart { segments.append(.chart(codeContent)) }
-                else if isMermaid { segments.append(.mermaid(codeContent)) }
-                else if isSVG { segments.append(.svg(codeContent, isStreaming: false)) }
-                else if isPython { segments.append(.python(codeContent)) }
-                else { segments.append(.html(codeContent, isStreaming: false)) }
+                if isChart { units.append(.segment(.chart(codeContent))) }
+                else if isMermaid { units.append(.segment(.mermaid(codeContent))) }
+                else if isSVG { units.append(.segment(.svg(codeContent, isStreaming: false))) }
+                else if isPython { units.append(.segment(.python(codeContent))) }
+                else { units.append(.block(ParsedBlock(language: lang, content: codeContent))) }
                 remaining = remaining[closeRange.upperBound...]
             } else {
                 let blockEnd = closeRange.upperBound
-                segments.append(.markdown(String(remaining[remaining.startIndex..<blockEnd])))
+                units.append(.markdown(String(remaining[remaining.startIndex..<blockEnd])))
                 remaining = remaining[blockEnd...]
             }
         }
@@ -514,11 +526,95 @@ struct StreamingMarkdownView: View {
         if !remaining.isEmpty {
             let s = String(remaining)
             if !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                segments.append(.markdown(s))
+                units.append(.markdown(s))
+            }
+        }
+
+        return collapseParsedUnits(units, fallback: text)
+    }
+
+    private func collapseParsedUnits(_ units: [EitherContent], fallback text: String) -> [ContentSegment] {
+        guard !units.isEmpty else { return [.markdown(text)] }
+
+        var segments: [ContentSegment] = []
+        var index = 0
+
+        func isWebBlock(_ block: ParsedBlock) -> Bool {
+            block.language == "html"
+                || block.language == "css"
+                || block.language == "js"
+                || block.language == "javascript"
+        }
+
+        func markdownBlock(_ block: ParsedBlock) -> ContentSegment {
+            .markdown("```\(block.language)\n\(block.content)\n```")
+        }
+
+        while index < units.count {
+            switch units[index] {
+            case .markdown(let markdown):
+                segments.append(.markdown(markdown))
+                index += 1
+            case .segment(let segment):
+                segments.append(segment)
+                index += 1
+            case .block(let block):
+                guard isWebBlock(block) else {
+                    segments.append(markdownBlock(block))
+                    index += 1
+                    continue
+                }
+
+                var webBlocks: [ParsedBlock] = []
+                var consumed = 0
+                while index + consumed < units.count {
+                    guard case .block(let linkedBlock) = units[index + consumed],
+                          isWebBlock(linkedBlock)
+                    else { break }
+                    webBlocks.append(linkedBlock)
+                    consumed += 1
+                }
+
+                guard let htmlBlock = webBlocks.first(where: { $0.language == "html" }) else {
+                    webBlocks.forEach { segments.append(markdownBlock($0)) }
+                    index += max(consumed, 1)
+                    continue
+                }
+
+                var html = htmlBlock.content
+                for linkedBlock in webBlocks where linkedBlock.language == "css" {
+                    html = injectCSS(linkedBlock.content, into: html)
+                }
+                for linkedBlock in webBlocks where linkedBlock.language == "js" || linkedBlock.language == "javascript" {
+                    html = injectJS(linkedBlock.content, into: html)
+                }
+
+                segments.append(.html(html, isStreaming: false))
+                index += max(consumed, 1)
             }
         }
 
         return segments.isEmpty ? [.markdown(text)] : segments
+    }
+
+    private func injectCSS(_ css: String, into html: String) -> String {
+        let styleTag = "<style>\n\(css)\n</style>"
+        if let headRange = html.range(of: "</head>", options: .caseInsensitive) {
+            var updated = html
+            updated.insert(contentsOf: styleTag + "\n", at: headRange.lowerBound)
+            return updated
+        }
+        return styleTag + "\n" + html
+    }
+
+    private func injectJS(_ js: String, into html: String) -> String {
+        let scriptTag = "<script>\n\(js)\n</script>"
+        if let bodyRange = html.range(of: "</body>", options: .caseInsensitive) {
+            var updated = html
+            updated.insert(contentsOf: scriptTag + "\n", at: bodyRange.lowerBound)
+            return updated
+        }
+        return html + "\n" + scriptTag
     }
 
     private func looksLikeChartJSON(_ code: String) -> Bool {

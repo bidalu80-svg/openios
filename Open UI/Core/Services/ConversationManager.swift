@@ -139,6 +139,10 @@ final class ConversationManager: @unchecked Sendable {
         await apiClient.getDefaultModel()
     }
 
+    func fetchUserDefaultModel() async -> String? {
+        await apiClient.getUserDefaultModel()
+    }
+
     // MARK: - Tools & Terminals
 
     func fetchTerminalServers() async throws -> [TerminalServer] {

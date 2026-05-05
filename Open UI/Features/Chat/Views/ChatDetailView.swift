@@ -1535,7 +1535,9 @@ struct ChatDetailView: View {
 
             VStack(alignment: .trailing, spacing: Spacing.sm) {
                 // Inline images inside the bubble
-                let imageFiles = displayFiles.filter { $0.type == "image" }
+                let imageFiles = displayFiles.filter {
+                    $0.type == "image" || ($0.contentType ?? "").hasPrefix("image/")
+                }
                 if !imageFiles.isEmpty {
                     ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
                         if let fileId = file.url, !fileId.isEmpty {
@@ -1547,7 +1549,11 @@ struct ChatDetailView: View {
                 }
 
                 // Non-image file cards inside the bubble
-                let nonImageFiles = displayFiles.filter { $0.type != "image" && $0.type != "collection" && $0.type != "folder" }
+                let nonImageFiles = displayFiles.filter {
+                    !($0.type == "image" || ($0.contentType ?? "").hasPrefix("image/"))
+                        && $0.type != "collection"
+                        && $0.type != "folder"
+                }
                 if !nonImageFiles.isEmpty {
                     ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
                         fileAttachmentCard(file: file)
@@ -2236,8 +2242,12 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func userAttachmentImages(for message: ChatMessage) -> some View {
-        let imageFiles = message.files.filter { $0.type == "image" }
-        let nonImageFiles = message.files.filter { $0.type != "image" }
+        let imageFiles = message.files.filter {
+            $0.type == "image" || ($0.contentType ?? "").hasPrefix("image/")
+        }
+        let nonImageFiles = message.files.filter {
+            !($0.type == "image" || ($0.contentType ?? "").hasPrefix("image/"))
+        }
 
         VStack(alignment: .trailing, spacing: Spacing.xs) {
             if !imageFiles.isEmpty {

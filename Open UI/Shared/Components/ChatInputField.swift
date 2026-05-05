@@ -153,8 +153,13 @@ struct ChatInputField: View {
         attachments.contains { $0.isUploading }
     }
 
+    /// Whether any attachment has failed and needs user action before sending.
+    private var hasFailedAttachments: Bool {
+        attachments.contains { $0.uploadStatus == .error }
+    }
+
     private var canSend: Bool {
-        isEnabled && !isTranscribing && !hasUploadingAttachments &&
+        isEnabled && !isTranscribing && !hasUploadingAttachments && !hasFailedAttachments &&
             (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !attachments.isEmpty)
     }

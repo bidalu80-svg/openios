@@ -89,7 +89,9 @@ final class ActiveChatStore {
         // Pre-populate from shared cache so UI is instant
         if !cachedModels.isEmpty {
             vm.availableModels = cachedModels
-            vm.selectedModelId = cachedSelectedModelId ?? cachedModels.first?.id
+            if let cachedSelectedModelId {
+                vm.selectedModelId = cachedSelectedModelId
+            }
         }
         viewModels[key] = vm
         accessOrder.append(key)
@@ -121,6 +123,15 @@ final class ActiveChatStore {
     func updateModelCache(models: [AIModel], selectedId: String?) {
         cachedModels = models
         if let selectedId { cachedSelectedModelId = selectedId }
+    }
+
+    /// Updates the shared default/new-chat model selection cache.
+    /// Also patches the cached new-chat VM so the picker reflects the change immediately.
+    func updateDefaultModelSelection(_ selectedId: String?) {
+        cachedSelectedModelId = selectedId
+        if let newChatVM = viewModels["__new__"] {
+            newChatVM.selectedModelId = selectedId
+        }
     }
 
     /// Removes the cached view model for a conversation that has finished.

@@ -352,6 +352,7 @@ final class ChatViewModel {
         !isStreaming
             && !attachments.contains(where: { $0.type == .audio && $0.isTranscribing })
             && !attachments.contains(where: { $0.isUploading })
+            && !attachments.contains(where: { $0.uploadStatus == .error })
             && (!inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !attachments.isEmpty)
     }
@@ -486,8 +487,12 @@ final class ChatViewModel {
                 return
             }
 
-            guard let idx = attachments.firstIndex(where: { $0.id == attachmentId }),
-                  let data = attachments[idx].data else { return }
+            guard let idx = attachments.firstIndex(where: { $0.id == attachmentId }) else { return }
+            guard let data = attachments[idx].data else {
+                attachments[idx].uploadStatus = .error
+                attachments[idx].uploadError = "Failed to read attachment data"
+                return
+            }
 
             let fileName = attachments[idx].name
 
@@ -786,6 +791,8 @@ final class ChatViewModel {
             // check — they are all no-ops when there is no conversation ID.
             if needsModelFetch {
                 await loadModels()
+            } else if selectedModelId == nil {
+                await resolveDefaultModelSelection()
             } else {
                 syncUIWithModelDefaults()
             }
@@ -798,7 +805,11 @@ final class ChatViewModel {
                     group.addTask { await self.loadConversation() }
                 }
             } else {
-                syncUIWithModelDefaults()
+                if selectedModelId == nil {
+                    await resolveDefaultModelSelection()
+                } else {
+                    syncUIWithModelDefaults()
+                }
                 await loadConversation()
             }
         }
@@ -876,7 +887,7 @@ final class ChatViewModel {
             } else if let conversationModel = fetched.model, !conversationModel.isEmpty {
                 selectedModelId = conversationModel
             } else if selectedModelId == nil {
-                selectedModelId = availableModels.first?.id
+                await resolveDefaultModelSelection()
             }
         } catch {
             logger.error("Failed to load conversation: \(error.localizedDescription)")
@@ -1502,12 +1513,11 @@ final class ChatViewModel {
         isLoadingModels = true
         do {
             availableModels = try await manager.fetchModels()
-            if selectedModelId == nil {
-                if let def = await manager.fetchDefaultModel() {
-                    selectedModelId = def
-                } else {
-                    selectedModelId = availableModels.first?.id
-                }
+            let currentSelectionIsAvailable = selectedModelId.flatMap { selected in
+                availableModels.first(where: { $0.id == selected })
+            } != nil
+            if selectedModelId == nil || !currentSelectionIsAvailable {
+                await resolveDefaultModelSelection()
             }
             // Write back to shared cache so subsequent VMs are pre-populated
             activeChatStore?.updateModelCache(models: availableModels, selectedId: selectedModelId)
@@ -1516,6 +1526,23 @@ final class ChatViewModel {
         }
         isLoadingModels = false
         // Sync UI toggles with model defaults after models are loaded
+        syncUIWithModelDefaults()
+    }
+
+    private func resolveDefaultModelSelection() async {
+        guard let manager else {
+            selectedModelId = availableModels.first?.id
+            syncUIWithModelDefaults()
+            return
+        }
+
+        if let def = await manager.fetchDefaultModel(),
+           availableModels.isEmpty || availableModels.contains(where: { $0.id == def }) {
+            selectedModelId = def
+        } else {
+            selectedModelId = availableModels.first?.id
+        }
+        activeChatStore?.updateModelCache(models: availableModels, selectedId: selectedModelId)
         syncUIWithModelDefaults()
     }
 
@@ -2412,6 +2439,14 @@ final class ChatViewModel {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else { return }
         guard let manager else { return }
+        if attachments.contains(where: { $0.uploadStatus == .error }) {
+            errorMessage = "One or more attachments failed to upload. Retry or remove them before sending."
+            return
+        }
+        if attachments.contains(where: { $0.isUploading }) {
+            errorMessage = "Please wait for attachments to finish uploading."
+            return
+        }
         // Use mentioned model (@ override) if set, otherwise the chat's selected model
         guard let modelId = mentionedModelId ?? selectedModelId else {
             errorMessage = "Please select a model first."
@@ -2468,8 +2503,6 @@ final class ChatViewModel {
 
         let currentText = text
         let currentAttachments = processedAttachments
-        inputText = ""
-        attachments = []
         errorMessage = nil
 
         // Build file references from pre-uploaded attachments.
@@ -2478,15 +2511,17 @@ final class ChatViewModel {
         // Only fall back to uploading at send time for attachments that
         // somehow don't have a file ID yet (e.g., audio transcription text files).
         var fileRefs: [[String: Any]] = []
+        var fallbackUploadFailure: String?
         for attachment in currentAttachments {
             if let fileId = attachment.uploadedFileId {
                 // Already uploaded + processed — build rich web-UI-format ref
                 let fileObject = attachment.uploadedFileObject ?? [:]
                 let isImage = attachment.type == .image
                 let contentType: String = isImage ? "image/jpeg" : mimeType(for: attachment.name)
+                let payloadType = isImage ? "image" : "file"
                 let size: Int = (fileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
                 fileRefs.append([
-                    "type": "file",
+                    "type": payloadType,
                     "file": fileObject.isEmpty ? [
                         "id": fileId,
                         "filename": attachment.name,
@@ -2508,9 +2543,10 @@ final class ChatViewModel {
                     let (fileId, fileObject) = try await manager.uploadFile(data: data, fileName: attachment.name)
                     let isImage = attachment.type == .image
                     let contentType: String = isImage ? "image/jpeg" : mimeType(for: attachment.name)
+                    let payloadType = isImage ? "image" : "file"
                     let size: Int = (fileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
                     fileRefs.append([
-                        "type": "file",
+                        "type": payloadType,
                         "file": fileObject.isEmpty ? [
                             "id": fileId,
                             "filename": attachment.name,
@@ -2525,12 +2561,21 @@ final class ChatViewModel {
                         "content_type": contentType
                     ])
                 } catch {
+                    fallbackUploadFailure = error.localizedDescription
                     logger.error("Upload failed: \(error.localizedDescription)")
+                    break
                 }
             }
             // Note: attachments with uploadStatus == .error and no uploadedFileId are
             // intentionally skipped — they failed at attach-time and must be retried or removed.
         }
+        if let fallbackUploadFailure {
+            errorMessage = "Attachment upload failed: \(fallbackUploadFailure)"
+            return
+        }
+
+        inputText = ""
+        attachments = []
 
         // Create user message - store file IDs (not base64) matching Flutter behavior
         let uploadedAttachmentIds = fileRefs.compactMap { $0["id"] as? String }
@@ -2542,8 +2587,15 @@ final class ChatViewModel {
             // This affects images (broken thumbnails), PDFs, docs, and all files.
             let name = ref["name"] as? String
             let contentType: String? = mimeType(for: name ?? "file")
+            let normalizedType: String = {
+                let rawType = (ref["type"] as? String) ?? "file"
+                if rawType == "image" || (contentType ?? "").hasPrefix("image/") {
+                    return "image"
+                }
+                return rawType
+            }()
             return ChatMessageFile(
-                type: ref["type"] as? String,
+                type: normalizedType,
                 url: ref["id"] as? String,  // Store file ID, not base64
                 name: name,
                 contentType: contentType
@@ -3259,6 +3311,7 @@ final class ChatViewModel {
 
     func selectModel(_ modelId: String) {
         selectedModelId = modelId
+        activeChatStore?.cachedSelectedModelId = modelId
         // Switching models is a deliberate user action — reset disabled tools
         // so the new model's defaults apply cleanly without stale overrides.
         userDisabledToolIds = []

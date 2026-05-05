@@ -393,6 +393,23 @@ final class APIClient: @unchecked Sendable {
     }
 
     func getDefaultModel() async -> String? {
+        if let userDefault = await getUserDefaultModel() {
+            return userDefault
+        }
+
+        if let config = try? await getBackendConfig(),
+           let first = config.defaultModels?.first,
+           !first.isEmpty {
+            return first
+        }
+
+        if let models = try? await getModels(), let first = models.first {
+            return first.id
+        }
+        return nil
+    }
+
+    func getUserDefaultModel() async -> String? {
         do {
             let settings = try await getUserSettings()
             if let ui = settings["ui"] as? [String: Any],
@@ -401,10 +418,6 @@ final class APIClient: @unchecked Sendable {
                 return first
             }
         } catch {}
-
-        if let models = try? await getModels(), let first = models.first {
-            return first.id
-        }
         return nil
     }
 
@@ -1332,7 +1345,12 @@ final class APIClient: @unchecked Sendable {
             timeout: 300
         )
 
-        guard let fileId = response["id"] as? String else {
+        let nestedFile = response["file"] as? [String: Any]
+        let nestedData = response["data"] as? [String: Any]
+        guard let fileId = response["id"] as? String
+                ?? nestedFile?["id"] as? String
+                ?? nestedData?["id"] as? String
+        else {
             throw APIError.responseDecoding(
                 underlying: NSError(
                     domain: "APIError", code: -1,
@@ -1342,13 +1360,14 @@ final class APIClient: @unchecked Sendable {
             )
         }
 
+        let fileObject = nestedFile ?? nestedData ?? response
+        onUploaded?(fileId)
+
         if !isImage {
-            // Notify caller that file is uploaded — processing is about to start
-            onUploaded?(fileId)
             try await waitForFileProcessing(fileId: fileId)
         }
 
-        return (fileId: fileId, fileObject: response)
+        return (fileId: fileId, fileObject: fileObject)
     }
 
     /// Polls `GET /api/v1/files/{id}/process/status?stream=true` via SSE
@@ -4005,8 +4024,14 @@ final class APIClient: @unchecked Sendable {
             if !msg.files.isEmpty {
                 let filesArray: [[String: Any]] = msg.files.compactMap { file -> [String: Any]? in
                     guard let url = file.url else { return nil }
+                    let normalizedType: String = {
+                        if file.type == "image" || (file.contentType ?? "").hasPrefix("image/") {
+                            return "image"
+                        }
+                        return file.type ?? "file"
+                    }()
                     var dict: [String: Any] = [
-                        "type": file.type ?? "file",
+                        "type": normalizedType,
                         "id": url,
                         "url": url
                     ]

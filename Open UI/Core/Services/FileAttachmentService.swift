@@ -409,10 +409,11 @@ final class FileAttachmentService {
             let filename = attachment.name
             let isImage = attachment.type == .image
             let contentType: String = isImage ? "image/jpeg" : "application/octet-stream"
+            let payloadType = isImage ? "image" : "file"
             let size: Int = (fileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
 
             return [
-                "type": "file",
+                "type": payloadType,
                 "file": fileObject.isEmpty ? [
                     "id": fileId,
                     "filename": filename,
