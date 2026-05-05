@@ -40,10 +40,23 @@ final class ActiveChatStore {
     /// Updated by the first VM that loads models.
     var cachedModels: [AIModel] = []
 
-    /// The last-selected model ID, carried forward to new chats.
-    var cachedSelectedModelId: String? = UserDefaults.standard.string(forKey: "chat.lastSelectedModelId")
+    /// The preferred model ID carried forward to new chats.
+    ///
+    /// `defaultModelKey` is an explicit Settings choice. `lastSelectedModelKey`
+    /// is only a fallback when the user has not set a default model.
+    var cachedSelectedModelId: String? = Self.persistedPreferredModelId()
 
     static let lastSelectedModelKey = "chat.lastSelectedModelId"
+    static let defaultModelKey = "chat.defaultModelId"
+
+    static func persistedPreferredModelId() -> String? {
+        UserDefaults.standard.string(forKey: Self.defaultModelKey)
+            ?? UserDefaults.standard.string(forKey: Self.lastSelectedModelKey)
+    }
+
+    static func persistedExplicitDefaultModelId() -> String? {
+        UserDefaults.standard.string(forKey: Self.defaultModelKey)
+    }
 
     /// Server task config shared with all ChatViewModels.
     /// Updated by AppDependencyContainer.fetchTaskConfig().
@@ -126,7 +139,9 @@ final class ActiveChatStore {
     /// Updates the shared cache. Called by VMs after a successful model fetch.
     func updateModelCache(models: [AIModel], selectedId: String?) {
         cachedModels = models
-        if let selectedId { updateDefaultModelSelection(selectedId) }
+        if cachedSelectedModelId == nil {
+            cachedSelectedModelId = Self.persistedPreferredModelId() ?? selectedId
+        }
     }
 
     /// Updates the shared default/new-chat model selection cache.
@@ -134,10 +149,29 @@ final class ActiveChatStore {
     func updateDefaultModelSelection(_ selectedId: String?) {
         cachedSelectedModelId = selectedId
         if let selectedId, !selectedId.isEmpty {
+            UserDefaults.standard.set(selectedId, forKey: Self.defaultModelKey)
+            UserDefaults.standard.set(selectedId, forKey: Self.lastSelectedModelKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.defaultModelKey)
+            UserDefaults.standard.removeObject(forKey: Self.lastSelectedModelKey)
+        }
+        UserDefaults.standard.synchronize()
+        if let newChatVM = viewModels["__new__"] {
+            newChatVM.selectedModelId = selectedId
+        }
+    }
+
+    /// Records an ad-hoc model picker choice without overwriting an explicit
+    /// default selected in Settings.
+    func updateLastSelectedModel(_ selectedId: String?) {
+        guard Self.persistedExplicitDefaultModelId() == nil else { return }
+        cachedSelectedModelId = selectedId
+        if let selectedId, !selectedId.isEmpty {
             UserDefaults.standard.set(selectedId, forKey: Self.lastSelectedModelKey)
         } else {
             UserDefaults.standard.removeObject(forKey: Self.lastSelectedModelKey)
         }
+        UserDefaults.standard.synchronize()
         if let newChatVM = viewModels["__new__"] {
             newChatVM.selectedModelId = selectedId
         }
@@ -160,8 +194,7 @@ final class ActiveChatStore {
         viewModels.removeAll()
         accessOrder.removeAll()
         cachedModels = []
-        cachedSelectedModelId = nil
-        UserDefaults.standard.removeObject(forKey: Self.lastSelectedModelKey)
+        cachedSelectedModelId = Self.persistedPreferredModelId()
         cachedMemorySetting = nil
         cachedPinnedModelIds = nil
         cachedUserName = nil

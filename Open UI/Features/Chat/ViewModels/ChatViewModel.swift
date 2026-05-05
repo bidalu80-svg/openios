@@ -1646,7 +1646,7 @@ final class ChatViewModel {
     }
 
     private func resolveDefaultModelSelection() async {
-        let localModelId = UserDefaults.standard.string(forKey: ActiveChatStore.lastSelectedModelKey)
+        let localModelId = ActiveChatStore.persistedPreferredModelId()
         if let localModelId,
            !localModelId.isEmpty,
            availableModels.isEmpty || availableModels.contains(where: { $0.id == localModelId }) {
@@ -3487,7 +3487,7 @@ final class ChatViewModel {
 
     func selectModel(_ modelId: String) {
         selectedModelId = modelId
-        activeChatStore?.updateDefaultModelSelection(modelId)
+        activeChatStore?.updateLastSelectedModel(modelId)
         // Switching models is a deliberate user action — reset disabled tools
         // so the new model's defaults apply cleanly without stale overrides.
         userDisabledToolIds = []

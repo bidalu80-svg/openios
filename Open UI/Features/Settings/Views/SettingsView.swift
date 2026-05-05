@@ -369,8 +369,8 @@ struct SettingsView: View {
         isLoadingModels = true
         do {
             availableModels = try await manager.fetchModels()
-            defaultModelId = await manager.fetchUserDefaultModel()
-                ?? UserDefaults.standard.string(forKey: ActiveChatStore.lastSelectedModelKey)
+            defaultModelId = ActiveChatStore.persistedExplicitDefaultModelId()
+                ?? await manager.fetchUserDefaultModel()
         } catch {}
         isLoadingModels = false
     }
@@ -384,21 +384,12 @@ struct SettingsView: View {
         // `memory`, `pinnedModels`, or any other ui keys.
         Task {
             guard let api = dependencies.apiClient else { return }
-            let manager = dependencies.conversationManager
             do {
                 let models: [String] = modelId.map { [$0] } ?? []
                 try await api.mergeUserUISettings(["models": models])
-                let effectiveModelId: String?
-                if let modelId {
-                    effectiveModelId = modelId
-                } else if let manager {
-                    effectiveModelId = await manager.fetchDefaultModel()
-                } else {
-                    effectiveModelId = nil
-                }
                 await MainActor.run {
                     defaultModelId = modelId
-                    dependencies.activeChatStore.updateDefaultModelSelection(effectiveModelId)
+                    dependencies.activeChatStore.updateDefaultModelSelection(modelId)
                 }
             } catch {
                 await MainActor.run {
