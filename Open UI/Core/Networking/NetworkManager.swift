@@ -225,7 +225,17 @@ final class NetworkManager: NSObject, Sendable {
 
         let (data, response) = try await performRequest(urlRequest)
         try validateHTTPResponse(response, data: data)
-        return (data, response as! HTTPURLResponse)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.responseDecoding(
+                underlying: NSError(
+                    domain: "NetworkManager",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Expected HTTPURLResponse"]
+                ),
+                data: data
+            )
+        }
+        return (data, httpResponse)
     }
 
     func requestVoid(
