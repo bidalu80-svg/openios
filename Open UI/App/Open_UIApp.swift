@@ -517,10 +517,6 @@ struct RootView: View {
                 MainChatView()
             }
         }
-        .overlay {
-            // Connection lost overlay — blocks interaction when server/internet is down
-            ConnectionOverlayView(monitor: dependencies.connectionMonitor)
-        }
         .task {
             // Start the connection monitor once the user is authenticated.
             // This begins NWPathMonitor + /health polling.
