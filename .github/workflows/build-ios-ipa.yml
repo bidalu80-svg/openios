@@ -182,6 +182,18 @@ jobs:
           </plist>
           EOF
 
+      - name: Prepare CI local package path
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Open UI.xcodeproj/project.pbxproj')
+          s = p.read_text()
+          # CI checks out this repository as the workspace root, so the local
+          # MarkdownView package lives inside the repo instead of beside it.
+          s = s.replace('relativePath = ../MarkdownView;', 'relativePath = MarkdownView;')
+          p.write_text(s)
+          PY
+
       - name: Archive app
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
