@@ -474,6 +474,14 @@ final class ChatViewModel {
     func uploadAttachmentImmediately(attachmentId: UUID) {
         guard let index = attachments.firstIndex(where: { $0.id == attachmentId }) else { return }
         if isOpenAICompatibleProvider, canSendAttachmentInline(attachments[index]) {
+            if attachments[index].type == .image,
+               let data = attachments[index].data,
+               attachments[index].displayDataURL == nil {
+                attachments[index].displayDataURL = inlineImageDataURL(
+                    data: data,
+                    fileName: attachments[index].name
+                )
+            }
             attachments[index].uploadStatus = .completed
             attachments[index].uploadError = nil
             return
@@ -2940,16 +2948,26 @@ final class ChatViewModel {
                                 )
                             )
                         }
+                        let imagePrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
                         let imageReference: String
                         if let editImage = self.firstEditableImage(from: currentAttachments) {
                             imageReference = try await manager.editImage(
-                                prompt: messageText,
+                                prompt: imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
                                 model: modelId,
                                 imageData: editImage.data,
                                 fileName: editImage.fileName
                             )
                         } else {
-                            imageReference = try await manager.generateImage(prompt: messageText, model: modelId)
+                            guard !imagePrompt.isEmpty else {
+                                throw APIError.unknown(
+                                    underlying: NSError(
+                                        domain: "ChatViewModel",
+                                        code: -1,
+                                        userInfo: [NSLocalizedDescriptionKey: "Please enter a prompt for image generation."]
+                                    )
+                                )
+                            }
+                            imageReference = try await manager.generateImage(prompt: imagePrompt, model: modelId)
                         }
                         let markdown = "![Generated image](\(imageReference))"
                         self.updateAssistantMessage(
@@ -5340,15 +5358,24 @@ final class ChatViewModel {
 
     private func firstEditableImage(from attachments: [ChatAttachment]) -> (data: Data, fileName: String)? {
         for attachment in attachments where attachment.type == .image {
+            let outputFileName = Self.jpegFileName(for: attachment.name)
             if let data = attachment.data {
-                return (data, attachment.name)
+                let jpegData = FileAttachmentService.downsampleForUpload(data: data)
+                return (jpegData.isEmpty ? data : jpegData, outputFileName)
             }
             if let dataURL = attachment.displayDataURL,
                let data = Self.imageData(fromDataURL: dataURL) {
-                return (data, attachment.name)
+                let jpegData = FileAttachmentService.downsampleForUpload(data: data)
+                return (jpegData.isEmpty ? data : jpegData, outputFileName)
             }
         }
         return nil
+    }
+
+    private static func jpegFileName(for originalName: String) -> String {
+        let base = (originalName as NSString).deletingPathExtension
+        let safeBase = base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "image" : base
+        return safeBase + ".jpg"
     }
 
     private static func imageData(fromDataURL dataURL: String) -> Data? {

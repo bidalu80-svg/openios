@@ -28,7 +28,7 @@ final class ConversationManager: @unchecked Sendable {
             }
             return Array(all[start...])
         }
-        try await apiClient.getConversations(limit: limit, skip: skip)
+        return try await apiClient.getConversations(limit: limit, skip: skip)
     }
 
     /// Fetches a single page of conversations by 1-based page number.
@@ -41,21 +41,21 @@ final class ConversationManager: @unchecked Sendable {
             guard start < all.count else { return [] }
             return Array(all[start..<min(all.count, start + pageSize)])
         }
-        try await apiClient.getConversationsPage(page: page, pinnedIds: pinnedIds)
+        return try await apiClient.getConversationsPage(page: page, pinnedIds: pinnedIds)
     }
 
     func fetchConversation(id: String) async throws -> Conversation {
         if usesLocalConversationStore {
             return try await localStore.get(id: id, serverURL: apiClient.baseURL)
         }
-        try await apiClient.getConversation(id: id)
+        return try await apiClient.getConversation(id: id)
     }
 
     func searchConversations(query: String) async throws -> [Conversation] {
         if usesLocalConversationStore {
             return await localStore.search(serverURL: apiClient.baseURL, query: query)
         }
-        try await apiClient.searchConversations(query: query)
+        return try await apiClient.searchConversations(query: query)
     }
 
     // MARK: - Create
@@ -79,7 +79,7 @@ final class ConversationManager: @unchecked Sendable {
             await localStore.upsert(conversation, serverURL: apiClient.baseURL)
             return conversation
         }
-        try await apiClient.createConversation(
+        return try await apiClient.createConversation(
             title: title,
             messages: messages,
             model: model,

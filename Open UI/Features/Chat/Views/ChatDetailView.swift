@@ -1561,7 +1561,7 @@ struct ChatDetailView: View {
                     ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
                         let displayFileId = file.displayURL ?? file.url
                         if let fileId = displayFileId, !fileId.isEmpty {
-                            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                            chatImageView(fileId: fileId)
                                 .frame(maxWidth: 220, maxHeight: 220)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
@@ -2276,23 +2276,12 @@ struct ChatDetailView: View {
                     ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
                         let displayFileId = file.displayURL ?? file.url
                         if let fileId = displayFileId, !fileId.isEmpty {
-                            if let image = inlineDataImage(from: fileId) {
-                                Image(uiImage: image)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fit)
-                                    .frame(
-                                        maxWidth: imageFiles.count == 1 ? 200 : 100,
-                                        maxHeight: imageFiles.count == 1 ? 200 : 100
-                                    )
-                                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
-                            } else {
-                                AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
-                                    .frame(
-                                        maxWidth: imageFiles.count == 1 ? 200 : 100,
-                                        maxHeight: imageFiles.count == 1 ? 200 : 100
-                                    )
-                                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
-                            }
+                            chatImageView(fileId: fileId)
+                                .frame(
+                                    maxWidth: imageFiles.count == 1 ? 200 : 100,
+                                    maxHeight: imageFiles.count == 1 ? 200 : 100
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
                         }
                     }
                 }
@@ -2305,6 +2294,17 @@ struct ChatDetailView: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func chatImageView(fileId: String) -> some View {
+        if let image = inlineDataImage(from: fileId) {
+            Image(uiImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+        } else {
+            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
         }
     }
 
