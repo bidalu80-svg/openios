@@ -445,6 +445,48 @@ final class APIClient: @unchecked Sendable {
         )
     }
 
+    func editImage(
+        prompt: String,
+        model: String,
+        imageData: Data,
+        fileName: String = "image.png",
+        size: String = "1024x1024"
+    ) async throws -> String {
+        let json = try await network.uploadMultipart(
+            path: "/images/edits",
+            fileData: imageData,
+            fileName: fileName,
+            mimeType: mimeType(for: fileName),
+            fieldName: "image",
+            additionalFields: [
+                "model": model,
+                "prompt": prompt,
+                "n": "1",
+                "size": size
+            ],
+            timeout: 300
+        )
+
+        if let dataArray = json["data"] as? [[String: Any]],
+           let first = dataArray.first {
+            if let url = first["url"] as? String, !url.isEmpty {
+                return url
+            }
+            if let b64 = first["b64_json"] as? String, !b64.isEmpty {
+                return "data:image/png;base64,\(b64)"
+            }
+        }
+
+        throw APIError.responseDecoding(
+            underlying: NSError(
+                domain: "APIClient",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Image edit returned no image URL."]
+            ),
+            data: Data()
+        )
+    }
+
     func getDefaultModel() async -> String? {
         if let userDefault = await getUserDefaultModel() {
             return userDefault

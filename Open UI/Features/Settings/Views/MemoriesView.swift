@@ -21,6 +21,14 @@ struct MemoriesView: View {
     @State private var memoryEnabled = false
     @State private var isLoadingMemoryToggle = false
 
+    private var usesLocalMemories: Bool {
+        dependencies.apiClient?.providerType != .openWebUI
+    }
+
+    private var memoryServerURL: String {
+        dependencies.apiClient?.baseURL ?? "local"
+    }
+
     var body: some View {
         Group {
             if isLoading {
@@ -292,7 +300,13 @@ struct MemoriesView: View {
         errorMessage = nil
 
         do {
-            memories = try await api.getMemories()
+            if usesLocalMemories {
+                memories = await LocalMemoryStore.shared
+                    .list(serverURL: memoryServerURL)
+                    .map(\.dictionary)
+            } else {
+                memories = try await api.getMemories()
+            }
         } catch {
             errorMessage = "Failed to load memories."
         }
@@ -306,7 +320,14 @@ struct MemoriesView: View {
         guard !text.isEmpty else { return }
 
         do {
-            let newMemory = try await api.addMemory(content: text)
+            let newMemory: [String: Any]
+            if usesLocalMemories {
+                newMemory = await LocalMemoryStore.shared
+                    .add(content: text, serverURL: memoryServerURL)
+                    .dictionary
+            } else {
+                newMemory = try await api.addMemory(content: text)
+            }
             withAnimation {
                 memories.insert(newMemory, at: 0)
                 newMemoryText = ""
@@ -323,7 +344,14 @@ struct MemoriesView: View {
         guard !text.isEmpty else { return }
 
         do {
-            let updated = try await api.updateMemory(id: id, content: text)
+            let updated: [String: Any]
+            if usesLocalMemories {
+                guard let local = await LocalMemoryStore.shared
+                    .update(id: id, content: text, serverURL: memoryServerURL) else { return }
+                updated = local.dictionary
+            } else {
+                updated = try await api.updateMemory(id: id, content: text)
+            }
             if let idx = memories.firstIndex(where: { ($0["id"] as? String) == id }) {
                 memories[idx] = updated
             }
@@ -337,7 +365,11 @@ struct MemoriesView: View {
         guard let api = dependencies.apiClient else { return }
 
         do {
-            try await api.deleteMemory(id: id)
+            if usesLocalMemories {
+                await LocalMemoryStore.shared.delete(id: id, serverURL: memoryServerURL)
+            } else {
+                try await api.deleteMemory(id: id)
+            }
             withAnimation {
                 memories.removeAll { ($0["id"] as? String) == id }
             }
@@ -351,7 +383,11 @@ struct MemoriesView: View {
         isClearingAll = true
 
         do {
-            try await api.resetMemories()
+            if usesLocalMemories {
+                await LocalMemoryStore.shared.deleteAll(serverURL: memoryServerURL)
+            } else {
+                try await api.resetMemories()
+            }
             withAnimation { memories.removeAll() }
         } catch {
             errorMessage = "Failed to clear memories."
@@ -363,10 +399,14 @@ struct MemoriesView: View {
     private func loadMemoryToggle() async {
         guard let api = dependencies.apiClient else { return }
         isLoadingMemoryToggle = true
-        if let settings = try? await api.getUserSettings(),
-           let ui = settings["ui"] as? [String: Any],
-           let enabled = ui["memory"] as? Bool {
-            memoryEnabled = enabled
+        if usesLocalMemories {
+            memoryEnabled = await LocalMemoryStore.shared.isEnabled(serverURL: memoryServerURL)
+        } else {
+            if let settings = try? await api.getUserSettings(),
+               let ui = settings["ui"] as? [String: Any],
+               let enabled = ui["memory"] as? Bool {
+                memoryEnabled = enabled
+            }
         }
         isLoadingMemoryToggle = false
     }
@@ -374,9 +414,13 @@ struct MemoriesView: View {
     private func updateMemoryToggle(_ enabled: Bool) async {
         guard let api = dependencies.apiClient else { return }
         isLoadingMemoryToggle = true
-        // Use merge helper so we ONLY update `memory` without overwriting
-        // `models`, `pinnedModels`, or any other ui keys.
-        try? await api.mergeUserUISettings(["memory": enabled])
+        if usesLocalMemories {
+            await LocalMemoryStore.shared.setEnabled(enabled, serverURL: memoryServerURL)
+        } else {
+            // Use merge helper so we ONLY update `memory` without overwriting
+            // `models`, `pinnedModels`, or any other ui keys.
+            try? await api.mergeUserUISettings(["memory": enabled])
+        }
         isLoadingMemoryToggle = false
         // Notify all active ChatViewModels so they update immediately
         // without waiting for the next server fetch on model switch/reload.

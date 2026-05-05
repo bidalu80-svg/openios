@@ -19,7 +19,7 @@ struct ChatTask: Codable, Identifiable, Hashable, Sendable {
 // MARK: - Conversation
 
 /// Represents a chat conversation with its message history.
-struct Conversation: Identifiable, Hashable, Sendable {
+struct Conversation: Codable, Identifiable, Hashable, Sendable {
     var id: String
     var title: String
     var createdAt: Date
@@ -67,6 +67,7 @@ struct Conversation: Identifiable, Hashable, Sendable {
         shareId: String? = nil,
         folderId: String? = nil,
         tags: [String] = [],
+        chatParams: ChatAdvancedParams? = nil,
         tasks: [ChatTask] = []
     ) {
         self.id = id
@@ -82,6 +83,7 @@ struct Conversation: Identifiable, Hashable, Sendable {
         self.shareId = shareId
         self.folderId = folderId
         self.tags = tags
+        self.chatParams = chatParams
         self.tasks = tasks
     }
 

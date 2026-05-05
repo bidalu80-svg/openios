@@ -421,10 +421,14 @@ final class AppDependencyContainer: ServiceContainer {
         socketService?.dispose()
 
         let token = KeychainService.shared.getToken(forServer: config.url)
-        socketService = SocketIOService(serverConfig: config, authToken: token)
-
-        // Wire socket state to the dependency container's observable property
-        wireSocketStateTracking()
+        if config.providerType == .openWebUI {
+            socketService = SocketIOService(serverConfig: config, authToken: token)
+            // Wire socket state to the dependency container's observable property
+            wireSocketStateTracking()
+        } else {
+            socketService = nil
+            socketConnectionState = .disconnected
+        }
 
         // Update shared data for widget
         SharedDataService.shared.saveAuthState(

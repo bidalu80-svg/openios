@@ -139,6 +139,10 @@ struct MainChatView: View {
         min(containerWidth * 0.82, 360)
     }
 
+    private var usesDirectProvider: Bool {
+        dependencies.conversationManager?.usesLocalConversationStore == true
+    }
+
     var body: some View {
         @Bindable var bindableRouter = router
         mainContent(voiceCallBinding: $bindableRouter.isVoiceCallPresented)
@@ -914,8 +918,8 @@ struct MainChatView: View {
                 if let folderManager = dependencies.folderManager {
                     listViewModel.folderViewModel.configure(with: folderManager)
                 }
-                // Configure and load channels — must pass currentUserId for DM participant filtering
-                if let apiClient = dependencies.apiClient {
+                // Configure and load channels only for OpenWebUI servers.
+                if !usesDirectProvider, let apiClient = dependencies.apiClient {
                     var userId = dependencies.authViewModel.currentUser?.id
                     if userId == nil || userId?.isEmpty == true {
                         userId = try? await apiClient.getCurrentUser().id
@@ -924,11 +928,17 @@ struct MainChatView: View {
                 }
                 await withTaskGroup(of: Void.self) { group in
                     group.addTask { await listViewModel.loadConversations() }
-                    group.addTask { await listViewModel.folderViewModel.loadFolders() }
-                    group.addTask { await dependencies.fetchTaskConfig() }
-                    group.addTask { await channelListVM.loadChannels() }
+                    if dependencies.conversationManager?.usesLocalConversationStore != true {
+                        group.addTask { await listViewModel.folderViewModel.loadFolders() }
+                    }
+                    if !usesDirectProvider {
+                        group.addTask { await dependencies.fetchTaskConfig() }
+                        group.addTask { await channelListVM.loadChannels() }
+                    }
                 }
-                registerSocketReconnectHandler()
+                if !usesDirectProvider {
+                    registerSocketReconnectHandler()
+                }
                 // Wire up channel notification tap → navigate to that channel
                 NotificationService.shared.onOpenChannel = { channelId in
                     NotificationCenter.default.post(name: .navigateToChannel, object: channelId)
@@ -948,7 +958,7 @@ struct MainChatView: View {
             .onChange(of: activeChannelId) { _, newId in
                 // When entering a channel, the server marks it as read via GET /channels/{id}.
                 // Refresh the channel list after a short delay to clear the unread badge.
-                if newId != nil {
+                if newId != nil && !usesDirectProvider {
                     Task {
                         try? await Task.sleep(for: .seconds(1.5))
                         await channelListVM.refreshChannels()
@@ -996,7 +1006,9 @@ struct MainChatView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .openUINewChannel)) { _ in
                 // Widget "Channel" button — open the create-channel sheet
-                showCreateChannel = true
+                if !usesDirectProvider {
+                    showCreateChannel = true
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: .openUINewChatWithFocus)) { _ in
                 // Widget "Ask Open Relay" bar — start new chat and auto-focus keyboard
@@ -1025,9 +1037,13 @@ struct MainChatView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .conversationListNeedsRefresh)) { _ in
                 Task {
-                    await withTaskGroup(of: Void.self) { group in
-                        group.addTask { await listViewModel.refreshConversations() }
-                        group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                    if dependencies.conversationManager?.usesLocalConversationStore == true {
+                        await listViewModel.refreshConversations()
+                    } else {
+                        await withTaskGroup(of: Void.self) { group in
+                            group.addTask { await listViewModel.refreshConversations() }
+                            group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                        }
                     }
                 }
             }
@@ -1129,10 +1145,14 @@ struct MainChatView: View {
         }
         Haptics.play(.light)
         Task {
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await listViewModel.refreshConversations() }
-                group.addTask { await listViewModel.folderViewModel.refreshFolders() }
-                group.addTask { await channelListVM.refreshChannels() }
+            if usesDirectProvider {
+                await listViewModel.refreshConversations()
+            } else {
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { await listViewModel.refreshConversations() }
+                    group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                    group.addTask { await channelListVM.refreshChannels() }
+                }
             }
         }
     }
@@ -1284,13 +1304,13 @@ struct MainChatView: View {
 
                     // ── FOLDERS SECTION (always visible so user can create new folders) ─
                     let folderVM = listViewModel.folderViewModel
-                    let foldersEnabled = dependencies.authViewModel.featurePermissions.folders
+                    let foldersEnabled = !usesDirectProvider && dependencies.authViewModel.featurePermissions.folders
                     if foldersEnabled && !folderVM.featureDisabled {
                         drawerFoldersSection(folderVM: folderVM)
                     }
 
                     // ── DIVIDER between Folders & Channels ──────────────
-                    let channelsEnabled = dependencies.authViewModel.featurePermissions.channels
+                    let channelsEnabled = !usesDirectProvider && dependencies.authViewModel.featurePermissions.channels
                     if (foldersEnabled && !folderVM.featureDisabled && !folderVM.folders.isEmpty) || (channelsEnabled && !channelListVM.channels.isEmpty) {
                         Rectangle()
                             .fill(theme.textTertiary.opacity(0.15))
@@ -1379,11 +1399,13 @@ struct MainChatView: View {
                     } // end if channelsEnabled
 
                     // ── DIVIDER between Channels & Chats ──────────────
-                    Rectangle()
-                        .fill(theme.textTertiary.opacity(0.15))
-                        .frame(height: 1)
-                        .padding(.horizontal, Spacing.md)
-                        .padding(.vertical, Spacing.sm)
+                    if channelsEnabled && !channelListVM.channels.isEmpty {
+                        Rectangle()
+                            .fill(theme.textTertiary.opacity(0.15))
+                            .frame(height: 1)
+                            .padding(.horizontal, Spacing.md)
+                            .padding(.vertical, Spacing.sm)
+                    }
 
                     // ── CHATS SECTION (entire section is a drop zone) ─
                     let hasAnyChats = !listViewModel.pinnedConversations.isEmpty
@@ -1613,20 +1635,22 @@ struct MainChatView: View {
                         Label("Delete All Chats", systemImage: "trash")
                     }
 
-                    Divider()
+                    if !usesDirectProvider {
+                        Divider()
 
-                    Button {
-                        closeDrawer()
-                        showArchivedChats = true
-                    } label: {
-                        Label("Archived Chats", systemImage: "archivebox")
-                    }
+                        Button {
+                            closeDrawer()
+                            showArchivedChats = true
+                        } label: {
+                            Label("Archived Chats", systemImage: "archivebox")
+                        }
 
-                    Button {
-                        closeDrawer()
-                        showSharedChats = true
-                    } label: {
-                        Label("Shared Chats", systemImage: "link.circle")
+                        Button {
+                            closeDrawer()
+                            showSharedChats = true
+                        } label: {
+                            Label("Shared Chats", systemImage: "link.circle")
+                        }
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -2122,11 +2146,13 @@ struct MainChatView: View {
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .contextMenu {
-                    // Share
-                    Button {
-                        sharingConversation = conversation
-                    } label: {
-                        Label("Share", systemImage: "square.and.arrow.up")
+                    // Share is an OpenWebUI server feature.
+                    if !usesDirectProvider {
+                        Button {
+                            sharingConversation = conversation
+                        } label: {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                        }
                     }
 
                     // Download submenu (matching WebUI)
@@ -2141,10 +2167,12 @@ struct MainChatView: View {
                         } label: {
                             Label("Plain text (.txt)", systemImage: "doc.plaintext")
                         }
-                        Button {
-                            Task { await exportChat(conversation, format: .pdf) }
-                        } label: {
-                            Label("PDF document (.pdf)", systemImage: "doc.richtext")
+                        if !usesDirectProvider {
+                            Button {
+                                Task { await exportChat(conversation, format: .pdf) }
+                            } label: {
+                                Label("PDF document (.pdf)", systemImage: "doc.richtext")
+                            }
                         }
                     } label: {
                         Label("Download", systemImage: "arrow.down.circle")
@@ -2168,19 +2196,21 @@ struct MainChatView: View {
                         )
                     }
 
-                    // Clone
-                    Button {
-                        Task {
-                            guard let manager = dependencies.conversationManager else { return }
-                            let cloned = try? await manager.cloneConversation(id: conversation.id)
-                            if let cloned {
-                                await listViewModel.refreshConversations()
-                                activeConversationId = cloned.id
-                                closeDrawer()
+                    // Clone uses the OpenWebUI chats API.
+                    if !usesDirectProvider {
+                        Button {
+                            Task {
+                                guard let manager = dependencies.conversationManager else { return }
+                                let cloned = try? await manager.cloneConversation(id: conversation.id)
+                                if let cloned {
+                                    await listViewModel.refreshConversations()
+                                    activeConversationId = cloned.id
+                                    closeDrawer()
+                                }
                             }
+                        } label: {
+                            Label("Clone", systemImage: "doc.on.doc")
                         }
-                    } label: {
-                        Label("Clone", systemImage: "doc.on.doc")
                     }
 
                     // Archive
@@ -2331,7 +2361,7 @@ struct MainChatView: View {
 
                 // More menu — secondary actions tucked away cleanly
                 Menu {
-                    if dependencies.authViewModel.featurePermissions.memories {
+                    if usesDirectProvider || dependencies.authViewModel.featurePermissions.memories {
                         Button {
                             closeDrawer()
                             showMemories = true
@@ -2339,7 +2369,7 @@ struct MainChatView: View {
                             Label("Memories", systemImage: "brain.head.profile")
                         }
                     }
-                    if dependencies.authViewModel.hasAnyWorkspaceAccess {
+                    if !usesDirectProvider && dependencies.authViewModel.hasAnyWorkspaceAccess {
                         Button {
                             showWorkspace = true
                         } label: {
@@ -2347,7 +2377,7 @@ struct MainChatView: View {
                         }
                     }
 
-                    if dependencies.authViewModel.featurePermissions.notes {
+                    if !usesDirectProvider && dependencies.authViewModel.featurePermissions.notes {
                         Button {
                             closeDrawer()
                             showNotes = true
@@ -2356,7 +2386,7 @@ struct MainChatView: View {
                         }
                     }
 
-                    if dependencies.authViewModel.featurePermissions.calendar {
+                    if !usesDirectProvider && dependencies.authViewModel.featurePermissions.calendar {
                         Button {
                             closeDrawer()
                             showCalendar = true
@@ -2365,7 +2395,7 @@ struct MainChatView: View {
                         }
                     }
 
-                    if dependencies.authViewModel.featurePermissions.automations {
+                    if !usesDirectProvider && dependencies.authViewModel.featurePermissions.automations {
                         Button {
                             closeDrawer()
                             showAutomations = true
@@ -2483,6 +2513,12 @@ struct MainChatView: View {
     // MARK: - Foreground Refresh
 
     private func refreshAllDataOnForeground() async {
+        if usesDirectProvider {
+            await listViewModel.refreshIfStale()
+            dependencies.updateWidgetData(conversations: listViewModel.conversations)
+            return
+        }
+
         // Use connect() without force so an already-in-progress connection
         // is NOT cancelled. connect(force:true) calls disconnectInternal()
         // which cancels the current URLSessionWebSocketTask, causing

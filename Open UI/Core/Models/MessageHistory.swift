@@ -10,7 +10,12 @@ import Foundation
 /// Branching (edits, regenerations) is expressed through `childrenIds`
 /// — multiple children of the same parent with the same role are siblings
 /// (alternative versions).
-struct HistoryNode: Sendable {
+struct HistoryNode: Codable, Sendable {
+    enum CodingKeys: String, CodingKey {
+        case id, parentId, childrenIds, role, content, timestamp, model, done
+        case files, sources, followUps, statusHistory, error, usage, embeds, models
+    }
+
     var id: String
     var parentId: String?
     var childrenIds: [String]
@@ -66,6 +71,52 @@ struct HistoryNode: Sendable {
         self.usage = usage
         self.embeds = embeds
         self.models = models
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        parentId = try c.decodeIfPresent(String.self, forKey: .parentId)
+        childrenIds = (try? c.decode([String].self, forKey: .childrenIds)) ?? []
+        role = try c.decode(MessageRole.self, forKey: .role)
+        content = (try? c.decode(String.self, forKey: .content)) ?? ""
+        timestamp = (try? c.decode(Date.self, forKey: .timestamp)) ?? .now
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        done = (try? c.decode(Bool.self, forKey: .done)) ?? true
+        files = (try? c.decode([ChatMessageFile].self, forKey: .files)) ?? []
+        sources = (try? c.decode([ChatSourceReference].self, forKey: .sources)) ?? []
+        followUps = (try? c.decode([String].self, forKey: .followUps)) ?? []
+        statusHistory = (try? c.decode([ChatStatusUpdate].self, forKey: .statusHistory)) ?? []
+        error = try? c.decodeIfPresent(ChatMessageError.self, forKey: .error)
+        if let usageData = try? c.decodeIfPresent(AnyCodableMap.self, forKey: .usage) {
+            usage = usageData.value
+        } else {
+            usage = nil
+        }
+        embeds = (try? c.decode([String].self, forKey: .embeds)) ?? []
+        models = (try? c.decode([String].self, forKey: .models)) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encodeIfPresent(parentId, forKey: .parentId)
+        try c.encode(childrenIds, forKey: .childrenIds)
+        try c.encode(role, forKey: .role)
+        try c.encode(content, forKey: .content)
+        try c.encode(timestamp, forKey: .timestamp)
+        try c.encodeIfPresent(model, forKey: .model)
+        try c.encode(done, forKey: .done)
+        try c.encode(files, forKey: .files)
+        try c.encode(sources, forKey: .sources)
+        try c.encode(followUps, forKey: .followUps)
+        try c.encode(statusHistory, forKey: .statusHistory)
+        try c.encodeIfPresent(error, forKey: .error)
+        if let usage {
+            try c.encode(AnyCodableMap(usage), forKey: .usage)
+        }
+        try c.encode(embeds, forKey: .embeds)
+        try c.encode(models, forKey: .models)
     }
 
     // MARK: - Serialization
@@ -187,7 +238,7 @@ struct HistoryNode: Sendable {
 ///
 /// All mutation operations (edit, regenerate, new message, version switch)
 /// modify the tree directly, then the flat list is re-derived.
-struct MessageHistory: Sendable {
+struct MessageHistory: Codable, Sendable {
     var nodes: [String: HistoryNode] = [:]
     var currentId: String?
 

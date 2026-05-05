@@ -106,6 +106,10 @@ struct iPadMainChatView: View {
     /// Whether the terminal file browser panel is visible (independent of terminal being enabled).
     @State private var showTerminalBrowser: Bool = true
 
+    private var usesDirectProvider: Bool {
+        dependencies.conversationManager?.usesLocalConversationStore == true
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -172,15 +176,15 @@ struct iPadMainChatView: View {
         )
         // Channel-specific lifecycle wiring
         .task {
-            // Configure and load channels — must pass currentUserId for DM participant filtering
-            if let apiClient = dependencies.apiClient {
+            // Configure and load channels only for OpenWebUI servers.
+            if !usesDirectProvider, let apiClient = dependencies.apiClient {
                 var userId = dependencies.authViewModel.currentUser?.id
                 if userId == nil || userId?.isEmpty == true {
                     userId = try? await apiClient.getCurrentUser().id
                 }
                 channelListVM.configure(apiClient: apiClient, socket: dependencies.socketService, currentUserId: userId)
+                await channelListVM.loadChannels()
             }
-            await channelListVM.loadChannels()
             // Wire up channel notification tap → navigate to that channel
             NotificationService.shared.onOpenChannel = { channelId in
                 NotificationCenter.default.post(name: .navigateToChannel, object: channelId)
@@ -221,7 +225,7 @@ struct iPadMainChatView: View {
         .onChange(of: activeChannelId) { _, newId in
             // When entering a channel, the server marks it as read via GET /channels/{id}.
             // Refresh the channel list after a short delay to clear the unread badge.
-            if newId != nil {
+            if newId != nil && !usesDirectProvider {
                 Task {
                     try? await Task.sleep(for: .seconds(1.5))
                     await channelListVM.refreshChannels()
@@ -714,6 +718,10 @@ struct iPadSidebarContent: View {
     /// Tracks which time-group sub-sections are collapsed (e.g. "Pinned", "Today").
     @State private var collapsedSections: Set<String> = []
 
+    private var usesDirectProvider: Bool {
+        dependencies.conversationManager?.usesLocalConversationStore == true
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Search / selection header
@@ -732,13 +740,13 @@ struct iPadSidebarContent: View {
                     pinnedModelsSection
 
                     // Folders section
-                    let foldersEnabled = dependencies.authViewModel.featurePermissions.folders
+                    let foldersEnabled = !usesDirectProvider && dependencies.authViewModel.featurePermissions.folders
                     if foldersEnabled && !folderVM.featureDisabled {
                         foldersSection(folderVM: folderVM)
                     }
 
                     // Divider between folders and channels
-                    let channelsEnabled = dependencies.authViewModel.featurePermissions.channels
+                    let channelsEnabled = !usesDirectProvider && dependencies.authViewModel.featurePermissions.channels
                     if (foldersEnabled && !folderVM.featureDisabled && !folderVM.folders.isEmpty) || (channelsEnabled && !channelListVM.channels.isEmpty) {
                         Rectangle()
                             .fill(theme.textTertiary.opacity(0.12))
@@ -824,18 +832,20 @@ struct iPadSidebarContent: View {
                             }
                         }
 
-                        Divider()
+                        if !usesDirectProvider {
+                            Divider()
 
-                        Button {
-                            onShowArchivedChats?()
-                        } label: {
-                            Label("Archived Chats", systemImage: "archivebox")
-                        }
+                            Button {
+                                onShowArchivedChats?()
+                            } label: {
+                                Label("Archived Chats", systemImage: "archivebox")
+                            }
 
-                        Button {
-                            onShowSharedChats?()
-                        } label: {
-                            Label("Shared Chats", systemImage: "link.circle")
+                            Button {
+                                onShowSharedChats?()
+                            } label: {
+                                Label("Shared Chats", systemImage: "link.circle")
+                            }
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -1573,30 +1583,30 @@ struct iPadSidebarContent: View {
 
                 // More menu — secondary actions tucked away cleanly
                 Menu {
-                    if dependencies.authViewModel.featurePermissions.memories {
+                    if usesDirectProvider || dependencies.authViewModel.featurePermissions.memories {
                         Button { showMemories = true } label: {
                             Label("Memories", systemImage: "brain.head.profile")
                         }
                     }
-                    if dependencies.authViewModel.hasAnyWorkspaceAccess {
+                    if !usesDirectProvider && dependencies.authViewModel.hasAnyWorkspaceAccess {
                         Button { showWorkspace = true } label: {
                             Label("Workspace", systemImage: "square.grid.2x2")
                         }
                     }
 
-                    if dependencies.authViewModel.featurePermissions.notes {
+                    if !usesDirectProvider && dependencies.authViewModel.featurePermissions.notes {
                         Button { showNotes = true } label: {
                             Label("Notes", systemImage: "note.text")
                         }
                     }
 
-                    if dependencies.authViewModel.featurePermissions.calendar {
+                    if !usesDirectProvider && dependencies.authViewModel.featurePermissions.calendar {
                         Button { showCalendar = true } label: {
                             Label("Calendar", systemImage: "calendar")
                         }
                     }
 
-                    if dependencies.authViewModel.featurePermissions.automations {
+                    if !usesDirectProvider && dependencies.authViewModel.featurePermissions.automations {
                         Button { showAutomations = true } label: {
                             Label("Automations", systemImage: "clock.arrow.circlepath")
                         }
@@ -1642,11 +1652,15 @@ private struct iPadConversationContextMenu: View {
     let onExport: (Conversation, iPadMainChatView.ExportFormat) -> Void
 
     var body: some View {
-        // Share
-        Button {
-            sharingConversation = conversation
-        } label: {
-            Label("Share", systemImage: "square.and.arrow.up")
+        let usesDirectProvider = dependencies.conversationManager?.usesLocalConversationStore == true
+
+        // Share is an OpenWebUI server feature.
+        if !usesDirectProvider {
+            Button {
+                sharingConversation = conversation
+            } label: {
+                Label("Share", systemImage: "square.and.arrow.up")
+            }
         }
 
         // Download submenu (matching WebUI)
@@ -1657,8 +1671,10 @@ private struct iPadConversationContextMenu: View {
             Button { onExport(conversation, .txt) } label: {
                 Label("Plain text (.txt)", systemImage: "doc.plaintext")
             }
-            Button { onExport(conversation, .pdf) } label: {
-                Label("PDF document (.pdf)", systemImage: "doc.richtext")
+            if !usesDirectProvider {
+                Button { onExport(conversation, .pdf) } label: {
+                    Label("PDF document (.pdf)", systemImage: "doc.richtext")
+                }
             }
         } label: {
             Label("Download", systemImage: "arrow.down.circle")
@@ -1682,17 +1698,19 @@ private struct iPadConversationContextMenu: View {
                   systemImage: conversation.pinned ? "pin.slash" : "pin")
         }
 
-        // Clone
-        Button {
-            Task {
-                guard let manager = dependencies.conversationManager else { return }
-                if let cloned = try? await manager.cloneConversation(id: conversation.id) {
-                    await listViewModel.refreshConversations()
-                    activeConversationId = cloned.id
+        // Clone uses the OpenWebUI chats API.
+        if !usesDirectProvider {
+            Button {
+                Task {
+                    guard let manager = dependencies.conversationManager else { return }
+                    if let cloned = try? await manager.cloneConversation(id: conversation.id) {
+                        await listViewModel.refreshConversations()
+                        activeConversationId = cloned.id
+                    }
                 }
+            } label: {
+                Label("Clone", systemImage: "doc.on.doc")
             }
-        } label: {
-            Label("Clone", systemImage: "doc.on.doc")
         }
 
         // Archive
@@ -2066,25 +2084,34 @@ private extension View {
                 if let folderManager = dependencies.folderManager {
                     listViewModel.folderViewModel.configure(with: folderManager)
                 }
+                let usesLocalStore = dependencies.conversationManager?.usesLocalConversationStore == true
                 await withTaskGroup(of: Void.self) { group in
                     group.addTask { await listViewModel.loadConversations() }
-                    group.addTask { await listViewModel.folderViewModel.loadFolders() }
-                    group.addTask { await dependencies.fetchTaskConfig() }
+                    if !usesLocalStore {
+                        group.addTask { await listViewModel.folderViewModel.loadFolders() }
+                        group.addTask { await dependencies.fetchTaskConfig() }
+                    }
                 }
-                onSocketSetup()
+                if !usesLocalStore {
+                    onSocketSetup()
+                }
             }
             .onChange(of: scenePhase) { oldPhase, newPhase in
                 if newPhase == .active && oldPhase != .active {
                     Task {
-                        if let socket = dependencies.socketService,
-                           !socket.isConnected, !socket.isConnecting {
-                            socket.connect()
-                        }
-                        // Refresh conversations, folders, AND channels on foreground
-                        // (mirrors iPhone's refreshAllDataOnForeground)
-                        await withTaskGroup(of: Void.self) { group in
-                            group.addTask { await listViewModel.refreshIfStale() }
-                            group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                        let usesLocalStore = dependencies.conversationManager?.usesLocalConversationStore == true
+                        if usesLocalStore {
+                            await listViewModel.refreshIfStale()
+                        } else {
+                            if let socket = dependencies.socketService,
+                               !socket.isConnected, !socket.isConnecting {
+                                socket.connect()
+                            }
+                            // Refresh conversations and folders on foreground.
+                            await withTaskGroup(of: Void.self) { group in
+                                group.addTask { await listViewModel.refreshIfStale() }
+                                group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                            }
                         }
                         dependencies.updateWidgetData(conversations: listViewModel.conversations)
                     }
@@ -2104,9 +2131,13 @@ private extension View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .conversationListNeedsRefresh)) { _ in
                 Task {
-                    await withTaskGroup(of: Void.self) { group in
-                        group.addTask { await listViewModel.refreshConversations() }
-                        group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                    if dependencies.conversationManager?.usesLocalConversationStore == true {
+                        await listViewModel.refreshConversations()
+                    } else {
+                        await withTaskGroup(of: Void.self) { group in
+                            group.addTask { await listViewModel.refreshConversations() }
+                            group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                        }
                     }
                 }
             }
@@ -2129,7 +2160,9 @@ private extension View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .openUINewChannel)) { _ in
                 // Widget "Channel" button — open the create-channel sheet
-                showCreateChannel.wrappedValue = true
+                if dependencies.conversationManager?.usesLocalConversationStore != true {
+                    showCreateChannel.wrappedValue = true
+                }
             }
             .onChange(of: dependencies.authViewModel.accountSwitchCount) {
                 // Account was switched — perform a full reset so the new account's
@@ -2147,11 +2180,15 @@ private extension View {
                 newChatGeneration.wrappedValue += 1
                 // 5. Reload all lists from the server for the new account.
                 Task {
-                    await withTaskGroup(of: Void.self) { group in
-                        group.addTask { await listViewModel.refreshConversations() }
-                        group.addTask { await listViewModel.folderViewModel.refreshFolders() }
-                        if let channelListVM {
-                            group.addTask { await channelListVM.refreshChannels() }
+                    if dependencies.conversationManager?.usesLocalConversationStore == true {
+                        await listViewModel.refreshConversations()
+                    } else {
+                        await withTaskGroup(of: Void.self) { group in
+                            group.addTask { await listViewModel.refreshConversations() }
+                            group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                            if let channelListVM {
+                                group.addTask { await channelListVM.refreshChannels() }
+                            }
                         }
                     }
                 }

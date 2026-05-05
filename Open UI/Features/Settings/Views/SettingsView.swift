@@ -371,6 +371,8 @@ struct SettingsView: View {
             availableModels = try await manager.fetchModels()
             if let localDefaultModelId = ActiveChatStore.persistedExplicitDefaultModelId() {
                 defaultModelId = localDefaultModelId
+            } else if manager.usesLocalConversationStore {
+                defaultModelId = nil
             } else {
                 defaultModelId = await manager.fetchUserDefaultModel()
             }
@@ -381,6 +383,10 @@ struct SettingsView: View {
     private func saveDefaultModel(_ modelId: String?) {
         defaultModelId = modelId
         dependencies.activeChatStore.updateDefaultModelSelection(modelId)
+
+        if dependencies.conversationManager?.usesLocalConversationStore == true {
+            return
+        }
 
         // Save to user settings on server.
         // Use merge helper so we ONLY update `models` without overwriting

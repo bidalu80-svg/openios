@@ -68,6 +68,11 @@ final class ServerConnectionMonitor: @unchecked Sendable {
     /// Weak reference to the socket service for reconnection.
     @ObservationIgnored private weak var socketService: SocketIOService?
 
+    /// Direct model providers do not expose OpenWebUI's `/health` endpoint.
+    /// For them, liveness is checked through `/models`, otherwise the global
+    /// overlay shows "Server Unreachable" while chat/image calls still work.
+    @ObservationIgnored private var usesModelProbe = false
+
     /// Whether the monitor is currently running.
     @ObservationIgnored private var isRunning = false
 
@@ -101,6 +106,7 @@ final class ServerConnectionMonitor: @unchecked Sendable {
 
         self.apiClient = apiClient
         self.socketService = socketService
+        self.usesModelProbe = apiClient.providerType != .openWebUI
         isRunning = true
 
         startPathMonitor()
@@ -124,6 +130,7 @@ final class ServerConnectionMonitor: @unchecked Sendable {
         debounceTask?.cancel()
         debounceTask = nil
         immediateCheckInFlight = false
+        usesModelProbe = false
 
         // Reset state
         connectionState = .connected
@@ -208,7 +215,12 @@ final class ServerConnectionMonitor: @unchecked Sendable {
     private func checkServerHealth() async {
         guard let apiClient else { return }
 
-        let healthy = await apiClient.checkHealth()
+        let healthy: Bool
+        if usesModelProbe {
+            healthy = (try? await apiClient.getModels().isEmpty == false) ?? false
+        } else {
+            healthy = await apiClient.checkHealth()
+        }
 
         await MainActor.run { [weak self] in
             guard let self else { return }

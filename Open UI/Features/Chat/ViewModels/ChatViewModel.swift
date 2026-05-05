@@ -315,7 +315,7 @@ final class ChatViewModel {
                 if !msg.statusHistory.isEmpty { node.statusHistory = msg.statusHistory }
                 if let error = msg.error { node.error = error }
                 if !msg.files.isEmpty {
-                    let files = Self.serverPersistableFiles(msg.files)
+                    let files = isOpenAICompatibleProvider ? msg.files : Self.serverPersistableFiles(msg.files)
                     if !files.isEmpty { node.files = files }
                 }
                 if let usage = msg.usage { node.usage = usage }
@@ -341,14 +341,7 @@ final class ChatViewModel {
             return
         }
 
-        try? await manager.apiClient.syncConversationHistory(
-            id: chatId,
-            history: conv.history,
-            model: modelId,
-            systemPrompt: conv.systemPrompt,
-            chatParams: conv.chatParams,
-            title: conv.title
-        )
+        try? await manager.syncConversationHistory(conv)
     }
 
     var selectedModel: AIModel? {
@@ -480,6 +473,11 @@ final class ChatViewModel {
 
     func uploadAttachmentImmediately(attachmentId: UUID) {
         guard let index = attachments.firstIndex(where: { $0.id == attachmentId }) else { return }
+        if isOpenAICompatibleProvider, canSendAttachmentInline(attachments[index]) {
+            attachments[index].uploadStatus = .completed
+            attachments[index].uploadError = nil
+            return
+        }
         // Skip audio only when in on-device transcription mode — server mode uploads audio like any file
         let audioFileMode = UserDefaults.standard.string(forKey: "audioFileTranscriptionMode") ?? "server"
         guard !(attachments[index].type == .audio && audioFileMode == "device") else { return }
@@ -1689,6 +1687,12 @@ final class ChatViewModel {
     /// Called once at chat load time. If any terminals are available, the
     /// user can toggle them on via the terminal pill in the input field.
     func loadTerminalServers() async {
+        guard !isOpenAICompatibleProvider else {
+            availableTerminalServers = []
+            selectedTerminalServer = nil
+            terminalEnabled = false
+            return
+        }
         guard let manager else { return }
         do {
             availableTerminalServers = try await manager.fetchTerminalServers()
@@ -1716,6 +1720,12 @@ final class ChatViewModel {
     }
 
     func loadTools() async {
+        guard !isOpenAICompatibleProvider else {
+            availableTools = []
+            selectedToolIds = []
+            isLoadingTools = false
+            return
+        }
         guard let manager else { return }
         isLoadingTools = true
         do {
@@ -1800,6 +1810,11 @@ final class ChatViewModel {
     /// - If no cache, shows a loading state while fetching.
     /// - Cache is refreshed every time the picker opens (async).
     func loadKnowledgeItems() {
+        guard !isOpenAICompatibleProvider else {
+            knowledgeItems = []
+            isLoadingKnowledge = false
+            return
+        }
         // If we already have cached items, show them immediately
         // and refresh in the background (stale-while-revalidate)
         if !knowledgeItems.isEmpty {
@@ -1819,6 +1834,7 @@ final class ChatViewModel {
     /// Fetches folders + knowledge bases + knowledge files from the server
     /// and updates the cache. All 3 APIs are called concurrently.
     private func fetchKnowledgeItemsFromServer() async {
+        guard !isOpenAICompatibleProvider else { return }
         guard let manager else { return }
 
         // Fetch all 3 sources concurrently — each is independent and
@@ -2570,11 +2586,11 @@ final class ChatViewModel {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else { return }
         guard let manager else { return }
-        if attachments.contains(where: { $0.uploadStatus == .error && !canSendAttachmentInline($0) }) {
+        if attachments.contains(where: { $0.uploadStatus == .error && !(isOpenAICompatibleProvider && canSendAttachmentInline($0)) }) {
             errorMessage = "One or more attachments failed to upload. Retry or remove them before sending."
             return
         }
-        if attachments.contains(where: { $0.isUploading && !canSendAttachmentInline($0) }) {
+        if attachments.contains(where: { $0.isUploading && !(isOpenAICompatibleProvider && canSendAttachmentInline($0)) }) {
             errorMessage = "Please wait for attachments to finish uploading."
             return
         }
@@ -2646,7 +2662,16 @@ final class ChatViewModel {
         var inlineTextSnippets: [String] = []
         var fallbackUploadFailure: String?
         for attachment in currentAttachments {
-            if let fileId = attachment.uploadedFileId {
+            if isOpenAICompatibleProvider, let data = attachment.data, attachment.type == .image {
+                let dataURL = attachment.displayDataURL ?? inlineImageDataURL(data: data, fileName: attachment.name)
+                inlineImageFiles.append(ChatMessageFile(
+                    type: "image",
+                    url: dataURL,
+                    name: attachment.name,
+                    contentType: "image/jpeg",
+                    displayURL: dataURL
+                ))
+            } else if let fileId = attachment.uploadedFileId {
                 // Already uploaded + processed — build rich web-UI-format ref
                 let fileObject = attachment.uploadedFileObject ?? [:]
                 let isImage = attachment.type == .image
@@ -2827,6 +2852,9 @@ final class ChatViewModel {
                 pendingChatParams = nil
             }
             conversation = newConv
+            if isOpenAICompatibleProvider {
+                activeChatStore?.promoteNewChat(to: localId)
+            }
             // Update active conversation ID so notifications are suppressed
             // while the user is viewing this newly created chat
             NotificationService.shared.activeConversationId = localId
@@ -2853,7 +2881,7 @@ final class ChatViewModel {
             role: .user,
             content: messageText,
             timestamp: userMessage.timestamp,
-            files: Self.serverPersistableFiles(messageFiles),
+            files: isOpenAICompatibleProvider ? messageFiles : Self.serverPersistableFiles(messageFiles),
             models: userNodeModels
         )
         let assistantHistoryNode = HistoryNode(
@@ -2912,7 +2940,17 @@ final class ChatViewModel {
                                 )
                             )
                         }
-                        let imageReference = try await manager.generateImage(prompt: messageText, model: modelId)
+                        let imageReference: String
+                        if let editImage = self.firstEditableImage(from: currentAttachments) {
+                            imageReference = try await manager.editImage(
+                                prompt: messageText,
+                                model: modelId,
+                                imageData: editImage.data,
+                                fileName: editImage.fileName
+                            )
+                        } else {
+                            imageReference = try await manager.generateImage(prompt: messageText, model: modelId)
+                        }
                         let markdown = "![Generated image](\(imageReference))"
                         self.updateAssistantMessage(
                             id: assistantMessageId,
@@ -2924,6 +2962,7 @@ final class ChatViewModel {
                         self.selfInitiatedStream = false
                         self.activeTaskId = nil
                         self.lastTaskExtractionLength = 0
+                        await self.persistLocalConversationIfNeeded()
                         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                         return
                     }
@@ -2955,6 +2994,8 @@ final class ChatViewModel {
                             error: ChatMessageError(content: error.localizedDescription)
                         )
                         self.cleanupStreaming()
+                        await self.persistLocalConversationIfNeeded()
+                        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                     }
                     return
                 }
@@ -2967,6 +3008,7 @@ final class ChatViewModel {
                 self.selfInitiatedStream = false
                 self.activeTaskId = nil
                 self.lastTaskExtractionLength = 0
+                await self.persistLocalConversationIfNeeded()
                 await self.sendCompletionNotificationIfNeeded(content: acc.content)
                 NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
             }
@@ -3763,21 +3805,13 @@ final class ChatViewModel {
     /// metadata on inactive-branch nodes with stale/empty flat-list data,
     /// which can cause the server to reorder childrenIds.
     private func syncCurrentIdToServer() async {
-        guard let chatId = conversationId ?? conversation?.id, let manager else { return }
-        let modelId = selectedModelId ?? conversation?.model ?? ""
+        guard let manager else { return }
 
         guard let conv = conversation, conv.history.isPopulated else {
             return
         }
 
-        try? await manager.apiClient.syncConversationHistory(
-            id: chatId,
-            history: conv.history,
-            model: modelId,
-            systemPrompt: conv.systemPrompt,
-            chatParams: conv.chatParams,
-            title: conv.title
-        )
+        try? await manager.syncConversationHistory(conv)
     }
 
     /// Regenerates content for an existing assistant message placeholder.
@@ -4750,6 +4784,7 @@ final class ChatViewModel {
     /// the server's actual config. Updates the model in `availableModels` and
     /// re-syncs UI defaults.
     private func refreshSelectedModelConfig() async {
+        guard !isOpenAICompatibleProvider else { return }
         guard let modelId = selectedModelId, let manager else { return }
         do {
             if var fullModel = try await manager.apiClient.fetchModelConfig(modelId: modelId) {
@@ -4796,6 +4831,7 @@ final class ChatViewModel {
     /// IMPORTANT: Uses `applyIncrementalModelDefaults` instead of `syncUIWithModelDefaults`
     /// to avoid wiping tools/features the user has manually toggled during the session.
     private func refreshSelectedModelMetadata() async {
+        guard !isOpenAICompatibleProvider else { return }
         guard let modelId = selectedModelId, let manager else { return }
         do {
             if var fullModel = try await manager.apiClient.fetchModelConfig(modelId: modelId) {
@@ -4955,7 +4991,7 @@ final class ChatViewModel {
     /// Whether the selected model supports the memory builtin tool.
     /// Controls visibility of the memory toggle in ToolsMenuSheet.
     var isMemoryAvailable: Bool {
-        selectedModel?.supportsMemory ?? false
+        isOpenAICompatibleProvider || (selectedModel?.supportsMemory ?? false)
     }
 
     /// Syncs the UI toggles (web search pill, selected tools) with the selected
@@ -5013,6 +5049,12 @@ final class ChatViewModel {
     /// toggles memory in Settings → Personalization. Fire-and-forget
     /// — failure just leaves `memoryEnabled` at its last known value.
     func fetchMemorySettingFromServer() async {
+        if isOpenAICompatibleProvider, let manager {
+            let enabled = await LocalMemoryStore.shared.isEnabled(serverURL: manager.baseURL)
+            memoryEnabled = enabled
+            activeChatStore?.cachedMemorySetting = enabled
+            return
+        }
         // Use session-level cache — avoids a redundant GET /api/v1/users/user/settings
         // on every model load/switch. Cache is cleared by ActiveChatStore.clear()
         // on logout or server switch, ensuring a fresh fetch each session.
@@ -5044,9 +5086,13 @@ final class ChatViewModel {
         guard let apiClient = manager?.apiClient else { return }
         Task {
             do {
-                // Use merge helper so we only update `memory` without
-                // overwriting `models`, `pinnedModels`, or any other ui keys.
-                try await apiClient.mergeUserUISettings(["memory": enabled])
+                if self.isOpenAICompatibleProvider {
+                    await LocalMemoryStore.shared.setEnabled(enabled, serverURL: apiClient.baseURL)
+                } else {
+                    // Use merge helper so we only update `memory` without
+                    // overwriting `models`, `pinnedModels`, or any other ui keys.
+                    try await apiClient.mergeUserUISettings(["memory": enabled])
+                }
                 logger.debug("Memory setting saved to server: \(enabled)")
             } catch {
                 logger.debug("Failed to save memory setting: \(error.localizedDescription)")
@@ -5292,6 +5338,37 @@ final class ChatViewModel {
             && !negatives.contains(where: { haystack.contains($0) })
     }
 
+    private func firstEditableImage(from attachments: [ChatAttachment]) -> (data: Data, fileName: String)? {
+        for attachment in attachments where attachment.type == .image {
+            if let data = attachment.data {
+                return (data, attachment.name)
+            }
+            if let dataURL = attachment.displayDataURL,
+               let data = Self.imageData(fromDataURL: dataURL) {
+                return (data, attachment.name)
+            }
+        }
+        return nil
+    }
+
+    private static func imageData(fromDataURL dataURL: String) -> Data? {
+        guard dataURL.hasPrefix("data:image/"),
+              let comma = dataURL.firstIndex(of: ",") else { return nil }
+        return Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...]))
+    }
+
+    private func localMemorySystemContext() async -> String? {
+        guard isOpenAICompatibleProvider, memoryEnabled, let manager else { return nil }
+        guard await LocalMemoryStore.shared.isEnabled(serverURL: manager.baseURL) else { return nil }
+        let memories = await LocalMemoryStore.shared.list(serverURL: manager.baseURL)
+        guard !memories.isEmpty else { return nil }
+        let lines = memories.prefix(30).map { "- \($0.content)" }.joined(separator: "\n")
+        return """
+        User memories to consider across conversations:
+        \(lines)
+        """
+    }
+
     /// Builds API messages array, fetching image base64 from server for vision.
     /// Matches Flutter's `_buildMessagePayloadWithAttachments` which calls
     /// `api.getFileContent(fileId)` to get base64 data URLs for the LLM.
@@ -5324,8 +5401,13 @@ final class ChatViewModel {
                !cp.trimmingCharacters(in: .whitespaces).isEmpty { return cp }
             return conversation.systemPrompt
         }()
-        if let sp = asyncEffectiveSP, !sp.trimmingCharacters(in: .whitespaces).isEmpty {
-            apiMessages.append(["role": "system", "content": sp])
+        let memoryContext = await localMemorySystemContext()
+        let combinedSystemPrompt = [asyncEffectiveSP, memoryContext]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        if !combinedSystemPrompt.isEmpty {
+            apiMessages.append(["role": "system", "content": combinedSystemPrompt])
         }
         for message in conversation.messages where !message.isStreaming {
             let imageFiles = message.files.filter { f in
@@ -5972,6 +6054,16 @@ final class ChatViewModel {
 
         // Notify history to refresh
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func persistLocalConversationIfNeeded() async {
+        guard let manager, manager.usesLocalConversationStore, let conversation else { return }
+        guard !isTemporaryChat else { return }
+        do {
+            try await manager.saveConversation(conversation)
+        } catch {
+            logger.error("Failed to save local conversation: \(error.localizedDescription)")
+        }
     }
 }
 

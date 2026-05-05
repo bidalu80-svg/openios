@@ -103,6 +103,10 @@ final class ChatListViewModel {
         conversations.filter { $0.folderId == nil || $0.folderId?.isEmpty == true }
     }
 
+    private var usesLocalConversationStore: Bool {
+        manager?.usesLocalConversationStore == true
+    }
+
     /// Filtered conversations based on search text.
     /// When searching, shows all conversations regardless of folder membership.
     var filteredConversations: [Conversation] {
@@ -259,6 +263,12 @@ final class ChatListViewModel {
         backgroundFetchTask = nil
 
         do {
+            if manager.usesLocalConversationStore {
+                conversations = try await manager.fetchConversationsPage(page: 1)
+                isLoading = false
+                return
+            }
+
             // Phase 1: page 1 + pinned IDs in parallel → instant UI
             async let page1Request = manager.fetchConversationsPage(page: 1)
             async let pinnedRequest = manager.apiClient.getPinnedConversationIds()
@@ -304,6 +314,14 @@ final class ChatListViewModel {
         backgroundFetchTask = nil
 
         do {
+            if manager.usesLocalConversationStore {
+                conversations = try await manager.fetchConversationsPage(page: 1)
+                errorMessage = nil
+                lastRefreshDate = Date()
+                isRefreshing = false
+                return
+            }
+
             // Phase 1: page 1 + pinned IDs in parallel
             async let page1Request = manager.fetchConversationsPage(page: 1)
             async let pinnedRequest = manager.apiClient.getPinnedConversationIds()
@@ -362,6 +380,16 @@ final class ChatListViewModel {
         guard !isLoading, !isRefreshing else { return }
 
         do {
+            if manager.usesLocalConversationStore {
+                let local = try await manager.fetchConversationsPage(page: 1)
+                if local.map(\.id) != conversations.map(\.id) {
+                    conversations = local
+                }
+                errorMessage = nil
+                lastRefreshDate = Date()
+                return
+            }
+
             async let page1Request = manager.fetchConversationsPage(page: 1)
             async let pinnedRequest = manager.apiClient.getPinnedConversationIds()
 
@@ -782,6 +810,10 @@ final class ChatListViewModel {
 
     /// Archives all conversations for the current user.
     func archiveAllConversations() async {
+        if usesLocalConversationStore {
+            await deleteAllConversations()
+            return
+        }
         guard let apiClient = manager?.apiClient else { return }
 
         isDeletingBulk = true // Reuse the loading overlay
@@ -801,6 +833,12 @@ final class ChatListViewModel {
 
     /// Unshares a conversation (revokes its share link).
     func unshareConversation(_ conversation: Conversation) async {
+        if usesLocalConversationStore {
+            if let index = conversations.firstIndex(where: { $0.id == conversation.id }) {
+                conversations[index].shareId = nil
+            }
+            return
+        }
         guard let apiClient = manager?.apiClient else { return }
 
         do {

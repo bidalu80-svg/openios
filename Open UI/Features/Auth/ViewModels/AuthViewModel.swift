@@ -124,6 +124,9 @@ final class AuthViewModel {
     /// Admins always get full access — their `permissions` field is never consulted.
     /// `nil` permissions (older server without the field) also defaults to full access.
     var workspacePermissions: GroupWorkspacePermissions {
+        if serverConfigStore.activeServer?.providerType != .openWebUI {
+            return GroupWorkspacePermissions()
+        }
         guard currentUser?.role != .admin else { return .allEnabled }
         return currentUser?.permissions?.workspace ?? .allEnabled
     }
@@ -131,6 +134,21 @@ final class AuthViewModel {
     /// The resolved feature permissions for the current user from `/api/v1/auths/`.
     /// Admins always get full access. `nil` permissions defaults to full access.
     var featurePermissions: GroupFeaturePermissions {
+        if serverConfigStore.activeServer?.providerType != .openWebUI {
+            return GroupFeaturePermissions(
+                apiKeys: false,
+                notes: false,
+                channels: false,
+                folders: false,
+                directToolServers: false,
+                webSearch: false,
+                imageGeneration: true,
+                codeInterpreter: false,
+                memories: true,
+                automations: false,
+                calendar: false
+            )
+        }
         guard currentUser?.role != .admin else { return .allEnabled }
         return currentUser?.permissions?.features ?? .allEnabled
     }
@@ -330,17 +348,33 @@ final class AuthViewModel {
             serverURL = finalURL
         }
 
+        var deferredCloudflareChallenge = false
+        var deferredProxyAuthChallenge = false
+
         switch health.result {
         case .cloudflareChallenge:
-            pendingCloudflareURL = resolvedURL
-            showCloudflareChallenge = true
-            isConnecting = false
-            return
+            if trimmedAPIKey.isEmpty {
+                pendingCloudflareURL = resolvedURL
+                showCloudflareChallenge = true
+                isConnecting = false
+                return
+            }
+            // Some OpenAI-compatible endpoints serve an HTML app at /health.
+            // With an API key present, probe provider endpoints before assuming
+            // this is an OpenWebUI Cloudflare challenge.
+            deferredCloudflareChallenge = true
+            logger.info("Health check looked like Cloudflare, continuing with API-key provider probing.")
         case .proxyAuthRequired:
-            pendingProxyAuthURL = resolvedURL
-            showProxyAuthChallenge = true
-            isConnecting = false
-            return
+            if trimmedAPIKey.isEmpty {
+                pendingProxyAuthURL = resolvedURL
+                showProxyAuthChallenge = true
+                isConnecting = false
+                return
+            }
+            // Direct providers commonly do not expose OpenWebUI's /health or
+            // /api/config. Continue to /v1/models probing when an API key exists.
+            deferredProxyAuthChallenge = true
+            logger.info("Health check looked like proxy/HTML, continuing with API-key provider probing.")
         case .unreachable:
             if trimmedAPIKey.isEmpty {
                 errorMessage = "Couldn't reach the server. Check your URL and internet connection."
@@ -461,6 +495,14 @@ final class AuthViewModel {
                 errorMessage = apiError.errorDescription ?? "Could not load models. Check your BASEURL and APIKEY."
             } else if sawEmptyModels {
                 errorMessage = "Connected, but no models were returned. Check your BASEURL and APIKEY."
+            } else if deferredCloudflareChallenge {
+                pendingCloudflareURL = resolvedURL
+                showCloudflareChallenge = true
+                errorMessage = nil
+            } else if deferredProxyAuthChallenge {
+                pendingProxyAuthURL = resolvedURL
+                showProxyAuthChallenge = true
+                errorMessage = nil
             } else {
                 errorMessage = "Could not load models. Check your BASEURL and APIKEY."
             }
