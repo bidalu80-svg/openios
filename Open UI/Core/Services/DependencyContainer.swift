@@ -44,7 +44,7 @@ final class ActiveChatStore {
     ///
     /// `defaultModelKey` is an explicit Settings choice. `lastSelectedModelKey`
     /// is only a fallback when the user has not set a default model.
-    var cachedSelectedModelId: String? = Self.persistedPreferredModelId()
+    var cachedSelectedModelId: String? = ActiveChatStore.persistedPreferredModelId()
 
     static let lastSelectedModelKey = "chat.lastSelectedModelId"
     static let defaultModelKey = "chat.defaultModelId"
