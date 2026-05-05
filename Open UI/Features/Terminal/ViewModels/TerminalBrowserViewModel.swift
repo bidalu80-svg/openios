@@ -32,16 +32,10 @@ final class TerminalBrowserViewModel {
     /// Whether the terminal section is expanded.
     var isTerminalExpanded: Bool = false
 
-    // MARK: - Action State
-
     /// Whether the new folder alert is showing.
     var showNewFolderAlert: Bool = false
     /// New folder name input.
     var newFolderName: String = ""
-    /// File being renamed (nil = not renaming).
-    var renamingFile: TerminalFileItem?
-    /// New name for the file being renamed.
-    var renameText: String = ""
 
     // MARK: - Private
 
@@ -89,8 +83,6 @@ final class TerminalBrowserViewModel {
         isTerminalExpanded = false
         showNewFolderAlert = false
         newFolderName = ""
-        renamingFile = nil
-        renameText = ""
     }
 
     // MARK: - Navigation

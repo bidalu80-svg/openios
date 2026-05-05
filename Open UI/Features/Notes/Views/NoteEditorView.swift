@@ -1,8 +1,10 @@
+import AVFoundation
+import QuickLook
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Editor view for a single note with markdown editing,
-/// audio recording, and file attachment support.
+/// Editor view for a single note with markdown editing
+/// and file attachment support.
 struct NoteEditorView: View {
     let noteId: String
 
@@ -15,15 +17,15 @@ struct NoteEditorView: View {
     @State private var showAudioRecorder = false
     @State private var showFilePicker = false
     @State private var showAudioPlayer: AudioAttachment?
+    @State private var previewFileURL: URL?
     @State private var isPreviewMode = true
-    @State private var recordingService = AudioRecordingService()
     @State private var isGeneratingTitle = false
     @State private var isEnhancing = false
     @State private var aiErrorMessage: String?
+    @State private var recordingService = AudioRecordingService()
 
     @Environment(AppDependencyContainer.self) private var dependencies
     @Environment(\.theme) private var theme
-    @Environment(\.dismiss) private var dismiss
 
     @FocusState private var isContentFocused: Bool
 
@@ -93,9 +95,8 @@ struct NoteEditorView: View {
                     }
                     .accessibilityLabel(isPreviewMode ? "Edit" : "Preview")
 
-                    // Audio recording
                     Button {
-                        showAudioRecorder = true
+                        Task { await openAudioRecorder() }
                     } label: {
                         Image(systemName: "mic.circle")
                     }
@@ -136,7 +137,7 @@ struct NoteEditorView: View {
             }
         }
         .sheet(item: $showAudioPlayer) { attachment in
-            AudioPlayerSheet(attachment: attachment, baseURL: dependencies.conversationManager?.baseURL)
+            AudioPlayerSheet(attachment: attachment, apiClient: dependencies.apiClient)
         }
         .fileImporter(
             isPresented: $showFilePicker,
@@ -145,6 +146,7 @@ struct NoteEditorView: View {
         ) { result in
             handleFileImport(result)
         }
+        .quickLookPreview($previewFileURL)
     }
 
     // MARK: - Editor Content
@@ -185,7 +187,6 @@ struct NoteEditorView: View {
                     Divider()
                         .foregroundStyle(theme.divider)
 
-                    // Audio attachments
                     if !note.audioAttachments.isEmpty {
                         audioAttachmentsSection(note.audioAttachments)
                     }
@@ -321,21 +322,30 @@ struct NoteEditorView: View {
                 .foregroundStyle(theme.textSecondary)
 
             ForEach(attachments) { attachment in
-                HStack(spacing: Spacing.sm) {
-                    Image(systemName: iconForMimeType(attachment.mimeType))
-                        .foregroundStyle(theme.brandPrimary)
-                    Text(attachment.fileName)
-                        .scaledFont(size: 14)
-                        .foregroundStyle(theme.textPrimary)
-                        .lineLimit(1)
-                    Spacer()
-                    Text(formatFileSize(attachment.fileSize))
-                        .scaledFont(size: 12, weight: .medium)
-                        .foregroundStyle(theme.textTertiary)
+                Button {
+                    Task {
+                        if let url = await resolveFilePreviewURL(for: attachment) {
+                            previewFileURL = url
+                        }
+                    }
+                } label: {
+                    HStack(spacing: Spacing.sm) {
+                        Image(systemName: iconForMimeType(attachment.mimeType))
+                            .foregroundStyle(theme.brandPrimary)
+                        Text(attachment.fileName)
+                            .scaledFont(size: 14)
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(formatFileSize(attachment.fileSize))
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                    .padding(Spacing.sm)
+                    .background(theme.surfaceContainer)
+                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.sm, style: .continuous))
                 }
-                .padding(Spacing.sm)
-                .background(theme.surfaceContainer)
-                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.sm, style: .continuous))
+                .buttonStyle(.plain)
             }
         }
     }
@@ -451,18 +461,33 @@ struct NoteEditorView: View {
         isEnhancing = false
     }
 
+    private func openAudioRecorder() async {
+        if recordingService.checkPermission() {
+            showAudioRecorder = true
+            return
+        }
+
+        let granted = await recordingService.requestPermission()
+        if granted {
+            showAudioRecorder = true
+        } else {
+            aiErrorMessage = RecordingError.permissionDenied.errorDescription
+        }
+    }
+
     private func handleAudioRecording(_ result: RecordingResult) {
         guard var updatedNote = note else { return }
 
+        let storedURL = persistAudioRecording(data: result.data, originalFileName: result.fileName)
         let attachment = AudioAttachment(
             fileName: result.fileName,
-            duration: result.duration
+            duration: result.duration,
+            localFilePath: storedURL?.path
         )
         updatedNote.audioAttachments.append(attachment)
         note = updatedNote
         Task { await notesManager?.updateNote(updatedNote) }
 
-        // Upload to server if available
         Task {
             do {
                 let fileId = try await notesManager?.uploadAudio(data: result.data, fileName: result.fileName)
@@ -473,7 +498,7 @@ struct NoteEditorView: View {
                     note = currentNote
                 }
             } catch {
-                // File saved locally, server upload failed - that's OK
+                // Local playback still works even if the server upload fails.
             }
         }
     }
@@ -486,11 +511,13 @@ struct NoteEditorView: View {
             defer { url.stopAccessingSecurityScopedResource() }
 
             guard let data = try? Data(contentsOf: url) else { continue }
+            let storedURL = persistFileAttachment(data: data, originalFileName: url.lastPathComponent)
 
             let attachment = FileAttachmentRef(
                 fileName: url.lastPathComponent,
                 fileSize: Int64(data.count),
-                mimeType: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+                mimeType: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
+                localFilePath: storedURL?.path
             )
             updatedNote.fileAttachments.append(attachment)
 
@@ -520,6 +547,61 @@ struct NoteEditorView: View {
 
     private func wrapSelection(_ wrapper: String) {
         contentText += "\(wrapper)text\(wrapper)"
+    }
+
+    private func persistAudioRecording(data: Data, originalFileName: String) -> URL? {
+        persistAttachmentData(data: data, folderName: "note_audio", originalFileName: originalFileName)
+    }
+
+    private func persistFileAttachment(data: Data, originalFileName: String) -> URL? {
+        persistAttachmentData(data: data, folderName: "note_files", originalFileName: originalFileName)
+    }
+
+    private func persistAttachmentData(data: Data, folderName: String, originalFileName: String) -> URL? {
+        guard let baseDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+
+        let dir = baseDir
+            .appendingPathComponent("OpenUI", isDirectory: true)
+            .appendingPathComponent(folderName, isDirectory: true)
+
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let safeName = originalFileName.isEmpty ? UUID().uuidString : originalFileName
+            let url = dir.appendingPathComponent("\(UUID().uuidString)_\(safeName)")
+            try data.write(to: url, options: .atomic)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    private func resolveFilePreviewURL(for attachment: FileAttachmentRef) async -> URL? {
+        if let localPath = attachment.localFilePath,
+           FileManager.default.fileExists(atPath: localPath) {
+            return URL(fileURLWithPath: localPath)
+        }
+
+        guard let fileId = attachment.fileId,
+              let apiClient = dependencies.apiClient else {
+            return nil
+        }
+
+        do {
+            let (data, _) = try await apiClient.getFileContent(id: fileId)
+            let storedURL = persistFileAttachment(data: data, originalFileName: attachment.fileName)
+            if let storedURL,
+               var currentNote = note,
+               let index = currentNote.fileAttachments.firstIndex(where: { $0.id == attachment.id }) {
+                currentNote.fileAttachments[index].localFilePath = storedURL.path
+                note = currentNote
+                await notesManager?.updateNote(currentNote)
+            }
+            return storedURL
+        } catch {
+            return nil
+        }
     }
 
     private func formatDuration(_ seconds: TimeInterval) -> String {
@@ -554,7 +636,6 @@ struct AudioRecorderSheet: View {
             VStack(spacing: Spacing.xl) {
                 Spacer()
 
-                // Waveform visualization
                 HStack(spacing: 4) {
                     ForEach(0..<20, id: \.self) { index in
                         RoundedRectangle(cornerRadius: 2)
@@ -564,7 +645,6 @@ struct AudioRecorderSheet: View {
                 }
                 .frame(height: 80)
 
-                // Duration
                 Text(formatDuration(recordingService.duration))
                     .scaledFont(size: 36, weight: .bold)
                     .foregroundStyle(theme.textPrimary)
@@ -572,9 +652,7 @@ struct AudioRecorderSheet: View {
 
                 Spacer()
 
-                // Controls
                 HStack(spacing: Spacing.xxl) {
-                    // Cancel
                     Button {
                         recordingService.cancelRecording()
                         dismiss()
@@ -584,7 +662,6 @@ struct AudioRecorderSheet: View {
                             .foregroundStyle(theme.textTertiary)
                     }
 
-                    // Record / Pause
                     Button {
                         switch recordingService.state {
                         case .idle:
@@ -615,7 +692,6 @@ struct AudioRecorderSheet: View {
                             )
                     }
 
-                    // Done
                     Button {
                         if let result = recordingService.stopRecording() {
                             onComplete(result)
@@ -652,11 +728,142 @@ struct AudioRecorderSheet: View {
 
 // MARK: - Audio Player Sheet
 
+@MainActor @Observable
+final class NoteAudioPlaybackController: NSObject, AVAudioPlayerDelegate {
+    enum PlaybackState: Equatable {
+        case idle
+        case loading
+        case playing
+        case paused
+        case error(String)
+    }
+
+    private(set) var state: PlaybackState = .idle
+    private(set) var currentTime: TimeInterval = 0
+    private(set) var duration: TimeInterval = 0
+
+    private var player: AVAudioPlayer?
+    private var timer: Timer?
+
+    func load(attachment: AudioAttachment, apiClient: APIClient?) async {
+        stop()
+        state = .loading
+
+        do {
+            let data = try await resolveAudioData(for: attachment, apiClient: apiClient)
+            try configurePlayer(with: data)
+            state = .paused
+        } catch {
+            state = .error(error.localizedDescription)
+        }
+    }
+
+    func togglePlayback() {
+        switch state {
+        case .playing:
+            player?.pause()
+            stopTimer()
+            state = .paused
+        case .paused:
+            do {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .default)
+                try session.setActive(true)
+                player?.play()
+                startTimer()
+                state = .playing
+            } catch {
+                state = .error(error.localizedDescription)
+            }
+        default:
+            break
+        }
+    }
+
+    func seek(to time: TimeInterval) {
+        let clamped = min(max(0, time), duration)
+        player?.currentTime = clamped
+        currentTime = clamped
+    }
+
+    func stop() {
+        player?.stop()
+        player = nil
+        stopTimer()
+        currentTime = 0
+        duration = 0
+        if case .loading = state {
+            return
+        }
+        state = .idle
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        stopTimer()
+        currentTime = duration
+        state = .paused
+    }
+
+    private func resolveAudioData(for attachment: AudioAttachment, apiClient: APIClient?) async throws -> Data {
+        if let localPath = attachment.localFilePath,
+           FileManager.default.fileExists(atPath: localPath) {
+            return try Data(contentsOf: URL(fileURLWithPath: localPath))
+        }
+
+        guard let fileId = attachment.fileId, let apiClient else {
+            throw NotesAudioError.audioUnavailable
+        }
+
+        let (data, _) = try await apiClient.getFileContent(id: fileId)
+        return data
+    }
+
+    private func configurePlayer(with data: Data) throws {
+        let player = try AVAudioPlayer(data: data)
+        player.delegate = self
+        player.prepareToPlay()
+        self.player = player
+        self.duration = player.duration
+        self.currentTime = 0
+    }
+
+    private func startTimer() {
+        stopTimer()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.currentTime = self?.player?.currentTime ?? 0
+            }
+        }
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+}
+
+private enum NotesAudioError: LocalizedError {
+    case audioUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .audioUnavailable:
+            return "This voice note is no longer available."
+        }
+    }
+}
+
 struct AudioPlayerSheet: View {
     let attachment: AudioAttachment
-    let baseURL: String?
+    let apiClient: APIClient?
+
+    @State private var controller = NoteAudioPlaybackController()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
+
+    private var effectiveDuration: TimeInterval {
+        max(max(controller.duration, attachment.duration), 0.1)
+    }
 
     var body: some View {
         NavigationStack {
@@ -670,17 +877,51 @@ struct AudioPlayerSheet: View {
                 Text(attachment.fileName)
                     .scaledFont(size: 16)
                     .foregroundStyle(theme.textPrimary)
+                    .multilineTextAlignment(.center)
 
-                Text(formatDuration(attachment.duration))
+                Text(formatDuration(controller.duration > 0 ? controller.duration : attachment.duration))
                     .scaledFont(size: 24, weight: .semibold)
                     .foregroundStyle(theme.textSecondary)
                     .monospacedDigit()
 
-                // Playback controls placeholder
-                Text("Audio playback requires AVAudioPlayer integration")
-                    .scaledFont(size: 12, weight: .medium)
-                    .foregroundStyle(theme.textTertiary)
-                    .multilineTextAlignment(.center)
+                switch controller.state {
+                case .loading:
+                    ProgressView("Loading audio…")
+                case .error(let message):
+                    ContentUnavailableView(
+                        "Playback Unavailable",
+                        systemImage: "speaker.slash",
+                        description: Text(message)
+                    )
+                default:
+                    VStack(spacing: Spacing.md) {
+                        Slider(
+                            value: Binding(
+                                get: { controller.currentTime },
+                                set: { controller.seek(to: $0) }
+                            ),
+                            in: 0...effectiveDuration
+                        )
+
+                        HStack {
+                            Text(formatDuration(controller.currentTime))
+                            Spacer()
+                            Text(formatDuration(effectiveDuration))
+                        }
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                        .monospacedDigit()
+
+                        Button {
+                            controller.togglePlayback()
+                        } label: {
+                            Image(systemName: controller.state == .playing ? "pause.circle.fill" : "play.circle.fill")
+                                .scaledFont(size: 56)
+                                .foregroundStyle(theme.brandPrimary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
 
                 Spacer()
             }
@@ -689,20 +930,20 @@ struct AudioPlayerSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
+                    Button("Done") {
+                        controller.stop()
                         dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .scaledFont(size: 14, weight: .medium)
-                            .foregroundStyle(Color.secondary)
-                            .frame(width: 32, height: 32)
-                            .background(Color(uiColor: .systemGray5).opacity(0.6))
-                            .clipShape(Circle())
                     }
                 }
             }
         }
         .presentationDetents([.medium])
+        .task {
+            await controller.load(attachment: attachment, apiClient: apiClient)
+        }
+        .onDisappear {
+            controller.stop()
+        }
     }
 
     private func formatDuration(_ seconds: TimeInterval) -> String {

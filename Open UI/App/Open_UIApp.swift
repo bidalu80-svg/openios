@@ -105,7 +105,6 @@ struct Open_UIApp: App {
             RootView()
                 .environment(router)
                 .environment(dependencies)
-                .environment(\.locale, Locale(identifier: "zh_Hans"))
                 .task {
                     // Wire the router into the dependency container so AuthViewModel
                     // can reset navigation on server switch (must be done after both
@@ -421,7 +420,7 @@ struct RootView: View {
                         SavedServersView(viewModel: viewModel, showAddServerButton: true)
                     }
                     .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-                    .navigationTitle("切换服务器")
+                    .navigationTitle("Switch Server")
                     .navigationBarTitleDisplayMode(.inline)
                 }
             }
@@ -468,7 +467,7 @@ struct RootView: View {
                     .scaledFont(size: 44)
                     .foregroundStyle(.secondary)
 
-                Text("连接异常")
+                Text("Connection Issue")
                     .font(.title3.weight(.semibold))
 
                 Text(error)
@@ -482,14 +481,14 @@ struct RootView: View {
                         await viewModel.retrySessionRestore()
                     }
                 } label: {
-                    Label("重试", systemImage: "arrow.clockwise")
+                    Label("Retry", systemImage: "arrow.clockwise")
                         .font(.body.weight(.medium))
                         .frame(minWidth: 120)
                 }
                 .buttonStyle(.borderedProminent)
                 .padding(.top, 4)
 
-                Button("使用其他账号登录") {
+                Button("Sign in with different account") {
                     viewModel.errorMessage = nil
                     viewModel.phase = .authMethodSelection
                 }
@@ -500,7 +499,7 @@ struct RootView: View {
                 // Normal loading state
                 ProgressView()
                     .controlSize(.large)
-                Text("连接中...")
+                Text("Connecting...")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -518,7 +517,13 @@ struct RootView: View {
                 MainChatView()
             }
         }
+        .overlay {
+            // Connection lost overlay — blocks interaction when server/internet is down
+            ConnectionOverlayView(monitor: dependencies.connectionMonitor)
+        }
         .task {
+            // Start the connection monitor once the user is authenticated.
+            // This begins NWPathMonitor + /health polling.
             dependencies.startServerConnectionMonitor()
         }
         .overlay(alignment: .topTrailing) {

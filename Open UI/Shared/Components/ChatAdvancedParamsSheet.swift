@@ -30,14 +30,14 @@ struct ChatAdvancedParamsSheet: View {
                 streamFunctionSection
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("聊天控制")
+            .navigationTitle("Chat Controls")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") {
+                    Button("Save") {
                         params = draft
                         dismiss()
                     }
@@ -47,7 +47,7 @@ struct ChatAdvancedParamsSheet: View {
                     Button(role: .destructive) {
                         draft = ChatAdvancedParams()
                     } label: {
-                        Label("全部重置", systemImage: "arrow.counterclockwise")
+                        Label("Reset All", systemImage: "arrow.counterclockwise")
                             .foregroundStyle(.red)
                     }
                 }
@@ -61,7 +61,7 @@ struct ChatAdvancedParamsSheet: View {
         Section {
             ZStack(alignment: .topLeading) {
                 if draft.systemPrompt?.isEmpty ?? true {
-                    Text("仅覆盖本聊天的系统提示词…")
+                    Text("Override system prompt for this chat…")
                         .foregroundStyle(.secondary)
                         .font(.body)
                         .padding(.top, 8)
@@ -75,25 +75,25 @@ struct ChatAdvancedParamsSheet: View {
                 .frame(minHeight: 80)
             }
         } header: {
-            Text("系统提示词")
+            Text("System Prompt")
         } footer: {
-            Text("仅为当前聊天覆盖模型默认系统提示词。")
+            Text("Overrides the model's default system prompt for this chat only.")
         }
     }
 
     private var basicSection: some View {
-        Section("基础") {
-            paramDoubleRow(label: "温度", value: $draft.temperature,
+        Section("Basic") {
+            paramDoubleRow(label: "Temperature", value: $draft.temperature,
                            range: 0...2, step: 0.05, defaultHint: "0.8")
-            paramIntRow(label: "最大 Token 数", value: $draft.maxTokens,
+            paramIntRow(label: "Max Tokens", value: $draft.maxTokens,
                         range: -1...131072, step: 1, defaultHint: "-1")
-            paramOptionalIntRow(label: "随机种子", value: $draft.seed,
-                                range: 0...9_999_999, step: 1, defaultHint: "随机")
+            paramOptionalIntRow(label: "Seed", value: $draft.seed,
+                                range: 0...9_999_999, step: 1, defaultHint: "Random")
         }
     }
 
     private var samplingSection: some View {
-        Section("采样") {
+        Section("Sampling") {
             paramIntRow(label: "top_k", value: $draft.topK,
                         range: 0...1000, step: 1, defaultHint: "40")
             paramDoubleRow(label: "top_p", value: $draft.topP,
@@ -119,7 +119,7 @@ struct ChatAdvancedParamsSheet: View {
     }
 
     private var repeatSection: some View {
-        Section("重复 / Tail-Free") {
+        Section("Repeat / Tail-Free") {
             paramIntRow(label: "repeat_last_n", value: $draft.repeatLastN,
                         range: -1...128, step: 1, defaultHint: "64")
             paramDoubleRow(label: "tfs_z", value: $draft.tfsZ,
@@ -138,18 +138,18 @@ struct ChatAdvancedParamsSheet: View {
             paramIntRow(label: "num_batch", value: $draft.numBatch,
                         range: 256...8192, step: 256, defaultHint: "512")
             thinkRow
-            paramTextRow(label: "format", value: $draft.format, placeholder: "例如 json")
+            paramTextRow(label: "format", value: $draft.format, placeholder: "e.g. json")
         }
     }
 
     private var reasoningSection: some View {
-        Section("推理") {
+        Section("Reasoning") {
             reasoningEffortRow
         }
     }
 
     private var streamFunctionSection: some View {
-        Section("流式响应与函数调用") {
+        Section("Streaming & Function Calling") {
             streamResponseRow
             functionCallingRow
         }
@@ -167,10 +167,10 @@ struct ChatAdvancedParamsSheet: View {
         activeColor: Color = .accentColor
     ) -> some View {
         let current = value.wrappedValue
-        let currentLabel: String = states.first(where: { $0.value == current })?.label ?? "默认"
+        let currentLabel: String = states.first(where: { $0.value == current })?.label ?? "Default"
 
         // All states including Default as first entry
-        let allStates: [(label: String, value: String?)] = [("默认", nil)] + states
+        let allStates: [(label: String, value: String?)] = [("Default", nil)] + states
         let currentIdx = allStates.firstIndex(where: { $0.value == current }) ?? 0
 
         HStack {
@@ -202,8 +202,8 @@ struct ChatAdvancedParamsSheet: View {
     private func cyclingBoolPillRow(
         label: String,
         value: Binding<Bool?>,
-        onLabel: String = "启用",
-        offLabel: String = "禁用",
+        onLabel: String = "Enabled",
+        offLabel: String = "Disabled",
         activeColor: Color = .accentColor
     ) -> some View {
         let current = value.wrappedValue
@@ -211,7 +211,7 @@ struct ChatAdvancedParamsSheet: View {
             switch current {
             case .some(true): return onLabel
             case .some(false): return offLabel
-            case .none: return "默认"
+            case .none: return "Default"
             }
         }()
 
@@ -270,10 +270,10 @@ struct ChatAdvancedParamsSheet: View {
 
         let currentLabel: String = {
             switch current {
-            case .default:       return "默认"
-            case .on:            return "开启"
-            case .off:           return "关闭"
-            case .custom(let s): return s.isEmpty ? "自定义" : s
+            case .default:       return "Default"
+            case .on:            return "On"
+            case .off:           return "Off"
+            case .custom(let s): return s.isEmpty ? "Custom" : s
             }
         }()
 
@@ -304,7 +304,7 @@ struct ChatAdvancedParamsSheet: View {
                 .buttonStyle(.plain)
             }
             if isCustom {
-                TextField("预算字符串，例如 medium", text: Binding(
+                TextField("budget string, e.g. medium", text: Binding(
                     get: { draft.thinkCustom ?? "" },
                     set: {
                         draft.thinkCustom = $0
@@ -321,20 +321,20 @@ struct ChatAdvancedParamsSheet: View {
     @ViewBuilder
     private var streamResponseRow: some View {
         cyclingBoolPillRow(
-            label: "流式响应",
+            label: "Stream Response",
             value: $draft.streamResponse,
-            onLabel: "启用",
-            offLabel: "禁用"
+            onLabel: "Enabled",
+            offLabel: "Disabled"
         )
     }
 
     @ViewBuilder
     private var functionCallingRow: some View {
         let states: [(label: String, value: String?)] = [
-            ("原生", "native"),
+            ("Native", "native"),
         ]
         cyclingPillRow(
-            label: "函数调用",
+            label: "Function Calling",
             value: $draft.functionCalling,
             states: states
         )
@@ -363,7 +363,7 @@ struct ChatAdvancedParamsSheet: View {
                     }
                     .buttonStyle(.plain)
                 } else {
-                    Text("默认（\(defaultHint)）")
+                    Text("Default (\(defaultHint))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Button {
@@ -408,7 +408,7 @@ struct ChatAdvancedParamsSheet: View {
                     }
                     .buttonStyle(.plain)
                 } else {
-                    Text("默认（\(defaultHint)）")
+                    Text("Default (\(defaultHint))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Button {

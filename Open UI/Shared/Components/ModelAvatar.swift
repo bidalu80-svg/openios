@@ -44,16 +44,24 @@ struct ModelAvatar: View {
     }
 
     private var fallbackView: some View {
-        Image("AppIconImage")
-            .resizable()
-            .aspectRatio(contentMode: .fill)
-            .frame(width: size, height: size)
-            .clipShape(RoundedRectangle(cornerRadius: size * 0.15, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: size * 0.15, style: .continuous)
-                    .strokeBorder(theme.brandPrimary.opacity(0.25), lineWidth: 0.5)
-            )
-            .accessibilityLabel(Text(label ?? String(localized: "AI Model")))
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.15, style: .continuous)
+                .fill(theme.brandPrimary.opacity(0.12))
+            RoundedRectangle(cornerRadius: size * 0.15, style: .continuous)
+                .strokeBorder(theme.brandPrimary.opacity(0.25), lineWidth: 0.5)
+
+            if let initial = label?.trimmingCharacters(in: .whitespacesAndNewlines).first {
+                Text(String(initial).uppercased())
+                    .scaledFont(size: size * 0.38, weight: .semibold, design: .rounded)
+                    .foregroundStyle(theme.brandPrimary)
+            } else {
+                Image(systemName: "brain")
+                    .scaledFont(size: size * 0.4, weight: .medium)
+                    .foregroundStyle(theme.brandPrimary)
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityLabel(Text(label ?? String(localized: "AI Model")))
     }
 
     private var shimmerPlaceholder: some View {

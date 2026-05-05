@@ -36,7 +36,7 @@ struct UnifiedAttachmentPicker: View {
             
             // Title
             HStack {
-                Text("添加附件")
+                Text("Add Attachment")
                     .scaledFont(size: 17, weight: .semibold)
                     .foregroundStyle(theme.textPrimary)
                 Spacer()
@@ -58,7 +58,7 @@ struct UnifiedAttachmentPicker: View {
                     Image(systemName: "photo.on.rectangle")
                         .scaledFont(size: 13, weight: .semibold)
                         .foregroundStyle(theme.brandPrimary)
-                    Text("最近照片")
+                    Text("Recent Photos")
                         .scaledFont(size: 13, weight: .semibold)
                         .foregroundStyle(theme.textSecondary)
                     Spacer()
@@ -70,7 +70,7 @@ struct UnifiedAttachmentPicker: View {
                         matching: .images
                     ) {
                         HStack(spacing: 3) {
-                            Text("查看全部")
+                            Text("See All")
                                 .scaledFont(size: 12, weight: .medium)
                             Image(systemName: "chevron.right")
                                 .scaledFont(size: 10, weight: .semibold)
@@ -113,7 +113,7 @@ struct UnifiedAttachmentPicker: View {
                             Image(systemName: "photo.badge.plus")
                                 .scaledFont(size: 24)
                                 .foregroundStyle(theme.textTertiary)
-                            Text(hasPhotoAccess ? "未找到照片" : "授权照片访问后即可浏览")
+                            Text(hasPhotoAccess ? "No photos found" : "Grant photo access to browse")
                                 .scaledFont(size: 12)
                                 .foregroundStyle(theme.textTertiary)
                         }
@@ -133,8 +133,8 @@ struct UnifiedAttachmentPicker: View {
                 // Document picker
                 actionButton(
                     icon: "doc",
-                    title: "文档",
-                    subtitle: "PDF、Word、Excel 等文件",
+                    title: "Document",
+                    subtitle: "PDF, Word, Excel, and more",
                     color: theme.brandPrimary
                 ) {
                     showDocumentPicker = true
@@ -148,8 +148,8 @@ struct UnifiedAttachmentPicker: View {
                 ) {
                     actionRow(
                         icon: "photo.stack",
-                        title: "照片图库",
-                        subtitle: "浏览所有照片和视频",
+                        title: "Photo Library",
+                        subtitle: "Browse all photos and videos",
                         color: Color(hex: 0x10B981)
                     )
                 }

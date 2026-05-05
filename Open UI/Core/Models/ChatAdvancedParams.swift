@@ -192,7 +192,7 @@ struct ChatAdvancedParams: Codable, Sendable, Equatable {
         numKeep != nil || numCtx != nil || numBatch != nil ||
         reasoningEffort != nil || streamResponse != nil ||
         functionCalling != nil || format != nil ||
-        thinkEnabled != nil || (thinkCustom != nil && !thinkCustom!.isEmpty)
+        thinkEnabled != nil || (thinkCustom?.isEmpty == false)
     }
 
     // MARK: - toRequestParams()

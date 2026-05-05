@@ -501,8 +501,7 @@ final class AppDependencyContainer: ServiceContainer {
     /// Delegates to the ``ServerConnectionMonitor`` which handles health checks,
     /// state transitions, and socket reconnection automatically.
     private func performForegroundHealthCheck() async {
-        guard let client = apiClient else { return }
-        guard client.network.serverConfig.providerType == .openWebUI else { return }
+        guard apiClient != nil else { return }
         guard authViewModel.isAuthenticated else { return }
 
         // Delegate to the connection monitor — it handles /health check,
@@ -510,15 +509,10 @@ final class AppDependencyContainer: ServiceContainer {
         connectionMonitor.triggerImmediateCheck()
     }
 
-    /// Starts the ``ServerConnectionMonitor`` for OpenWebUI servers.
-    /// OpenAI-compatible/local API servers usually do not expose `/health`,
-    /// so monitoring them would show a false offline state.
+    /// Starts the ``ServerConnectionMonitor`` for the current API client.
+    /// Called after `configureServicesForActiveServer()` and when authentication succeeds.
     func startServerConnectionMonitor() {
         guard let client = apiClient else {
-            connectionMonitor.stop()
-            return
-        }
-        guard client.network.serverConfig.providerType == .openWebUI else {
             connectionMonitor.stop()
             return
         }

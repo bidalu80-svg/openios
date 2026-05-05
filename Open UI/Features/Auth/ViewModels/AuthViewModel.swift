@@ -258,22 +258,21 @@ final class AuthViewModel {
 
     // MARK: - Server Connection
 
-    /// Attempts to connect to the specified OpenAI-compatible BASEURL,
-    /// verifies API key access by loading models, and authenticates locally.
+    /// Attempts to connect to the specified server URL.
+    ///
+    /// Connection order:
+    /// 1) Try Open WebUI flow first (API key optional).
+    /// 2) If not Open WebUI and API key is provided, fall back to OpenAI-compatible mode.
     func connect() async {
         let trimmed = serverURL
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !trimmed.isEmpty, URL(string: trimmed) != nil else {
-            errorMessage = "请输入有效的 BASEURL。"
+            errorMessage = "Please enter a valid BASEURL."
             return
         }
 
         let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedAPIKey.isEmpty else {
-            errorMessage = "请输入 APIKEY。"
-            return
-        }
 
         isConnecting = true
         errorMessage = nil
@@ -294,7 +293,7 @@ final class AuthViewModel {
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
               url.host != nil else {
-            errorMessage = "URL 格式无效，请输入有效的 HTTP 或 HTTPS 服务器地址。"
+            errorMessage = "Invalid URL format. Please enter a valid HTTP or HTTPS server address."
             isConnecting = false
             return
         }
@@ -307,40 +306,146 @@ final class AuthViewModel {
             uniquingKeysWith: { _, last in last }
         )
 
-        let config = ServerConfig(
-            name: url.host ?? "Server",
-            url: normalizedURL,
-            providerType: .openAICompatible,
-            apiKey: trimmedAPIKey,
-            customHeaders: userCustomHeaders,
-            lastConnected: .now,
-            isActive: true,
-            allowSelfSignedCertificates: allowSelfSignedCerts
-        )
+        func makeConfig(urlString: String, providerType: ServerConfig.ProviderType) -> ServerConfig {
+            ServerConfig(
+                name: URL(string: urlString)?.host ?? "Server",
+                url: urlString,
+                providerType: providerType,
+                apiKey: trimmedAPIKey.isEmpty ? nil : trimmedAPIKey,
+                customHeaders: userCustomHeaders,
+                lastConnected: .now,
+                isActive: true,
+                allowSelfSignedCertificates: allowSelfSignedCerts
+            )
+        }
 
-        let client = APIClient(serverConfig: config)
+        var resolvedURL = normalizedURL
 
-        client.updateAuthToken(trimmedAPIKey)
+        // Probe connectivity + detect auth proxy / Cloudflare / HTTP→HTTPS upgrades.
+        let probeClient = APIClient(serverConfig: makeConfig(urlString: resolvedURL, providerType: .openWebUI))
+        let health = await probeClient.checkHealthWithProxyDetectionAndFinalURL()
 
-        let activeConfig = config
-        let activeClient = client
+        if let finalURL = health.finalURL, !finalURL.isEmpty {
+            resolvedURL = finalURL
+            serverURL = finalURL
+        }
 
-        do {
-            let models = try await activeClient.getModels()
-            guard !models.isEmpty else {
-                errorMessage = "已连接，但没有返回任何模型。请检查 BASEURL 和 APIKEY。"
-                isConnecting = false
-                return
+        switch health.result {
+        case .cloudflareChallenge:
+            pendingCloudflareURL = resolvedURL
+            showCloudflareChallenge = true
+            isConnecting = false
+            return
+        case .proxyAuthRequired:
+            pendingProxyAuthURL = resolvedURL
+            showProxyAuthChallenge = true
+            isConnecting = false
+            return
+        case .unreachable:
+            errorMessage = "Couldn't reach the server. Check your URL and internet connection."
+            isConnecting = false
+            return
+        case .healthy, .unhealthy:
+            break
+        }
+
+        // Primary path: Open WebUI server (supports full app feature set).
+        let openWebConfig = makeConfig(urlString: resolvedURL, providerType: .openWebUI)
+        let openWebClient = APIClient(serverConfig: openWebConfig)
+
+        if let configResult = await openWebClient.verifyAndGetConfig() {
+            backendConfig = configResult
+            logger.info("📋 [connect] Open WebUI detected: '\(configResult.name ?? "unknown")' at \(resolvedURL)")
+
+            serverConfigStore.addServer(openWebConfig)
+            if let saved = serverConfigStore.server(forURL: resolvedURL) {
+                serverConfigStore.setActiveServer(id: saved.id)
             }
-        } catch {
-            let apiError = APIError.from(error)
-            errorMessage = apiError.errorDescription ?? "无法加载模型。请检查 BASEURL 和 APIKEY。"
+            dependencies?.refreshServices()
+
+            if !trimmedAPIKey.isEmpty {
+                let previousToken = KeychainService.shared.getToken(forServer: resolvedURL)
+                // Optional fast-path: treat the API key as a bearer token and try direct auth.
+                dependencies?.apiClient?.updateAuthToken(trimmedAPIKey)
+                do {
+                    guard let activeClient = dependencies?.apiClient else {
+                        throw APIError.unknown(
+                            underlying: NSError(
+                                domain: "AuthViewModel",
+                                code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: "No active API client after server activation."]
+                            )
+                        )
+                    }
+                    let user = try await activeClient.getCurrentUser()
+                    currentUser = user
+                    dependencies?.activeChatStore.clear()
+                    connectSocketWithToken()
+                    cacheCurrentUser()
+                    saveCurrentUserAsAccount(authType: .apiKey)
+                    phase = .authenticated
+                    startTokenRefreshTimer()
+                    markOnboardingSeen()
+                } catch {
+                    // API key not valid for direct auth on this Open WebUI server.
+                    // Restore prior token (if any) so we don't clobber an existing session.
+                    if let previousToken, !previousToken.isEmpty {
+                        dependencies?.apiClient?.updateAuthToken(previousToken)
+                    } else {
+                        dependencies?.apiClient?.updateAuthToken(nil)
+                    }
+                    logger.warning("API key auth failed on Open WebUI server: \(error.localizedDescription)")
+                    if previousToken != nil {
+                        phase = .restoringSession
+                        await restoreSession()
+                    } else {
+                        phase = .authMethodSelection
+                    }
+                }
+            } else {
+                // If a token already exists for this server, restore it immediately.
+                // This keeps reconnect UX fast when re-adding/editing an existing server profile.
+                if KeychainService.shared.hasToken(forServer: resolvedURL) {
+                    phase = .restoringSession
+                    await restoreSession()
+                } else {
+                    phase = .authMethodSelection
+                }
+            }
+
             isConnecting = false
             return
         }
 
-        serverConfigStore.addServer(activeConfig)
-        if let saved = serverConfigStore.server(forURL: normalizedURL) {
+        // Fallback path: non-Open WebUI endpoint in OpenAI-compatible mode.
+        guard !trimmedAPIKey.isEmpty else {
+            errorMessage = "Server does not appear to be an Open WebUI instance. If this is an OpenAI-compatible endpoint, please enter an API key."
+            isConnecting = false
+            return
+        }
+
+        let openAIConfig = makeConfig(urlString: resolvedURL, providerType: .openAICompatible)
+        let openAIClient = APIClient(serverConfig: openAIConfig)
+        openAIClient.updateAuthToken(trimmedAPIKey)
+
+        do {
+            let models = try await openAIClient.getModels()
+            guard !models.isEmpty else {
+                openAIClient.updateAuthToken(nil)
+                errorMessage = "Connected, but no models were returned. Check your BASEURL and APIKEY."
+                isConnecting = false
+                return
+            }
+        } catch {
+            openAIClient.updateAuthToken(nil)
+            let apiError = APIError.from(error)
+            errorMessage = apiError.errorDescription ?? "Could not load models. Check your BASEURL and APIKEY."
+            isConnecting = false
+            return
+        }
+
+        serverConfigStore.addServer(openAIConfig)
+        if let saved = serverConfigStore.server(forURL: resolvedURL) {
             serverConfigStore.setActiveServer(id: saved.id)
         }
         dependencies?.refreshServices()
@@ -353,6 +458,7 @@ final class AuthViewModel {
             role: .user
         )
         cacheCurrentUser()
+        saveCurrentUserAsAccount(authType: .apiKey)
         phase = .authenticated
         markOnboardingSeen()
         isConnecting = false
@@ -934,6 +1040,7 @@ final class AuthViewModel {
         let config = ServerConfig(
             name: url.host ?? "Server",
             url: normalizedURL,
+            providerType: .openWebUI,
             apiKey: apiKey.isEmpty ? nil : apiKey,
             customHeaders: customHeaders,
             lastConnected: .now,
@@ -972,6 +1079,7 @@ final class AuthViewModel {
         dependencies?.refreshServices()
 
         if !apiKey.isEmpty {
+            let previousToken = KeychainService.shared.getToken(forServer: normalizedURL)
             do {
                 currentUser = try await client.getCurrentUser()
                 cacheCurrentUser()
@@ -979,11 +1087,26 @@ final class AuthViewModel {
                 startTokenRefreshTimer()
                 markOnboardingSeen()
             } catch {
+                if let previousToken, !previousToken.isEmpty {
+                    dependencies?.apiClient?.updateAuthToken(previousToken)
+                } else {
+                    dependencies?.apiClient?.updateAuthToken(nil)
+                }
                 logger.warning("API key auth failed after Cloudflare: \(error.localizedDescription)")
-                phase = .authMethodSelection
+                if previousToken != nil {
+                    phase = .restoringSession
+                    await restoreSession()
+                } else {
+                    phase = .authMethodSelection
+                }
             }
         } else {
-            phase = .authMethodSelection
+            if KeychainService.shared.hasToken(forServer: normalizedURL) {
+                phase = .restoringSession
+                await restoreSession()
+            } else {
+                phase = .authMethodSelection
+            }
         }
 
         isConnecting = false
@@ -1069,6 +1192,7 @@ final class AuthViewModel {
         let config = ServerConfig(
             name: url.host ?? "Server",
             url: normalizedURL,
+            providerType: .openWebUI,
             apiKey: apiKey.isEmpty ? nil : apiKey,
             customHeaders: customHeaders,
             lastConnected: .now,
@@ -1103,6 +1227,7 @@ final class AuthViewModel {
         dependencies?.refreshServices()
 
         if !apiKey.isEmpty {
+            let previousToken = KeychainService.shared.getToken(forServer: normalizedURL)
             do {
                 currentUser = try await client.getCurrentUser()
                 cacheCurrentUser()
@@ -1110,11 +1235,26 @@ final class AuthViewModel {
                 startTokenRefreshTimer()
                 markOnboardingSeen()
             } catch {
+                if let previousToken, !previousToken.isEmpty {
+                    dependencies?.apiClient?.updateAuthToken(previousToken)
+                } else {
+                    dependencies?.apiClient?.updateAuthToken(nil)
+                }
                 logger.warning("API key auth failed after proxy sign-in: \(error.localizedDescription)")
-                phase = .authMethodSelection
+                if previousToken != nil {
+                    phase = .restoringSession
+                    await restoreSession()
+                } else {
+                    phase = .authMethodSelection
+                }
             }
         } else {
-            phase = .authMethodSelection
+            if KeychainService.shared.hasToken(forServer: normalizedURL) {
+                phase = .restoringSession
+                await restoreSession()
+            } else {
+                phase = .authMethodSelection
+            }
         }
 
         isConnecting = false

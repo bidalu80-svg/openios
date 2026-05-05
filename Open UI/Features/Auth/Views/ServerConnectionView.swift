@@ -191,7 +191,7 @@ struct AuthPrimaryButton: View {
 
 // MARK: - Server Connection View
 
-/// View for connecting to an OpenAI-compatible server — modernized with animated background.
+/// View for connecting to an Open WebUI server or an OpenAI-compatible endpoint.
 struct ServerConnectionView: View {
     @Bindable var viewModel: AuthViewModel
     @Environment(\.theme) private var theme
@@ -231,13 +231,13 @@ struct ServerConnectionView: View {
                         }
                         .opacity(logoOpacity)
 
-                        Text("Open Relay")
+                        Text("Iexa")
                             .scaledFont(size: 36, weight: .bold, design: .rounded)
                             .foregroundStyle(theme.textPrimary)
                             .opacity(appeared ? 1 : 0)
                             .offset(y: appeared ? 0 : 10)
 
-                        Text("连接任意 OpenAI 兼容接口")
+                        Text("Connect to Open WebUI or any OpenAI-compatible API")
                             .scaledFont(size: 16)
                             .foregroundStyle(theme.textSecondary)
                             .opacity(appeared ? 1 : 0)
@@ -253,20 +253,20 @@ struct ServerConnectionView: View {
                             keyboardType: .URL,
                             textContentType: .URL,
                             onSubmit: {
-                                if !viewModel.serverURL.isEmpty && !viewModel.apiKey.isEmpty {
+                                if !viewModel.serverURL.isEmpty {
                                     Task { await viewModel.connect() }
                                 }
                             }
                         )
 
                         ModernTextField(
-                            label: "APIKEY",
-                            placeholder: "请输入 API 密钥",
+                            label: "APIKEY (Optional)",
+                            placeholder: "Optional for Open WebUI",
                             text: $viewModel.apiKey,
                             isSecure: true,
                             textContentType: .password,
                             onSubmit: {
-                                if !viewModel.serverURL.isEmpty && !viewModel.apiKey.isEmpty {
+                                if !viewModel.serverURL.isEmpty {
                                     Task { await viewModel.connect() }
                                 }
                             }
@@ -277,11 +277,11 @@ struct ServerConnectionView: View {
                             VStack(spacing: Spacing.lg) {
                                 HStack {
                                     VStack(alignment: .leading, spacing: Spacing.xxs) {
-                                        Text("自签名证书")
+                                        Text("Self-Signed Certificates")
                                             .scaledFont(size: 14)
                                             .foregroundStyle(theme.textPrimary)
 
-                                        Text("用于使用自定义证书的私有服务器")
+                                        Text("For private servers with custom certs")
                                             .scaledFont(size: 12, weight: .medium)
                                             .foregroundStyle(theme.textTertiary)
                                     }
@@ -301,7 +301,7 @@ struct ServerConnectionView: View {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: "gearshape")
                                     .scaledFont(size: 14)
-                                Text("高级设置")
+                                Text("Advanced")
                                     .scaledFont(size: 14, weight: .medium)
                             }
                             .foregroundStyle(theme.textTertiary)
@@ -328,10 +328,10 @@ struct ServerConnectionView: View {
 
                         // Connect button
                         AuthPrimaryButton(
-                            title: viewModel.isConnecting ? "连接中..." : "连接",
+                            title: viewModel.isConnecting ? "Connecting..." : "Connect",
                             icon: viewModel.isConnecting ? nil : "link",
                             isLoading: viewModel.isConnecting,
-                            isDisabled: viewModel.serverURL.isEmpty || viewModel.apiKey.isEmpty
+                            isDisabled: viewModel.serverURL.isEmpty
                         ) {
                             Task { await viewModel.connect() }
                         }
@@ -373,11 +373,11 @@ struct ServerConnectionView: View {
 
                     // Help text
                     VStack(spacing: Spacing.sm) {
-                        Text("需要帮助？")
+                        Text("Need help?")
                             .scaledFont(size: 14, weight: .medium)
                             .foregroundStyle(theme.textSecondary)
 
-                        Text("请输入 OpenAI 兼容的 BASEURL，例如 https://api.example.com/v1，以及你的 APIKEY。")
+                        Text("For Open WebUI, enter your server URL (API key optional). For OpenAI-compatible APIs, include /v1 and an API key.")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textTertiary)
                             .multilineTextAlignment(.center)

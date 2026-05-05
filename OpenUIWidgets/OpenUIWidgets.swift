@@ -51,7 +51,7 @@ struct QuickActionsWidget: Widget {
             QuickActionsWidgetView()
                 .containerBackground(.fill.tertiary, for: .widget)
         }
-        .configurationDisplayName("Open Relay")
+        .configurationDisplayName("Iexa")
         .description("Instantly start a chat, voice call, camera chat, or file chat.")
         .supportedFamilies([.systemSmall, .systemMedium])
         .contentMarginsDisabled()
@@ -172,7 +172,7 @@ struct QuickActionsMediumView: View {
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 10) {
-                // ── "Ask Open Relay" pill ──
+                // ── "Ask Iexa" pill ──
                 MediumSearchBar(width: geo.size.width - 20)
 
                 // ── Action buttons: Camera · Photos · Channel · Files ──
@@ -205,7 +205,7 @@ private struct MediumSearchBar: View {
                         .frame(width: 28, height: 28)
                         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
 
-                    Text("Ask Open Relay")
+                    Text("Ask Iexa")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.secondary)
 
@@ -294,8 +294,8 @@ struct LockScreenWidget: Widget {
             LockScreenWidgetView()
                 .containerBackground(.clear, for: .widget)
         }
-        .configurationDisplayName("Open Relay")
-        .description("Quick access to Open Relay from your lock screen.")
+        .configurationDisplayName("Iexa")
+        .description("Quick access to Iexa from your lock screen.")
         .supportedFamilies([.accessoryCircular, .accessoryRectangular, .accessoryInline])
     }
 }
@@ -321,7 +321,7 @@ struct LockScreenWidgetView: View {
                         .font(.system(size: 14, weight: .semibold))
                         .widgetAccentable()
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("Open Relay")
+                        Text("Iexa")
                             .font(.system(size: 13, weight: .semibold))
                         Text("Ask anything")
                             .font(.system(size: 11))
@@ -332,7 +332,7 @@ struct LockScreenWidgetView: View {
             }
         case .accessoryInline:
             Link(destination: OpenUIURL.newChat) {
-                Label("Ask Open Relay", systemImage: "bubble.left.and.text.bubble.right.fill")
+                Label("Ask Iexa", systemImage: "bubble.left.and.text.bubble.right.fill")
             }
         default:
             Link(destination: OpenUIURL.newChat) {

@@ -98,7 +98,7 @@ struct ChatEmptyState: View {
                         .foregroundStyle(theme.brandPrimary.opacity(0.7))
                 }
 
-                Text(modelName != nil ? "Chat with \(modelName!)" : "How can I help you today?")
+                Text(modelName.map { "Chat with \($0)" } ?? "How can I help you today?")
                     .scaledFont(size: 24, weight: .semibold)
                     .foregroundStyle(theme.textPrimary)
             }

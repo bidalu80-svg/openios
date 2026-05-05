@@ -36,10 +36,6 @@ final class APIClient: @unchecked Sendable {
         network.serverConfig.providerType == .openAICompatible ? "/chat/completions" : "/api/chat/completions"
     }
 
-    private var imageGenerationsPath: String {
-        network.serverConfig.providerType == .openAICompatible ? "/images/generations" : "/api/images/generations"
-    }
-
     private func chatCompletionBody(for request: ChatCompletionRequest) -> [String: Any] {
         network.serverConfig.providerType == .openAICompatible
             ? request.toOpenAICompatibleJSON()
@@ -898,38 +894,6 @@ final class APIClient: @unchecked Sendable {
             return ["raw": str]
         }
         return [:]
-    }
-
-    func generateImage(request: ImageGenerationRequest) async throws -> [GeneratedImage] {
-        let bodyData = try JSONSerialization.data(withJSONObject: request.toOpenAICompatibleJSON())
-        let (data, _) = try await network.requestRaw(
-            path: imageGenerationsPath,
-            method: .post,
-            body: bodyData,
-            timeout: 120
-        )
-
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw APIError.responseDecoding(
-                underlying: NSError(
-                    domain: "APIError", code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Expected image generation JSON response"]
-                ),
-                data: data
-            )
-        }
-
-        let images = GeneratedImage.parse(from: json)
-        if images.isEmpty {
-            throw APIError.responseDecoding(
-                underlying: NSError(
-                    domain: "APIError", code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Image generation response did not include image URLs"]
-                ),
-                data: data
-            )
-        }
-        return images
     }
 
     /// Sends a pipe-model chat completion request and streams the SSE response
@@ -3649,7 +3613,7 @@ final class APIClient: @unchecked Sendable {
                         guard let node = messagesMap[key] else { return false }
                         let nodeParentId = node["parentId"] as? String
                         let nodeRole = node["role"] as? String
-                        let isRootLevel = (nodeParentId == nil || nodeParentId!.isEmpty)
+                        let isRootLevel = (nodeParentId?.isEmpty ?? true)
                         return isRootLevel && nodeRole == "user" && key != msgId
                     }
                     if !rootSiblings.isEmpty {

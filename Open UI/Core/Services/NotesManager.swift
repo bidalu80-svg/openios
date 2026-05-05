@@ -43,7 +43,9 @@ final class NotesManager: @unchecked Sendable {
                 return fetchLocalNotes()
             }
 
+            let localById = Dictionary(uniqueKeysWithValues: fetchLocalNotes().map { ($0.id, $0) })
             let notes = rawNotes.compactMap { Note.fromServerJSON($0) }
+                .map { mergeLocalMetadata(into: $0, from: localById[$0.id]) }
                 .sorted { $0.updatedAt > $1.updatedAt }
 
             // Cache server notes locally
@@ -95,7 +97,9 @@ final class NotesManager: @unchecked Sendable {
         do {
             let json = try await apiClient.getNoteById(id)
             if let note = Note.fromServerJSON(json) {
-                return note
+                let merged = mergeLocalMetadata(into: note, from: fetchLocalNote(id: id))
+                updateLocalNote(merged, touchUpdatedAt: false)
+                return merged
             }
         } catch {
             logger.warning("Failed to fetch note \(id) from server: \(error.localizedDescription)")
@@ -184,14 +188,18 @@ final class NotesManager: @unchecked Sendable {
     }
 
     /// Updates a note in local storage.
-    private func updateLocalNote(_ note: Note) {
+    private func updateLocalNote(_ note: Note, touchUpdatedAt: Bool = true) {
         var notes = fetchLocalNotes()
-        if let index = notes.firstIndex(where: { $0.id == note.id }) {
-            var updated = note
+        var updated = note
+        if touchUpdatedAt {
             updated.updatedAt = .now
-            notes[index] = updated
-            saveLocalNotes(notes)
         }
+        if let index = notes.firstIndex(where: { $0.id == note.id }) {
+            notes[index] = updated
+        } else {
+            notes.insert(updated, at: 0)
+        }
+        saveLocalNotes(notes)
     }
 
     /// Deletes a note from local storage.
@@ -254,6 +262,23 @@ final class NotesManager: @unchecked Sendable {
         }
         let (fileId, _) = try await apiClient.uploadFile(data: data, fileName: fileName)
         return fileId
+    }
+
+    private func mergeLocalMetadata(into remote: Note, from local: Note?) -> Note {
+        guard let local else { return remote }
+        var merged = remote
+        merged.audioAttachments = local.audioAttachments
+        merged.fileAttachments = local.fileAttachments
+        merged.isPinned = local.isPinned
+        merged.folderId = local.folderId
+        merged.tags = local.tags
+        if merged.title.isEmpty {
+            merged.title = local.title
+        }
+        if merged.content.isEmpty {
+            merged.content = local.content
+        }
+        return merged
     }
 }
 

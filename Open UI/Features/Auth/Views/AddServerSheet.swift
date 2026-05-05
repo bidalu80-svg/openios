@@ -62,7 +62,7 @@ struct AddServerSheet: View {
                             VStack(spacing: Spacing.lg) {
                                 ModernTextField(
                                     label: "API Key (optional)",
-                                    placeholder: "Enter API key to skip login",
+                                    placeholder: "Optional for Open WebUI; required for OpenAI-compatible endpoints",
                                     text: $apiKey,
                                     isSecure: true
                                 )

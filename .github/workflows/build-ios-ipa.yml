@@ -182,29 +182,6 @@ jobs:
           </plist>
           EOF
 
-      - name: Verify local package paths
-        run: |
-          ls -la
-          ls -la "MarkdownView" || true
-          ls -la "Open UI.xcodeproj"
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('Open UI.xcodeproj/project.pbxproj')
-          s = p.read_text()
-          print('contains ../MarkdownView:', '../MarkdownView' in s)
-          print('contains MarkdownView only:', 'relativePath = MarkdownView;' in s)
-          PY
-
-      - name: Prepare CI local package path
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('Open UI.xcodeproj/project.pbxproj')
-          s = p.read_text()
-          # CI checkout root is already the repository root. Point local package there.
-          s = s.replace('relativePath = ../MarkdownView;', 'relativePath = MarkdownView;')
-          p.write_text(s)
-          PY
       - name: Archive app
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
@@ -254,5 +231,4 @@ jobs:
         run: |
           security delete-keychain "$KEYCHAIN_NAME" || true
           rm -f "$P12_PATH" "$PROFILE_PATH" || true
-
 

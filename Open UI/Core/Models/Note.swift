@@ -1,6 +1,6 @@
 import Foundation
 
-/// Represents a note with markdown content and optional audio attachments.
+/// Represents a note with markdown content and optional local/server attachments.
 ///
 /// Supports both local-only mode and server-backed mode. When fetched from the
 /// OpenWebUI server, notes use the `/api/v1/notes/` endpoints. The server stores
@@ -123,6 +123,8 @@ struct Note: Codable, Identifiable, Hashable, Sendable {
             && lhs.title == rhs.title
             && lhs.content == rhs.content
             && lhs.updatedAt == rhs.updatedAt
+            && lhs.audioAttachments == rhs.audioAttachments
+            && lhs.fileAttachments == rhs.fileAttachments
             && lhs.isPinned == rhs.isPinned
     }
 
@@ -130,6 +132,8 @@ struct Note: Codable, Identifiable, Hashable, Sendable {
         hasher.combine(id)
         hasher.combine(title)
         hasher.combine(updatedAt)
+        hasher.combine(audioAttachments)
+        hasher.combine(fileAttachments)
     }
 }
 
@@ -139,6 +143,7 @@ struct AudioAttachment: Codable, Identifiable, Hashable, Sendable {
     var fileName: String
     var duration: TimeInterval
     var fileId: String?
+    var localFilePath: String?
     var createdAt: Date
 
     init(
@@ -146,12 +151,14 @@ struct AudioAttachment: Codable, Identifiable, Hashable, Sendable {
         fileName: String,
         duration: TimeInterval,
         fileId: String? = nil,
+        localFilePath: String? = nil,
         createdAt: Date = .now
     ) {
         self.id = id
         self.fileName = fileName
         self.duration = duration
         self.fileId = fileId
+        self.localFilePath = localFilePath
         self.createdAt = createdAt
     }
 }
@@ -163,6 +170,7 @@ struct FileAttachmentRef: Codable, Identifiable, Hashable, Sendable {
     var fileSize: Int64
     var mimeType: String
     var fileId: String?
+    var localFilePath: String?
     var createdAt: Date
 
     init(
@@ -171,6 +179,7 @@ struct FileAttachmentRef: Codable, Identifiable, Hashable, Sendable {
         fileSize: Int64 = 0,
         mimeType: String = "application/octet-stream",
         fileId: String? = nil,
+        localFilePath: String? = nil,
         createdAt: Date = .now
     ) {
         self.id = id
@@ -178,6 +187,7 @@ struct FileAttachmentRef: Codable, Identifiable, Hashable, Sendable {
         self.fileSize = fileSize
         self.mimeType = mimeType
         self.fileId = fileId
+        self.localFilePath = localFilePath
         self.createdAt = createdAt
     }
 }
