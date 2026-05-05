@@ -2255,12 +2255,23 @@ struct ChatDetailView: View {
                     Spacer()
                     ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
                         if let fileId = file.url, !fileId.isEmpty {
-                            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
-                                .frame(
-                                    maxWidth: imageFiles.count == 1 ? 200 : 100,
-                                    maxHeight: imageFiles.count == 1 ? 200 : 100
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                            if let image = inlineDataImage(from: fileId) {
+                                Image(uiImage: image)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(
+                                        maxWidth: imageFiles.count == 1 ? 200 : 100,
+                                        maxHeight: imageFiles.count == 1 ? 200 : 100
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                            } else {
+                                AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                                    .frame(
+                                        maxWidth: imageFiles.count == 1 ? 200 : 100,
+                                        maxHeight: imageFiles.count == 1 ? 200 : 100
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                            }
                         }
                     }
                 }
@@ -2334,6 +2345,14 @@ struct ChatDetailView: View {
         case "mp4", "mov", "avi", "mkv": return "film"
         default: return "doc"
         }
+    }
+
+    private func inlineDataImage(from dataURL: String) -> UIImage? {
+        guard dataURL.hasPrefix("data:image/"),
+              let comma = dataURL.firstIndex(of: ",") else { return nil }
+        let base64 = String(dataURL[dataURL.index(after: comma)...])
+        guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else { return nil }
+        return UIImage(data: data)
     }
 
     // MARK: - Tool-Generated Images

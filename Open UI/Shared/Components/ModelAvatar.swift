@@ -35,7 +35,7 @@ struct ModelAvatar: View {
                     .frame(width: size, height: size)
                     .clipShape(RoundedRectangle(cornerRadius: size * 0.15, style: .continuous))
             } placeholder: {
-                shimmerPlaceholder
+                fallbackView
             }
             .accessibilityLabel(Text(label ?? String(localized: "AI Model")))
         } else {
@@ -122,10 +122,7 @@ struct UserAvatar: View {
                     .frame(width: size, height: size)
                     .clipShape(Circle())
             } placeholder: {
-                Circle()
-                    .fill(theme.shimmerBase)
-                    .frame(width: size, height: size)
-                    .shimmer()
+                initialsView
             }
             .accessibilityLabel(Text(name ?? String(localized: "User")))
         } else {

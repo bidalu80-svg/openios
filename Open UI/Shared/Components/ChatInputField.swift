@@ -150,18 +150,38 @@ struct ChatInputField: View {
 
     /// Whether any attachment is still uploading or being processed on the server.
     private var hasUploadingAttachments: Bool {
-        attachments.contains { $0.isUploading }
+        attachments.contains { $0.isUploading && !canSendWithoutServerUpload($0) }
     }
 
     /// Whether any attachment has failed and needs user action before sending.
     private var hasFailedAttachments: Bool {
-        attachments.contains { $0.uploadStatus == .error }
+        attachments.contains { $0.uploadStatus == .error && !canSendWithoutServerUpload($0) }
     }
 
     private var canSend: Bool {
         isEnabled && !isTranscribing && !hasUploadingAttachments && !hasFailedAttachments &&
             (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !attachments.isEmpty)
+    }
+
+    /// Images and small text/code files can be sent inline from local data if
+    /// the server upload endpoint is slow or unavailable.
+    private func canSendWithoutServerUpload(_ attachment: ChatAttachment) -> Bool {
+        guard attachment.data != nil else { return false }
+        if attachment.type == .image { return true }
+        guard attachment.type == .file else { return false }
+        return Self.isInlineTextFile(attachment.name)
+    }
+
+    private static func isInlineTextFile(_ name: String) -> Bool {
+        let ext = (name as NSString).pathExtension.lowercased()
+        return [
+            "txt", "md", "markdown", "csv", "json", "jsonl", "yaml", "yml",
+            "xml", "html", "htm", "css", "scss", "sass", "less", "js", "jsx",
+            "ts", "tsx", "py", "swift", "java", "kt", "kts", "c", "h", "cpp",
+            "hpp", "cs", "go", "rs", "rb", "php", "sh", "bash", "zsh", "ps1",
+            "bat", "cmd", "sql", "toml", "ini", "cfg", "conf", "env", "log"
+        ].contains(ext)
     }
 
     /// Whether any tool/feature is currently active.
@@ -1053,13 +1073,13 @@ struct ChatInputField: View {
                         .frame(width: 56, height: 56)
                         .overlay(
                             VStack(spacing: 3) {
-                                if attachment.isUploading {
+                                if attachment.isUploading && !canSendWithoutServerUpload(attachment) {
                                     ProgressView().controlSize(.small)
-                                } else if attachment.uploadStatus == .error {
+                                } else if attachment.uploadStatus == .error && !canSendWithoutServerUpload(attachment) {
                                     Image(systemName: "exclamationmark.triangle.fill")
                                         .scaledFont(size: 16)
                                         .foregroundStyle(theme.error)
-                                } else if attachment.isReady {
+                                } else if attachment.isReady || canSendWithoutServerUpload(attachment) {
                                     Image(systemName: "checkmark.circle.fill")
                                         .scaledFont(size: 16)
                                         .foregroundStyle(theme.success)
@@ -1086,12 +1106,12 @@ struct ChatInputField: View {
             }
             // Upload status overlay for image thumbnails
             .overlay {
-                if attachment.thumbnail != nil && attachment.isUploading {
+                if attachment.thumbnail != nil && attachment.isUploading && !canSendWithoutServerUpload(attachment) {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(Color.black.opacity(0.4))
                         .frame(width: 56, height: 56)
                         .overlay(ProgressView().controlSize(.small).tint(.white))
-                } else if attachment.thumbnail != nil && attachment.uploadStatus == .error {
+                } else if attachment.thumbnail != nil && attachment.uploadStatus == .error && !canSendWithoutServerUpload(attachment) {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(Color.black.opacity(0.4))
                         .frame(width: 56, height: 56)

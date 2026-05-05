@@ -351,8 +351,8 @@ final class ChatViewModel {
     var canSend: Bool {
         !isStreaming
             && !attachments.contains(where: { $0.type == .audio && $0.isTranscribing })
-            && !attachments.contains(where: { $0.isUploading })
-            && !attachments.contains(where: { $0.uploadStatus == .error })
+            && !attachments.contains(where: { $0.isUploading && !canSendAttachmentInline($0) })
+            && !attachments.contains(where: { $0.uploadStatus == .error && !canSendAttachmentInline($0) })
             && (!inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !attachments.isEmpty)
     }
@@ -544,6 +544,61 @@ final class ChatViewModel {
                 }
                 logger.error("Attachment upload failed for \(fileName): \(errorMessage)")
             }
+        }
+    }
+
+    private func canSendAttachmentInline(_ attachment: ChatAttachment) -> Bool {
+        guard attachment.data != nil else { return false }
+        if attachment.type == .image { return true }
+        guard attachment.type == .file else { return false }
+        return Self.isInlineTextFile(attachment.name)
+    }
+
+    private static func isInlineTextFile(_ name: String) -> Bool {
+        let ext = (name as NSString).pathExtension.lowercased()
+        return [
+            "txt", "md", "markdown", "csv", "json", "jsonl", "yaml", "yml",
+            "xml", "html", "htm", "css", "scss", "sass", "less", "js", "jsx",
+            "ts", "tsx", "py", "swift", "java", "kt", "kts", "c", "h", "cpp",
+            "hpp", "cs", "go", "rs", "rb", "php", "sh", "bash", "zsh", "ps1",
+            "bat", "cmd", "sql", "toml", "ini", "cfg", "conf", "env", "log"
+        ].contains(ext)
+    }
+
+    private func inlineImageDataURL(data: Data, fileName: String) -> String {
+        let capped = FileAttachmentService.downsampleForUpload(data: data)
+        return "data:image/jpeg;base64,\(capped.base64EncodedString())"
+    }
+
+    private func inlineTextContext(for attachment: ChatAttachment, data: Data) -> String {
+        let text = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .unicode)
+            ?? String(data: data, encoding: .utf16)
+            ?? ""
+        let trimmed = text.count > 60_000 ? String(text.prefix(60_000)) + "\n\n[File truncated]" : text
+        return """
+        Attached file: \(attachment.name)
+        ```\(Self.inlineFenceLanguage(for: attachment.name))
+        \(trimmed)
+        ```
+        """
+    }
+
+    private static func inlineFenceLanguage(for name: String) -> String {
+        let ext = (name as NSString).pathExtension.lowercased()
+        switch ext {
+        case "js", "jsx": return "javascript"
+        case "ts", "tsx": return "typescript"
+        case "py": return "python"
+        case "swift": return "swift"
+        case "html", "htm": return "html"
+        case "css": return "css"
+        case "json", "jsonl": return "json"
+        case "yaml", "yml": return "yaml"
+        case "md", "markdown": return "markdown"
+        case "sh", "bash", "zsh": return "bash"
+        case "ps1": return "powershell"
+        default: return ext
         }
     }
 
@@ -1530,6 +1585,16 @@ final class ChatViewModel {
     }
 
     private func resolveDefaultModelSelection() async {
+        let localModelId = UserDefaults.standard.string(forKey: ActiveChatStore.lastSelectedModelKey)
+        if let localModelId,
+           !localModelId.isEmpty,
+           availableModels.isEmpty || availableModels.contains(where: { $0.id == localModelId }) {
+            selectedModelId = localModelId
+            activeChatStore?.updateModelCache(models: availableModels, selectedId: selectedModelId)
+            syncUIWithModelDefaults()
+            return
+        }
+
         guard let manager else {
             selectedModelId = availableModels.first?.id
             syncUIWithModelDefaults()
@@ -2439,11 +2504,11 @@ final class ChatViewModel {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else { return }
         guard let manager else { return }
-        if attachments.contains(where: { $0.uploadStatus == .error }) {
+        if attachments.contains(where: { $0.uploadStatus == .error && !canSendAttachmentInline($0) }) {
             errorMessage = "One or more attachments failed to upload. Retry or remove them before sending."
             return
         }
-        if attachments.contains(where: { $0.isUploading }) {
+        if attachments.contains(where: { $0.isUploading && !canSendAttachmentInline($0) }) {
             errorMessage = "Please wait for attachments to finish uploading."
             return
         }
@@ -2511,6 +2576,8 @@ final class ChatViewModel {
         // Only fall back to uploading at send time for attachments that
         // somehow don't have a file ID yet (e.g., audio transcription text files).
         var fileRefs: [[String: Any]] = []
+        var inlineImageFiles: [ChatMessageFile] = []
+        var inlineTextSnippets: [String] = []
         var fallbackUploadFailure: String?
         for attachment in currentAttachments {
             if let fileId = attachment.uploadedFileId {
@@ -2535,6 +2602,16 @@ final class ChatViewModel {
                     "error": "",
                     "content_type": contentType
                 ])
+            } else if let data = attachment.data, attachment.type == .image {
+                let dataURL = inlineImageDataURL(data: data, fileName: attachment.name)
+                inlineImageFiles.append(ChatMessageFile(
+                    type: "image",
+                    url: dataURL,
+                    name: attachment.name,
+                    contentType: "image/jpeg"
+                ))
+            } else if let data = attachment.data, canSendAttachmentInline(attachment) {
+                inlineTextSnippets.append(inlineTextContext(for: attachment, data: data))
             } else if let data = attachment.data, attachment.uploadStatus != .error {
                 // Fallback: upload now (e.g., audio transcript text files that don't go
                 // through uploadAttachmentImmediately). Skip attachments that previously
@@ -2577,6 +2654,13 @@ final class ChatViewModel {
         inputText = ""
         attachments = []
 
+        let messageText: String = {
+            guard !inlineTextSnippets.isEmpty else { return currentText }
+            let joined = inlineTextSnippets.joined(separator: "\n\n")
+            if currentText.isEmpty { return joined }
+            return currentText + "\n\n" + joined
+        }()
+
         // Create user message - store file IDs (not base64) matching Flutter behavior
         let uploadedAttachmentIds = fileRefs.compactMap { $0["id"] as? String }
         var messageFiles: [ChatMessageFile] = fileRefs.map { ref in
@@ -2601,6 +2685,7 @@ final class ChatViewModel {
                 contentType: contentType
             )
         }
+        messageFiles.append(contentsOf: inlineImageFiles)
         // Also store knowledge items (collection/folder/file) on the user message
         // so they persist in conversation history and appear on reload.
         for knowledgeItem in currentKnowledgeItems {
@@ -2613,7 +2698,7 @@ final class ChatViewModel {
         }
         let userMessage = ChatMessage(
             role: .user,
-            content: currentText,
+            content: messageText,
             timestamp: .now,
             attachmentIds: uploadedAttachmentIds,
             files: messageFiles
@@ -2625,7 +2710,7 @@ final class ChatViewModel {
 
         // Ensure conversation exists on server (skip for temporary chats)
         if conversation == nil {
-            let chatTitle = String(currentText.prefix(50))
+            let chatTitle = String(messageText.prefix(50))
             var serverId: String?
             if !isTemporaryChat && !isOpenAICompatibleProvider {
                 do {
@@ -2671,7 +2756,7 @@ final class ChatViewModel {
             parentId: userMessageParentId,
             childrenIds: [assistantMessageId],
             role: .user,
-            content: currentText,
+            content: messageText,
             timestamp: userMessage.timestamp,
             files: messageFiles,
             models: userNodeModels
@@ -2722,7 +2807,8 @@ final class ChatViewModel {
                 let acc = ContentAccumulator()
 
                 do {
-                    let request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
+                    var request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
+                    if !fileRefs.isEmpty { request.files = fileRefs }
                     let sseStream = try await manager.sendMessageStreaming(request: request)
 
                     for try await event in sseStream {
@@ -2842,7 +2928,7 @@ final class ChatViewModel {
                     "parentId": (userMessageParentId as Any?) ?? NSNull(),
                     "childrenIds": [assistantMessageId],
                     "role": "user",
-                    "content": currentText,
+                    "content": messageText,
                     "timestamp": Int(userMessage.timestamp.timeIntervalSince1970),
                     "models": [modelId]
                 ]
@@ -3311,7 +3397,7 @@ final class ChatViewModel {
 
     func selectModel(_ modelId: String) {
         selectedModelId = modelId
-        activeChatStore?.cachedSelectedModelId = modelId
+        activeChatStore?.updateDefaultModelSelection(modelId)
         // Switching models is a deliberate user action — reset disabled tools
         // so the new model's defaults apply cleanly without stale overrides.
         userDisabledToolIds = []

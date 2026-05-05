@@ -371,11 +371,13 @@ struct ChatCompletionRequest: Sendable {
     }
     /// Serialises the request to a minimal OpenAI-compatible JSON dictionary.
     func toOpenAICompatibleJSON() -> [String: Any] {
-        [
+        var data: [String: Any] = [
             "stream": stream,
             "model": model,
             "messages": messages
         ]
+        if let files, !files.isEmpty { data["files"] = files }
+        return data
     }
 }
 

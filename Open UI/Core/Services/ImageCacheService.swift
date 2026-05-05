@@ -640,6 +640,7 @@ struct CachedAsyncImage<Content: View, Placeholder: View>: View {
     /// Pre-populated synchronously from the memory cache so the view
     /// renders the cached image immediately on first layout — no shimmer flash.
     @State private var loadedImage: UIImage?
+    @State private var didFailToLoad = false
 
     init(
         url: URL?,
@@ -664,6 +665,8 @@ struct CachedAsyncImage<Content: View, Placeholder: View>: View {
         Group {
             if let loadedImage {
                 content(Image(uiImage: loadedImage))
+            } else if didFailToLoad {
+                placeholder()
             } else {
                 placeholder()
             }
@@ -676,10 +679,12 @@ struct CachedAsyncImage<Content: View, Placeholder: View>: View {
             if let newURL = url,
                let cached = ImageCacheService.shared.cachedImageSync(for: newURL) {
                 loadedImage = cached
+                didFailToLoad = false
                 return
             }
             // Not in memory — show placeholder and fetch from disk/network.
             loadedImage = nil
+            didFailToLoad = false
 
             // Scroll debounce: wait 150 ms before hitting disk/network.
             // If the row is scrolled past quickly the task is cancelled here,
@@ -704,6 +709,9 @@ struct CachedAsyncImage<Content: View, Placeholder: View>: View {
         )
         if let fresh {
             loadedImage = fresh
+            didFailToLoad = false
+        } else {
+            didFailToLoad = true
         }
     }
 }

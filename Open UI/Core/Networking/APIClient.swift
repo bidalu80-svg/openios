@@ -4024,6 +4024,15 @@ final class APIClient: @unchecked Sendable {
             if !msg.files.isEmpty {
                 let filesArray: [[String: Any]] = msg.files.compactMap { file -> [String: Any]? in
                     guard let url = file.url else { return nil }
+                    if url.hasPrefix("data:image/") {
+                        var dict: [String: Any] = [
+                            "type": "image",
+                            "url": url
+                        ]
+                        if let name = file.name { dict["name"] = name }
+                        if let ct = file.contentType { dict["content_type"] = ct }
+                        return dict
+                    }
                     let normalizedType: String = {
                         if file.type == "image" || (file.contentType ?? "").hasPrefix("image/") {
                             return "image"

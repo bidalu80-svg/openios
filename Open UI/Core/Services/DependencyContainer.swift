@@ -41,7 +41,9 @@ final class ActiveChatStore {
     var cachedModels: [AIModel] = []
 
     /// The last-selected model ID, carried forward to new chats.
-    var cachedSelectedModelId: String?
+    var cachedSelectedModelId: String? = UserDefaults.standard.string(forKey: Self.lastSelectedModelKey)
+
+    static let lastSelectedModelKey = "chat.lastSelectedModelId"
 
     /// Server task config shared with all ChatViewModels.
     /// Updated by AppDependencyContainer.fetchTaskConfig().
@@ -92,6 +94,8 @@ final class ActiveChatStore {
             if let cachedSelectedModelId {
                 vm.selectedModelId = cachedSelectedModelId
             }
+        } else if let cachedSelectedModelId {
+            vm.selectedModelId = cachedSelectedModelId
         }
         viewModels[key] = vm
         accessOrder.append(key)
@@ -122,13 +126,18 @@ final class ActiveChatStore {
     /// Updates the shared cache. Called by VMs after a successful model fetch.
     func updateModelCache(models: [AIModel], selectedId: String?) {
         cachedModels = models
-        if let selectedId { cachedSelectedModelId = selectedId }
+        if let selectedId { updateDefaultModelSelection(selectedId) }
     }
 
     /// Updates the shared default/new-chat model selection cache.
     /// Also patches the cached new-chat VM so the picker reflects the change immediately.
     func updateDefaultModelSelection(_ selectedId: String?) {
         cachedSelectedModelId = selectedId
+        if let selectedId, !selectedId.isEmpty {
+            UserDefaults.standard.set(selectedId, forKey: Self.lastSelectedModelKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.lastSelectedModelKey)
+        }
         if let newChatVM = viewModels["__new__"] {
             newChatVM.selectedModelId = selectedId
         }
@@ -152,6 +161,7 @@ final class ActiveChatStore {
         accessOrder.removeAll()
         cachedModels = []
         cachedSelectedModelId = nil
+        UserDefaults.standard.removeObject(forKey: Self.lastSelectedModelKey)
         cachedMemorySetting = nil
         cachedPinnedModelIds = nil
         cachedUserName = nil
