@@ -369,8 +369,11 @@ struct SettingsView: View {
         isLoadingModels = true
         do {
             availableModels = try await manager.fetchModels()
-            defaultModelId = ActiveChatStore.persistedExplicitDefaultModelId()
-                ?? await manager.fetchUserDefaultModel()
+            if let localDefaultModelId = ActiveChatStore.persistedExplicitDefaultModelId() {
+                defaultModelId = localDefaultModelId
+            } else {
+                defaultModelId = await manager.fetchUserDefaultModel()
+            }
         } catch {}
         isLoadingModels = false
     }
