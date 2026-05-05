@@ -309,7 +309,10 @@ final class ChatViewModel {
                 if !msg.sources.isEmpty { node.sources = msg.sources }
                 if !msg.statusHistory.isEmpty { node.statusHistory = msg.statusHistory }
                 if let error = msg.error { node.error = error }
-                if !msg.files.isEmpty { node.files = msg.files }
+                if !msg.files.isEmpty {
+                    let files = Self.serverPersistableFiles(msg.files)
+                    if !files.isEmpty { node.files = files }
+                }
                 if let usage = msg.usage { node.usage = usage }
             }
         }
@@ -518,6 +521,12 @@ final class ChatViewModel {
                     attachments[idx].uploadStatus = .completed
                     attachments[idx].uploadedFileId = fileId
                     attachments[idx].uploadedFileObject = fileObject
+                    if attachments[idx].type == .image {
+                        attachments[idx].displayDataURL = self.inlineImageDataURL(
+                            data: data,
+                            fileName: fileName
+                        )
+                    }
                     // STORAGE FIX: Release raw file data after successful upload.
                     // The file ID is sufficient for referencing the file going forward.
                     // Holding multi-MB image data in memory indefinitely causes bloat.
@@ -563,6 +572,54 @@ final class ChatViewModel {
             "hpp", "cs", "go", "rs", "rb", "php", "sh", "bash", "zsh", "ps1",
             "bat", "cmd", "sql", "toml", "ini", "cfg", "conf", "env", "log"
         ].contains(ext)
+    }
+
+    private static func isImageFile(_ file: ChatMessageFile) -> Bool {
+        file.type == "image" || (file.contentType ?? "").hasPrefix("image/")
+    }
+
+    private static func preservingInlineImageFiles(
+        local: [ChatMessageFile],
+        incoming: [ChatMessageFile]
+    ) -> [ChatMessageFile] {
+        let localDisplayImages = local.filter { file in
+            isImageFile(file)
+                && (file.displayURL?.hasPrefix("data:image/") == true
+                    || file.url?.hasPrefix("data:image/") == true)
+        }
+        guard !localDisplayImages.isEmpty else { return incoming }
+
+        var merged = incoming
+        for image in localDisplayImages {
+            let displayURL = image.displayURL ?? image.url
+            if let name = image.name,
+               let index = merged.firstIndex(where: { candidate in
+                   candidate.name == name && isImageFile(candidate)
+               }) {
+                merged[index].displayURL = displayURL
+                if merged[index].contentType == nil { merged[index].contentType = image.contentType }
+                if merged[index].type == nil { merged[index].type = image.type }
+            } else if let url = image.url,
+                      let index = merged.firstIndex(where: { $0.url == url }) {
+                merged[index].displayURL = displayURL
+            } else if !merged.contains(where: { $0.url == image.url || $0.displayURL == displayURL }) {
+                var fallback = image
+                fallback.displayURL = displayURL
+                merged.append(fallback)
+            }
+        }
+        return merged
+    }
+
+    private static func serverPersistableFiles(_ files: [ChatMessageFile]) -> [ChatMessageFile] {
+        files.compactMap { file in
+            if isImageFile(file) && (file.url?.hasPrefix("data:image/") == true) {
+                return nil
+            }
+            var persistable = file
+            persistable.displayURL = nil
+            return persistable
+        }
     }
 
     private func inlineImageDataURL(data: Data, fileName: String) -> String {
@@ -1035,7 +1092,7 @@ final class ChatViewModel {
                     let contentChanged = !serverContent.isEmpty && serverContent != localContent
 
                     // Server has different files (e.g., regenerated images from tool)
-                    let filesChanged = serverLast.files != localLast.files
+                    let filesChanged = serverLast.files != Self.serverPersistableFiles(localLast.files)
 
                     // Server has different sources
                     let sourcesChanged = serverLast.sources.count != localLast.sources.count
@@ -1190,8 +1247,12 @@ final class ChatViewModel {
                 if !skipContentUpdate && local.content != serverMsg.content {
                     conversation!.messages[localIdx].content = serverMsg.content
                 }
-                if local.files != serverMsg.files {
-                    conversation!.messages[localIdx].files = serverMsg.files
+                let mergedFiles = Self.preservingInlineImageFiles(
+                    local: local.files,
+                    incoming: serverMsg.files
+                )
+                if local.files != mergedFiles || serverMsg.files.contains(where: { $0.displayURL != nil }) {
+                    conversation!.messages[localIdx].files = mergedFiles
                 }
                 if local.sources.count != serverMsg.sources.count || local.sources != serverMsg.sources {
                     conversation!.messages[localIdx].sources = serverMsg.sources
@@ -2602,6 +2663,17 @@ final class ChatViewModel {
                     "error": "",
                     "content_type": contentType
                 ])
+                if isImage,
+                   let dataURL = attachment.displayDataURL
+                    ?? attachment.data.map({ inlineImageDataURL(data: $0, fileName: attachment.name) }) {
+                    inlineImageFiles.append(ChatMessageFile(
+                        type: "image",
+                        url: fileId,
+                        name: attachment.name,
+                        contentType: contentType,
+                        displayURL: dataURL
+                    ))
+                }
             } else if let data = attachment.data, attachment.type == .image {
                 let dataURL = inlineImageDataURL(data: data, fileName: attachment.name)
                 inlineImageFiles.append(ChatMessageFile(
@@ -2637,6 +2709,15 @@ final class ChatViewModel {
                         "error": "",
                         "content_type": contentType
                     ])
+                    if isImage {
+                        inlineImageFiles.append(ChatMessageFile(
+                            type: "image",
+                            url: fileId,
+                            name: attachment.name,
+                            contentType: contentType,
+                            displayURL: inlineImageDataURL(data: data, fileName: attachment.name)
+                        ))
+                    }
                 } catch {
                     fallbackUploadFailure = error.localizedDescription
                     logger.error("Upload failed: \(error.localizedDescription)")
@@ -2678,14 +2759,23 @@ final class ChatViewModel {
                 }
                 return rawType
             }()
+            var displayURL: String?
+            if normalizedType == "image", let fileId = ref["id"] as? String {
+                displayURL = inlineImageFiles.first(where: {
+                    $0.url == fileId || ($0.name == name && Self.isImageFile($0))
+                })?.displayURL
+            }
             return ChatMessageFile(
                 type: normalizedType,
                 url: ref["id"] as? String,  // Store file ID, not base64
                 name: name,
-                contentType: contentType
+                contentType: contentType,
+                displayURL: displayURL
             )
         }
-        messageFiles.append(contentsOf: inlineImageFiles)
+        for inlineImage in inlineImageFiles where inlineImage.url?.hasPrefix("data:image/") == true {
+            messageFiles.append(inlineImage)
+        }
         // Also store knowledge items (collection/folder/file) on the user message
         // so they persist in conversation history and appear on reload.
         for knowledgeItem in currentKnowledgeItems {
@@ -2758,7 +2848,7 @@ final class ChatViewModel {
             role: .user,
             content: messageText,
             timestamp: userMessage.timestamp,
-            files: messageFiles,
+            files: Self.serverPersistableFiles(messageFiles),
             models: userNodeModels
         )
         let assistantHistoryNode = HistoryNode(
@@ -5102,6 +5192,10 @@ final class ChatViewModel {
     /// support memory and ignores the flag for models that don't.
     private func buildChatFeatures() -> ChatCompletionRequest.ChatFeatures {
         var features = ChatCompletionRequest.ChatFeatures()
+        let modelAllowsImageGeneration = selectedModel.map {
+            Self.modelSupportsBuiltinFeature($0, key: "image_generation")
+        } ?? false
+        let shouldEnableImageGeneration = imageGenerationEnabled || modelAllowsImageGeneration
 
         // Use ONLY the current toggle state. Server defaults are already applied
         // to these toggles at init time via syncUIWithModelDefaults() — which runs
@@ -5112,7 +5206,7 @@ final class ChatViewModel {
         if webSearchEnabled {
             features.webSearch = true
         }
-        if imageGenerationEnabled {
+        if shouldEnableImageGeneration {
             features.imageGeneration = true
         }
         if codeInterpreterEnabled {
@@ -5126,6 +5220,28 @@ final class ChatViewModel {
         }
 
         return features
+    }
+
+    private static func modelSupportsBuiltinFeature(_ model: AIModel, key: String) -> Bool {
+        if model.defaultFeatureIds.contains(key) { return true }
+        if model.builtinTools[key] == true { return true }
+        if let value = model.capabilities?[key]?.lowercased(),
+           ["1", "true", "yes", "enabled"].contains(value) {
+            return true
+        }
+
+        let haystack = ([model.id, model.name] + model.toolIds + model.actionIds + model.actions.map(\.id))
+            .joined(separator: " ")
+            .lowercased()
+        guard key == "image_generation" else { return false }
+        return haystack.contains("image_generation")
+            || haystack.contains("image-gen")
+            || haystack.contains("image gen")
+            || haystack.contains("generate_image")
+            || haystack.contains("text_to_image")
+            || haystack.contains("dall")
+            || haystack.contains("flux")
+            || haystack.contains("midjourney")
     }
 
     /// Builds API messages array, fetching image base64 from server for vision.
@@ -5180,7 +5296,12 @@ final class ChatViewModel {
                 }
                 for imgFile in imageFiles {
                     if let fileId = imgFile.url, !fileId.isEmpty {
-                        if fileId.hasPrefix("data:image/") {
+                        if let displayURL = imgFile.displayURL, displayURL.hasPrefix("data:image/") {
+                            contentArray.append([
+                                "type": "image_url",
+                                "image_url": ["url": displayURL]
+                            ])
+                        } else if fileId.hasPrefix("data:image/") {
                             // Already a data URL
                             contentArray.append([
                                 "type": "image_url",
@@ -5707,7 +5828,10 @@ final class ChatViewModel {
             // Copy files from server (tool-generated images etc.)
             if !serverAssistant.files.isEmpty {
                 if let index = conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) {
-                    conversation?.messages[index].files = serverAssistant.files
+                    conversation?.messages[index].files = Self.preservingInlineImageFiles(
+                        local: conversation?.messages[index].files ?? [],
+                        incoming: serverAssistant.files
+                    )
                 }
             }
             // Also update content if server has different content (e.g., tool appended text,
@@ -5756,9 +5880,6 @@ final class ChatViewModel {
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
         let message = conversation!.messages[index]
 
-        // Only run if files array is empty — don't override server-provided files
-        guard message.files.isEmpty else { return }
-
         // Only check assistant messages with content (tool results are embedded in content)
         guard message.role == .assistant,
               !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -5766,7 +5887,14 @@ final class ChatViewModel {
         let extractedFiles = ToolCallParser.extractFileReferences(from: message.content)
         if !extractedFiles.isEmpty {
             logger.info("Extracted \(extractedFiles.count) file(s) from tool results for message \(messageId)")
-            conversation?.messages[index].files = extractedFiles
+            var merged = message.files
+            for file in extractedFiles {
+                guard let url = file.url else { continue }
+                if !merged.contains(where: { $0.url == url || $0.displayURL == url }) {
+                    merged.append(file)
+                }
+            }
+            conversation?.messages[index].files = merged
         }
     }
 

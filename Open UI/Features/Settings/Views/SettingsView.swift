@@ -370,11 +370,15 @@ struct SettingsView: View {
         do {
             availableModels = try await manager.fetchModels()
             defaultModelId = await manager.fetchUserDefaultModel()
+                ?? UserDefaults.standard.string(forKey: ActiveChatStore.lastSelectedModelKey)
         } catch {}
         isLoadingModels = false
     }
 
     private func saveDefaultModel(_ modelId: String?) {
+        defaultModelId = modelId
+        dependencies.activeChatStore.updateDefaultModelSelection(modelId)
+
         // Save to user settings on server.
         // Use merge helper so we ONLY update `models` without overwriting
         // `memory`, `pinnedModels`, or any other ui keys.
@@ -396,7 +400,15 @@ struct SettingsView: View {
                     defaultModelId = modelId
                     dependencies.activeChatStore.updateDefaultModelSelection(effectiveModelId)
                 }
-            } catch {}
+            } catch {
+                await MainActor.run {
+                    // Keep the user's choice working locally even if this server build
+                    // rejects the settings endpoint; surface the failure instead of
+                    // silently making Save look broken.
+                    defaultModelId = modelId
+                    dependencies.activeChatStore.updateDefaultModelSelection(modelId)
+                }
+            }
         }
     }
 

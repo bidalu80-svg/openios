@@ -1044,8 +1044,9 @@ enum ToolCallParser {
             // should not be rendered as such.
             guard isImageTool else { continue }
 
-            // Strategy 1: Extract file IDs from /api/v1/files/{id}/content URLs
-            let urlPattern = #"/api/v1/files/([a-f0-9\-]{36})/content"#
+            // Strategy 1: Extract file IDs from /api/v1/files/{id}/content URLs.
+            // Some gateways use UUIDs, others use short IDs; accept any safe path segment.
+            let urlPattern = #"/api/v1/files/([^/\s\"')]+)/content"#
             if let urlRegex = cachedRegex(urlPattern) {
                 let nsResult = result as NSString
                 let matches = urlRegex.matches(in: result, range: NSRange(location: 0, length: nsResult.length))
@@ -1058,7 +1059,37 @@ enum ToolCallParser {
                 }
             }
 
-            // Strategy 2: Extract from JSON fields like "file_id", "id", "url" containing UUIDs
+            // Strategy 2: Extract from JSON fields like "file_id", "id", "url",
+            // "path", "src", or "source" that point at a generated file.
+            let jsonURLPattern = #"(?:"file_id"|"id"|"url"|"path"|"src"|"source")\s*:\s*"([^"]*(?:/api/v1/files/[^"/]+/content|/files/[^"/]+/content|data:image/[^"]+|[a-zA-Z0-9_\-]{12,})[^"]*)""#
+            if let jsonRegex = cachedRegex(jsonURLPattern) {
+                let nsResult = result as NSString
+                let matches = jsonRegex.matches(in: result, range: NSRange(location: 0, length: nsResult.length))
+                for match in matches where match.numberOfRanges > 1 {
+                    let value = nsResult.substring(with: match.range(at: 1))
+                    let fileId: String = {
+                        if value.hasPrefix("data:image/") { return value }
+                        if let fileId = extractFileId(from: value, pattern: #"/api/v1/files/([^/\s\"')]+)/content"#) {
+                            return fileId
+                        }
+                        if let fileId = extractFileId(from: value, pattern: #"/files/([^/\s\"')]+)/content"#) {
+                            return fileId
+                        }
+                        return value
+                    }()
+                    if !fileId.isEmpty && !seenIds.contains(fileId) {
+                        seenIds.insert(fileId)
+                        files.append(ChatMessageFile(
+                            type: "image",
+                            url: fileId,
+                            name: nil,
+                            contentType: fileId.hasPrefix("data:image/") ? "image/jpeg" : nil
+                        ))
+                    }
+                }
+            }
+
+            // Strategy 3: Extract UUID-only JSON fields from older tool payloads.
             let jsonFieldPattern = #"(?:"file_id"|"id"|"url")\s*:\s*"([a-f0-9\-]{36})""#
             if let jsonRegex = cachedRegex(jsonFieldPattern) {
                 let nsResult = result as NSString
@@ -1072,7 +1103,7 @@ enum ToolCallParser {
                 }
             }
 
-            // Strategy 3: Last resort — look for any bare UUID in the result
+            // Strategy 4: Last resort — look for any bare UUID in the result
             if files.isEmpty {
                 let uuidPattern = #"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"#
                 if let uuidRegex = cachedRegex(uuidPattern) {
@@ -1090,6 +1121,18 @@ enum ToolCallParser {
         }
 
         return files
+    }
+
+    private static func extractFileId(from value: String, pattern: String) -> String? {
+        guard let regex = cachedRegex(pattern) else { return nil }
+        let nsValue = value as NSString
+        guard let match = regex.firstMatch(
+            in: value,
+            range: NSRange(location: 0, length: nsValue.length)
+        ), match.numberOfRanges > 1 else {
+            return nil
+        }
+        return nsValue.substring(with: match.range(at: 1))
     }
 }
 

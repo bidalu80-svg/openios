@@ -136,6 +136,10 @@ struct ChatMessageFile: Codable, Hashable, Sendable {
     var url: String?        // file ID or URL path
     var name: String?
     var contentType: String?
+    /// Local-only display URL, usually a downsampled `data:image/...` string.
+    /// This keeps sent image bubbles visible even if the server file endpoint
+    /// cannot be downloaded later. Server serializers intentionally ignore it.
+    var displayURL: String? = nil
 }
 
 struct ChatMessage: Identifiable, Hashable, Sendable {

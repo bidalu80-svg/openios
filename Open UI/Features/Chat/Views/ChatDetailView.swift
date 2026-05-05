@@ -903,8 +903,27 @@ struct ChatDetailView: View {
         // Server must have the feature enabled globally
         guard serverEnabled == true else { return false }
         // Model must have the capability enabled
-        guard let model = viewModel.selectedModel,
-              let caps = model.capabilities,
+        guard let model = viewModel.selectedModel else {
+            return serverEnabled == true
+        }
+        if model.defaultFeatureIds.contains(capabilityKey) || model.builtinTools[capabilityKey] == true {
+            return true
+        }
+        if capabilityKey == "image_generation" {
+            let haystack = ([model.id, model.name] + model.toolIds + model.actionIds + model.actions.map(\.id))
+                .joined(separator: " ")
+                .lowercased()
+            if haystack.contains("image_generation")
+                || haystack.contains("image-gen")
+                || haystack.contains("generate_image")
+                || haystack.contains("text_to_image")
+                || haystack.contains("dall")
+                || haystack.contains("flux")
+                || haystack.contains("midjourney") {
+                return true
+            }
+        }
+        guard let caps = model.capabilities,
               let value = caps[capabilityKey] else {
             // If model has no capabilities dict at all, default to showing
             // (backward compat — older servers may not send capabilities)
@@ -2254,7 +2273,8 @@ struct ChatDetailView: View {
                 HStack(spacing: Spacing.sm) {
                     Spacer()
                     ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
-                        if let fileId = file.url, !fileId.isEmpty {
+                        let displayFileId = file.displayURL ?? file.url
+                        if let fileId = displayFileId, !fileId.isEmpty {
                             if let image = inlineDataImage(from: fileId) {
                                 Image(uiImage: image)
                                     .resizable()
@@ -2369,6 +2389,9 @@ struct ChatDetailView: View {
                 ForEach(Array(imageFiles.enumerated()), id: \.element) { _, file in
                     if let fileUrl = file.url, !fileUrl.isEmpty {
                         let fileId: String = {
+                            if let displayURL = file.displayURL, displayURL.hasPrefix("data:image/") {
+                                return displayURL
+                            }
                             if !fileUrl.contains("/") { return fileUrl }
                             let parts = fileUrl.split(separator: "/")
                             if let idx = parts.firstIndex(of: "files"), idx + 1 < parts.count {

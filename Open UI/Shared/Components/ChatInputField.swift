@@ -11,6 +11,9 @@ struct ChatAttachment: Identifiable {
     let name: String
     var thumbnail: Image?
     var data: Data?
+    /// Local, downsampled image data URL kept only so the sent bubble can render
+    /// immediately even if the server file download endpoint is unavailable.
+    var displayDataURL: String? = nil
 
     /// Whether this audio attachment is currently being transcribed.
     var isTranscribing: Bool = false

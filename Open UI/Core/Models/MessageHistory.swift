@@ -94,6 +94,10 @@ struct HistoryNode: Sendable {
         if !files.isEmpty {
             let filesArray: [[String: Any]] = files.compactMap { file -> [String: Any]? in
                 guard let url = file.url else { return nil }
+                if (file.type == "image" || (file.contentType ?? "").hasPrefix("image/")),
+                   url.hasPrefix("data:image/") {
+                    return nil
+                }
                 let normalizedType: String = {
                     if file.type == "image" || (file.contentType ?? "").hasPrefix("image/") {
                         return "image"

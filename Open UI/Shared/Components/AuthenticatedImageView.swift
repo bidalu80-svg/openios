@@ -122,6 +122,14 @@ struct AuthenticatedImageView: View {
     private static let maxAutoRetries = 3
 
     private func loadImage() async {
+        if let inlineImage = Self.inlineDataImage(from: fileId) {
+            Self.imageCache.setObject(inlineImage, forKey: fileId as NSString)
+            loadedImage = inlineImage
+            isLoading = false
+            hasError = false
+            return
+        }
+
         // Check in-memory cache first — if the image is cached, display it
         // instantly without resetting to the loading placeholder. This prevents
         // the height change (200px placeholder → actual image) that causes
@@ -180,6 +188,16 @@ struct AuthenticatedImageView: View {
         // All retries exhausted — show tap-to-retry error state
         hasError = true
         isLoading = false
+    }
+
+    private static func inlineDataImage(from dataURL: String) -> UIImage? {
+        guard dataURL.hasPrefix("data:image/"),
+              let comma = dataURL.firstIndex(of: ",") else { return nil }
+        let base64 = String(dataURL[dataURL.index(after: comma)...])
+        guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else {
+            return nil
+        }
+        return UIImage(data: data)
     }
 
     private func shareImage(_ image: UIImage) {
