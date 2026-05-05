@@ -1,5 +1,6 @@
 import UIKit
 import SwiftUI
+import Photos
 import MarkdownView
 import Charts
 import os.log
@@ -357,8 +358,7 @@ struct StreamingMarkdownView: View {
                       let altRange = Range(match.range(at: 1), in: text),
                       let imgRange = Range(match.range(at: 2), in: text),
                       let linkRange = Range(match.range(at: 3), in: text),
-                      let imgURL = URL(string: String(text[imgRange])),
-                      imgURL.scheme == "http" || imgURL.scheme == "https"
+                      let imgURL = Self.makeImageURL(from: String(text[imgRange]))
                 else { continue }
 
                 let linkURLStr = String(text[linkRange])
@@ -381,8 +381,7 @@ struct StreamingMarkdownView: View {
                       let swiftRange = Range(match.range, in: text),
                       let altRange = Range(match.range(at: 1), in: text),
                       let imgRange = Range(match.range(at: 2), in: text),
-                      let imgURL = URL(string: String(text[imgRange])),
-                      imgURL.scheme == "http" || imgURL.scheme == "https"
+                      let imgURL = Self.makeImageURL(from: String(text[imgRange]))
                 else { continue }
 
                 // Skip if this overlaps with any linked image already found
@@ -401,6 +400,17 @@ struct StreamingMarkdownView: View {
         // Sort by position in the string (earliest first)
         results.sort { $0.range.lowerBound < $1.range.lowerBound }
         return results
+    }
+
+    private static func makeImageURL(from raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
+            return URL(string: trimmed)
+        }
+        if trimmed.hasPrefix("data:image/") {
+            return URL(string: trimmed)
+        }
+        return nil
     }
 
     private func parseSpecialBlocks(_ text: String) -> [ContentSegment] {
@@ -648,43 +658,148 @@ private struct MarkdownInlineImageView: View {
 
     @Environment(\.theme) private var theme
     @Environment(\.openURL) private var openURL
+    @State private var loadedUIImage: UIImage?
+    @State private var saveState: SaveState = .idle
+
+    private enum SaveState {
+        case idle
+        case saving
+        case saved
+        case failed
+    }
 
     var body: some View {
-        CachedAsyncImage(url: imageURL) { image in
-            image
+        ZStack(alignment: .topTrailing) {
+            imageContent
+                .contextMenu {
+                    Button {
+                        Task { await saveImageToPhotos() }
+                    } label: {
+                        Label("Save to Photos", systemImage: "photo")
+                    }
+                }
+
+            Button {
+                Task { await saveImageToPhotos() }
+            } label: {
+                HStack(spacing: 4) {
+                    if saveState == .saving {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else {
+                        Image(systemName: saveIcon)
+                            .scaledFont(size: 12, weight: .semibold)
+                    }
+                    Text(saveLabel)
+                        .scaledFont(size: 11, weight: .semibold)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .background(.black.opacity(0.62), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(8)
+        }
+        .accessibilityLabel(altText.isEmpty ? "Image" : altText)
+        .accessibilityAddTraits(.isImage)
+    }
+
+    @ViewBuilder
+    private var imageContent: some View {
+        if imageURL.scheme == "data",
+           let image = dataURIImage(from: imageURL.absoluteString) {
+            Image(uiImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(maxWidth: .infinity, maxHeight: 300, alignment: .leading)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
-        } placeholder: {
-            RoundedRectangle(cornerRadius: 10)
-                .fill(theme.surfaceContainer.opacity(0.5))
-                .frame(height: 160)
-                .overlay {
-                    VStack(spacing: 6) {
-                        ProgressView()
-                        if !altText.isEmpty {
-                            Text(altText)
-                                .scaledFont(size: 12)
-                                .foregroundStyle(theme.textTertiary)
-                                .lineLimit(1)
+                .onAppear { loadedUIImage = image }
+        } else {
+            CachedAsyncImage(url: imageURL) { image in
+                image
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: 300, alignment: .leading)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            } placeholder: {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(theme.surfaceContainer.opacity(0.5))
+                    .frame(height: 160)
+                    .overlay {
+                        VStack(spacing: 6) {
+                            ProgressView()
+                            if !altText.isEmpty {
+                                Text(altText)
+                                    .scaledFont(size: 12)
+                                    .foregroundStyle(theme.textTertiary)
+                                    .lineLimit(1)
+                            }
                         }
                     }
-                }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            // If the image is wrapped in a link, open the link URL.
-            // Otherwise, open the image URL directly.
-            if let linkURL {
-                openURL(linkURL)
-            } else {
-                openURL(imageURL)
             }
+            .task(id: imageURL) {
+                loadedUIImage = await ImageCacheService.shared.loadImage(from: imageURL)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if let linkURL {
+                    openURL(linkURL)
+                } else {
+                    openURL(imageURL)
+                }
+            }
+            .accessibilityAddTraits(.isLink)
         }
-        .accessibilityLabel(altText.isEmpty ? "Image" : altText)
-        .accessibilityAddTraits(.isImage)
-        .accessibilityAddTraits(.isLink)
+    }
+
+    private var saveIcon: String {
+        switch saveState {
+        case .saved: return "checkmark"
+        case .failed: return "exclamationmark.triangle"
+        case .idle, .saving: return "square.and.arrow.down"
+        }
+    }
+
+    private var saveLabel: String {
+        switch saveState {
+        case .idle: return "Save"
+        case .saving: return "Saving"
+        case .saved: return "Saved"
+        case .failed: return "Failed"
+        }
+    }
+
+    private func dataURIImage(from dataURI: String) -> UIImage? {
+        guard let comma = dataURI.firstIndex(of: ",") else { return nil }
+        let encoded = String(dataURI[dataURI.index(after: comma)...])
+        guard let data = Data(base64Encoded: encoded) else { return nil }
+        return UIImage(data: data)
+    }
+
+    @MainActor
+    private func saveImageToPhotos() async {
+        guard saveState != .saving else { return }
+        saveState = .saving
+        let image = loadedUIImage ?? dataURIImage(from: imageURL.absoluteString)
+        guard let image else {
+            saveState = .failed
+            return
+        }
+
+        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        if status == .notDetermined {
+            _ = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        }
+
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAsset(from: image)
+            }
+            saveState = .saved
+        } catch {
+            saveState = .failed
+        }
     }
 }
 

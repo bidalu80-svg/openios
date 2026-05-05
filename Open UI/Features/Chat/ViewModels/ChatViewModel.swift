@@ -249,7 +249,12 @@ final class ChatViewModel {
     @ObservationIgnored nonisolated(unsafe) private var transcriptionBackgroundTaskId: UIBackgroundTaskIdentifier = .invalid
 
     private var isOpenAICompatibleProvider: Bool {
-        manager?.providerType == .openAICompatible
+        guard let providerType = manager?.providerType else { return false }
+        return providerType != .openWebUI
+    }
+
+    private var currentProviderType: ServerConfig.ProviderType? {
+        manager?.providerType
     }
 
     /// Pending transcriptions that were interrupted when the app moved to the background
@@ -2897,6 +2902,32 @@ final class ChatViewModel {
                 let acc = ContentAccumulator()
 
                 do {
+                    if self.shouldUseDirectImageGeneration(modelId: modelId) {
+                        guard self.currentProviderType != .anthropic else {
+                            throw APIError.unknown(
+                                underlying: NSError(
+                                    domain: "ChatViewModel",
+                                    code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: "Claude/Anthropic does not provide an image generation endpoint."]
+                                )
+                            )
+                        }
+                        let imageReference = try await manager.generateImage(prompt: messageText, model: modelId)
+                        let markdown = "![Generated image](\(imageReference))"
+                        self.updateAssistantMessage(
+                            id: assistantMessageId,
+                            content: markdown,
+                            isStreaming: false
+                        )
+                        self.hasFinishedStreaming = true
+                        self.isStreaming = false
+                        self.selfInitiatedStream = false
+                        self.activeTaskId = nil
+                        self.lastTaskExtractionLength = 0
+                        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                        return
+                    }
+
                     var request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
                     if !fileRefs.isEmpty { request.files = fileRefs }
                     let sseStream = try await manager.sendMessageStreaming(request: request)
@@ -5242,6 +5273,23 @@ final class ChatViewModel {
             || haystack.contains("dall")
             || haystack.contains("flux")
             || haystack.contains("midjourney")
+    }
+
+    private func shouldUseDirectImageGeneration(modelId: String) -> Bool {
+        guard currentProviderType != .openWebUI else { return false }
+        if let selectedModel,
+           Self.modelSupportsBuiltinFeature(selectedModel, key: "image_generation") {
+            return true
+        }
+        let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
+            .lowercased()
+        let positives = [
+            "image", "img", "dall-e", "dalle", "gpt-image", "imagen",
+            "flux", "sdxl", "stable-diffusion", "midjourney", "mj-"
+        ]
+        let negatives = ["vision", "ocr", "vl", "video"]
+        return positives.contains(where: { haystack.contains($0) })
+            && !negatives.contains(where: { haystack.contains($0) })
     }
 
     /// Builds API messages array, fetching image base64 from server for vision.

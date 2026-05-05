@@ -51,7 +51,7 @@ struct AddServerSheet: View {
                     VStack(spacing: Spacing.lg) {
                         ModernTextField(
                             label: "Server URL",
-                            placeholder: "https://your-server.com or http://IP:port",
+                            placeholder: "https://your-server.com or https://api.example.com",
                             text: $url,
                             keyboardType: .URL,
                             textContentType: .URL,
@@ -62,7 +62,7 @@ struct AddServerSheet: View {
                             VStack(spacing: Spacing.lg) {
                                 ModernTextField(
                                     label: "API Key (optional)",
-                                    placeholder: "Optional for Open WebUI; required for OpenAI-compatible endpoints",
+                                    placeholder: "Optional for Open WebUI; required for OpenAI/Gemini/Claude endpoints",
                                     text: $apiKey,
                                     isSecure: true
                                 )

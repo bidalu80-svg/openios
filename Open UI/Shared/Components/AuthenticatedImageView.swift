@@ -1,4 +1,5 @@
 import SwiftUI
+import Photos
 
 /// Loads and displays an image from the server using authenticated API calls.
 /// Supports:
@@ -12,12 +13,20 @@ struct AuthenticatedImageView: View {
     @State private var isLoading = true
     @State private var hasError = false
     @State private var showFullScreen = false
+    @State private var saveState: SaveState = .idle
     /// Incrementing trigger to force `.task` re-evaluation on retry.
     /// Changing this value causes SwiftUI to cancel the old task and
     /// start a new one, which re-runs `loadImage()`.
     @State private var retryTrigger: Int = 0
 
     @Environment(\.theme) private var theme
+
+    private enum SaveState {
+        case idle
+        case saving
+        case saved
+        case failed
+    }
 
     /// In-memory cache for file-based images. Prevents re-fetching when
     /// scrolling back through the chat, which causes layout shifts and
@@ -33,61 +42,94 @@ struct AuthenticatedImageView: View {
         // to prevent layout shifts that cause scroll position jumps.
         // The image is constrained to the same height as the placeholder
         // so the scroll view never needs to re-layout when images finish loading.
-        Group {
-            if let image = loadedImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .onTapGesture {
-                        showFullScreen = true
-                    }
-                    .contextMenu {
-                        Button {
-                            UIPasteboard.general.image = image
-                            Haptics.notify(.success)
-                        } label: {
-                            Label("Copy Image", systemImage: "doc.on.doc")
-                        }
-
-                        Button {
-                            shareImage(image)
-                        } label: {
-                            Label("Share", systemImage: "square.and.arrow.up")
-                        }
-
-                        Button {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let image = loadedImage {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .onTapGesture {
                             showFullScreen = true
-                        } label: {
-                            Label("View Full Screen", systemImage: "arrow.up.left.and.arrow.down.right")
                         }
+                        .contextMenu {
+                            Button {
+                                UIPasteboard.general.image = image
+                                Haptics.notify(.success)
+                            } label: {
+                                Label("Copy Image", systemImage: "doc.on.doc")
+                            }
+
+                            Button {
+                                Task { await saveImageToPhotos() }
+                            } label: {
+                                Label("Save to Photos", systemImage: "photo")
+                            }
+
+                            Button {
+                                shareImage(image)
+                            } label: {
+                                Label("Share", systemImage: "square.and.arrow.up")
+                            }
+
+                            Button {
+                                showFullScreen = true
+                            } label: {
+                                Label("View Full Screen", systemImage: "arrow.up.left.and.arrow.down.right")
+                            }
+                        }
+                } else if isLoading {
+                    RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
+                        .fill(theme.surfaceContainer)
+                        .frame(height: placeholderHeight)
+                        .overlay(
+                            ProgressView()
+                                .controlSize(.regular)
+                                .tint(theme.brandPrimary)
+                        )
+                } else if hasError {
+                    // Tap-to-retry error state — tapping bumps the retryTrigger
+                    // which causes the `.task(id:)` to re-fire and attempt loading again.
+                    VStack(spacing: Spacing.xs) {
+                        Image(systemName: "arrow.clockwise.circle")
+                            .scaledFont(size: 28)
+                            .foregroundStyle(theme.brandPrimary.opacity(0.7))
+                        Text("Tap to retry")
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
                     }
-            } else if isLoading {
-                RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
-                    .fill(theme.surfaceContainer)
                     .frame(height: placeholderHeight)
-                    .overlay(
-                        ProgressView()
-                            .controlSize(.regular)
-                            .tint(theme.brandPrimary)
-                    )
-            } else if hasError {
-                // Tap-to-retry error state — tapping bumps the retryTrigger
-                // which causes the `.task(id:)` to re-fire and attempt loading again.
-                VStack(spacing: Spacing.xs) {
-                    Image(systemName: "arrow.clockwise.circle")
-                        .scaledFont(size: 28)
-                        .foregroundStyle(theme.brandPrimary.opacity(0.7))
-                    Text("Tap to retry")
-                        .scaledFont(size: 12, weight: .medium)
-                        .foregroundStyle(theme.textTertiary)
+                    .frame(maxWidth: .infinity)
+                    .background(theme.surfaceContainer.opacity(0.5))
+                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                    .onTapGesture {
+                        retryTrigger += 1
+                    }
                 }
-                .frame(height: placeholderHeight)
-                .frame(maxWidth: .infinity)
-                .background(theme.surfaceContainer.opacity(0.5))
-                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
-                .onTapGesture {
-                    retryTrigger += 1
+            }
+
+            if loadedImage != nil {
+                Button {
+                    Task { await saveImageToPhotos() }
+                } label: {
+                    HStack(spacing: 4) {
+                        if saveState == .saving {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .tint(.white)
+                        } else {
+                            Image(systemName: saveIcon)
+                                .scaledFont(size: 12, weight: .semibold)
+                        }
+                        Text(saveLabel)
+                            .scaledFont(size: 11, weight: .semibold)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.62), in: Capsule())
                 }
+                .buttonStyle(.plain)
+                .padding(8)
             }
         }
         // Combine fileId + retryTrigger so that:
@@ -121,12 +163,45 @@ struct AuthenticatedImageView: View {
     /// the server while still recovering quickly from transient failures.
     private static let maxAutoRetries = 3
 
+    private var saveIcon: String {
+        switch saveState {
+        case .saved: return "checkmark"
+        case .failed: return "exclamationmark.triangle"
+        case .idle, .saving: return "square.and.arrow.down"
+        }
+    }
+
+    private var saveLabel: String {
+        switch saveState {
+        case .idle: return "Save"
+        case .saving: return "Saving"
+        case .saved: return "Saved"
+        case .failed: return "Failed"
+        }
+    }
+
     private func loadImage() async {
         if let inlineImage = Self.inlineDataImage(from: fileId) {
             Self.imageCache.setObject(inlineImage, forKey: fileId as NSString)
             loadedImage = inlineImage
             isLoading = false
             hasError = false
+            return
+        }
+
+        if let remoteURL = Self.remoteImageURL(from: fileId) {
+            if loadedImage == nil {
+                isLoading = true
+            }
+            let image = await ImageCacheService.shared.loadImage(from: remoteURL)
+            if let image {
+                loadedImage = image
+                hasError = false
+                isLoading = false
+            } else {
+                hasError = true
+                isLoading = false
+            }
             return
         }
 
@@ -198,6 +273,35 @@ struct AuthenticatedImageView: View {
             return nil
         }
         return UIImage(data: data)
+    }
+
+    private static func remoteImageURL(from value: String) -> URL? {
+        guard value.hasPrefix("http://") || value.hasPrefix("https://") else { return nil }
+        return URL(string: value)
+    }
+
+    @MainActor
+    private func saveImageToPhotos() async {
+        guard saveState != .saving else { return }
+        guard let image = loadedImage else {
+            saveState = .failed
+            return
+        }
+
+        saveState = .saving
+        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        if status == .notDetermined {
+            _ = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        }
+
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAsset(from: image)
+            }
+            saveState = .saved
+        } catch {
+            saveState = .failed
+        }
     }
 
     private func shareImage(_ image: UIImage) {

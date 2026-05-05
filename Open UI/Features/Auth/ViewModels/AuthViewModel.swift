@@ -342,9 +342,14 @@ final class AuthViewModel {
             isConnecting = false
             return
         case .unreachable:
-            errorMessage = "Couldn't reach the server. Check your URL and internet connection."
-            isConnecting = false
-            return
+            if trimmedAPIKey.isEmpty {
+                errorMessage = "Couldn't reach the server. Check your URL and internet connection."
+                isConnecting = false
+                return
+            }
+            // Many OpenAI-compatible providers do not expose /health. Continue to
+            // model probing below when an API key is present.
+            logger.info("Health check failed, continuing with API-key provider probing.")
         case .healthy, .unhealthy:
             break
         }
@@ -424,22 +429,41 @@ final class AuthViewModel {
             return
         }
 
-        let openAIConfig = makeConfig(urlString: resolvedURL, providerType: .openAICompatible)
-        let openAIClient = APIClient(serverConfig: openAIConfig)
-        openAIClient.updateAuthToken(trimmedAPIKey)
+        let providerCandidates = Self.providerCandidates(for: resolvedURL)
+        var selectedConfig: ServerConfig?
+        var lastError: Error?
+        var sawEmptyModels = false
 
-        do {
-            let models = try await openAIClient.getModels()
-            guard !models.isEmpty else {
-                openAIClient.updateAuthToken(nil)
-                errorMessage = "Connected, but no models were returned. Check your BASEURL and APIKEY."
-                isConnecting = false
-                return
+        for provider in providerCandidates {
+            let candidateConfig = makeConfig(urlString: resolvedURL, providerType: provider)
+            let candidateClient = APIClient(serverConfig: candidateConfig)
+            candidateClient.updateAuthToken(trimmedAPIKey)
+
+            do {
+                let models = try await candidateClient.getModels()
+                guard !models.isEmpty else {
+                    sawEmptyModels = true
+                    candidateClient.updateAuthToken(nil)
+                    continue
+                }
+                selectedConfig = candidateConfig
+                break
+            } catch {
+                lastError = error
+                candidateClient.updateAuthToken(nil)
+                continue
             }
-        } catch {
-            openAIClient.updateAuthToken(nil)
-            let apiError = APIError.from(error)
-            errorMessage = apiError.errorDescription ?? "Could not load models. Check your BASEURL and APIKEY."
+        }
+
+        guard let openAIConfig = selectedConfig else {
+            if let lastError {
+                let apiError = APIError.from(lastError)
+                errorMessage = apiError.errorDescription ?? "Could not load models. Check your BASEURL and APIKEY."
+            } else if sawEmptyModels {
+                errorMessage = "Connected, but no models were returned. Check your BASEURL and APIKEY."
+            } else {
+                errorMessage = "Could not load models. Check your BASEURL and APIKEY."
+            }
             isConnecting = false
             return
         }
@@ -474,6 +498,19 @@ final class AuthViewModel {
         serverURL = ""
         apiKey = ""
         stopTokenRefreshTimer()
+    }
+
+    private static func providerCandidates(for urlString: String) -> [ServerConfig.ProviderType] {
+        let host = URL(string: urlString)?.host?.lowercased() ?? ""
+        if host.contains("anthropic.com") || host.contains("claude.com") {
+            return [.anthropic, .openAICompatible, .gemini]
+        }
+        if host.contains("generativelanguage.googleapis.com")
+            || host.contains("googleapis.com")
+            || host.contains("gemini") {
+            return [.gemini, .openAICompatible]
+        }
+        return [.openAICompatible, .gemini, .anthropic]
     }
 
     // MARK: - Credential Login
@@ -710,7 +747,8 @@ final class AuthViewModel {
         let maxRetries = 3
         var lastError: Error?
 
-        if serverConfigStore.activeServer?.providerType == .openAICompatible {
+        if let providerType = serverConfigStore.activeServer?.providerType,
+           providerType != .openWebUI {
             currentUser = User(
                 id: "openai-compatible-user",
                 username: "API Key User",

@@ -135,6 +135,10 @@ final class ConversationManager: @unchecked Sendable {
         try await apiClient.getModels()
     }
 
+    func generateImage(prompt: String, model: String) async throws -> String {
+        try await apiClient.generateImage(prompt: prompt, model: model)
+    }
+
     func fetchDefaultModel() async -> String? {
         await apiClient.getDefaultModel()
     }
@@ -243,5 +247,5 @@ final class ConversationManager: @unchecked Sendable {
 
     var baseURL: String { apiClient.baseURL }
 
-    var providerType: ServerConfig.ProviderType { apiClient.network.serverConfig.providerType }
+    var providerType: ServerConfig.ProviderType { apiClient.providerType }
 }

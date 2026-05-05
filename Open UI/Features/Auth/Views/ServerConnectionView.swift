@@ -248,7 +248,7 @@ struct ServerConnectionView: View {
                     VStack(spacing: Spacing.lg) {
                         ModernTextField(
                             label: "BASEURL",
-                            placeholder: "https://api.example.com/v1",
+                            placeholder: "https://api.example.com",
                             text: $viewModel.serverURL,
                             keyboardType: .URL,
                             textContentType: .URL,
@@ -377,7 +377,7 @@ struct ServerConnectionView: View {
                             .scaledFont(size: 14, weight: .medium)
                             .foregroundStyle(theme.textSecondary)
 
-                        Text("For Open WebUI, enter your server URL (API key optional). For OpenAI-compatible APIs, include /v1 and an API key.")
+                        Text("For Open WebUI, enter your server URL (API key optional). For OpenAI/Gemini/Claude-compatible APIs, enter the provider base URL and API key; Iexa adds the required API suffix automatically.")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textTertiary)
                             .multilineTextAlignment(.center)

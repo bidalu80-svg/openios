@@ -119,12 +119,19 @@ enum SSEEvent: Sendable {
     /// Extracts the content delta from an OpenAI-style streaming chunk.
     var contentDelta: String? {
         guard case .json(let json) = self else { return nil }
-        guard let choices = json["choices"] as? [[String: Any]],
-              let first = choices.first,
-              let delta = first["delta"] as? [String: Any],
-              let content = delta["content"] as? String
-        else { return nil }
-        return content
+        if let choices = json["choices"] as? [[String: Any]],
+           let first = choices.first,
+           let delta = first["delta"] as? [String: Any],
+           let content = delta["content"] as? String {
+            return content
+        }
+        if json["type"] as? String == "content_block_delta",
+           let delta = json["delta"] as? [String: Any],
+           delta["type"] as? String == "text_delta",
+           let text = delta["text"] as? String {
+            return text
+        }
+        return nil
     }
 
     /// Extracts usage statistics from the final streaming chunk.
@@ -139,6 +146,10 @@ enum SSEEvent: Sendable {
         case .done:
             return true
         case .json(let json):
+            if let type = json["type"] as? String,
+               type == "message_stop" {
+                return true
+            }
             if let choices = json["choices"] as? [[String: Any]],
                let first = choices.first,
                let finishReason = first["finish_reason"] as? String,

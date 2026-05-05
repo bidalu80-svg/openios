@@ -161,14 +161,15 @@ final class ActiveChatStore {
         }
     }
 
-    /// Records an ad-hoc model picker choice without overwriting an explicit
-    /// default selected in Settings.
+    /// Records the user's model picker choice as the next-chat default too.
+    /// This keeps the selected model stable after a full app restart.
     func updateLastSelectedModel(_ selectedId: String?) {
-        guard Self.persistedExplicitDefaultModelId() == nil else { return }
         cachedSelectedModelId = selectedId
         if let selectedId, !selectedId.isEmpty {
+            UserDefaults.standard.set(selectedId, forKey: Self.defaultModelKey)
             UserDefaults.standard.set(selectedId, forKey: Self.lastSelectedModelKey)
         } else {
+            UserDefaults.standard.removeObject(forKey: Self.defaultModelKey)
             UserDefaults.standard.removeObject(forKey: Self.lastSelectedModelKey)
         }
         UserDefaults.standard.synchronize()

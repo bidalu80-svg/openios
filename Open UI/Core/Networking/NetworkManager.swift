@@ -12,6 +12,8 @@ final class NetworkManager: NSObject, Sendable {
 
     var baseURL: URL? { serverConfig.apiBaseURL }
 
+    var providerType: ServerConfig.ProviderType { serverConfig.providerType }
+
     var authToken: String? {
         keychain.getToken(forServer: serverConfig.url)
     }
@@ -147,7 +149,14 @@ final class NetworkManager: NSObject, Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
         if authenticated, let token = authToken {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            switch serverConfig.providerType {
+            case .anthropic:
+                request.setValue(token, forHTTPHeaderField: "x-api-key")
+                request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                request.setValue("true", forHTTPHeaderField: "anthropic-dangerous-direct-browser-access")
+            case .openWebUI, .openAICompatible, .gemini:
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            }
         }
 
         for (key, value) in serverConfig.customHeaders {

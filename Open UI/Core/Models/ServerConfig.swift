@@ -9,6 +9,8 @@ struct ServerConfig: Codable, Identifiable, Hashable, Sendable {
     enum ProviderType: String, Codable, Sendable {
         case openWebUI
         case openAICompatible
+        case gemini
+        case anthropic
     }
 
     let id: String
@@ -186,6 +188,45 @@ struct ServerConfig: Codable, Identifiable, Hashable, Sendable {
 
     /// The base API URL derived from the server URL.
     var apiBaseURL: URL? {
-        URL(string: url)
+        guard var components = URLComponents(string: url) else { return nil }
+        var path = components.path
+        if path.hasSuffix("/") {
+            path = String(path.dropLast())
+        }
+
+        switch providerType {
+        case .openWebUI:
+            components.path = path
+        case .openAICompatible:
+            components.path = Self.apiPath(path, ensuringSuffix: "/v1")
+        case .gemini:
+            components.path = Self.geminiOpenAIPath(path)
+        case .anthropic:
+            components.path = Self.apiPath(path, ensuringSuffix: "/v1")
+        }
+
+        return components.url
+    }
+
+    private static func apiPath(_ rawPath: String, ensuringSuffix suffix: String) -> String {
+        let path = rawPath.hasSuffix("/") ? String(rawPath.dropLast()) : rawPath
+        let lowerPath = path.lowercased()
+        let lowerSuffix = suffix.lowercased()
+        if lowerPath == lowerSuffix || lowerPath.hasSuffix(lowerSuffix) {
+            return path
+        }
+        return path.isEmpty ? suffix : path + suffix
+    }
+
+    private static func geminiOpenAIPath(_ rawPath: String) -> String {
+        let path = rawPath.hasSuffix("/") ? String(rawPath.dropLast()) : rawPath
+        let lowerPath = path.lowercased()
+        if lowerPath.hasSuffix("/v1beta/openai") {
+            return path
+        }
+        if lowerPath.hasSuffix("/v1beta") {
+            return path + "/openai"
+        }
+        return path.isEmpty ? "/v1beta/openai" : path + "/v1beta/openai"
     }
 }

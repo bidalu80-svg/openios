@@ -379,6 +379,75 @@ struct ChatCompletionRequest: Sendable {
         if let files, !files.isEmpty { data["files"] = files }
         return data
     }
+
+    /// Serialises the request to Anthropic's native Messages API shape.
+    func toAnthropicJSON() -> [String: Any] {
+        var systemParts: [String] = []
+        var anthropicMessages: [[String: Any]] = []
+
+        for message in messages {
+            let role = (message["role"] as? String) ?? "user"
+            let content = message["content"]
+
+            if role == "system" {
+                if let text = content as? String, !text.isEmpty {
+                    systemParts.append(text)
+                }
+                continue
+            }
+
+            let mappedRole = role == "assistant" ? "assistant" : "user"
+            if let text = content as? String {
+                anthropicMessages.append([
+                    "role": mappedRole,
+                    "content": text
+                ])
+            } else if let parts = content as? [[String: Any]] {
+                anthropicMessages.append([
+                    "role": mappedRole,
+                    "content": parts.compactMap(Self.anthropicContentBlock(from:))
+                ])
+            }
+        }
+
+        var data: [String: Any] = [
+            "model": model,
+            "messages": anthropicMessages,
+            "max_tokens": 4096,
+            "stream": stream
+        ]
+        if !systemParts.isEmpty {
+            data["system"] = systemParts.joined(separator: "\n\n")
+        }
+        return data
+    }
+
+    private static func anthropicContentBlock(from part: [String: Any]) -> [String: Any]? {
+        guard let type = part["type"] as? String else { return nil }
+        if type == "text" {
+            return ["type": "text", "text": part["text"] as? String ?? ""]
+        }
+        if type == "image_url",
+           let imageURL = part["image_url"] as? [String: Any],
+           let url = imageURL["url"] as? String,
+           url.hasPrefix("data:image/"),
+           let comma = url.firstIndex(of: ",") {
+            let header = String(url[..<comma])
+            let data = String(url[url.index(after: comma)...])
+            let mediaType = header
+                .replacingOccurrences(of: "data:", with: "")
+                .replacingOccurrences(of: ";base64", with: "")
+            return [
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": mediaType,
+                    "data": data
+                ]
+            ]
+        }
+        return nil
+    }
 }
 
 // MARK: - File Info

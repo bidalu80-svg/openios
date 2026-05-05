@@ -28,18 +28,37 @@ final class APIClient: @unchecked Sendable {
 
     var baseURL: String { network.serverConfig.url }
 
+    var providerType: ServerConfig.ProviderType { network.serverConfig.providerType }
+
     private var modelsPath: String {
-        network.serverConfig.providerType == .openAICompatible ? "/models" : "/api/models"
+        switch network.serverConfig.providerType {
+        case .openWebUI:
+            return "/api/models"
+        case .openAICompatible, .gemini, .anthropic:
+            return "/models"
+        }
     }
 
     private var chatCompletionsPath: String {
-        network.serverConfig.providerType == .openAICompatible ? "/chat/completions" : "/api/chat/completions"
+        switch network.serverConfig.providerType {
+        case .openWebUI:
+            return "/api/chat/completions"
+        case .openAICompatible, .gemini:
+            return "/chat/completions"
+        case .anthropic:
+            return "/messages"
+        }
     }
 
     private func chatCompletionBody(for request: ChatCompletionRequest) -> [String: Any] {
-        network.serverConfig.providerType == .openAICompatible
-            ? request.toOpenAICompatibleJSON()
-            : request.toJSON()
+        switch network.serverConfig.providerType {
+        case .openWebUI:
+            return request.toJSON()
+        case .openAICompatible, .gemini:
+            return request.toOpenAICompatibleJSON()
+        case .anthropic:
+            return request.toAnthropicJSON()
+        }
     }
 
     // MARK: - Health & Configuration
@@ -390,6 +409,40 @@ final class APIClient: @unchecked Sendable {
         }
 
         return []
+    }
+
+    func generateImage(prompt: String, model: String, size: String = "1024x1024") async throws -> String {
+        let body: [String: Any] = [
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            "size": size
+        ]
+        let json = try await network.requestJSON(
+            path: "/images/generations",
+            method: .post,
+            body: body,
+            timeout: 300
+        )
+
+        if let dataArray = json["data"] as? [[String: Any]],
+           let first = dataArray.first {
+            if let url = first["url"] as? String, !url.isEmpty {
+                return url
+            }
+            if let b64 = first["b64_json"] as? String, !b64.isEmpty {
+                return "data:image/png;base64,\(b64)"
+            }
+        }
+
+        throw APIError.responseDecoding(
+            underlying: NSError(
+                domain: "APIClient",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Image generation returned no image URL."]
+            ),
+            data: Data()
+        )
     }
 
     func getDefaultModel() async -> String? {
@@ -3231,23 +3284,19 @@ final class APIClient: @unchecked Sendable {
         </content>
         """
 
-        let body: [String: Any] = [
-            "model": modelId,
-            "stream": false,
-            "messages": [["role": "user", "content": prompt]]
-        ]
+        let request = ChatCompletionRequest(
+            model: modelId,
+            messages: [["role": "user", "content": prompt]],
+            stream: false
+        )
 
         let json = try await network.requestJSON(
             path: chatCompletionsPath,
             method: .post,
-            body: body
+            body: chatCompletionBody(for: request)
         )
 
-        guard let choices = json["choices"] as? [[String: Any]],
-              let first = choices.first,
-              let message = first["message"] as? [String: Any],
-              let responseText = message["content"] as? String
-        else { return nil }
+        guard let responseText = extractAssistantText(from: json) else { return nil }
 
         if let jsonStart = responseText.range(of: "{"),
            let jsonEnd = responseText.range(of: "}", options: .backwards) {
@@ -3271,36 +3320,56 @@ final class APIClient: @unchecked Sendable {
         Provide the enhanced notes in markdown format. Use markdown syntax for headings, lists, task lists ([ ]) where tasks or checklists are strongly implied, and emphasis to improve clarity and presentation. Ensure that all integrated content is accurately reflected. Return only the markdown formatted note.
         """
 
-        let body: [String: Any] = [
-            "model": modelId,
-            "stream": false,
-            "messages": [
+        let request = ChatCompletionRequest(
+            model: modelId,
+            messages: [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": "<notes>\(content)</notes>"]
-            ]
-        ]
+            ],
+            stream: false
+        )
 
         let json = try await network.requestJSON(
             path: chatCompletionsPath,
             method: .post,
-            body: body
+            body: chatCompletionBody(for: request)
         )
 
-        guard let choices = json["choices"] as? [[String: Any]],
-              let first = choices.first,
-              let message = first["message"] as? [String: Any],
-              let responseText = message["content"] as? String
-        else { return nil }
-
-        return responseText
+        return extractAssistantText(from: json)
     }
 
     // MARK: - Private Helpers
 
+    private func extractAssistantText(from json: [String: Any]) -> String? {
+        if let choices = json["choices"] as? [[String: Any]],
+           let first = choices.first,
+           let message = first["message"] as? [String: Any],
+           let content = message["content"] as? String,
+           !content.isEmpty {
+            return content
+        }
+
+        if let content = json["content"] as? [[String: Any]] {
+            let text = content.compactMap { block -> String? in
+                guard block["type"] as? String == "text" else { return nil }
+                return block["text"] as? String
+            }.joined()
+            if !text.isEmpty { return text }
+        }
+
+        if let content = json["content"] as? String, !content.isEmpty {
+            return content
+        }
+
+        return nil
+    }
+
     private func parseModelArray(_ models: [[String: Any]]) -> [AIModel] {
         return models.compactMap { raw -> AIModel? in
             guard let id = raw["id"] as? String else { return nil }
-            let name = raw["name"] as? String ?? id
+            let name = raw["name"] as? String
+                ?? raw["display_name"] as? String
+                ?? id
 
             var isMultimodal = false
             var supportsRAG = false
@@ -3310,6 +3379,23 @@ final class APIClient: @unchecked Sendable {
             var defaultFeatureIds: [String] = []
             var functionCallingMode: String?
             var builtinTools: [String: Bool] = [:]
+
+            if let inputModalities = raw["input_modalities"] as? [String],
+               inputModalities.contains(where: { $0.lowercased().contains("image") }) {
+                isMultimodal = true
+            }
+            if let capabilitiesDict = raw["capabilities"] as? [String: Any] {
+                capabilities = capabilitiesDict.compactMapValues { "\($0)" }
+                if capabilitiesDict["vision"] as? Bool == true
+                    || capabilitiesDict["image"] as? Bool == true
+                    || capabilitiesDict["image_generation"] as? Bool == true {
+                    isMultimodal = true
+                }
+            }
+            if Self.looksLikeImageGenerationModel(id: id, name: name) {
+                defaultFeatureIds.append("image_generation")
+                builtinTools["image_generation"] = true
+            }
 
             if let info = raw["info"] as? [String: Any] {
                 if let meta = info["meta"] as? [String: Any] {
@@ -3424,6 +3510,17 @@ final class APIClient: @unchecked Sendable {
                 rawModelItem: raw
             )
         }
+    }
+
+    private static func looksLikeImageGenerationModel(id: String, name: String) -> Bool {
+        let haystack = "\(id) \(name)".lowercased()
+        let positive = [
+            "image", "img", "dall-e", "dalle", "gpt-image", "imagen",
+            "flux", "sdxl", "stable-diffusion", "midjourney", "mj-"
+        ]
+        let negative = ["vision", "ocr", "vl", "video"]
+        return positive.contains(where: { haystack.contains($0) })
+            && !negative.contains(where: { haystack.contains($0) })
     }
 
     private func parseConversationSummary(_ json: [String: Any]) -> Conversation? {

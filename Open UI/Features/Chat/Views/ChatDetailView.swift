@@ -1559,7 +1559,8 @@ struct ChatDetailView: View {
                 }
                 if !imageFiles.isEmpty {
                     ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
-                        if let fileId = file.url, !fileId.isEmpty {
+                        let displayFileId = file.displayURL ?? file.url
+                        if let fileId = displayFileId, !fileId.isEmpty {
                             AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
                                 .frame(maxWidth: 220, maxHeight: 220)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
