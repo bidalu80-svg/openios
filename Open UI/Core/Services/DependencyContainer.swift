@@ -41,7 +41,7 @@ final class ActiveChatStore {
     var cachedModels: [AIModel] = []
 
     /// The last-selected model ID, carried forward to new chats.
-    var cachedSelectedModelId: String? = UserDefaults.standard.string(forKey: Self.lastSelectedModelKey)
+    var cachedSelectedModelId: String? = UserDefaults.standard.string(forKey: "chat.lastSelectedModelId")
 
     static let lastSelectedModelKey = "chat.lastSelectedModelId"
 
