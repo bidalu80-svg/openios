@@ -150,11 +150,11 @@ struct SettingsView: View {
                         }
                     }
 
-                    // Server & Connection
-                    SettingsSection(header: "服务器") {
+                    // Site & Connection
+                    SettingsSection(header: "站点") {
                         SettingsCell(
                             icon: "server.rack",
-                            title: "服务器配置",
+                            title: "站点配置",
                             subtitle: viewModel.serverURL,
                             showDivider: true,
                             accessory: .chevron
@@ -164,10 +164,10 @@ struct SettingsView: View {
 
                         SettingsCell(
                             icon: "arrow.left.arrow.right.circle",
-                            title: "管理服务器",
+                            title: "管理站点",
                             subtitle: viewModel.savedServers.count == 1
-                                ? "已保存 1 个服务器"
-                                : "已保存 \(viewModel.savedServers.count) 个服务器",
+                                ? "已保存 1 个站点"
+                                : "已保存 \(viewModel.savedServers.count) 个站点",
                             iconColor: .teal,
                             showDivider: false,
                             accessory: .chevron
@@ -275,7 +275,7 @@ struct SettingsView: View {
                         SavedServersView(viewModel: viewModel, showAddServerButton: true)
                     }
                     .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-                    .navigationTitle("管理服务器")
+                    .navigationTitle("管理站点")
                     .navigationBarTitleDisplayMode(.inline)
                 case .privacySecurity:
                     PrivacySecurityView()
@@ -770,7 +770,7 @@ struct TTSSettingsView: View {
         ]
         if ttsService.isServerAvailable {
             options.insert(
-                ("server", "服务器", "OpenWebUI 服务器端 TTS"),
+                ("server", "服务器", "服务器端 TTS"),
                 at: options.count - 1
             )
         }
@@ -971,7 +971,7 @@ struct TTSSettingsView: View {
                 } header: {
                     Text("服务器 TTS 模型")
                 } footer: {
-                    Text("OpenWebUI 服务器上配置的语音合成模型（/api/v1/audio/config）。")
+                    Text("当前服务器上配置的语音合成模型（/api/v1/audio/config）。")
                 }
 
                 // --- Voice picker ---
@@ -1016,7 +1016,7 @@ struct TTSSettingsView: View {
                 } header: {
                     Text("服务器声音")
                 } footer: {
-                    Text("OpenWebUI 服务器可用的声音。默认值会使用服务器配置的声音。")
+                    Text("当前服务器可用的声音。默认值会使用服务器配置的声音。")
                 }
             }
 
@@ -1497,7 +1497,7 @@ struct STTSettingsView: View {
                     } label: {
                         engineRow(
                             value: "server",
-                            label: "服务器（OpenWebUI）",
+                            label: "服务器",
                             description: "通过服务器端 /api/v1/audio/transcriptions 转写",
                             selected: selectedSTTEngine == "server"
                         )
@@ -1510,7 +1510,7 @@ struct STTSettingsView: View {
                 if selectedSTTEngine == "device" {
                     Text("用于实时麦克风输入。Apple 语音识别框架可离线工作，不会发送到外部服务器。")
                 } else if selectedSTTEngine == "server" {
-                    Text("用于实时麦克风输入。会把音频发送到你的 OpenWebUI 服务器转写，需要网络。")
+                    Text("用于实时麦克风输入。会把音频发送到当前服务器转写，需要网络。")
                 } else {
                     Text("选择实时麦克风输入和语音通话使用的转写引擎。")
                 }
@@ -1528,7 +1528,7 @@ struct STTSettingsView: View {
                     engineRow(
                         value: "server",
                         label: "服务器",
-                        description: "上传音频到 OpenWebUI 服务器并自动转写",
+                        description: "上传音频到当前服务器并自动转写",
                         selected: audioFileMode == "server"
                     )
                 }
@@ -2155,14 +2155,14 @@ struct SignOutConfirmationSheet: View {
             VStack(spacing: Spacing.sm) {
                 signOutButton(
                     title: "退出登录",
-                    subtitle: "保留服务器连接",
+                    subtitle: "保留站点连接",
                     icon: "arrow.right.circle",
                     action: onSignOut,
                     index: 0
                 )
 
                 signOutButton(
-                    title: "退出并移除服务器",
+                    title: "退出并移除站点",
                     subtitle: "清除所有连接数据",
                     icon: "trash.circle",
                     action: onSignOutAndRemove,

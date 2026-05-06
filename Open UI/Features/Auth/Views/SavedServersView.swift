@@ -61,11 +61,11 @@ struct SavedServersView: View {
                 .foregroundStyle(theme.brandPrimary)
                 .padding(.bottom, Spacing.xs)
 
-            Text("你的服务器")
+            Text("你的站点")
                 .scaledFont(size: 28, weight: .bold, design: .rounded)
                 .foregroundStyle(theme.textPrimary)
 
-            Text("选择一个服务器继续")
+            Text("选择一个站点继续")
                 .scaledFont(size: 15)
                 .foregroundStyle(theme.textSecondary)
         }
@@ -80,10 +80,10 @@ struct SavedServersView: View {
             Image(systemName: "network.slash")
                 .scaledFont(size: 44)
                 .foregroundStyle(theme.textTertiary)
-            Text("暂无已保存服务器")
+            Text("暂无已保存站点")
                 .scaledFont(size: 17, weight: .semibold)
                 .foregroundStyle(theme.textPrimary)
-            Text("连接 OpenWebUI 服务器即可开始。")
+            Text("连接 Iexa 原生站点或兼容 API 即可开始。")
                 .scaledFont(size: 14)
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -121,7 +121,7 @@ struct SavedServersView: View {
         }
         .padding(.horizontal, Spacing.screenPadding)
         .confirmationDialog(
-            "移除服务器",
+            "移除站点",
             isPresented: $showDeleteConfirmation,
             titleVisibility: .visible
         ) {
@@ -135,7 +135,7 @@ struct SavedServersView: View {
             }
         } message: {
             if let server = serverToDelete {
-                Text("这会移除“\(server.name)”并退出该服务器。服务器端数据不会受到影响。")
+                Text("这会移除“\(server.name)”并退出该站点。站点端数据不会受到影响。")
             }
         }
     }
@@ -147,7 +147,7 @@ struct SavedServersView: View {
             // Present as a sheet — user can cancel without losing current session
             showAddServerSheet = true
         } label: {
-            Label("添加新服务器", systemImage: "plus.circle.fill")
+            Label("添加新站点", systemImage: "plus.circle.fill")
                 .scaledFont(size: 15, weight: .medium)
                 .foregroundStyle(theme.brandPrimary)
                 .frame(maxWidth: .infinity)
@@ -481,7 +481,7 @@ struct CompactSavedServersSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            Text("已保存服务器")
+            Text("已保存站点")
                 .scaledFont(size: 13, weight: .semibold)
                 .foregroundStyle(theme.textTertiary)
                 .padding(.horizontal, Spacing.xs)

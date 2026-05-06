@@ -49,7 +49,7 @@
 			<key>UIApplicationShortcutItemIconSymbolName</key>
 			<string>bubble.left.and.bubble.right.fill</string>
 			<key>UIApplicationShortcutItemTitle</key>
-			<string>New Chat</string>
+			<string>新建聊天</string>
 			<key>UIApplicationShortcutItemType</key>
 			<string>com.openui.openui.new-chat</string>
 			<key>UIApplicationShortcutItemUserInfo</key>
@@ -62,7 +62,7 @@
 			<key>UIApplicationShortcutItemIconSymbolName</key>
 			<string>mic.fill</string>
 			<key>UIApplicationShortcutItemTitle</key>
-			<string>Voice Call</string>
+			<string>语音通话</string>
 			<key>UIApplicationShortcutItemType</key>
 			<string>com.openui.openui.voice-call</string>
 			<key>UIApplicationShortcutItemUserInfo</key>
@@ -75,7 +75,7 @@
 			<key>UIApplicationShortcutItemIconSymbolName</key>
 			<string>camera.fill</string>
 			<key>UIApplicationShortcutItemTitle</key>
-			<string>Camera Chat</string>
+			<string>相机聊天</string>
 			<key>UIApplicationShortcutItemType</key>
 			<string>com.openui.openui.camera-chat</string>
 			<key>UIApplicationShortcutItemUserInfo</key>
@@ -88,7 +88,7 @@
 			<key>UIApplicationShortcutItemIconSymbolName</key>
 			<string>number</string>
 			<key>UIApplicationShortcutItemTitle</key>
-			<string>New Channel</string>
+			<string>新建频道</string>
 			<key>UIApplicationShortcutItemType</key>
 			<string>com.openui.openui.new-channel</string>
 			<key>UIApplicationShortcutItemUserInfo</key>
@@ -104,6 +104,8 @@
 		<string>processing</string>
 	</array>
 	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
 	<key>UTExportedTypeDeclarations</key>
 	<array>

@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import os.log
 import SwiftUI
 
@@ -240,6 +241,10 @@ final class ChatViewModel {
     /// Tracks whether the socket has received at least one content token.
     /// Used by the recovery timer to avoid overwriting an active stream.
     private var socketHasReceivedContent = false
+    /// Assistant message IDs whose local workspace instructions have already
+    /// been applied. Prevents duplicate writes when a completion is refreshed
+    /// or retried after streaming finishes.
+    private var localWorkspaceAgentExecutedMessageIds: Set<String> = []
     private(set) var serverBaseURL: String = ""
     @ObservationIgnored nonisolated(unsafe) private var foregroundObserver: NSObjectProtocol?
     @ObservationIgnored nonisolated(unsafe) private var backgroundObserver: NSObjectProtocol?
@@ -352,8 +357,8 @@ final class ChatViewModel {
     var canSend: Bool {
         !isStreaming
             && !attachments.contains(where: { $0.type == .audio && $0.isTranscribing })
-            && !attachments.contains(where: { $0.isUploading && !canSendAttachmentInline($0) })
-            && !attachments.contains(where: { $0.uploadStatus == .error && !canSendAttachmentInline($0) })
+            && !attachments.contains(where: { $0.isUploading && !canSendAttachmentWithoutCompletedUpload($0) })
+            && !attachments.contains(where: { $0.uploadStatus == .error && !canSendAttachmentWithoutCompletedUpload($0) })
             && (!inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !attachments.isEmpty)
     }
@@ -379,9 +384,9 @@ final class ChatViewModel {
     /// Call this right after appending an attachment to `self.attachments`.
     /// The attachment's `uploadStatus` will progress: uploading → completed/error.
     /// The send button is blocked while any attachment has `isUploading == true`.
-    /// Scrapes a webpage URL, converts the extracted text to a `.txt` file,
-    /// and uploads it through the standard files API so it appears as a file
-    /// attachment pill — identical to attaching a document from the file picker.
+    /// Scrapes a webpage URL and turns it into a text attachment.
+    /// Direct API providers do not expose Iexa/OpenWebUI retrieval endpoints, so
+    /// they keep the text inline and send it with the next model request.
     func processWebURL(urlString: String) {
         var normalised = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalised.isEmpty else { return }
@@ -405,45 +410,71 @@ final class ChatViewModel {
         let attachmentId = attachment.id
 
         Task {
-            guard let apiClient = manager?.apiClient else {
-                if let idx = attachments.firstIndex(where: { $0.id == attachmentId }) {
-                    attachments[idx].uploadStatus = .error
-                    attachments[idx].uploadError = "Not connected to server"
-                }
-                return
-            }
-
             do {
-                // Phase 1: Scrape the webpage content
-                let content = try await apiClient.processWebPage(url: normalised)
+                let content: String
+                if let apiClient = manager?.apiClient, apiClient.providerType == .openWebUI {
+                    do {
+                        content = try await apiClient.processWebPage(url: normalised)
+                    } catch {
+                        // Some compatible servers do not enable the retrieval API.
+                        // Fall back to a local scrape instead of making the feature fail.
+                        content = try await Self.fetchWebPageTextLocally(from: normalised)
+                    }
+                } else {
+                    content = try await Self.fetchWebPageTextLocally(from: normalised)
+                }
 
                 guard let textData = content.data(using: .utf8), !textData.isEmpty else {
                     if let idx = attachments.firstIndex(where: { $0.id == attachmentId }) {
                         attachments[idx].uploadStatus = .error
-                        attachments[idx].uploadError = "No content extracted from webpage"
+                        attachments[idx].uploadError = "没有从网页提取到内容"
                     }
                     return
                 }
 
-                // Store data on the attachment for the upload
+                // Store data on the attachment for either inline sending or upload.
                 if let idx = attachments.firstIndex(where: { $0.id == attachmentId }) {
                     attachments[idx].data = textData
                 }
 
-                // Phase 2: Upload the text file through the normal files pipeline
-                guard let mgr = manager else { return }
-                let (fileId, fileObject) = try await mgr.uploadFile(
-                    data: textData,
-                    fileName: fileName,
-                    onUploaded: { [weak self] _ in
-                        Task { @MainActor [weak self] in
-                            guard let self else { return }
-                            if let idx = self.attachments.firstIndex(where: { $0.id == attachmentId }) {
-                                self.attachments[idx].uploadStatus = .processing
+                guard let mgr = manager, mgr.providerType == .openWebUI else {
+                    if let idx = attachments.firstIndex(where: { $0.id == attachmentId }) {
+                        attachments[idx].uploadStatus = .completed
+                        attachments[idx].uploadError = nil
+                    }
+                    logger.info("Web page \(normalised) scraped locally for inline sending")
+                    return
+                }
+
+                // OpenWebUI/Iexa server mode: upload through the normal files pipeline
+                // so server-side RAG can process it.
+                let fileResult: (String, [String: Any])
+                do {
+                    fileResult = try await mgr.uploadFile(
+                        data: textData,
+                        fileName: fileName,
+                        onUploaded: { [weak self] _ in
+                            Task { @MainActor [weak self] in
+                                guard let self else { return }
+                                if let idx = self.attachments.firstIndex(where: { $0.id == attachmentId }) {
+                                    self.attachments[idx].uploadStatus = .processing
+                                }
                             }
                         }
+                    )
+                } catch {
+                    let apiError = APIError.from(error)
+                    if case .httpError(let code, _, _) = apiError, code == 404 || code == 405 {
+                        if let idx = attachments.firstIndex(where: { $0.id == attachmentId }) {
+                            attachments[idx].uploadStatus = .completed
+                            attachments[idx].uploadError = nil
+                        }
+                        logger.info("Web page \(normalised) upload endpoint unavailable; using inline text")
+                        return
                     }
-                )
+                    throw error
+                }
+                let (fileId, fileObject) = fileResult
 
                 // Phase 3: Mark completed
                 if let idx = attachments.firstIndex(where: { $0.id == attachmentId }) {
@@ -460,7 +491,9 @@ final class ChatViewModel {
                    let msg, !msg.isEmpty {
                     errorMessage = msg
                 } else {
-                    errorMessage = error.localizedDescription
+                    errorMessage = error.localizedDescription.isEmpty
+                        ? "网页链接处理失败"
+                        : error.localizedDescription
                 }
                 if let idx = attachments.firstIndex(where: { $0.id == attachmentId }) {
                     attachments[idx].uploadStatus = .error
@@ -471,9 +504,116 @@ final class ChatViewModel {
         }
     }
 
+    nonisolated private static func fetchWebPageTextLocally(from urlString: String) async throws -> String {
+        guard let url = URL(string: urlString),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            throw URLError(.badURL)
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        request.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<400).contains(http.statusCode) {
+            throw URLError(.badServerResponse)
+        }
+
+        let encodingName = (response.textEncodingName ?? "").lowercased()
+        let encoding: String.Encoding = {
+            switch encodingName {
+            case "gbk", "gb2312", "gb18030":
+                return .init(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))
+            case "iso-8859-1":
+                return .isoLatin1
+            default:
+                return .utf8
+            }
+        }()
+        let raw = String(data: data, encoding: encoding)
+            ?? String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1)
+            ?? ""
+        let title = extractHTMLTitle(from: raw)
+        let text = extractReadableText(from: raw)
+        let limited = text.count > 80_000 ? String(text.prefix(80_000)) + "\n\n[网页内容已截断]" : text
+        return """
+        Source URL: \(urlString)
+        \(title.isEmpty ? "" : "Title: \(title)\n")
+        \(limited)
+        """
+    }
+
+    nonisolated private static func extractHTMLTitle(from html: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"<title[^>]*>(.*?)</title>"#, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
+            return ""
+        }
+        let ns = html as NSString
+        guard let match = regex.firstMatch(in: html, range: NSRange(location: 0, length: ns.length)),
+              match.numberOfRanges > 1 else { return "" }
+        return decodeHTMLEntities(ns.substring(with: match.range(at: 1)))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func extractReadableText(from html: String) -> String {
+        var text = html
+        let removalPatterns = [
+            #"<script\b[^>]*>.*?</script>"#,
+            #"<style\b[^>]*>.*?</style>"#,
+            #"<noscript\b[^>]*>.*?</noscript>"#,
+            #"<!--.*?-->"#
+        ]
+        for pattern in removalPatterns {
+            text = text.replacingOccurrences(of: pattern, with: " ", options: [.regularExpression, .caseInsensitive])
+        }
+        text = text.replacingOccurrences(of: #"</(p|div|section|article|header|footer|li|h[1-6]|br|tr)>"#, with: "\n", options: [.regularExpression, .caseInsensitive])
+        text = text.replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
+        text = decodeHTMLEntities(text)
+        text = text.replacingOccurrences(of: #"[ \t\f\r]+"#, with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func decodeHTMLEntities(_ value: String) -> String {
+        var decoded = value
+        let named: [String: String] = [
+            "&nbsp;": " ",
+            "&amp;": "&",
+            "&lt;": "<",
+            "&gt;": ">",
+            "&quot;": "\"",
+            "&#39;": "'",
+            "&apos;": "'"
+        ]
+        for (entity, replacement) in named {
+            decoded = decoded.replacingOccurrences(of: entity, with: replacement)
+        }
+        guard let numericRegex = try? NSRegularExpression(pattern: #"&#(x?[0-9A-Fa-f]+);"#) else {
+            return decoded
+        }
+        let ns = decoded as NSString
+        let matches = numericRegex.matches(in: decoded, range: NSRange(location: 0, length: ns.length)).reversed()
+        for match in matches {
+            let raw = ns.substring(with: match.range(at: 1))
+            let radix = raw.lowercased().hasPrefix("x") ? 16 : 10
+            let digits = radix == 16 ? String(raw.dropFirst()) : raw
+            if let scalarValue = UInt32(digits, radix: radix),
+               let scalar = UnicodeScalar(scalarValue) {
+                decoded = (decoded as NSString).replacingCharacters(in: match.range, with: String(Character(scalar)))
+            }
+        }
+        return decoded
+    }
+
     func uploadAttachmentImmediately(attachmentId: UUID) {
         guard let index = attachments.firstIndex(where: { $0.id == attachmentId }) else { return }
-        if isOpenAICompatibleProvider, canSendAttachmentInline(attachments[index]) {
+        if isOpenAICompatibleProvider,
+           canSendAttachmentInline(attachments[index]) || attachments[index].type == .file {
             if attachments[index].type == .image,
                let data = attachments[index].data,
                attachments[index].displayDataURL == nil {
@@ -515,18 +655,35 @@ final class ChatViewModel {
                 // onUploaded fires after the file is stored on the server but BEFORE
                 // SSE processing completes — we switch the chip from "uploading" to
                 // "processing" so the user sees the two-phase status.
-                let (fileId, fileObject) = try await manager.uploadFile(
-                    data: data,
-                    fileName: fileName,
-                    onUploaded: { [weak self] _ in
-                        Task { @MainActor [weak self] in
-                            guard let self else { return }
-                            if let idx = self.attachments.firstIndex(where: { $0.id == attachmentId }) {
-                                self.attachments[idx].uploadStatus = .processing
+                let uploadResult: (fileId: String, fileObject: [String: Any])
+                if attachments[idx].type == .file && Self.shouldUploadWithoutServerProcessing(fileName) {
+                    let fileObject = try await manager.uploadFileOnly(data: data, fileName: fileName)
+                    guard let fileId = fileObject["id"] as? String else {
+                        throw APIError.responseDecoding(
+                            underlying: NSError(
+                                domain: "APIError",
+                                code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: "Missing file ID in upload response"]
+                            ),
+                            data: nil
+                        )
+                    }
+                    uploadResult = (fileId: fileId, fileObject: fileObject)
+                } else {
+                    uploadResult = try await manager.uploadFile(
+                        data: data,
+                        fileName: fileName,
+                        onUploaded: { [weak self] _ in
+                            Task { @MainActor [weak self] in
+                                guard let self else { return }
+                                if let idx = self.attachments.firstIndex(where: { $0.id == attachmentId }) {
+                                    self.attachments[idx].uploadStatus = .processing
+                                }
                             }
                         }
-                    }
-                )
+                    )
+                }
+                let (fileId, fileObject) = uploadResult
                 // Update on success
                 if let idx = attachments.firstIndex(where: { $0.id == attachmentId }) {
                     attachments[idx].uploadStatus = .completed
@@ -574,6 +731,12 @@ final class ChatViewModel {
         return Self.isInlineTextFile(attachment.name)
     }
 
+    private func canSendAttachmentWithoutCompletedUpload(_ attachment: ChatAttachment) -> Bool {
+        guard attachment.data != nil else { return false }
+        if canSendAttachmentInline(attachment) { return true }
+        return isOpenAICompatibleProvider && attachment.type == .file
+    }
+
     private static func isInlineTextFile(_ name: String) -> Bool {
         let ext = (name as NSString).pathExtension.lowercased()
         return [
@@ -582,6 +745,23 @@ final class ChatViewModel {
             "ts", "tsx", "py", "swift", "java", "kt", "kts", "c", "h", "cpp",
             "hpp", "cs", "go", "rs", "rb", "php", "sh", "bash", "zsh", "ps1",
             "bat", "cmd", "sql", "toml", "ini", "cfg", "conf", "env", "log"
+        ].contains(ext)
+    }
+
+    private static func shouldUploadWithoutServerProcessing(_ name: String) -> Bool {
+        guard !isInlineTextFile(name) else { return false }
+        let mime = mimeType(for: name)
+        if mime.hasPrefix("text/") { return false }
+        let ext = (name as NSString).pathExtension.lowercased()
+        return [
+            "zip", "rar", "7z", "tar", "gz", "bz2", "xz",
+            "exe", "dll", "dylib", "so", "apk", "ipa", "app",
+            "bin", "dat", "db", "sqlite", "sqlite3",
+            "psd", "ai", "sketch", "fig",
+            "ttf", "otf", "woff", "woff2",
+            "mp3", "m4a", "aac", "flac", "wav", "ogg",
+            "mp4", "mov", "avi", "mkv", "webm",
+            "doc", "docx", "xls", "xlsx", "ppt", "pptx"
         ].contains(ext)
     }
 
@@ -652,6 +832,42 @@ final class ChatViewModel {
         """
     }
 
+    private func inlineBinaryContext(for attachment: ChatAttachment, data: Data) -> String {
+        let contentType = mimeType(for: attachment.name)
+        let sizeText = ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)
+        let maxInlineBytes = 192_000
+        let previewBytes = 64_000
+
+        if data.count <= maxInlineBytes {
+            let encoded = data.base64EncodedString(options: [.lineLength64Characters])
+            return """
+            Attached binary file: \(attachment.name)
+            MIME type: \(contentType)
+            Size: \(sizeText)
+            Encoding: base64
+            ```base64
+            \(encoded)
+            ```
+            """
+        }
+
+        let head = data.subdata(in: 0..<previewBytes).base64EncodedString(options: [.lineLength64Characters])
+        let tail = data.subdata(in: (data.count - previewBytes)..<data.count).base64EncodedString(options: [.lineLength64Characters])
+        return """
+        Attached binary file: \(attachment.name)
+        MIME type: \(contentType)
+        Size: \(sizeText)
+        The file is too large to inline fully. The first and last \(previewBytes) bytes are included as base64 previews.
+        ```base64
+        [first \(previewBytes) bytes]
+        \(head)
+
+        [last \(previewBytes) bytes]
+        \(tail)
+        ```
+        """
+    }
+
     private static func inlineFenceLanguage(for name: String) -> String {
         let ext = (name as NSString).pathExtension.lowercased()
         switch ext {
@@ -668,6 +884,11 @@ final class ChatViewModel {
         case "ps1": return "powershell"
         default: return ext
         }
+    }
+
+    private static func isLocalWorkspaceAgentResult(_ message: ChatMessage) -> Bool {
+        message.metadata?["iexa_local_workspace_result"] == "true"
+            || (message.role == .system && message.content.hasPrefix("本地工作区执行结果"))
     }
 
     // MARK: - Initialisation
@@ -2594,11 +2815,11 @@ final class ChatViewModel {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else { return }
         guard let manager else { return }
-        if attachments.contains(where: { $0.uploadStatus == .error && !(isOpenAICompatibleProvider && canSendAttachmentInline($0)) }) {
+        if attachments.contains(where: { $0.uploadStatus == .error && !canSendAttachmentWithoutCompletedUpload($0) }) {
             errorMessage = "One or more attachments failed to upload. Retry or remove them before sending."
             return
         }
-        if attachments.contains(where: { $0.isUploading && !(isOpenAICompatibleProvider && canSendAttachmentInline($0)) }) {
+        if attachments.contains(where: { $0.isUploading && !canSendAttachmentWithoutCompletedUpload($0) }) {
             errorMessage = "Please wait for attachments to finish uploading."
             return
         }
@@ -2722,12 +2943,41 @@ final class ChatViewModel {
                 ))
             } else if let data = attachment.data, canSendAttachmentInline(attachment) {
                 inlineTextSnippets.append(inlineTextContext(for: attachment, data: data))
+            } else if isOpenAICompatibleProvider, let data = attachment.data, attachment.type == .file {
+                inlineTextSnippets.append(inlineBinaryContext(for: attachment, data: data))
+                fileRefs.append([
+                    "type": "file",
+                    "id": "local-binary:\(attachment.id.uuidString)",
+                    "url": "local-binary:\(attachment.id.uuidString)",
+                    "name": attachment.name,
+                    "status": "inline",
+                    "size": data.count,
+                    "error": "",
+                    "content_type": mimeType(for: attachment.name)
+                ])
             } else if let data = attachment.data, attachment.uploadStatus != .error {
                 // Fallback: upload now (e.g., audio transcript text files that don't go
                 // through uploadAttachmentImmediately). Skip attachments that previously
                 // failed — the error chip is already shown; the user must retry or remove.
                 do {
-                    let (fileId, fileObject) = try await manager.uploadFile(data: data, fileName: attachment.name)
+                    let uploadResult: (fileId: String, fileObject: [String: Any])
+                    if attachment.type == .file && Self.shouldUploadWithoutServerProcessing(attachment.name) {
+                        let fileObject = try await manager.uploadFileOnly(data: data, fileName: attachment.name)
+                        guard let fileId = fileObject["id"] as? String else {
+                            throw APIError.responseDecoding(
+                                underlying: NSError(
+                                    domain: "APIError",
+                                    code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: "Missing file ID in upload response"]
+                                ),
+                                data: nil
+                            )
+                        }
+                        uploadResult = (fileId: fileId, fileObject: fileObject)
+                    } else {
+                        uploadResult = try await manager.uploadFile(data: data, fileName: attachment.name)
+                    }
+                    let (fileId, fileObject) = uploadResult
                     let isImage = attachment.type == .image
                     let contentType: String = isImage ? "image/jpeg" : mimeType(for: attachment.name)
                     let payloadType = isImage ? "image" : "file"
@@ -2834,7 +3084,7 @@ final class ChatViewModel {
 
         // Capture the ID of the last message before appending the user message.
         // This becomes the user message's parentId in the history tree.
-        let userMessageParentId = conversation?.messages.last?.id
+        let userMessageParentId = conversation?.messages.last(where: { !Self.isLocalWorkspaceAgentResult($0) })?.id
 
         // Ensure conversation exists on server (skip for temporary chats)
         if conversation == nil {
@@ -5568,6 +5818,22 @@ final class ChatViewModel {
         - Use exact relative file names and matching imports, links, entrypoints, and package/config files.
         - For HTML/CSS/JavaScript projects split across index.html, style.css, and script.js, the HTML must link ./style.css and ./script.js, and the CSS/JS must be written for that same UI.
         - For other languages, include the folder tree, entry file, dependency/config files, and imports so the project can run as a coherent whole instead of unrelated snippets.
+
+        Iexa has a local workspace agent. When the user asks you to create, modify, read, list, or delete local project files, include exactly one fenced block with language `iexa_workspace` containing JSON. Paths are relative to the app's Documents/Iexa Workspace folder and must never be absolute or use `..`.
+        Supported operations:
+        ```iexa_workspace
+        {
+          "iexa_workspace": [
+            {"action": "mkdir", "path": "demo"},
+            {"action": "write", "path": "demo/index.html", "content": "<!doctype html>..."},
+            {"action": "append", "path": "demo/README.md", "content": "\\nMore notes"},
+            {"action": "read", "path": "demo/index.html"},
+            {"action": "list", "path": "demo"},
+            {"action": "delete", "path": "demo/old.txt"}
+          ]
+        }
+        ```
+        For multi-file projects, write all connected files in the same workspace block so the UI, styles, scripts, imports, and dependencies stay linked.
         """
     }
 
@@ -5589,7 +5855,7 @@ final class ChatViewModel {
         if let sp = simpleEffectiveSP, !sp.trimmingCharacters(in: .whitespaces).isEmpty {
             msgs.append(["role": "system", "content": sp])
         }
-        for msg in conversation.messages where !msg.isStreaming {
+        for msg in conversation.messages where !msg.isStreaming && !Self.isLocalWorkspaceAgentResult(msg) {
             msgs.append(["role": msg.role.rawValue, "content": msg.content])
         }
         return msgs
@@ -5611,7 +5877,7 @@ final class ChatViewModel {
         if !combinedSystemPrompt.isEmpty {
             apiMessages.append(["role": "system", "content": combinedSystemPrompt])
         }
-        for message in conversation.messages where !message.isStreaming {
+        for message in conversation.messages where !message.isStreaming && !Self.isLocalWorkspaceAgentResult(message) {
             let imageFiles = message.files.filter { f in
                 f.type == "image" || (f.contentType ?? "").hasPrefix("image/")
             }
@@ -5676,6 +5942,7 @@ final class ChatViewModel {
                 if !nonImageFiles.isEmpty {
                     msgDict["files"] = nonImageFiles.compactMap { f -> [String: Any]? in
                         guard let id = f.url else { return nil }
+                        guard !id.hasPrefix("local-binary:") else { return nil }
                         return ["type": "file", "id": id, "url": id]
                     }
                 }
@@ -5690,6 +5957,7 @@ final class ChatViewModel {
                 if !message.files.isEmpty {
                     msgDict["files"] = message.files.compactMap { f -> [String: Any]? in
                         guard let id = f.url else { return nil }
+                        guard !id.hasPrefix("local-binary:") else { return nil }
                         return ["type": f.type ?? "file", "id": id, "url": id]
                     }
                 } else if !message.attachmentIds.isEmpty {
@@ -5990,12 +6258,58 @@ final class ChatViewModel {
         return nil
     }
 
+    private func scheduleLocalWorkspaceAgentIfNeeded(messageId: String, content: String, error: ChatMessageError?) {
+        guard error == nil else { return }
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard content.localizedCaseInsensitiveContains("iexa_workspace") else { return }
+        guard let role = conversation?.messages.first(where: { $0.id == messageId })?.role, role == .assistant else { return }
+        guard !localWorkspaceAgentExecutedMessageIds.contains(messageId) else { return }
+
+        localWorkspaceAgentExecutedMessageIds.insert(messageId)
+        Task { [weak self] in
+            await self?.executeLocalWorkspaceAgent(messageId: messageId, content: content)
+        }
+    }
+
+    private func executeLocalWorkspaceAgent(messageId: String, content: String) async {
+        let result = await LocalWorkspaceAgentService.shared.executeBlocks(in: content)
+        guard result.didExecute else { return }
+        guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
+
+        let resultMessage = ChatMessage(
+            role: .system,
+            content: result.summary,
+            timestamp: .now,
+            isStreaming: false,
+            metadata: ["iexa_local_workspace_result": "true"]
+        )
+        let resultNode = HistoryNode(
+            id: resultMessage.id,
+            parentId: messageId,
+            childrenIds: [],
+            role: .system,
+            content: result.summary,
+            timestamp: resultMessage.timestamp,
+            done: true
+        )
+
+        conversation?.messages.append(resultMessage)
+        conversation?.history.addNode(resultNode)
+        conversation?.history.appendChildId(resultMessage.id, to: messageId)
+        conversation?.history.currentId = resultMessage.id
+
+        await persistLocalConversationIfNeeded()
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
     private func updateAssistantMessage(
         id: String, content: String, isStreaming: Bool,
         sources: [ChatSourceReference]? = nil,
         statusHistory: [ChatStatusUpdate]? = nil,
         error: ChatMessageError? = nil
     ) {
+        var completedAssistantContentForAgent: String?
+
         if isStreaming && streamingStore.streamingMessageId == id {
             // ── STREAMING PATH ──
             // Route content to the isolated StreamingContentStore.
@@ -6054,6 +6368,7 @@ final class ChatViewModel {
                         if !result.statusHistory.isEmpty { node.statusHistory = result.statusHistory }
                     }
                 }
+                completedAssistantContentForAgent = finalContent
             } else {
                 // Normal non-streaming update (e.g., error before streaming started)
                 conversation?.messages[index].content = content
@@ -6064,6 +6379,9 @@ final class ChatViewModel {
                         node.content = content
                         node.done = true
                     }
+                }
+                if !isStreaming {
+                    completedAssistantContentForAgent = content
                 }
             }
             if let sources { conversation?.messages[index].sources = sources }
@@ -6084,6 +6402,10 @@ final class ChatViewModel {
         // overwhelming the Taptic Engine while still feeling responsive)
         if isStreaming && error == nil {
             triggerStreamingHaptic()
+        }
+
+        if let completedAssistantContentForAgent {
+            scheduleLocalWorkspaceAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
         }
     }
 

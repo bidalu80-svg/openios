@@ -36,7 +36,7 @@ struct AddServerSheet: View {
                         Image(systemName: "info.circle.fill")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.brandPrimary)
-                        Text("每个服务器地址会保存一个会话。要在同一服务器使用不同账号，请先切换过去并退出登录。")
+                        Text("每个站点地址会保存一个会话。要在同一站点使用不同账号，请先切换过去并退出登录。")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -50,7 +50,7 @@ struct AddServerSheet: View {
                     // Connection form — delegates entirely to the same ServerConnectionView UI
                     VStack(spacing: Spacing.lg) {
                         ModernTextField(
-                            label: "服务器 URL",
+                            label: "站点 URL",
                             placeholder: "https://your-server.com 或 https://api.example.com",
                             text: $url,
                             keyboardType: .URL,
@@ -62,7 +62,7 @@ struct AddServerSheet: View {
                             VStack(spacing: Spacing.lg) {
                                 ModernTextField(
                                     label: "API Key（可选）",
-                                    placeholder: "Open WebUI 可选；OpenAI/Gemini/Claude 端点必填",
+                                    placeholder: "Iexa 原生站点可选；直连 API 必填",
                                     text: $apiKey,
                                     isSecure: true
                                 )
@@ -71,7 +71,7 @@ struct AddServerSheet: View {
                                         Text("自签名证书")
                                             .scaledFont(size: 14)
                                             .foregroundStyle(theme.textPrimary)
-                                        Text("适用于使用自定义证书的私有服务器")
+                                        Text("适用于使用自定义证书的私有站点")
                                             .scaledFont(size: 12, weight: .medium)
                                             .foregroundStyle(theme.textTertiary)
                                     }
@@ -128,7 +128,7 @@ struct AddServerSheet: View {
                 }
             }
             .background(theme.background)
-            .navigationTitle("添加服务器")
+            .navigationTitle("添加站点")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

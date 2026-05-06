@@ -23,8 +23,8 @@ struct ServerManagementView: View {
                 // Connection status
                 connectionStatusSection
 
-                // Server details
-                SettingsSection(header: "服务器详情") {
+                // Site details
+                SettingsSection(header: "站点详情") {
                     detailRow(icon: "globe", label: "URL", value: activeServer?.url ?? "—")
                     detailRow(icon: "tag", label: "名称", value: displayedConfig?.name ?? activeServer?.name ?? "—")
                     if let version = displayedConfig?.version ?? viewModel.serverVersion {
@@ -38,7 +38,7 @@ struct ServerManagementView: View {
                     )
                 }
 
-                // Accounts on this server
+                // Accounts on this site
                 accountsSection
 
                 // Actions
@@ -54,7 +54,7 @@ struct ServerManagementView: View {
 
                     SettingsCell(
                         icon: "pencil",
-                        title: "编辑服务器",
+                        title: "编辑站点",
                         showDivider: false,
                         accessory: .chevron
                     ) {
@@ -66,7 +66,7 @@ struct ServerManagementView: View {
                 SettingsSection(header: "危险操作") {
                     DestructiveSettingsCell(
                         icon: "trash",
-                        title: "移除服务器"
+                        title: "移除站点"
                     ) {
                         showDeleteConfirmation = true
                     }
@@ -75,7 +75,7 @@ struct ServerManagementView: View {
             .padding(.vertical, Spacing.lg)
         }
         .background(theme.background)
-        .navigationTitle("服务器")
+        .navigationTitle("站点")
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await checkHealth()
@@ -84,7 +84,7 @@ struct ServerManagementView: View {
             editServerSheet
         }
         .confirmationDialog(
-            "移除服务器",
+            "移除站点",
             isPresented: $showDeleteConfirmation,
             titleVisibility: .visible
         ) {
@@ -93,7 +93,7 @@ struct ServerManagementView: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("这会退出登录并移除当前服务器配置。")
+            Text("这会退出登录并移除当前站点配置。")
         }
         .confirmationDialog(
             "移除账号",
@@ -210,7 +210,7 @@ struct ServerManagementView: View {
     }
 
     private var statusSubtitle: String {
-        activeServer?.url ?? "未配置服务器"
+        activeServer?.url ?? "未配置站点"
     }
 
     // MARK: - Health Check
@@ -471,7 +471,7 @@ struct ServerManagementView: View {
     private var editServerSheet: some View {
         NavigationStack {
             Form {
-                Section("服务器 URL") {
+                Section("站点 URL") {
                     TextField("https://your-server.com", text: $editingURL)
                         .textContentType(.URL)
                         .autocorrectionDisabled()
@@ -480,7 +480,7 @@ struct ServerManagementView: View {
                 }
 
                 Section("显示名称") {
-                    TextField("我的服务器", text: $editingName)
+                    TextField("我的站点", text: $editingName)
                 }
 
                 Section("安全") {
@@ -493,11 +493,11 @@ struct ServerManagementView: View {
                 } header: {
                     Text("自定义请求头")
                 } footer: {
-                    Text("这些 HTTP 请求头会随每次请求发送到该服务器，适合反向代理或需要额外鉴权头的服务。")
+                    Text("这些 HTTP 请求头会随每次请求发送到该站点，适合反向代理或需要额外鉴权头的服务。")
                         .font(.caption)
                 }
             }
-            .navigationTitle("编辑服务器")
+            .navigationTitle("编辑站点")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

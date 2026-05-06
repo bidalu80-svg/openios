@@ -54,6 +54,15 @@ struct ProfileView: View {
 
     private let genderOptions = ["Prefer not to say", "Male", "Female", "Custom"]
 
+    private struct LocalProfileSnapshot: Codable {
+        var name: String
+        var bio: String
+        var gender: String?
+        var dateOfBirth: String?
+        var webhookURL: String
+        var profileImageURL: String?
+    }
+
     enum ProfileImageAction {
         case keep, remove, initials, newImage(Data)
     }
@@ -482,7 +491,8 @@ struct ProfileView: View {
                 size: 80,
                 imageURL: profileImageURL,
                 name: user?.displayName,
-                authToken: dependencies.apiClient?.network.authToken
+                authToken: dependencies.apiClient?.network.authToken,
+                dataURIString: profileImageDataURI
             )
         }
     }
@@ -511,7 +521,25 @@ struct ProfileView: View {
 
     private var user: User? { viewModel.currentUser }
 
+    private var isLocalOnlyProfile: Bool {
+        dependencies.apiClient?.providerType != .openWebUI
+    }
+
+    private var localProfileKey: String {
+        let serverURL = dependencies.apiClient?.baseURL
+            ?? dependencies.serverConfigStore.activeServer?.url
+            ?? "default"
+        return "iexa.local_profile.\(serverURL)"
+    }
+
+    private var profileImageDataURI: String? {
+        guard let imageURL = user?.profileImageURL,
+              imageURL.hasPrefix("data:") else { return nil }
+        return imageURL
+    }
+
     private var profileImageURL: URL? {
+        if profileImageDataURI != nil { return nil }
         guard let userId = user?.id,
               let baseURL = dependencies.apiClient?.baseURL,
               !userId.isEmpty, !baseURL.isEmpty else { return nil }
@@ -523,9 +551,18 @@ struct ProfileView: View {
 
     private func loadCurrentValues() {
         Task {
-            guard let api = dependencies.apiClient else { return }
             isLoadingSettings = true
             defer { isLoadingSettings = false }
+
+            guard let api = dependencies.apiClient else {
+                applyLocalProfileValues()
+                return
+            }
+
+            if isLocalOnlyProfile {
+                applyLocalProfileValues()
+                return
+            }
 
             // 1. Fetch fresh user data from server
             do {
@@ -533,7 +570,11 @@ struct ProfileView: View {
                 await MainActor.run { viewModel.currentUser = freshUser }
                 viewModel.cacheCurrentUser()
             } catch {
-                // Fall back to cached user if server fetch fails
+                if loadLocalProfileSnapshot() != nil {
+                    await MainActor.run { applyLocalProfileValues() }
+                    return
+                }
+                // Fall back to cached user if server fetch fails.
             }
 
             guard let user = viewModel.currentUser else { return }
@@ -595,6 +636,59 @@ struct ProfileView: View {
                 // Silently fail — webhook is optional
             }
         }
+    }
+
+    private func applyLocalProfileValues() {
+        let snapshot = loadLocalProfileSnapshot()
+        let cachedUser = viewModel.currentUser
+        let name = snapshot?.name ?? cachedUser?.displayName ?? "API Key User"
+        let bio = snapshot?.bio ?? cachedUser?.bio ?? ""
+        let gender = snapshot?.gender ?? cachedUser?.gender
+        let dob = snapshot?.dateOfBirth ?? cachedUser?.dateOfBirth
+        let webhook = snapshot?.webhookURL ?? ""
+        let avatar = snapshot?.profileImageURL ?? cachedUser?.profileImageURL
+
+        editName = name
+        editBio = bio
+        if let gender, !gender.isEmpty {
+            editGender = genderOptions.contains(gender) ? gender : "Custom"
+        } else {
+            editGender = "Prefer not to say"
+        }
+        if let dob, !dob.isEmpty {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MM/dd/yyyy"
+            editBirthDate = formatter.date(from: dob)
+        } else {
+            editBirthDate = nil
+        }
+        editWebhookURL = webhook
+
+        originalName = editName
+        originalBio = editBio
+        originalGender = editGender
+        originalBirthDate = editBirthDate
+        originalWebhookURL = webhook
+        originalAvatarBase64 = avatar?.hasPrefix("data:") == true ? (avatar ?? "") : ""
+
+        viewModel.currentUser = updatedLocalUser(
+            name: name,
+            bio: bio,
+            gender: gender,
+            dateOfBirth: dob,
+            profileImageURL: avatar
+        )
+        viewModel.cacheCurrentUser()
+    }
+
+    private func loadLocalProfileSnapshot() -> LocalProfileSnapshot? {
+        guard let data = UserDefaults.standard.data(forKey: localProfileKey) else { return nil }
+        return try? JSONDecoder().decode(LocalProfileSnapshot.self, from: data)
+    }
+
+    private func saveLocalProfileSnapshot(_ snapshot: LocalProfileSnapshot) {
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        UserDefaults.standard.set(data, forKey: localProfileKey)
     }
 
     // MARK: - Photo Handling
@@ -679,14 +773,42 @@ struct ProfileView: View {
                 dobValue = viewModel.currentUser?.dateOfBirth
             }
 
+            if api.providerType != .openWebUI {
+                await saveProfileLocally(
+                    name: trimmedName,
+                    bio: editBio,
+                    gender: genderValue,
+                    dateOfBirth: dobValue,
+                    imageAction: currentAction,
+                    avatarURL: avatarURL
+                )
+                return
+            }
+
             // ── Step 3: Send update to server ──
-            try await api.updateProfile(
-                name: trimmedName,
-                profileImageUrl: profileImageUrlString,
-                bio: editBio,
-                gender: genderValue,
-                dateOfBirth: dobValue
-            )
+            do {
+                try await api.updateProfile(
+                    name: trimmedName,
+                    profileImageUrl: profileImageUrlString,
+                    bio: editBio,
+                    gender: genderValue,
+                    dateOfBirth: dobValue
+                )
+            } catch {
+                let apiError = APIError.from(error)
+                if case .httpError(let code, _, _) = apiError, code == 404 || code == 405 {
+                    await saveProfileLocally(
+                        name: trimmedName,
+                        bio: editBio,
+                        gender: genderValue,
+                        dateOfBirth: dobValue,
+                        imageAction: currentAction,
+                        avatarURL: avatarURL
+                    )
+                    return
+                }
+                throw error
+            }
 
             // ── Step 4: Re-fetch the canonical user from server (single atomic assignment) ──
             let freshUser = try await api.getCurrentUser()
@@ -743,6 +865,110 @@ struct ProfileView: View {
             saveError = APIError.from(error).errorDescription ?? "更新资料失败。"
             isSaving = false
         }
+    }
+
+    private func saveProfileLocally(
+        name: String,
+        bio: String,
+        gender: String?,
+        dateOfBirth: String?,
+        imageAction: ProfileImageAction,
+        avatarURL: URL?
+    ) async {
+        let localImageURL: String? = {
+            switch imageAction {
+            case .keep:
+                if !originalAvatarBase64.isEmpty { return originalAvatarBase64 }
+                return viewModel.currentUser?.profileImageURL
+            case .remove, .initials:
+                return nil
+            case .newImage(let data):
+                return compressedAvatarDataURI(from: data)
+            }
+        }()
+
+        let snapshot = LocalProfileSnapshot(
+            name: name,
+            bio: bio,
+            gender: gender,
+            dateOfBirth: dateOfBirth,
+            webhookURL: editWebhookURL,
+            profileImageURL: localImageURL
+        )
+        saveLocalProfileSnapshot(snapshot)
+
+        viewModel.currentUser = updatedLocalUser(
+            name: name,
+            bio: bio,
+            gender: gender,
+            dateOfBirth: dateOfBirth,
+            profileImageURL: localImageURL
+        )
+        viewModel.cacheCurrentUser()
+
+        originalName = name
+        originalBio = bio
+        originalGender = editGender
+        originalBirthDate = editBirthDate
+        originalWebhookURL = editWebhookURL
+        originalAvatarBase64 = localImageURL?.hasPrefix("data:") == true ? (localImageURL ?? "") : ""
+
+        if let avatarURL {
+            await ImageCacheService.shared.evict(for: avatarURL)
+        }
+        if case .keep = imageAction {
+            // No avatar change.
+        } else {
+            profileImageData = nil
+            profileImageAction = .keep
+            viewModel.profileImageVersion += 1
+        }
+
+        isSaving = false
+        saveSuccess = true
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        saveSuccess = false
+    }
+
+    private func updatedLocalUser(
+        name: String,
+        bio: String,
+        gender: String?,
+        dateOfBirth: String?,
+        profileImageURL: String?
+    ) -> User {
+        let existing = viewModel.currentUser
+        let username = {
+            let existingUsername = existing?.username.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return existingUsername.isEmpty ? name : existingUsername
+        }()
+        return User(
+            id: existing?.id ?? "local-api-key-user",
+            username: username,
+            email: existing?.email ?? "",
+            name: name,
+            profileImageURL: profileImageURL,
+            role: existing?.role ?? .user,
+            isActive: existing?.isActive ?? true,
+            bio: bio,
+            gender: gender,
+            dateOfBirth: dateOfBirth,
+            permissions: existing?.permissions
+        )
+    }
+
+    private func compressedAvatarDataURI(from data: Data) -> String? {
+        guard let image = UIImage(data: data) else { return nil }
+        let maxDimension: CGFloat = 512
+        let largestSide = max(image.size.width, image.size.height)
+        let scale = largestSide > maxDimension ? maxDimension / largestSide : 1
+        let targetSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        let resized = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        guard let jpegData = resized.jpegData(compressionQuality: 0.82) else { return nil }
+        return "data:image/jpeg;base64," + jpegData.base64EncodedString()
     }
 
     // MARK: - Change Password

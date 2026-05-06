@@ -167,13 +167,13 @@ struct ChatInputField: View {
                 || !attachments.isEmpty)
     }
 
-    /// Images and small text/code files can be sent inline from local data if
-    /// the server upload endpoint is slow or unavailable.
+    /// Images and local files can be sent from local data when a direct API
+    /// provider has no upload endpoint. The chat view model still enforces the
+    /// provider-specific rules before sending.
     private func canSendWithoutServerUpload(_ attachment: ChatAttachment) -> Bool {
         guard attachment.data != nil else { return false }
         if attachment.type == .image { return true }
-        guard attachment.type == .file else { return false }
-        return Self.isInlineTextFile(attachment.name)
+        return attachment.type == .file
     }
 
     private static func isInlineTextFile(_ name: String) -> Bool {

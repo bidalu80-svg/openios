@@ -129,7 +129,7 @@ struct PromptPickerView: View {
                 Text("No prompts available")
                     .scaledFont(size: 13, weight: .medium)
                     .foregroundStyle(theme.textTertiary)
-                Text("Create prompts in your Open WebUI workspace")
+                Text("在 Iexa 工作区创建提示词")
                     .scaledFont(size: 11)
                     .foregroundStyle(theme.textTertiary.opacity(0.7))
             } else {

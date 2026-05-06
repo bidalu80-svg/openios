@@ -293,15 +293,15 @@ struct ChatDetailView: View {
             CameraPickerView { image in processCameraImage(image) }
                 .ignoresSafeArea()
         }
-        .alert("Add Web Link", isPresented: $showWebURLAlert) {
+        .alert("添加网页链接", isPresented: $showWebURLAlert) {
             TextField("https://example.com", text: $webURLInput)
                 .textContentType(.URL)
                 .keyboardType(.URL)
                 .autocapitalization(.none)
-            Button("Cancel", role: .cancel) { webURLInput = "" }
-            Button("Add") { processWebURL() }
+            Button("取消", role: .cancel) { webURLInput = "" }
+            Button("添加") { processWebURL() }
         } message: {
-            Text("Enter a URL to include as context in your message.")
+            Text("输入网址后，Iexa 会把网页内容作为上下文附加到下一条消息。")
         }
         .onChange(of: selectedPhotos) { _, newItems in
             Task { await processSelectedPhotos(newItems); selectedPhotos = [] }
@@ -4066,7 +4066,7 @@ private extension View {
                     actionCallContinuation.wrappedValue = nil
                     actionConfirmRequest.wrappedValue = nil
                 }
-                Button("Cancel", role: .cancel) {
+                Button("取消", role: .cancel) {
                     actionCallContinuation.wrappedValue?.resume(returning: .bool(false))
                     actionCallContinuation.wrappedValue = nil
                     actionConfirmRequest.wrappedValue = nil

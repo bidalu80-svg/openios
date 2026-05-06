@@ -102,7 +102,37 @@ final class AuthViewModel {
     }
 
     var serverName: String {
-        backendConfig?.name ?? "Open WebUI"
+        let backendName = backendConfig?.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let savedName = serverConfigStore.activeServer?.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let name = [backendName, savedName]
+            .compactMap({ $0 })
+            .first(where: { !$0.isEmpty && !Self.isOpenWebUIMarker($0) }) {
+            return name
+        }
+        return providerDisplayName
+    }
+
+    private var providerDisplayName: String {
+        switch serverConfigStore.activeServer?.providerType {
+        case .openWebUI:
+            return "Iexa 服务器"
+        case .openAICompatible:
+            return "兼容 API"
+        case .gemini:
+            return "Gemini API"
+        case .anthropic:
+            return "Claude API"
+        case .none:
+            return "Iexa"
+        }
+    }
+
+    private static func isOpenWebUIMarker(_ value: String) -> Bool {
+        let normalized = value
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        return normalized == "openwebui"
     }
 
     var serverVersion: String? {
@@ -458,7 +488,7 @@ final class AuthViewModel {
 
         // Fallback path: non-Open WebUI endpoint in OpenAI-compatible mode.
         guard !trimmedAPIKey.isEmpty else {
-            errorMessage = "Server does not appear to be an Open WebUI instance. If this is an OpenAI-compatible endpoint, please enter an API key."
+            errorMessage = "这个地址不像 Iexa 原生服务器。如果是 OpenAI/Gemini/Claude 兼容 API，请填写 API Key。"
             isConnecting = false
             return
         }
@@ -1140,7 +1170,7 @@ final class AuthViewModel {
 
         // Skip health check — go straight to verifying it's an OpenWebUI instance
         guard let configResult = await client.verifyAndGetConfig() else {
-            errorMessage = "Server does not appear to be an OpenWebUI instance."
+            errorMessage = "这个地址不像 Iexa 原生服务器。"
             isConnecting = false
             return
         }
@@ -1291,7 +1321,7 @@ final class AuthViewModel {
 
         // Skip health check — go straight to verifying it's an OpenWebUI instance
         guard let configResult = await client.verifyAndGetConfig() else {
-            errorMessage = "Server does not appear to be an OpenWebUI instance."
+            errorMessage = "这个地址不像 Iexa 原生服务器。"
             isConnecting = false
             return
         }

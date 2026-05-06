@@ -42,11 +42,11 @@ struct AboutView: View {
                     detailRow(label: "平台", value: "iOS \(UIDevice.current.systemVersion)", showDivider: false)
                 }
 
-                // Server info
-                SettingsSection(header: "服务器") {
+                // Site info
+                SettingsSection(header: "站点") {
                     detailRow(label: "名称", value: viewModel.serverName)
                     if let version = viewModel.serverVersion {
-                        detailRow(label: "服务器版本", value: version)
+                        detailRow(label: "站点版本", value: version)
                     }
                     detailRow(
                         label: "URL",

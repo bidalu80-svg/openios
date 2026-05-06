@@ -191,7 +191,7 @@ struct AuthPrimaryButton: View {
 
 // MARK: - Server Connection View
 
-/// View for connecting to an Open WebUI server or an OpenAI-compatible endpoint.
+/// View for connecting to an Iexa server or an OpenAI-compatible endpoint.
 struct ServerConnectionView: View {
     @Bindable var viewModel: AuthViewModel
     @Environment(\.theme) private var theme
@@ -237,7 +237,7 @@ struct ServerConnectionView: View {
                             .opacity(appeared ? 1 : 0)
                             .offset(y: appeared ? 0 : 10)
 
-                        Text("连接 Open WebUI 或任意 OpenAI 兼容 API")
+                        Text("连接 Iexa 原生站点或任意兼容 API")
                             .scaledFont(size: 16)
                             .foregroundStyle(theme.textSecondary)
                             .opacity(appeared ? 1 : 0)
@@ -261,7 +261,7 @@ struct ServerConnectionView: View {
 
                         ModernTextField(
                             label: "APIKEY（可选）",
-                            placeholder: "Open WebUI 可选",
+                            placeholder: "原生站点可选，直连 API 必填",
                             text: $viewModel.apiKey,
                             isSecure: true,
                             textContentType: .password,
@@ -281,7 +281,7 @@ struct ServerConnectionView: View {
                                             .scaledFont(size: 14)
                                             .foregroundStyle(theme.textPrimary)
 
-                                        Text("适用于使用自定义证书的私有服务器")
+                                        Text("适用于使用自定义证书的私有站点")
                                             .scaledFont(size: 12, weight: .medium)
                                             .foregroundStyle(theme.textTertiary)
                                     }
@@ -377,7 +377,7 @@ struct ServerConnectionView: View {
                             .scaledFont(size: 14, weight: .medium)
                             .foregroundStyle(theme.textSecondary)
 
-                        Text("Open WebUI 填服务器 URL 即可（API Key 可选）。OpenAI/Gemini/Claude 兼容 API 请填写服务商 Base URL 和 API Key，Iexa 会自动补全所需 API 后缀。")
+                        Text("Iexa 原生站点填 URL 即可（API Key 可选）。OpenAI/Gemini/Claude 兼容 API 请填写服务商 Base URL 和 API Key，Iexa 会自动补全所需 API 后缀。")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textTertiary)
                             .multilineTextAlignment(.center)
