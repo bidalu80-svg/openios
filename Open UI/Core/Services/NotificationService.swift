@@ -77,23 +77,24 @@ final class NotificationService: NSObject, @unchecked Sendable {
     func setup() async {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
+        clearLegacyBrandNotificationsIfNeeded(center: center)
 
         // Register notification categories
         let openAction = UNNotificationAction(
             identifier: Self.openChatAction,
-            title: "Open Chat",
+            title: "打开聊天",
             options: [.foreground]
         )
 
         let endCallAction = UNNotificationAction(
             identifier: Self.endCallAction,
-            title: "End Call",
+            title: "结束通话",
             options: [.destructive]
         )
 
         let openChannelAction = UNNotificationAction(
             identifier: Self.openChannelAction,
-            title: "Open Channel",
+            title: "打开频道",
             options: [.foreground]
         )
 
@@ -152,6 +153,18 @@ final class NotificationService: NSObject, @unchecked Sendable {
         }
     }
 
+    /// iOS snapshots the app icon into already-delivered notifications, so old
+    /// brand banners can survive an app update even after the AppIcon changes.
+    /// Clear them once after the Iexa rebrand so every future banner uses the
+    /// bundled ghost icon.
+    private func clearLegacyBrandNotificationsIfNeeded(center: UNUserNotificationCenter) {
+        let key = "iexaClearedLegacyNotificationIcons"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        center.removeAllDeliveredNotifications()
+        center.removeAllPendingNotificationRequests()
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
     // MARK: - Generation Complete
 
     /// Sends a local notification when a chat generation completes while the app is backgrounded.
@@ -193,10 +206,10 @@ final class NotificationService: NSObject, @unchecked Sendable {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let snippet = cleaned.prefix(120)
             bodyText = snippet.isEmpty
-                ? "Response is ready"
+                ? "回复已完成"
                 : (snippet.count < cleaned.count ? "\(snippet)…" : String(snippet))
         } else {
-            bodyText = "Response is ready"
+            bodyText = "回复已完成"
         }
 
         let content = UNMutableNotificationContent()
@@ -349,8 +362,8 @@ final class NotificationService: NSObject, @unchecked Sendable {
         guard isAuthorized else { return }
 
         let content = UNMutableNotificationContent()
-        content.title = "Voice Call"
-        content.body = "In call with \(modelName)"
+        content.title = "语音通话"
+        content.body = "正在与 \(modelName) 通话"
         content.sound = nil // No sound for ongoing
         content.categoryIdentifier = Self.voiceCallCategory
         content.interruptionLevel = .passive
