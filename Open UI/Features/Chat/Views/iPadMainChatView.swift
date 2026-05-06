@@ -2143,7 +2143,7 @@ private extension View {
             }
         }
 
-        self
+        return self
             .task {
                 if let manager = dependencies.conversationManager {
                     listViewModel.configure(with: manager)
