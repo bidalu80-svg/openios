@@ -2951,12 +2951,14 @@ final class ChatViewModel {
                         let imagePrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
                         let imageReference: String
                         if let editImage = self.firstEditableImage(from: currentAttachments) {
-                            imageReference = try await manager.editImage(
-                                prompt: imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
-                                model: modelId,
-                                imageData: editImage.data,
-                                fileName: editImage.fileName
-                            )
+                            imageReference = try await self.runImageRequestWithRateLimitRetry {
+                                try await manager.editImage(
+                                    prompt: imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
+                                    model: modelId,
+                                    imageData: editImage.data,
+                                    fileName: editImage.fileName
+                                )
+                            }
                         } else {
                             guard !imagePrompt.isEmpty else {
                                 throw APIError.unknown(
@@ -2967,13 +2969,20 @@ final class ChatViewModel {
                                     )
                                 )
                             }
-                            imageReference = try await manager.generateImage(prompt: imagePrompt, model: modelId)
+                            imageReference = try await self.runImageRequestWithRateLimitRetry {
+                                try await manager.generateImage(prompt: imagePrompt, model: modelId)
+                            }
                         }
-                        let markdown = "![Generated image](\(imageReference))"
+                        let displayReference = await self.localDisplayImageReference(from: imageReference) ?? imageReference
                         self.updateAssistantMessage(
                             id: assistantMessageId,
-                            content: markdown,
+                            content: "Generated image",
                             isStreaming: false
+                        )
+                        self.attachGeneratedImageFile(
+                            messageId: assistantMessageId,
+                            imageReference: imageReference,
+                            displayReference: displayReference
                         )
                         self.hasFinishedStreaming = true
                         self.isStreaming = false
@@ -5382,6 +5391,71 @@ final class ChatViewModel {
         guard dataURL.hasPrefix("data:image/"),
               let comma = dataURL.firstIndex(of: ",") else { return nil }
         return Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...]))
+    }
+
+    private func runImageRequestWithRateLimitRetry(
+        maxAttempts: Int = 3,
+        operation: @escaping () async throws -> String
+    ) async throws -> String {
+        var lastError: Error?
+        for attempt in 0..<maxAttempts {
+            do {
+                return try await operation()
+            } catch {
+                lastError = error
+                guard isRateLimitError(error), attempt < maxAttempts - 1 else { throw error }
+                let delay = min(18.0, 4.0 * pow(2.0, Double(attempt)))
+                logger.warning("Image endpoint rate limited; retrying in \(delay)s")
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+        }
+        throw lastError ?? APIError.unknown(underlying: nil)
+    }
+
+    private func isRateLimitError(_ error: Error) -> Bool {
+        if let apiError = error as? APIError,
+           case .httpError(let statusCode, let message, _) = apiError {
+            return statusCode == 429 || (message?.localizedCaseInsensitiveContains("too many") == true)
+        }
+        return error.localizedDescription.localizedCaseInsensitiveContains("too many requests")
+    }
+
+    private func localDisplayImageReference(from imageReference: String) async -> String? {
+        if imageReference.hasPrefix("data:image/") { return imageReference }
+        guard let url = URL(string: imageReference),
+              ["http", "https"].contains(url.scheme?.lowercased()) else { return nil }
+
+        if let image = await ImageCacheService.shared.loadImage(from: url) {
+            let data = FileAttachmentService.downsampleForUpload(image: image)
+            guard !data.isEmpty else { return nil }
+            return "data:image/jpeg;base64,\(data.base64EncodedString())"
+        }
+        return nil
+    }
+
+    private func attachGeneratedImageFile(
+        messageId: String,
+        imageReference: String,
+        displayReference: String
+    ) {
+        let file = ChatMessageFile(
+            type: "image",
+            url: imageReference,
+            name: "generated-image.jpg",
+            contentType: "image/jpeg",
+            displayURL: displayReference
+        )
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        if conversation?.messages[index].files.contains(where: {
+            $0.url == file.url || $0.displayURL == file.displayURL
+        }) != true {
+            conversation?.messages[index].files.append(file)
+        }
+        conversation?.history.updateNode(id: messageId) { node in
+            if !node.files.contains(where: { $0.url == file.url || $0.displayURL == file.displayURL }) {
+                node.files.append(file)
+            }
+        }
     }
 
     private func localMemorySystemContext() async -> String? {

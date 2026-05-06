@@ -69,8 +69,9 @@ final class ServerConnectionMonitor: @unchecked Sendable {
     @ObservationIgnored private weak var socketService: SocketIOService?
 
     /// Direct model providers do not expose OpenWebUI's `/health` endpoint.
-    /// For them, liveness is checked through `/models`, otherwise the global
-    /// overlay shows "Server Unreachable" while chat/image calls still work.
+    /// Do not poll `/models` for them: many OpenAI-compatible gateways rate-limit
+    /// model listing aggressively, and background health checks can steal quota
+    /// from real chat/image requests.
     @ObservationIgnored private var usesModelProbe = false
 
     /// Whether the monitor is currently running.
@@ -110,6 +111,13 @@ final class ServerConnectionMonitor: @unchecked Sendable {
         isRunning = true
 
         startPathMonitor()
+        if usesModelProbe {
+            Task { @MainActor [weak self] in
+                self?.transitionTo(.connected)
+            }
+            logger.info("Connection monitor started in passive direct-provider mode")
+            return
+        }
         startHealthPoll()
 
         // Wire socket disconnect to trigger immediate health check
@@ -144,6 +152,13 @@ final class ServerConnectionMonitor: @unchecked Sendable {
     /// Triggers an immediate health check, e.g. on foreground return.
     func triggerImmediateCheck() {
         guard isRunning, !immediateCheckInFlight else { return }
+        if usesModelProbe {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.transitionTo(self.isNetworkAvailable ? .connected : .internetDown)
+            }
+            return
+        }
         immediateCheckInFlight = true
 
         Task { [weak self] in
@@ -217,7 +232,11 @@ final class ServerConnectionMonitor: @unchecked Sendable {
 
         let healthy: Bool
         if usesModelProbe {
-            healthy = (try? await apiClient.getModels().isEmpty == false) ?? false
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.transitionTo(self.isNetworkAvailable ? .connected : .internetDown)
+            }
+            return
         } else {
             healthy = await apiClient.checkHealth()
         }

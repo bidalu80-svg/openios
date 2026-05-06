@@ -425,14 +425,8 @@ final class APIClient: @unchecked Sendable {
             timeout: 300
         )
 
-        if let dataArray = json["data"] as? [[String: Any]],
-           let first = dataArray.first {
-            if let url = first["url"] as? String, !url.isEmpty {
-                return url
-            }
-            if let b64 = first["b64_json"] as? String, !b64.isEmpty {
-                return "data:image/png;base64,\(b64)"
-            }
+        if let imageReference = firstImageReference(in: json) {
+            return imageReference
         }
 
         throw APIError.responseDecoding(
@@ -467,14 +461,8 @@ final class APIClient: @unchecked Sendable {
             timeout: 300
         )
 
-        if let dataArray = json["data"] as? [[String: Any]],
-           let first = dataArray.first {
-            if let url = first["url"] as? String, !url.isEmpty {
-                return url
-            }
-            if let b64 = first["b64_json"] as? String, !b64.isEmpty {
-                return "data:image/png;base64,\(b64)"
-            }
+        if let imageReference = firstImageReference(in: json) {
+            return imageReference
         }
 
         throw APIError.responseDecoding(
@@ -485,6 +473,51 @@ final class APIClient: @unchecked Sendable {
             ),
             data: Data()
         )
+    }
+
+    private func firstImageReference(in value: Any?) -> String? {
+        guard let value else { return nil }
+
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") || trimmed.hasPrefix("data:image/") {
+                return trimmed
+            }
+            if looksLikeBase64Image(trimmed) {
+                return "data:image/png;base64,\(trimmed)"
+            }
+            return nil
+        }
+
+        if let dict = value as? [String: Any] {
+            for key in ["url", "image_url", "b64_json", "base64", "image", "data"] {
+                if let reference = firstImageReference(in: dict[key]) {
+                    return reference
+                }
+            }
+            for key in ["output", "images", "content", "result", "results"] {
+                if let reference = firstImageReference(in: dict[key]) {
+                    return reference
+                }
+            }
+            return nil
+        }
+
+        if let array = value as? [Any] {
+            for item in array {
+                if let reference = firstImageReference(in: item) {
+                    return reference
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func looksLikeBase64Image(_ string: String) -> Bool {
+        guard string.count > 128, !string.contains(" ") else { return false }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
+        return string.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 
     func getDefaultModel() async -> String? {
