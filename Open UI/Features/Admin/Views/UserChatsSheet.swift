@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// Sheet for viewing a user's chat history. Admin only.
-/// Groups chats by date (Today, Yesterday, Previous 7 days, etc.)
-/// Tapping a chat navigates to a read-only detail view with clone/delete actions.
+/// 管理员查看用户聊天记录的弹窗。
+/// 按日期分组，并支持进入只读详情进行克隆或删除。
 struct UserChatsSheet: View {
     @Bindable var viewModel: AdminViewModel
     let serverBaseURL: String
@@ -34,7 +33,7 @@ struct UserChatsSheet: View {
             }
             .background(theme.background)
             .navigationTitle(
-                viewModel.viewingChatsForUser.map { "\($0.displayName)'s Chats" } ?? "User Chats"
+                viewModel.viewingChatsForUser.map { "\($0.displayName) 的聊天" } ?? "用户聊天"
             )
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -64,24 +63,24 @@ struct UserChatsSheet: View {
             }
             // Delete confirmation dialog
             .confirmationDialog(
-                "Delete Chat",
+                "删除聊天",
                 isPresented: $showDeleteConfirmation,
                 titleVisibility: .visible
             ) {
                 if let chat = viewModel.chatToDelete {
-                    Button("Delete \"\(chat.title)\"", role: .destructive) {
+                    Button("删除“\(chat.title)”", role: .destructive) {
                         Task {
                             await viewModel.deleteUserChat(chat)
                             viewModel.chatToDelete = nil
                         }
                     }
                 }
-                Button("Cancel", role: .cancel) {
+                Button("取消", role: .cancel) {
                     viewModel.chatToDelete = nil
                 }
             } message: {
                 if let chat = viewModel.chatToDelete {
-                    Text("Are you sure you want to permanently delete \"\(chat.title)\"? This action cannot be undone.")
+                    Text("确定要永久删除“\(chat.title)”吗？此操作无法撤销。")
                 }
             }
         }
@@ -95,7 +94,7 @@ struct UserChatsSheet: View {
                 .scaledFont(size: 15, weight: .medium)
                 .foregroundStyle(theme.textTertiary)
 
-            TextField("Search Chats", text: $viewModel.chatSearchQuery)
+            TextField("搜索聊天", text: $viewModel.chatSearchQuery)
                 .scaledFont(size: 16)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -234,11 +233,11 @@ struct UserChatsSheet: View {
         }
 
         var groups: [ChatGroup] = []
-        if !today.isEmpty { groups.append(ChatGroup(title: "Today", chats: today)) }
-        if !yesterday.isEmpty { groups.append(ChatGroup(title: "Yesterday", chats: yesterday)) }
-        if !previousWeek.isEmpty { groups.append(ChatGroup(title: "Previous 7 days", chats: previousWeek)) }
-        if !previousMonth.isEmpty { groups.append(ChatGroup(title: "Previous 30 days", chats: previousMonth)) }
-        if !older.isEmpty { groups.append(ChatGroup(title: "Older", chats: older)) }
+        if !today.isEmpty { groups.append(ChatGroup(title: "今天", chats: today)) }
+        if !yesterday.isEmpty { groups.append(ChatGroup(title: "昨天", chats: yesterday)) }
+        if !previousWeek.isEmpty { groups.append(ChatGroup(title: "过去 7 天", chats: previousWeek)) }
+        if !previousMonth.isEmpty { groups.append(ChatGroup(title: "过去 30 天", chats: previousMonth)) }
+        if !older.isEmpty { groups.append(ChatGroup(title: "更早", chats: older)) }
 
         return groups
     }
@@ -249,7 +248,7 @@ struct UserChatsSheet: View {
         VStack(spacing: Spacing.md) {
             ProgressView()
                 .controlSize(.large)
-            Text("Loading chats…")
+            Text("正在加载聊天…")
                 .scaledFont(size: 16)
                 .foregroundStyle(theme.textTertiary)
         }
@@ -262,7 +261,7 @@ struct UserChatsSheet: View {
             Image(systemName: "bubble.left.and.text.bubble.right")
                 .scaledFont(size: 40)
                 .foregroundStyle(theme.textTertiary)
-            Text("No chats found")
+            Text("没有找到聊天")
                 .scaledFont(size: 16)
                 .foregroundStyle(theme.textTertiary)
         }
@@ -278,7 +277,7 @@ struct UserChatsSheet: View {
             Text(message)
                 .scaledFont(size: 16)
                 .foregroundStyle(theme.textTertiary)
-            Button("Retry") {
+            Button("重试") {
                 if let user = viewModel.viewingChatsForUser {
                     Task { await viewModel.loadUserChats(for: user) }
                 }

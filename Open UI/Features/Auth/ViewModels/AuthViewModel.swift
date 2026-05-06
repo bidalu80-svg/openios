@@ -259,6 +259,10 @@ final class AuthViewModel {
     /// presenting sheet has fully dismissed.
     var accountSwitchCount: Int = 0
 
+    /// Monotonically increasing counter bumped after switching the active site.
+    /// Chat views observe this to drop model caches tied to the previous API.
+    var serverSwitchCount: Int = 0
+
     /// Weak reference to the app's dependency container.
     /// Set after init by `AppDependencyContainer` since `self` is not
     /// yet available during the container's own initializer.
@@ -1643,6 +1647,7 @@ final class AuthViewModel {
             phase = .authMethodSelection
         }
 
+        serverSwitchCount += 1
         logger.info("🔀 Server switch complete — phase=\(String(describing: self.phase))")
     }
 

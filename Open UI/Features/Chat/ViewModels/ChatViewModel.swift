@@ -2153,7 +2153,7 @@ final class ChatViewModel {
         knowledgeSearchQuery = ""
     }
 
-    // MARK: - Reference Chats
+    // MARK: - 引用聊天
 
     /// Called when a reference chat is selected from the picker.
     /// Adds the chat to the selected list (avoiding duplicates).

@@ -2,50 +2,49 @@ import Foundation
 
 // MARK: - Reference Chat Item
 
-/// Represents a chat conversation that can be attached as context to a new message.
+/// 表示可以作为上下文附加到新消息里的聊天记录。
 ///
-/// When the user selects a chat from the "Reference Chats" picker (via the `+` menu),
-/// the selected chat is shown as a chip in the composer and included in the `files`
-/// array of the chat completion request — exactly matching the Iexa native server web client.
+/// 当用户从“引用聊天”选择器（通过 `+` 菜单）选择对话时，
+/// 选中的聊天会在输入框里显示为标签，并加入聊天请求的 `files` 数组。
 struct ReferenceChatItem: Identifiable, Equatable, Hashable, Sendable {
     let id: String
     let title: String
     let updatedAt: Date
     let createdAt: Date
 
-    /// A human-readable relative time string, e.g. "24 minutes ago".
+    /// A human-readable relative time string, e.g. "24 分钟前".
     var relativeTime: String {
         let now = Date()
         let diff = now.timeIntervalSince(updatedAt)
         if diff < 60 {
-            return "Just now"
+            return "刚刚"
         } else if diff < 3600 {
             let mins = Int(diff / 60)
-            return "\(mins) minute\(mins == 1 ? "" : "s") ago"
+            return "\(mins) 分钟前"
         } else if diff < 86400 {
             let hours = Int(diff / 3600)
-            return "\(hours) hour\(hours == 1 ? "" : "s") ago"
+            return "\(hours) 小时前"
         } else {
             let days = Int(diff / 86400)
-            return "\(days) day\(days == 1 ? "" : "s") ago"
+            return "\(days) 天前"
         }
     }
 
-    /// The time-range bucket label used by Iexa native server, e.g. "Today", "Yesterday", etc.
+    /// The time-range bucket label shown in the picker.
     var timeRange: String {
         let calendar = Calendar.current
         if calendar.isDateInToday(updatedAt) {
-            return "Today"
+            return "今天"
         } else if calendar.isDateInYesterday(updatedAt) {
-            return "Yesterday"
+            return "昨天"
         } else if let daysAgo = calendar.dateComponents([.day], from: updatedAt, to: Date()).day {
             if daysAgo <= 7 {
-                return "Previous 7 days"
+                return "过去 7 天"
             } else if daysAgo <= 30 {
-                return "Previous 30 days"
+                return "过去 30 天"
             }
         }
-        return "Older"
+        return "更早"
     }
 
     /// Converts this item to the `files` array entry format expected by

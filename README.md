@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="openrelayicon.png" width="120" alt="Iexa App Icon" style="border-radius: 22px;" />
+<img src="Open%20UI/Assets.xcassets/AppIcon.appiconset/IexaAppIcon.png" width="120" alt="Iexa App Icon" style="border-radius: 22px;" />
 
 # Iexa
 
@@ -10,11 +10,11 @@
 
 [![Download on the App Store](https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg)](https://apps.apple.com/app/id6759630325)
 
-[![GitHub stars](https://img.shields.io/github/stars/Ichigo3766/Open-Relay?style=social)](https://github.com/Ichigo3766/Open-Relay/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/bidalu80-svg/openios?style=social)](https://github.com/bidalu80-svg/openios/stargazers)
 [![License: GPL](https://img.shields.io/badge/License-GPL-blue.svg)](LICENSE)
 [![iOS 18+](https://img.shields.io/badge/iOS-18%2B-black?logo=apple)](https://apps.apple.com/app/id6759630325)
 [![Swift 6](https://img.shields.io/badge/Swift-6.0-orange?logo=swift)](https://swift.org)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Ichigo3766/Open-Relay/pulls)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/bidalu80-svg/openios/pulls)
 
 </div>
 
@@ -28,7 +28,7 @@
 
 ## ⭐ Why Star This Repo?
 
-Iexa is **completely free** and **open source**. If it saves you time or brings you joy, a ⭐ star helps other people discover it and motivates continued development. Takes 1 second — [star it here](https://github.com/Ichigo3766/Open-Relay/stargazers). Thank you! 🙏
+Iexa is **completely free** and **open source**. If it saves you time or brings you joy, a ⭐ star helps other people discover it and motivates continued development. Takes 1 second — [star it here](https://github.com/bidalu80-svg/openios/stargazers). Thank you! 🙏
 
 ---
 
@@ -104,8 +104,8 @@ Think of it as **ChatGPT on your phone** — but pointed at *your* server, runni
 ### 1. Clone
 
 ```bash
-git clone https://github.com/ichigo3766/Open-Relay.git
-cd Open-Relay
+git clone https://github.com/bidalu80-svg/openios.git
+cd openios
 ```
 
 ### 2. Open in Xcode
@@ -173,6 +173,6 @@ This project is licensed under the **GPL License**. See [LICENSE](LICENSE) for d
 
 Made with ❤️ for the Iexa community
 
-**[⭐ Star this repo](https://github.com/Ichigo3766/Open-Relay/stargazers) · [🐛 Report a Bug](https://github.com/Ichigo3766/Open-Relay/issues) · [💡 Request a Feature](https://github.com/Ichigo3766/Open-Relay/issues)**
+**[⭐ Star this repo](https://github.com/bidalu80-svg/openios/stargazers) · [🐛 Report a Bug](https://github.com/bidalu80-svg/openios/issues) · [💡 Request a Feature](https://github.com/bidalu80-svg/openios/issues)**
 
 </div>

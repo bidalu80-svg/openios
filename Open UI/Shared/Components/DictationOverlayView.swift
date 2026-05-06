@@ -241,7 +241,7 @@ struct DictationOverlayView: View {
 
 /// Renders an array of normalised samples (0–1) as animated vertical capsule bars.
 ///
-/// Older samples on the left, newest on the right — matching Apple's voice
+/// 左侧是较早采样，右侧是最新采样，贴近 Apple 语音
 /// memo waveform style. Each bar animates smoothly between height values.
 private struct WaveformBarsView: View {
     let samples: [CGFloat]

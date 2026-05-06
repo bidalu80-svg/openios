@@ -110,6 +110,31 @@ struct iPadMainChatView: View {
         dependencies.conversationManager?.usesLocalConversationStore == true
     }
 
+    private var sidebarUserAvatarDataURI: String? {
+        guard let imageURL = dependencies.authViewModel.currentUser?.profileImageURL,
+              imageURL.hasPrefix("data:") else { return nil }
+        return imageURL
+    }
+
+    private var sidebarUserAvatarURL: URL? {
+        guard sidebarUserAvatarDataURI == nil,
+              let user = dependencies.authViewModel.currentUser else { return nil }
+
+        if dependencies.apiClient?.providerType != .iexa {
+            return dependencies.serverConfigStore.activeServer?.resolvedImageURL(from: user.profileImageURL)
+                ?? dependencies.serverConfigStore.activeServer?.siteIconURL
+        }
+
+        if let external = dependencies.serverConfigStore.activeServer?.resolvedImageURL(from: user.profileImageURL) {
+            return external
+        }
+
+        guard let baseURL = dependencies.apiClient?.baseURL,
+              !user.id.isEmpty, !baseURL.isEmpty else { return nil }
+        let v = dependencies.authViewModel.profileImageVersion
+        return URL(string: "\(baseURL)/api/v1/users/\(user.id)/profile/image?v=\(v)")
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -720,6 +745,31 @@ struct iPadSidebarContent: View {
 
     private var usesDirectProvider: Bool {
         dependencies.conversationManager?.usesLocalConversationStore == true
+    }
+
+    private var sidebarUserAvatarDataURI: String? {
+        guard let imageURL = dependencies.authViewModel.currentUser?.profileImageURL,
+              imageURL.hasPrefix("data:") else { return nil }
+        return imageURL
+    }
+
+    private var sidebarUserAvatarURL: URL? {
+        guard sidebarUserAvatarDataURI == nil,
+              let user = dependencies.authViewModel.currentUser else { return nil }
+
+        if dependencies.apiClient?.providerType != .iexa {
+            return dependencies.serverConfigStore.activeServer?.resolvedImageURL(from: user.profileImageURL)
+                ?? dependencies.serverConfigStore.activeServer?.siteIconURL
+        }
+
+        if let external = dependencies.serverConfigStore.activeServer?.resolvedImageURL(from: user.profileImageURL) {
+            return external
+        }
+
+        guard let baseURL = dependencies.apiClient?.baseURL,
+              !user.id.isEmpty, !baseURL.isEmpty else { return nil }
+        let v = dependencies.authViewModel.profileImageVersion
+        return URL(string: "\(baseURL)/api/v1/users/\(user.id)/profile/image?v=\(v)")
     }
 
     var body: some View {
@@ -1543,15 +1593,10 @@ struct iPadSidebarContent: View {
                     ZStack(alignment: .bottomTrailing) {
                         UserAvatar(
                             size: 30,
-                            imageURL: {
-                                guard let userId = dependencies.authViewModel.currentUser?.id,
-                                      let baseURL = dependencies.apiClient?.baseURL,
-                                      !userId.isEmpty, !baseURL.isEmpty else { return nil }
-                                let v = dependencies.authViewModel.profileImageVersion
-                                return URL(string: "\(baseURL)/api/v1/users/\(userId)/profile/image?v=\(v)")
-                            }(),
+                            imageURL: sidebarUserAvatarURL,
                             name: dependencies.authViewModel.currentUser?.displayName ?? "User",
-                            authToken: dependencies.apiClient?.network.authToken
+                            authToken: dependencies.apiClient?.network.authToken,
+                            dataURIString: sidebarUserAvatarDataURI
                         )
 
                     }
@@ -2076,6 +2121,28 @@ private extension View {
         showExportShareSheet: Binding<Bool> = .constant(false),
         onSocketSetup: @escaping () -> Void
     ) -> some View {
+        func resetChatStateAfterIdentityChange() {
+            activeConversationId.wrappedValue = nil
+            activeChannelId.wrappedValue = nil
+            activeFolderWorkspaceId.wrappedValue = nil
+            listViewModel.clearAll()
+            dependencies.activeChatStore.clear()
+            newChatGeneration.wrappedValue += 1
+            Task {
+                if dependencies.conversationManager?.usesLocalConversationStore == true {
+                    await listViewModel.refreshConversations()
+                } else {
+                    await withTaskGroup(of: Void.self) { group in
+                        group.addTask { await listViewModel.refreshConversations() }
+                        group.addTask { await listViewModel.folderViewModel.refreshFolders() }
+                        if let channelListVM {
+                            group.addTask { await channelListVM.refreshChannels() }
+                        }
+                    }
+                }
+            }
+        }
+
         self
             .task {
                 if let manager = dependencies.conversationManager {
@@ -2165,33 +2232,10 @@ private extension View {
                 }
             }
             .onChange(of: dependencies.authViewModel.accountSwitchCount) {
-                // Account was switched — perform a full reset so the new account's
-                // conversations, folders, channels, and model selector all load fresh.
-                // 1. Clear navigation state so no stale conversation/channel is shown.
-                activeConversationId.wrappedValue = nil
-                activeChannelId.wrappedValue = nil
-                activeFolderWorkspaceId.wrappedValue = nil
-                // 2. Clear the conversation/folder list immediately so stale chats vanish.
-                listViewModel.clearAll()
-                // 3. Purge all cached ChatViewModels (holds old account's messages/models).
-                dependencies.activeChatStore.clear()
-                // 4. Force the new-chat view to recreate so it picks up the new account's
-                //    default model (cachedSelectedModelId was cleared by activeChatStore.clear()).
-                newChatGeneration.wrappedValue += 1
-                // 5. Reload all lists from the server for the new account.
-                Task {
-                    if dependencies.conversationManager?.usesLocalConversationStore == true {
-                        await listViewModel.refreshConversations()
-                    } else {
-                        await withTaskGroup(of: Void.self) { group in
-                            group.addTask { await listViewModel.refreshConversations() }
-                            group.addTask { await listViewModel.folderViewModel.refreshFolders() }
-                            if let channelListVM {
-                                group.addTask { await channelListVM.refreshChannels() }
-                            }
-                        }
-                    }
-                }
+                resetChatStateAfterIdentityChange()
+            }
+            .onChange(of: dependencies.authViewModel.serverSwitchCount) {
+                resetChatStateAfterIdentityChange()
             }
     }
 }

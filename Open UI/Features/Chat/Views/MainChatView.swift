@@ -143,6 +143,31 @@ struct MainChatView: View {
         dependencies.conversationManager?.usesLocalConversationStore == true
     }
 
+    private var sidebarUserAvatarDataURI: String? {
+        guard let imageURL = dependencies.authViewModel.currentUser?.profileImageURL,
+              imageURL.hasPrefix("data:") else { return nil }
+        return imageURL
+    }
+
+    private var sidebarUserAvatarURL: URL? {
+        guard sidebarUserAvatarDataURI == nil,
+              let user = dependencies.authViewModel.currentUser else { return nil }
+
+        if dependencies.apiClient?.providerType != .iexa {
+            return dependencies.serverConfigStore.activeServer?.resolvedImageURL(from: user.profileImageURL)
+                ?? dependencies.serverConfigStore.activeServer?.siteIconURL
+        }
+
+        if let external = dependencies.serverConfigStore.activeServer?.resolvedImageURL(from: user.profileImageURL) {
+            return external
+        }
+
+        guard let baseURL = dependencies.apiClient?.baseURL,
+              !user.id.isEmpty, !baseURL.isEmpty else { return nil }
+        let v = dependencies.authViewModel.profileImageVersion
+        return URL(string: "\(baseURL)/api/v1/users/\(user.id)/profile/image?v=\(v)")
+    }
+
     var body: some View {
         @Bindable var bindableRouter = router
         mainContent(voiceCallBinding: $bindableRouter.isVoiceCallPresented)
@@ -1049,8 +1074,8 @@ struct MainChatView: View {
             }
     }
 
-    /// Watches `authViewModel.accountSwitchCount` via `.onChange` and performs a
-    /// full app state reset when the user switches accounts. This is intentionally a
+    /// Watches auth identity changes via `.onChange` and performs a
+    /// full app state reset when the user switches accounts/sites. This is intentionally a
     /// separate function from `applyLifecycleHandlers` — the Swift type-checker
     /// has a complexity limit that `applyLifecycleHandlers` already approaches,
     /// and adding another modifier there causes a "unable to type-check" build
@@ -1058,22 +1083,22 @@ struct MainChatView: View {
     private func applyAccountSwitchHandler<Content: View>(content: Content) -> some View {
         content
             .onChange(of: dependencies.authViewModel.accountSwitchCount) {
-                // Account was switched — perform a full reset so the new account's
-                // conversations, folders, channels, and model selector all load fresh.
-                // 1. Clear navigation state so no stale conversation/channel is shown.
-                activeConversationId = nil
-                activeChannelId = nil
-                activeFolderWorkspaceId = nil
-                // 2. Clear the conversation/folder list immediately so stale chats vanish.
-                listViewModel.clearAll()
-                // 3. Purge all cached ChatViewModels (holds old account's messages/models).
-                dependencies.activeChatStore.clear()
-                // 4. Force the new-chat view to recreate so it picks up the new account's
-                //    default model (cachedSelectedModelId was cleared by activeChatStore.clear()).
-                newChatGeneration += 1
-                // 5. Reload all lists from the server for the new account.
-                Task { await refreshAllDataOnForeground() }
+                resetChatStateAfterIdentityChange()
             }
+            .onChange(of: dependencies.authViewModel.serverSwitchCount) {
+                resetChatStateAfterIdentityChange()
+            }
+    }
+
+    private func resetChatStateAfterIdentityChange() {
+        // Account/site changed — drop state that belongs to the previous API.
+        activeConversationId = nil
+        activeChannelId = nil
+        activeFolderWorkspaceId = nil
+        listViewModel.clearAll()
+        dependencies.activeChatStore.clear()
+        newChatGeneration += 1
+        Task { await refreshAllDataOnForeground() }
     }
 
     // MARK: - Progress Overlays
@@ -2316,15 +2341,10 @@ struct MainChatView: View {
                     ZStack(alignment: .bottomTrailing) {
                         UserAvatar(
                             size: 32,
-                            imageURL: {
-                                guard let userId = dependencies.authViewModel.currentUser?.id,
-                                      let baseURL = dependencies.apiClient?.baseURL,
-                                      !userId.isEmpty, !baseURL.isEmpty else { return nil }
-                                let v = dependencies.authViewModel.profileImageVersion
-                                return URL(string: "\(baseURL)/api/v1/users/\(userId)/profile/image?v=\(v)")
-                            }(),
+                            imageURL: sidebarUserAvatarURL,
                             name: dependencies.authViewModel.currentUser?.displayName ?? "User",
-                            authToken: dependencies.apiClient?.network.authToken
+                            authToken: dependencies.apiClient?.network.authToken,
+                            dataURIString: sidebarUserAvatarDataURI
                         )
 
                     }

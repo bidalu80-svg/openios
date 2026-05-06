@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Tool Item Model
 
-/// Represents a tool available in the overflow menu.
+/// 表示溢出菜单里可用的工具。
 struct ToolItem: Identifiable, Hashable {
     let id: String
     var name: String
@@ -24,8 +24,7 @@ struct ToolItem: Identifiable, Hashable {
 
 // MARK: - Tools Menu Sheet
 
-/// A bottom sheet presenting attachment actions, feature toggles (web search),
-/// and an expandable list of available tools.
+/// 用于展示附件入口、功能开关（网页搜索）和可展开工具列表的底部弹窗。
 struct ToolsMenuSheet: View {
     @Binding var webSearchEnabled: Bool
     @Binding var imageGenerationEnabled: Bool
@@ -41,7 +40,7 @@ struct ToolsMenuSheet: View {
     var onCameraCapture: (() -> Void)?
     var onWebAttachment: (() -> Void)?
     var onReferenceChatAttachment: (() -> Void)?
-    /// Optional custom photo picker view (e.g. SwiftUI PhotosPicker).
+    /// 可选的自定义照片选择器视图（例如 SwiftUI PhotosPicker）。
     var photoPicker: AnyView?
 
     @Environment(\.theme) private var theme
@@ -50,31 +49,31 @@ struct ToolsMenuSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Drag handle
+            // 拖拽把手
             sheetHandle
                 .padding(.top, Spacing.sm)
                 .padding(.bottom, Spacing.xs)
 
             ScrollView {
                 VStack(spacing: Spacing.md) {
-                    // Attachment actions row
+                    // 附件操作行
                     attachmentActionsRow
                         .padding(.horizontal, Spacing.md)
 
-                    // Reference Chats row
+                    // 引用聊天入口
                     if let onReferenceChatAttachment {
                         referenceChatRow(action: onReferenceChatAttachment)
                             .padding(.horizontal, Spacing.md)
                     }
 
-                    // Built-in Tools section (web search, image gen, code interpreter)
+                    // 内置工具区（网页搜索、生图、代码解释器）
                     let hasBuiltins = isWebSearchAvailable || isImageGenerationAvailable || isCodeInterpreterAvailable
                     if hasBuiltins {
                         builtinToolsSection
                             .padding(.horizontal, Spacing.md)
                     }
 
-                    // Tools section
+                    // 工具区
                     toolsSection
                         .padding(.horizontal, Spacing.md)
                 }
@@ -296,10 +295,10 @@ struct ToolsMenuSheet: View {
             HStack(spacing: Spacing.sm) {
                 toolGlyph(systemImage: "bubble.left.and.bubble.right", isSelected: false)
                 VStack(alignment: .leading, spacing: Spacing.xs) {
-                    Text("Reference Chats")
+                    Text("引用聊天")
                         .scaledFont(size: 14, weight: .medium)
                         .foregroundStyle(theme.textPrimary)
-                    Text("Include a previous conversation as context")
+                    Text("把之前的对话作为上下文")
                         .scaledFont(size: 12, weight: .medium)
                         .foregroundStyle(theme.textSecondary)
                         .lineLimit(1)

@@ -128,7 +128,7 @@ jobs:
           p = Path('Open UI.xcodeproj/project.pbxproj')
           s = p.read_text()
 
-          # The available provisioning profile does not include Open Relay's optional
+          # The available provisioning profile does not include Iexa's optional
           # app-group/GPU/memory entitlements, so disable them for CI packaging.
           s = s.replace('CODE_SIGN_ENTITLEMENTS = "Open UI/Open UI.entitlements";', 'CODE_SIGN_ENTITLEMENTS = "";')
           s = s.replace('CODE_SIGN_ENTITLEMENTS = OpenUIWidgets/OpenUIWidgets.entitlements;', 'CODE_SIGN_ENTITLEMENTS = "";')
@@ -202,14 +202,14 @@ jobs:
             -scheme "Open UI" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
-            -archivePath "$RUNNER_TEMP/OpenRelay.xcarchive" \
+            -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
             PRODUCT_BUNDLE_IDENTIFIER="$APP_BUNDLE_ID" \
             archive
 
       - name: Export IPA
         run: |
           xcodebuild -exportArchive \
-            -archivePath "$RUNNER_TEMP/OpenRelay.xcarchive" \
+            -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
             -exportOptionsPlist ExportOptions.plist \
             -exportPath "$RUNNER_TEMP/exported"
 

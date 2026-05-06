@@ -42,7 +42,7 @@ extension Date {
 
     // MARK: - Public API
 
-    /// Returns a human-readable relative time string (e.g., "2 minutes ago").
+    /// 返回适合界面显示的相对时间字符串。
     var relativeString: String {
         Self._relativeFormatter.localizedString(for: self, relativeTo: .now)
     }
@@ -52,26 +52,22 @@ extension Date {
         if Calendar.current.isDateInToday(self) {
             return Self._timeFormatter.string(from: self)
         } else if Calendar.current.isDateInYesterday(self) {
-            return "Yesterday"
+            return "昨天"
         } else {
             return Self._dateFormatter.string(from: self)
         }
     }
     
-    /// Time-only string for channel inline timestamps: "2:29 AM"
+    /// 频道内联时间。
     var channelTime: String {
         Self._timeFormatter.string(from: self)
     }
     
-    /// Date separator string for grouping channel messages by day.
-    /// - Today → "Today"
-    /// - Yesterday → "Yesterday"
-    /// - This week → "Monday" (day name)
-    /// - Older → "Mar 14, 2026"
+    /// 频道消息按日期分组时使用的日期分隔文本。
     var channelDateSeparator: String {
         let cal = Calendar.current
-        if cal.isDateInToday(self) { return "Today" }
-        if cal.isDateInYesterday(self) { return "Yesterday" }
+        if cal.isDateInToday(self) { return "今天" }
+        if cal.isDateInYesterday(self) { return "昨天" }
         let daysAgo = cal.dateComponents([.day], from: self, to: .now).day ?? 0
         if daysAgo < 7 {
             return Self._dayOfWeekFormatter.string(from: self)

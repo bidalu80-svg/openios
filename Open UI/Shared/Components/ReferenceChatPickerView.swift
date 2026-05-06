@@ -2,10 +2,10 @@ import SwiftUI
 
 // MARK: - Reference Chat Picker View
 
-/// A full-screen sheet that appears when the user taps "Reference Chats" in the `+` menu.
+/// A full-screen sheet that appears when the user taps "引用聊天" in the `+` menu.
 ///
 /// Shows all of the user's chat conversations fetched via the existing pagination API,
-/// grouped by time range (Today, Yesterday, Previous 7 days, etc.).
+/// grouped by time range (今天、昨天、过去 7 天, etc.).
 /// Selected chats are attached as pills in the composer and included in the request's
 /// `files` array so the server can use them as context.
 struct ReferenceChatPickerView: View {
@@ -31,7 +31,7 @@ struct ReferenceChatPickerView: View {
     }
 
     private var groupedChats: [(title: String, items: [ReferenceChatItem])] {
-        let order = ["Today", "Yesterday", "Previous 7 days", "Previous 30 days", "Older"]
+        let order = ["今天", "昨天", "过去 7 天", "过去 30 天", "更早"]
         var grouped: [String: [ReferenceChatItem]] = [:]
         for chat in filteredChats {
             let key = chat.timeRange
@@ -75,11 +75,11 @@ struct ReferenceChatPickerView: View {
                     }
                 }
             }
-            .navigationTitle("Reference Chats")
+            .navigationTitle("引用聊天")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
+                    Button("取消") {
                         isPresented = false
                     }
                     .foregroundStyle(theme.brandPrimary)
@@ -99,7 +99,7 @@ struct ReferenceChatPickerView: View {
                 .scaledFont(size: 14, weight: .medium)
                 .foregroundStyle(theme.textTertiary)
 
-            TextField("Search chats…", text: $searchQuery)
+            TextField("搜索聊天…", text: $searchQuery)
                 .scaledFont(size: 15)
                 .foregroundStyle(theme.textPrimary)
                 .autocorrectionDisabled()
@@ -123,7 +123,7 @@ struct ReferenceChatPickerView: View {
         VStack(spacing: Spacing.sm) {
             ProgressView()
                 .controlSize(.regular)
-            Text("Loading chats…")
+            Text("正在加载聊天…")
                 .scaledFont(size: 14, weight: .medium)
                 .foregroundStyle(theme.textSecondary)
         }
@@ -137,14 +137,14 @@ struct ReferenceChatPickerView: View {
             Image(systemName: "exclamationmark.triangle")
                 .scaledFont(size: 32)
                 .foregroundStyle(theme.textTertiary)
-            Text("Couldn't load chats")
+            Text("无法加载聊天")
                 .scaledFont(size: 15, weight: .semibold)
                 .foregroundStyle(theme.textPrimary)
             Text(message)
                 .scaledFont(size: 13)
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
-            Button("Try Again") {
+            Button("重试") {
                 loadError = nil
                 Task { await loadChats(page: 1, reset: true) }
             }
@@ -163,7 +163,7 @@ struct ReferenceChatPickerView: View {
             Image(systemName: "bubble.left.and.bubble.right")
                 .scaledFont(size: 36)
                 .foregroundStyle(theme.textTertiary)
-            Text(searchQuery.isEmpty ? "No conversations found" : "No results for \"\(searchQuery)\"")
+            Text(searchQuery.isEmpty ? "没有找到聊天记录" : "没有找到“\(searchQuery)”")
                 .scaledFont(size: 15, weight: .medium)
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -241,7 +241,7 @@ struct ReferenceChatPickerView: View {
 
                 // Title + relative time
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(chat.title.isEmpty ? "Untitled" : chat.title)
+                    Text(chat.title.isEmpty ? "未命名聊天" : chat.title)
                         .scaledFont(size: 15, weight: .medium)
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
@@ -278,7 +278,7 @@ struct ReferenceChatPickerView: View {
     private func loadChats(page: Int, reset: Bool) async {
         guard !isLoading else { return }
         guard let manager = conversationManager else {
-            loadError = "Not connected to a server."
+            loadError = "当前未连接到站点。"
             return
         }
         if reset { isLoading = true }
