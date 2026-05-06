@@ -88,14 +88,14 @@ struct LoginView: View {
 
                 AuthScreenHeader(
                     icon: "person.badge.key",
-                    title: "Welcome Back",
-                    subtitle: "Sign in to continue"
+                    title: "邮箱密码登录已移除",
+                    subtitle: "请返回并使用 API Key、SSO 或 LDAP 登录"
                 )
 
                 // Form card
                 VStack(spacing: Spacing.lg) {
                     ModernTextField(
-                        label: "Email",
+                        label: "邮箱",
                         placeholder: "you@example.com",
                         text: $viewModel.email,
                         keyboardType: .emailAddress,
@@ -103,8 +103,8 @@ struct LoginView: View {
                     )
 
                     ModernTextField(
-                        label: "Password",
-                        placeholder: "Enter your password",
+                        label: "密码",
+                        placeholder: "请输入密码",
                         text: $viewModel.password,
                         isSecure: true,
                         textContentType: .password,
@@ -121,27 +121,19 @@ struct LoginView: View {
                             .shakeOnError(trigger: shakeCount)
                     }
 
-                    // Sign in button
                     AuthPrimaryButton(
-                        title: "Sign in",
-                        icon: viewModel.isLoggingIn ? nil : "arrow.right",
+                        title: "已禁用",
+                        icon: "lock.slash",
                         isLoading: viewModel.isLoggingIn,
-                        isDisabled: viewModel.email.isEmpty || viewModel.password.isEmpty
+                        isDisabled: true
                     ) {
-                        Task {
-                            await viewModel.login()
-                            if viewModel.errorMessage != nil {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.5)) {
-                                    shakeCount += 1
-                                }
-                            }
-                        }
+                        viewModel.goBack()
                     }
 
                     // Sign up link (when enabled)
                     if viewModel.isSignupEnabled {
                         HStack(spacing: Spacing.xs) {
-                            Text("Don't have an account?")
+                            Text("没有账号？")
                                 .scaledFont(size: 14)
                                 .foregroundStyle(theme.textTertiary)
 
@@ -150,7 +142,7 @@ struct LoginView: View {
                                     viewModel.goToPhase(.signUp)
                                 }
                             } label: {
-                                Text("Create one")
+                                Text("创建账号")
                                     .scaledFont(size: 14, weight: .medium)
                                     .foregroundStyle(theme.brandPrimary)
                             }
@@ -184,7 +176,7 @@ struct LoginView: View {
                     HStack(spacing: Spacing.xs) {
                         Image(systemName: "chevron.left")
                             .scaledFont(size: 14, weight: .semibold)
-                        Text("Back")
+                        Text("返回")
                             .scaledFont(size: 14)
                     }
                     .foregroundStyle(theme.textSecondary)
@@ -357,7 +349,7 @@ struct AuthMethodSelectionView: View {
                             .animation(.spring(response: 0.4, dampingFraction: 0.8).delay(0.25), value: appeared)
                     }
 
-                    Text("Choose how you'd like to sign in")
+                    Text("选择你想怎么登录")
                         .scaledFont(size: 14)
                         .foregroundStyle(theme.textSecondary)
                         .padding(.top, Spacing.xs)
@@ -382,22 +374,10 @@ struct AuthMethodSelectionView: View {
                         }
 
                         // Divider
-                        if viewModel.isLoginEnabled || viewModel.isLDAPEnabled {
-                            dividerWithText("or")
+                        if viewModel.isLDAPEnabled {
+                            dividerWithText("或")
                                 .opacity(appeared ? 1 : 0)
                                 .animation(.easeOut(duration: 0.3).delay(0.5), value: appeared)
-                        }
-                    }
-
-                    // Other auth method buttons
-                    if viewModel.isLoginEnabled {
-                        authMethodButton(
-                            icon: "envelope.fill",
-                            title: "Email & Password",
-                            subtitle: "Sign in with your account credentials",
-                            index: enabledOAuthProviders.count
-                        ) {
-                            viewModel.goToPhase(.credentialLogin)
                         }
                     }
 
@@ -410,6 +390,13 @@ struct AuthMethodSelectionView: View {
                         ) {
                             viewModel.goToPhase(.ldapLogin)
                         }
+                    }
+
+                    if enabledOAuthProviders.isEmpty && !viewModel.isLDAPEnabled && !viewModel.isTrustedHeaderAuth {
+                        noPasswordLoginNotice
+                            .opacity(appeared ? 1 : 0)
+                            .offset(y: appeared ? 0 : 15)
+                            .animation(.spring(response: 0.4, dampingFraction: 0.8).delay(0.35), value: appeared)
                     }
 
                     if viewModel.isTrustedHeaderAuth && enabledOAuthProviders.isEmpty {
@@ -426,14 +413,14 @@ struct AuthMethodSelectionView: View {
                     // Sign up option
                     if viewModel.isSignupEnabled {
                         VStack(spacing: Spacing.sm) {
-                            dividerWithText("new here?")
+                            dividerWithText("新用户？")
                                 .opacity(appeared ? 1 : 0)
                                 .animation(.easeOut(duration: 0.3).delay(0.7), value: appeared)
 
                             authMethodButton(
                                 icon: "person.badge.plus",
-                                title: "Create Account",
-                                subtitle: "Sign up for a new account",
+                                title: "创建账号",
+                                subtitle: "注册新账号",
                                 index: enabledOAuthProviders.count + 3
                             ) {
                                 viewModel.goToPhase(.signUp)
@@ -457,8 +444,8 @@ struct AuthMethodSelectionView: View {
                                 Image(systemName: "arrow.left.arrow.right.circle")
                                     .scaledFont(size: 14)
                                 Text(viewModel.savedServers.count > 1
-                                     ? "Switch server (\(viewModel.savedServers.count) saved)"
-                                     : "Add or switch server")
+                                     ? "切换站点（已保存 \(viewModel.savedServers.count) 个）"
+                                     : "添加或切换站点")
                                     .scaledFont(size: 14)
                             }
                             .foregroundStyle(theme.brandPrimary.opacity(0.8))
@@ -472,7 +459,7 @@ struct AuthMethodSelectionView: View {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: "arrow.left.circle")
                                     .scaledFont(size: 14)
-                                Text("Connect to a different server")
+                                Text("连接其他站点")
                                     .scaledFont(size: 14)
                             }
                             .foregroundStyle(theme.textTertiary)
@@ -489,6 +476,30 @@ struct AuthMethodSelectionView: View {
     }
 
     // MARK: - OAuth Provider Button
+
+    private var noPasswordLoginNotice: some View {
+        VStack(spacing: Spacing.sm) {
+            Image(systemName: "key.slash")
+                .scaledFont(size: 20, weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
+                .frame(width: 44, height: 44)
+                .background(theme.surfaceContainer)
+                .clipShape(Circle())
+
+            Text("邮箱密码登录已移除")
+                .scaledFont(size: 16, weight: .semibold)
+                .foregroundStyle(theme.textPrimary)
+
+            Text("请在站点配置里使用 API Key，或切换到已保存的站点。")
+                .scaledFont(size: 13)
+                .foregroundStyle(theme.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(Spacing.lg)
+        .frame(maxWidth: .infinity)
+        .background(theme.surfaceContainer)
+        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous))
+    }
 
     private func oauthProviderButton(provider: String) -> some View {
         let displayName = viewModel.oauthProviders?.displayName(for: provider)

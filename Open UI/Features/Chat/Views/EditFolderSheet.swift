@@ -270,7 +270,7 @@ struct EditFolderSheet: View {
                         } else {
                             Image(systemName: "cpu").scaledFont(size: 14)
                         }
-                        Text("Select Model").scaledFont(size: 14, weight: .medium)
+                        Text("选择模型").scaledFont(size: 14, weight: .medium)
                     }
                     .padding(.horizontal, Spacing.md)
                     .padding(.vertical, Spacing.sm)
@@ -383,7 +383,7 @@ struct EditFolderSheet: View {
                     .buttonStyle(.plain)
                 }
             }
-            .navigationTitle(String(localized: "Select Model"))
+            .navigationTitle(String(localized: "选择模型"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

@@ -78,6 +78,7 @@ final class NotificationService: NSObject, @unchecked Sendable {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         clearLegacyBrandNotificationsIfNeeded(center: center)
+        scheduleDelayedLegacyNotificationCleanup(center: center)
 
         // Register notification categories
         let openAction = UNNotificationAction(
@@ -158,11 +159,22 @@ final class NotificationService: NSObject, @unchecked Sendable {
     /// Clear them once after the Iexa rebrand so every future banner uses the
     /// bundled ghost icon.
     private func clearLegacyBrandNotificationsIfNeeded(center: UNUserNotificationCenter) {
-        let key = "iexaClearedLegacyNotificationIcons"
+        let key = "iexaClearedLegacyNotificationIcons.v2"
         guard !UserDefaults.standard.bool(forKey: key) else { return }
         center.removeAllDeliveredNotifications()
         center.removeAllPendingNotificationRequests()
         UserDefaults.standard.set(true, forKey: key)
+    }
+
+    private func scheduleDelayedLegacyNotificationCleanup(center: UNUserNotificationCenter) {
+        let key = "iexaDelayedNotificationIconCleanup.v2"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            center.removeAllDeliveredNotifications()
+            center.removeAllPendingNotificationRequests()
+        }
     }
 
     // MARK: - Generation Complete
@@ -199,7 +211,7 @@ final class NotificationService: NSObject, @unchecked Sendable {
         isAuthorized = true
 
         // Truncate to ~120 chars for the preview snippet
-        let showPreview = UserDefaults.standard.bool(forKey: "notificationShowResponsePreview")
+        let showPreview = UserDefaults.standard.object(forKey: "notificationShowResponsePreview") as? Bool ?? true
         let bodyText: String
         if showPreview {
             let cleaned = Self.stripThinkingAndToolBlocks(from: preview)

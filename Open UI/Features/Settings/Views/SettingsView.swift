@@ -568,6 +568,7 @@ struct ChatSettingsView: View {
     @AppStorage("temporaryChatDefault") private var temporaryChatDefault = false
     @AppStorage("expandThinkingWhileStreaming") private var expandThinkingWhileStreaming = true
     @AppStorage("citationShowDomain") private var citationShowDomain: Bool = true
+    @AppStorage("desktopPetEnabled") private var desktopPetEnabled = false
     @AppStorage("quickPills") private var quickPillsData: String = ""
     @State private var availableTools: [ToolItem] = []
     @State private var isLoadingTools = false
@@ -659,6 +660,15 @@ struct ChatSettingsView: View {
                 Text("引用")
             } footer: {
                 Text("开启后引用徽标显示网站域名；关闭后显示页面标题。")
+            }
+
+            Section {
+                Toggle("桌面宠物", isOn: $desktopPetEnabled)
+                    .tint(theme.brandPrimary)
+            } header: {
+                Text("桌面宠物")
+            } footer: {
+                Text("开启后聊天界面会显示小幽灵宠物，点击可快速新建对话、添加照片、文件、摄像头或网页。")
             }
 
             Section {
@@ -2029,7 +2039,7 @@ struct TTSVoicePickerView: View {
 struct NotificationSettingsView: View {
     @Environment(\.theme) private var theme
     @AppStorage("notificationsEnabled") private var notificationsEnabled = true
-    @AppStorage("notificationShowResponsePreview") private var showResponsePreview = false
+    @AppStorage("notificationShowResponsePreview") private var showResponsePreview = true
     @State private var systemPermissionGranted = NotificationService.shared.isAuthorized
 
     var body: some View {

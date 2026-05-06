@@ -448,7 +448,7 @@ struct iPadMainChatView: View {
                             .symbolVariant(showTerminalBrowser ? .fill : .none)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(showTerminalBrowser ? "Hide Files" : "Show Files")
+                    .accessibilityLabel(showTerminalBrowser ? "隐藏文件" : "显示文件")
                 }
             }
         } else {
@@ -470,7 +470,7 @@ struct iPadMainChatView: View {
                                 .foregroundStyle(theme.textSecondary)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("New Chat")
+                        .accessibilityLabel("新对话")
                     }
                 }
         } else if let conversationId = activeConversationId {
@@ -488,7 +488,7 @@ struct iPadMainChatView: View {
                             .foregroundStyle(theme.textSecondary)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("New Chat")
+                    .accessibilityLabel("新对话")
                 }
             }
         } else if let folderWorkspaceId = activeFolderWorkspaceId {
@@ -514,7 +514,7 @@ struct iPadMainChatView: View {
                                 .foregroundStyle(theme.textSecondary)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("New Chat")
+                        .accessibilityLabel("新对话")
                     }
                 }
         } else {
@@ -529,7 +529,7 @@ struct iPadMainChatView: View {
                                 .foregroundStyle(theme.textSecondary)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("New Chat")
+                        .accessibilityLabel("新对话")
                     }
                 }
         }
@@ -542,7 +542,7 @@ struct iPadMainChatView: View {
             Color.black.opacity(0.3).ignoresSafeArea()
             VStack(spacing: Spacing.md) {
                 ProgressView().controlSize(.large).tint(.white)
-                Text("Preparing export…")
+                Text("正在准备导出…")
                     .scaledFont(size: 16)
                     .foregroundStyle(.white)
             }
@@ -911,7 +911,7 @@ struct iPadSidebarContent: View {
                         .foregroundStyle(theme.textSecondary)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("New Chat")
+                .accessibilityLabel("新对话")
             }
         }
     }
@@ -1624,18 +1624,18 @@ struct iPadSidebarContent: View {
                         .frame(width: 36, height: 36)
                         .contentShape(Rectangle())
                 }
-                .accessibilityLabel("New Chat")
+                .accessibilityLabel("新对话")
 
                 // More menu — secondary actions tucked away cleanly
                 Menu {
                     if usesDirectProvider || dependencies.authViewModel.featurePermissions.memories {
                         Button { showMemories = true } label: {
-                            Label("Memories", systemImage: "brain.head.profile")
+                            Label("记忆", systemImage: "brain.head.profile")
                         }
                     }
                     if !usesDirectProvider && dependencies.authViewModel.hasAnyWorkspaceAccess {
                         Button { showWorkspace = true } label: {
-                            Label("Workspace", systemImage: "square.grid.2x2")
+                            Label("工作区", systemImage: "square.grid.2x2")
                         }
                     }
 

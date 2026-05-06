@@ -18,6 +18,7 @@ struct AddServerSheet: View {
     /// Local copy of the URL so we can reset viewModel.serverURL on cancel.
     @State private var url: String = ""
     @State private var apiKey: String = ""
+    @State private var userName: String = ""
     @State private var allowSelfSigned: Bool = false
     @State private var showAdvanced = false
 
@@ -25,6 +26,7 @@ struct AddServerSheet: View {
     /// Restored if the user cancels without completing the new connection.
     @State private var previousURL: String = ""
     @State private var previousApiKey: String = ""
+    @State private var previousUserName: String = ""
     @State private var previousAllowSelfSigned: Bool = false
 
     var body: some View {
@@ -49,6 +51,14 @@ struct AddServerSheet: View {
 
                     // Connection form — delegates entirely to the same ServerConnectionView UI
                     VStack(spacing: Spacing.lg) {
+                        ModernTextField(
+                            label: "用户名（可选）",
+                            placeholder: "用于本地显示，例如：Blank",
+                            text: $userName,
+                            textContentType: .name,
+                            onSubmit: { startConnect() }
+                        )
+
                         ModernTextField(
                             label: "站点 URL",
                             placeholder: "https://your-server.com 或 https://api.example.com",
@@ -177,6 +187,7 @@ struct AddServerSheet: View {
             // Snapshot the current URL/settings so Cancel can restore them
             previousURL = viewModel.serverURL
             previousApiKey = viewModel.apiKey
+            previousUserName = viewModel.localUserName
             previousAllowSelfSigned = viewModel.allowSelfSignedCerts
             // Clear error from any previous attempt
             viewModel.errorMessage = nil
@@ -192,9 +203,30 @@ struct AddServerSheet: View {
         guard !url.isEmpty else { return }
         viewModel.serverURL = url
         viewModel.apiKey = apiKey
+        viewModel.localUserName = userName
         viewModel.allowSelfSignedCerts = allowSelfSigned
         viewModel.errorMessage = nil
-        Task { await viewModel.connect() }
+        Task {
+            await viewModel.connect()
+            await closeAfterSuccessfulConnectionIfNeeded()
+        }
+    }
+
+    @MainActor
+    private func closeAfterSuccessfulConnectionIfNeeded() {
+        guard viewModel.errorMessage == nil,
+              !viewModel.isConnecting,
+              !viewModel.showCloudflareChallenge,
+              !viewModel.showProxyAuthChallenge else {
+            return
+        }
+
+        switch viewModel.phase {
+        case .authMethodSelection, .authenticated, .credentialLogin, .ldapLogin, .ssoLogin:
+            onDismiss()
+        default:
+            break
+        }
     }
 
     /// Cancels the add-server flow and restores the previous URL.
@@ -204,6 +236,7 @@ struct AddServerSheet: View {
         // Restore previous server URL so the auth screen for the original server is correct
         viewModel.serverURL = previousURL
         viewModel.apiKey = previousApiKey
+        viewModel.localUserName = previousUserName
         viewModel.allowSelfSignedCerts = previousAllowSelfSigned
         onDismiss()
     }

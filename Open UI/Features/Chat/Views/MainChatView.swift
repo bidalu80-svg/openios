@@ -115,6 +115,11 @@ struct MainChatView: View {
     @State private var fileBrowserDragOffset: CGFloat = 0
     @State private var isDraggingFileBrowser = false
     @State private var terminalBrowserVM = TerminalBrowserViewModel()
+    @AppStorage("desktopPetEnabled") private var desktopPetEnabled = false
+    @AppStorage("desktopPetOffsetX") private var desktopPetOffsetX = 0.0
+    @AppStorage("desktopPetOffsetY") private var desktopPetOffsetY = 0.0
+    @State private var desktopPetExpanded = false
+    @State private var desktopPetDragOffset: CGSize = .zero
 
     /// Rename conversation state.
     @State private var renamingConversation: Conversation?
@@ -282,7 +287,7 @@ struct MainChatView: View {
                                         .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
-                                .accessibilityLabel("New Chat")
+                                .accessibilityLabel("新对话")
                             }
                         }
                     }
@@ -415,6 +420,16 @@ struct MainChatView: View {
                     }
             )
             } // end if isTerminalActiveInCurrentChat
+
+            if desktopPetEnabled && activeChannelId == nil && drawerFraction < 0.01 && fileBrowserFraction < 0.01 {
+                desktopPetOverlay
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .padding(.trailing, 18)
+                    .padding(.bottom, 92)
+                    .offset(currentDesktopPetOffset)
+                    .transition(.scale(scale: 0.88, anchor: .bottomTrailing).combined(with: .opacity))
+                    .zIndex(20)
+            }
 
             // MARK: Left edge overlay — exclusively captures left-edge swipe to open drawer.
             // Sits on top of the NavigationStack so it intercepts touches before they
@@ -1114,7 +1129,7 @@ struct MainChatView: View {
                             ProgressView()
                                 .controlSize(.large)
                                 .tint(.white)
-                            Text("Preparing export…")
+                            Text("正在准备导出…")
                                 .scaledFont(size: 16)
                                 .foregroundStyle(.white)
                         }
@@ -1219,6 +1234,135 @@ struct MainChatView: View {
             showFileBrowser = false
             fileBrowserDragOffset = 0
         }
+    }
+
+    private var desktopPetOverlay: some View {
+        VStack(alignment: .trailing, spacing: 10) {
+            if desktopPetExpanded {
+                VStack(alignment: .trailing, spacing: 8) {
+                    desktopPetAction(title: "网页", icon: "globe") {
+                        postPetQuickAction(.openUIWebChat)
+                    }
+                    desktopPetAction(title: "摄像头", icon: "camera.fill") {
+                        postPetQuickAction(.openUICameraChat)
+                    }
+                    desktopPetAction(title: "照片", icon: "photo.fill") {
+                        postPetQuickAction(.openUIPhotosChat)
+                    }
+                    desktopPetAction(title: "文件", icon: "doc.fill") {
+                        postPetQuickAction(.openUIFileChat)
+                    }
+                    desktopPetAction(title: "新对话", icon: "square.and.pencil") {
+                        startNewChat()
+                        collapseDesktopPet()
+                    }
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            Button {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                    desktopPetExpanded.toggle()
+                }
+                Haptics.play(.light)
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(theme.cardBackground.opacity(0.96))
+                    Circle()
+                        .strokeBorder(theme.brandPrimary.opacity(0.18), lineWidth: 1)
+                    Image("AppIconImage")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 38, height: 38)
+                }
+                .frame(width: 58, height: 58)
+                .shadow(color: .black.opacity(theme.isDark ? 0.35 : 0.12), radius: 14, y: 6)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("桌面宠物")
+        }
+        .gesture(
+            DragGesture(minimumDistance: 8)
+                .onChanged { value in
+                    desktopPetDragOffset = value.translation
+                }
+                .onEnded { value in
+                    let stored = CGSize(width: desktopPetOffsetX, height: desktopPetOffsetY)
+                    let proposed = CGSize(
+                        width: stored.width + value.translation.width,
+                        height: stored.height + value.translation.height
+                    )
+                    let bounded = boundedDesktopPetOffset(proposed)
+                    desktopPetOffsetX = Double(bounded.width)
+                    desktopPetOffsetY = Double(bounded.height)
+                    desktopPetDragOffset = .zero
+                    Haptics.play(.light)
+                }
+        )
+    }
+
+    private func desktopPetAction(title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+        } label: {
+            HStack(spacing: 8) {
+                Text(title)
+                    .scaledFont(size: 13, weight: .semibold)
+                Image(systemName: icon)
+                    .scaledFont(size: 13, weight: .semibold)
+                    .frame(width: 18)
+            }
+            .foregroundStyle(theme.textPrimary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(.ultraThinMaterial)
+            .clipShape(Capsule(style: .continuous))
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(0.45), lineWidth: 0.5)
+            )
+            .shadow(color: .black.opacity(theme.isDark ? 0.24 : 0.08), radius: 8, y: 3)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func postPetQuickAction(_ name: Notification.Name) {
+        NotificationCenter.default.post(name: .openUIDismissOverlays, object: nil)
+        NotificationCenter.default.post(name: name, object: nil)
+        collapseDesktopPet()
+    }
+
+    private func collapseDesktopPet() {
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+            desktopPetExpanded = false
+        }
+        Haptics.play(.light)
+    }
+
+    private var currentDesktopPetOffset: CGSize {
+        let stored = CGSize(width: desktopPetOffsetX, height: desktopPetOffsetY)
+        return boundedDesktopPetOffset(
+            CGSize(
+                width: stored.width + desktopPetDragOffset.width,
+                height: stored.height + desktopPetDragOffset.height
+            )
+        )
+    }
+
+    private func boundedDesktopPetOffset(_ proposed: CGSize) -> CGSize {
+        let maxLeft = -max(0, containerWidth - 94)
+        let maxRight: CGFloat = 10
+        let screenHeight = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.screen.bounds.height }
+            .first ?? 820
+        let maxUp = -max(0, screenHeight - 210)
+        let maxDown: CGFloat = 10
+
+        return CGSize(
+            width: min(maxRight, max(maxLeft, proposed.width)),
+            height: min(maxDown, max(maxUp, proposed.height))
+        )
     }
 
     // MARK: - New Chat
@@ -2377,7 +2521,7 @@ struct MainChatView: View {
                         .frame(width: 40, height: 40)
                         .contentShape(Rectangle())
                 }
-                .accessibilityLabel("New Chat")
+                .accessibilityLabel("新对话")
 
                 // More menu — secondary actions tucked away cleanly
                 Menu {
@@ -2386,14 +2530,14 @@ struct MainChatView: View {
                             closeDrawer()
                             showMemories = true
                         } label: {
-                            Label("Memories", systemImage: "brain.head.profile")
+                            Label("记忆", systemImage: "brain.head.profile")
                         }
                     }
                     if !usesDirectProvider && dependencies.authViewModel.hasAnyWorkspaceAccess {
                         Button {
                             showWorkspace = true
                         } label: {
-                            Label("Workspace", systemImage: "square.grid.2x2")
+                            Label("工作区", systemImage: "square.grid.2x2")
                         }
                     }
 
@@ -2630,7 +2774,7 @@ let conversationId: String?
     var body: some View {
         Group {
             if vm.availableModels.isEmpty {
-                Text("New Chat")
+                Text("新对话")
                     .scaledFont(size: 14, weight: .medium)
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
@@ -2650,7 +2794,7 @@ let conversationId: String?
                             )
                             .fixedSize()
                         }
-                        Text(vm.selectedModel?.shortName ?? "Select Model")
+                        Text(vm.selectedModel?.shortName ?? "选择模型")
                             .scaledFont(size: 14, weight: .medium)
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
@@ -2661,16 +2805,18 @@ let conversationId: String?
                             .fixedSize()
                             .layoutPriority(1)
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .frame(minHeight: 40)
                     .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        Capsule(style: .continuous)
                             .fill(theme.cardBackground.opacity(0.9))
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        Capsule(style: .continuous)
                             .strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.5)
                     )
+                    .clipShape(Capsule(style: .continuous))
                     .frame(maxWidth: 220)
                 }
                 .buttonStyle(.plain)

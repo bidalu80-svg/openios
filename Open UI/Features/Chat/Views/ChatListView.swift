@@ -193,7 +193,7 @@ struct ChatListView: View {
                 } label: {
                     Image(systemName: "square.and.pencil")
                 }
-                .accessibilityLabel(Text("New Chat"))
+                .accessibilityLabel(Text("新对话"))
             }
         }
     }
@@ -226,7 +226,7 @@ struct ChatListView: View {
                 Button {
                     router.navigate(to: .newChat)
                 } label: {
-                    SwiftUI.Label(String(localized: "New Chat"), systemImage: "plus.bubble")
+                    SwiftUI.Label(String(localized: "新对话"), systemImage: "plus.bubble")
                 }
                 .buttonStyle(.borderedProminent)
                 .pressEffect()

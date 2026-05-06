@@ -440,6 +440,7 @@ struct ChatDetailView: View {
             showCameraPicker: $showCameraPicker,
             showPhotosPicker: $showPhotosPicker,
             showFilePicker: $showFilePicker,
+            showWebURLAlert: $showWebURLAlert,
             selectedPhotos: $selectedPhotos,
             codePreviewCode: $codePreviewCode,
             codePreviewLanguage: $codePreviewLanguage,
@@ -501,7 +502,7 @@ struct ChatDetailView: View {
     private var modelSelectorButton: some View {
         Group {
             if viewModel.availableModels.isEmpty {
-                Text(viewModel.conversation?.title ?? String(localized: "New Chat"))
+                Text(viewModel.conversation?.title ?? String(localized: "新对话"))
                     .scaledFont(size: 14, weight: .medium)
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
@@ -522,7 +523,7 @@ struct ChatDetailView: View {
                             )
                             .fixedSize()
                         }
-                        Text(viewModel.selectedModel?.shortName ?? String(localized: "Select Model"))
+                        Text(viewModel.selectedModel?.shortName ?? String(localized: "选择模型"))
                             .scaledFont(size: 14, weight: .medium)
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
@@ -534,16 +535,18 @@ struct ChatDetailView: View {
                             .fixedSize()
                             .layoutPriority(1)
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .frame(minHeight: 40)
                     .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        Capsule(style: .continuous)
                             .fill(theme.cardBackground.opacity(0.9))
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        Capsule(style: .continuous)
                             .strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.5)
                     )
+                    .clipShape(Capsule(style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .sheet(isPresented: $isShowingModelSelectorSheet) {
@@ -4106,6 +4109,7 @@ private extension View {
         showCameraPicker: Binding<Bool>,
         showPhotosPicker: Binding<Bool>,
         showFilePicker: Binding<Bool>,
+        showWebURLAlert: Binding<Bool>,
         selectedPhotos: Binding<[PhotosPickerItem]>,
         codePreviewCode: Binding<String?>,
         codePreviewLanguage: Binding<String>,
@@ -4129,6 +4133,9 @@ private extension View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .openUIFileChat)) { _ in
                 showFilePicker.wrappedValue = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openUIWebChat)) { _ in
+                showWebURLAlert.wrappedValue = true
             }
             .photosPicker(
                 isPresented: showPhotosPicker,

@@ -2,7 +2,7 @@
 //  OpenUIWidgetsControl.swift
 //  OpenUIWidgets
 //
-//  Control Center widget (iOS 18+) — one-tap "New Chat" button.
+//  Control Center widget (iOS 18+) — one-tap "新对话" button.
 //
 
 import AppIntents
@@ -17,10 +17,10 @@ struct OpenUIWidgetsControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: Self.kind) {
             ControlWidgetButton(action: OpenNewChatControlIntent()) {
-                Label("New Chat", systemImage: "bubble.left.and.text.bubble.right.fill")
+                Label("新对话", systemImage: "bubble.left.and.text.bubble.right.fill")
             }
         }
-        .displayName("New Chat")
+        .displayName("新对话")
         .description("Start a new AI chat instantly from Control Center.")
     }
 }
@@ -28,7 +28,7 @@ struct OpenUIWidgetsControl: ControlWidget {
 // MARK: - Control Intent
 
 struct OpenNewChatControlIntent: AppIntent {
-    static var title: LocalizedStringResource = "New Chat"
+    static var title: LocalizedStringResource = "新对话"
     static var description = IntentDescription("Open a new chat in Iexa.")
     static var openAppWhenRun: Bool = true
     // Prevent this Control Center-only intent from appearing in the Shortcuts app.

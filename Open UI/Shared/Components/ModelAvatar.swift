@@ -4,10 +4,8 @@ import SwiftUI
 
 /// Displays a model's avatar image with automatic fallback UI and image caching.
 ///
-/// The avatar can display:
-/// - A network image loaded from a URL (cached via ``ImageCacheService``)
-/// - A fallback showing the first letter of the model name
-/// - A brain icon when no name is available
+/// Iexa uses a consistent ghost mark for model avatars so provider/model
+/// initials do not make the chat header feel visually noisy.
 ///
 /// Usage:
 /// ```swift
@@ -23,45 +21,24 @@ struct ModelAvatar: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        if let imageURL {
-            CachedAsyncImage(
-                url: imageURL,
-                authToken: authToken,
-                targetPixelSize: Int(size * UIScreen.main.scale)
-            ) { image in
-                image
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: size, height: size)
-                    .clipShape(RoundedRectangle(cornerRadius: size * 0.15, style: .continuous))
-            } placeholder: {
-                fallbackView
-            }
+        iexaAvatar
             .accessibilityLabel(Text(label ?? String(localized: "AI Model")))
-        } else {
-            fallbackView
-        }
     }
 
-    private var fallbackView: some View {
+    private var iexaAvatar: some View {
         ZStack {
             RoundedRectangle(cornerRadius: size * 0.15, style: .continuous)
-                .fill(theme.brandPrimary.opacity(0.12))
+                .fill(theme.cardBackground)
             RoundedRectangle(cornerRadius: size * 0.15, style: .continuous)
-                .strokeBorder(theme.brandPrimary.opacity(0.25), lineWidth: 0.5)
+                .strokeBorder(theme.cardBorder.opacity(0.55), lineWidth: 0.5)
 
-            if let initial = label?.trimmingCharacters(in: .whitespacesAndNewlines).first {
-                Text(String(initial).uppercased())
-                    .scaledFont(size: size * 0.38, weight: .semibold, design: .rounded)
-                    .foregroundStyle(theme.brandPrimary)
-            } else {
-                Image(systemName: "brain")
-                    .scaledFont(size: size * 0.4, weight: .medium)
-                    .foregroundStyle(theme.brandPrimary)
-            }
+            Image("AppIconImage")
+                .resizable()
+                .scaledToFill()
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: size * 0.15, style: .continuous))
         }
         .frame(width: size, height: size)
-        .accessibilityLabel(Text(label ?? String(localized: "AI Model")))
     }
 
     private var shimmerPlaceholder: some View {

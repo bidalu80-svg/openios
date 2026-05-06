@@ -10,7 +10,7 @@ enum AuthPhase: Equatable {
     case restoringSession
     /// Server connected; user must choose an auth method.
     case authMethodSelection
-    /// Credentials (email/password) login form.
+    /// Legacy credentials login form. Hidden in Iexa; kept only for old saved state fallback.
     case credentialLogin
     /// New account sign-up form.
     case signUp
@@ -41,6 +41,7 @@ final class AuthViewModel {
 
     var serverURL: String = ""
     var apiKey: String = ""
+    var localUserName: String = ""
     /// User-supplied custom HTTP headers (key–value pairs) entered during server setup.
     var customHeaderEntries: [CustomHeaderEntry] = []
     var email: String = ""
@@ -94,7 +95,7 @@ final class AuthViewModel {
     }
 
     var isLoginEnabled: Bool {
-        backendConfig?.isLoginFormEnabled ?? true
+        false
     }
 
     var isTrustedHeaderAuth: Bool {
@@ -329,8 +330,10 @@ final class AuthViewModel {
         let activeAccount = targetServer?.savedAccounts.first(where: { $0.id == targetServer?.activeAccountId })
             ?? targetServer?.savedAccounts.first
         let baseUser = cachedUser ?? currentUser
+        let typedName = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let displayName = Self.firstNonEmpty(
+            typedName,
             baseUser?.displayName,
             activeAccount?.displayName,
             targetServer?.lastUserName,
@@ -394,6 +397,7 @@ final class AuthViewModel {
         }
 
         let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        localUserName = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
 
         isConnecting = true
         errorMessage = nil
@@ -619,6 +623,7 @@ final class AuthViewModel {
         }
         dependencies?.refreshServices()
 
+        currentUser = nil
         currentUser = directProviderUser()
         cacheCurrentUser()
         saveCurrentUserAsAccount(authType: .apiKey)
@@ -636,6 +641,7 @@ final class AuthViewModel {
         phase = .serverConnection
         serverURL = ""
         apiKey = ""
+        localUserName = ""
         stopTokenRefreshTimer()
     }
 
@@ -1609,6 +1615,7 @@ final class AuthViewModel {
 
         currentUser = nil
         backendConfig = nil
+        localUserName = ""
         email = ""
         password = ""
         ldapUsername = ""
