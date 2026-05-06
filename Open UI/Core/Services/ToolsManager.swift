@@ -143,7 +143,7 @@ final class ToolsManager {
     }
 
     /// Same as getValvesSpec but also returns the insertion-ordered property keys
-    /// parsed from the raw JSON bytes — needed so the UI can match OpenWebUI's ordering.
+    /// parsed from the raw JSON bytes — needed so the UI can match Iexa native server's ordering.
     func getValvesSpecWithOrder(id: String) async throws -> ([String: Any], [String]) {
         return try await apiClient.getToolValvesSpecOrdered(id: id)
     }

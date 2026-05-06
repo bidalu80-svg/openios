@@ -9,7 +9,7 @@ struct SavedAccount: Codable, Identifiable, Hashable, Sendable {
     /// Stable compound key: `{normalizedServerURL}::{userId}`
     let id: String
 
-    /// The OpenWebUI user ID from the server.
+    /// The Iexa native server user ID from the server.
     let userId: String
 
     /// Display name of the user.

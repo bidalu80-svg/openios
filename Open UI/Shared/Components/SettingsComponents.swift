@@ -206,6 +206,7 @@ struct SettingsProfileHeader: View {
     var email: String? = nil
     var avatarURL: URL? = nil
     var authToken: String? = nil
+    var dataURIString: String? = nil
     var onTap: (() -> Void)? = nil
 
     @Environment(\.theme) private var theme
@@ -213,7 +214,13 @@ struct SettingsProfileHeader: View {
     var body: some View {
         Button(action: { onTap?() }) {
             HStack(spacing: Spacing.md) {
-                UserAvatar(size: 56, imageURL: avatarURL, name: name, authToken: authToken)
+                UserAvatar(
+                    size: 56,
+                    imageURL: avatarURL,
+                    name: name,
+                    authToken: authToken,
+                    dataURIString: dataURIString
+                )
 
                 VStack(alignment: .leading, spacing: Spacing.xxs) {
                     Text(name)

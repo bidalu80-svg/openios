@@ -1,5 +1,5 @@
 // Auto-generated from github/gemoji db/emoji.json
-// Maps Slack/GitHub/OpenWebUI emoji shortcodes → Unicode emoji characters.
+// Maps Slack/GitHub/Iexa native server emoji shortcodes → Unicode emoji characters.
 // 1913 entries covering the complete standard emoji set.
 import Foundation
 

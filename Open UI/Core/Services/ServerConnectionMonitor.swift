@@ -20,7 +20,7 @@ enum ServerConnectionState: Equatable, Sendable {
 /// Combines three signals:
 /// 1. **NWPathMonitor** — instant, event-driven detection of device-level
 ///    internet loss (WiFi off, airplane mode, no cellular).
-/// 2. **`GET /health` polling** — periodic lightweight ping to the OpenWebUI
+/// 2. **`GET /health` polling** — periodic lightweight ping to the Iexa native server
 ///    server to detect server-down conditions.
 /// 3. **External ping** — HEAD request to Apple's captive portal URL to
 ///    distinguish "internet is down" from "server is down" when NWPath
@@ -68,7 +68,7 @@ final class ServerConnectionMonitor: @unchecked Sendable {
     /// Weak reference to the socket service for reconnection.
     @ObservationIgnored private weak var socketService: SocketIOService?
 
-    /// Direct model providers do not expose OpenWebUI's `/health` endpoint.
+    /// Direct model providers do not expose Iexa native server's `/health` endpoint.
     /// Do not poll `/models` for them: many OpenAI-compatible gateways rate-limit
     /// model listing aggressively, and background health checks can steal quota
     /// from real chat/image requests.
@@ -107,7 +107,7 @@ final class ServerConnectionMonitor: @unchecked Sendable {
 
         self.apiClient = apiClient
         self.socketService = socketService
-        self.usesModelProbe = apiClient.providerType != .openWebUI
+        self.usesModelProbe = apiClient.providerType != .iexa
         isRunning = true
 
         startPathMonitor()

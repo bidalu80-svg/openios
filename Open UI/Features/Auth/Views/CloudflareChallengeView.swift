@@ -134,7 +134,7 @@ struct CloudflareChallengeWebView: UIViewRepresentable {
                 webView?.evaluateJavaScript("navigator.userAgent") { [weak self] result, _ in
                     let userAgent = (result as? String) ?? ""
 
-                    // Clear other WKWebView session cookies so OpenWebUI login state
+                    // Clear other WKWebView session cookies so Iexa native server login state
                     // from the WKWebView doesn't bleed into the app's URLSession.
                     let cookieStore = WKWebsiteDataStore.default().httpCookieStore
                     cookieStore.getAllCookies { allCookies in

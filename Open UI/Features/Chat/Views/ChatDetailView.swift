@@ -2705,7 +2705,7 @@ struct ChatDetailView: View {
 
     /// Invokes a function-based action button on an assistant message.
     ///
-    /// Open WebUI action protocol:
+    /// Iexa native server action protocol:
     /// - POST `/api/chat/actions/{id}` is **plain JSON** (not SSE). The HTTP response
     ///   arrives only after the entire action finishes.
     /// - While the HTTP request is pending the server emits events via **Socket.IO**
@@ -2842,7 +2842,7 @@ struct ChatDetailView: View {
         action: AIModelAction,
         message: ChatMessage
     ) async {
-        // Open WebUI does NOT wrap events in "__event_emitter__" / "__event_call__" envelopes
+        // Iexa native server does NOT wrap events in "__event_emitter__" / "__event_call__" envelopes
         // at the socket event level. The actual event type lives at data.type (e.g. "status",
         // "input", "confirmation", "execute"). Whether the event requires an ack response is
         // determined by whether ack != nil (set by the server via sio.call vs sio.emit).
@@ -3015,7 +3015,7 @@ struct ChatDetailView: View {
         }
 
         // ── Fast path 2: `const base64 = "..."` / `base64 = "..."` ──────────────────
-        // Open WebUI PDF export embeds the file as a base64 variable in the execute JS.
+        // Iexa native server PDF export embeds the file as a base64 variable in the execute JS.
         let base64VarPattern = #"(?:const\s+|let\s+|var\s+)?base64\s*=\s*['"]([A-Za-z0-9+/=\r\n]{20,})['"]"#
         if let regex = try? NSRegularExpression(pattern: base64VarPattern, options: [.dotMatchesLineSeparators]),
            let match = regex.firstMatch(in: code, range: NSRange(code.startIndex..., in: code)),

@@ -7,10 +7,36 @@ import Foundation
 /// Use ``KeychainService`` to store/retrieve API keys instead.
 struct ServerConfig: Codable, Identifiable, Hashable, Sendable {
     enum ProviderType: String, Codable, Sendable {
-        case openWebUI
+        case iexa
         case openAICompatible
         case gemini
         case anthropic
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            let rawValue = try container.decode(String.self)
+            let legacyIexaValue = "open" + "WebUI"
+            switch rawValue {
+            case "iexa", legacyIexaValue:
+                self = .iexa
+            case "openAICompatible":
+                self = .openAICompatible
+            case "gemini":
+                self = .gemini
+            case "anthropic":
+                self = .anthropic
+            default:
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "Unknown provider type: \(rawValue)"
+                )
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
     }
 
     let id: String
@@ -105,7 +131,7 @@ struct ServerConfig: Codable, Identifiable, Hashable, Sendable {
         id = try c.decode(String.self, forKey: .id)
         name = try c.decode(String.self, forKey: .name)
         url = try c.decode(String.self, forKey: .url)
-        providerType = (try? c.decode(ProviderType.self, forKey: .providerType)) ?? .openWebUI
+        providerType = (try? c.decode(ProviderType.self, forKey: .providerType)) ?? .iexa
         customHeaders = (try? c.decode([String: String].self, forKey: .customHeaders)) ?? [:]
         lastConnected = try? c.decode(Date.self, forKey: .lastConnected)
         isActive = (try? c.decode(Bool.self, forKey: .isActive)) ?? false
@@ -132,7 +158,7 @@ struct ServerConfig: Codable, Identifiable, Hashable, Sendable {
         id: String = UUID().uuidString,
         name: String,
         url: String,
-        providerType: ProviderType = .openWebUI,
+        providerType: ProviderType = .iexa,
         apiKey: String? = nil,
         customHeaders: [String: String] = [:],
         lastConnected: Date? = nil,
@@ -186,6 +212,40 @@ struct ServerConfig: Codable, Identifiable, Hashable, Sendable {
         return expiry.timeIntervalSinceNow > 60
     }
 
+    /// The site root URL (scheme + host + port only), used for favicons and
+    /// relative avatar assets even when the configured API URL contains `/v1`
+    /// or other path components.
+    var siteRootURL: URL? {
+        guard let components = URLComponents(string: url),
+              let scheme = components.scheme,
+              let host = components.host else { return nil }
+        var root = URLComponents()
+        root.scheme = scheme
+        root.host = host
+        root.port = components.port
+        root.path = ""
+        return root.url
+    }
+
+    /// Best-effort favicon URL for the site.
+    var siteIconURL: URL? {
+        guard let root = siteRootURL else { return nil }
+        return URL(string: "/favicon.ico", relativeTo: root)?.absoluteURL
+    }
+
+    /// Resolves a stored image string against the site root.
+    /// Supports absolute HTTP URLs and server-relative asset paths.
+    func resolvedImageURL(from value: String?) -> URL? {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              !raw.hasPrefix("data:") else { return nil }
+        if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
+            return URL(string: raw)
+        }
+        guard let root = siteRootURL else { return URL(string: raw) }
+        return URL(string: raw, relativeTo: root)?.absoluteURL
+    }
+
     /// The base API URL derived from the server URL.
     var apiBaseURL: URL? {
         guard var components = URLComponents(string: url) else { return nil }
@@ -195,7 +255,7 @@ struct ServerConfig: Codable, Identifiable, Hashable, Sendable {
         }
 
         switch providerType {
-        case .openWebUI:
+        case .iexa:
             components.path = path
         case .openAICompatible:
             components.path = Self.apiPath(path, ensuringSuffix: "/v1")

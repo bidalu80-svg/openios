@@ -4,10 +4,10 @@ import CoreLocation
 
 // MARK: - Prompt Service
 
-/// Handles parsing, variable extraction, and substitution for Open WebUI prompt templates.
+/// Handles parsing, variable extraction, and substitution for Iexa native server prompt templates.
 ///
 /// Implements the full variable system as documented at:
-/// https://docs.openwebui.com/features/ai-knowledge/prompts/#prompt-variables
+/// Iexa prompt variable reference
 ///
 /// Variable syntax:
 /// - System: `{{CURRENT_DATE}}`, `{{USER_NAME}}`, etc.
@@ -22,7 +22,7 @@ enum PromptService {
     /// Skips system variables (CURRENT_DATE, USER_NAME, etc.) since those are
     /// auto-resolved and don't require user input.
     ///
-    /// Matches the Open WebUI web client's `extractInputVariables()` from `src/lib/utils/index.ts`.
+    /// Matches the Iexa native server web client's `extractInputVariables()` from `src/lib/utils/index.ts`.
     static func extractCustomVariables(from content: String) -> [PromptVariable] {
         // Regex matches both:
         //   {{variable_name}}
@@ -69,7 +69,7 @@ enum PromptService {
     /// Example: `"text:placeholder=\"Enter name\":required"` →
     /// `PromptVariable(type: .text, placeholder: "Enter name", isRequired: true)`
     ///
-    /// Matches the Open WebUI `parseVariableDefinition()` from `src/lib/utils/index.ts`.
+    /// Matches the Iexa native server `parseVariableDefinition()` from `src/lib/utils/index.ts`.
     private static func parseVariableDefinition(name: String, definition: String, rawMatch: String) -> PromptVariable {
         let parts = splitProperties(definition, delimiter: ":")
         guard let firstPart = parts.first else {
@@ -145,7 +145,7 @@ enum PromptService {
     // MARK: - System Variable Resolution
 
     /// Builds the full `variables` dictionary that must be sent in every chat completion
-    /// request, matching exactly what the Open WebUI web client sends.
+    /// request, matching exactly what the Iexa native server web client sends.
     ///
     /// The server uses this dict to perform find-and-replace on the model's system prompt
     /// before forwarding to the LLM. Keys MUST use the `{{VARIABLE_NAME}}` format with
@@ -198,7 +198,7 @@ enum PromptService {
     ///
     /// Called AFTER custom variables are substituted. System variables that can't
     /// be resolved (e.g., USER_LOCATION without HTTPS) are left as-is per the
-    /// Open WebUI documentation.
+    /// Iexa native server documentation.
     static func resolveSystemVariables(in content: String, userName: String?, userEmail: String?) -> String {
         var result = content
 
@@ -246,7 +246,7 @@ enum PromptService {
         }
 
         // {{USER_LOCATION}} — resolved from device GPS when user has enabled location sharing.
-        // Falls back to leaving the placeholder as-is (matching Open WebUI behavior)
+        // Falls back to leaving the placeholder as-is (matching Iexa native server behavior)
         // so prompts still work when location permission is not granted.
         if result.contains("{{USER_LOCATION}}") {
             // Use the cached location string (sync). The actual send pipeline uses
@@ -259,7 +259,7 @@ enum PromptService {
         }
 
         // NOTE: The following variables are left as-is if not available,
-        // matching Open WebUI's documented behavior:
+        // matching Iexa native server's documented behavior:
         // {{USER_BIO}}, {{USER_GENDER}}, {{USER_BIRTH_DATE}}, {{USER_AGE}}
         // These require user profile data we don't have on the client side.
 
@@ -305,7 +305,7 @@ enum PromptService {
 
     /// Splits a string by a delimiter, respecting quoted strings and brackets.
     ///
-    /// Matches the Open WebUI `splitProperties()` from `src/lib/utils/index.ts`.
+    /// Matches the Iexa native server `splitProperties()` from `src/lib/utils/index.ts`.
     /// Handles nested JSON arrays in property values (e.g., `options=["High","Low"]`).
     private static func splitProperties(_ str: String, delimiter: Character) -> [String] {
         var result: [String] = []

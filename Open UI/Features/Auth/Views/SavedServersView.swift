@@ -410,11 +410,8 @@ private struct ServerRowView: View {
     }
 
     private func accountAvatarView(_ account: SavedAccount) -> some View {
-        let avatarURL: URL? = {
-            guard let imageURL = account.profileImageURL, !imageURL.isEmpty else { return nil }
-            let full = imageURL.hasPrefix("http") ? imageURL : "\(server.url)\(imageURL)"
-            return URL(string: full)
-        }()
+        let dataURIString = account.profileImageURL?.hasPrefix("data:") == true ? account.profileImageURL : nil
+        let avatarURL = server.resolvedImageURL(from: account.profileImageURL) ?? server.siteIconURL
 
         // Use per-account token from Keychain
         let token = KeychainService.shared.getToken(forServer: server.url, userId: account.userId)
@@ -423,7 +420,8 @@ private struct ServerRowView: View {
             size: 32,
             imageURL: avatarURL,
             name: account.displayName,
-            authToken: token
+            authToken: token,
+            dataURIString: dataURIString
         )
     }
 
@@ -583,18 +581,17 @@ struct CompactSavedServersSection: View {
     }
 
     private func compactAccountAvatar(_ account: SavedAccount, serverURL: String) -> some View {
-        let avatarURL: URL? = {
-            guard let imageURL = account.profileImageURL, !imageURL.isEmpty else { return nil }
-            let full = imageURL.hasPrefix("http") ? imageURL : "\(serverURL)\(imageURL)"
-            return URL(string: full)
-        }()
+        let server = dependencies.serverConfigStore.server(forURL: serverURL)
+        let dataURIString = account.profileImageURL?.hasPrefix("data:") == true ? account.profileImageURL : nil
+        let avatarURL = server?.resolvedImageURL(from: account.profileImageURL) ?? server?.siteIconURL
         let token = KeychainService.shared.getToken(forServer: serverURL, userId: account.userId)
 
         return UserAvatar(
             size: 22,
             imageURL: avatarURL,
             name: account.displayName,
-            authToken: token
+            authToken: token,
+            dataURIString: dataURIString
         )
         .overlay(
             Circle()

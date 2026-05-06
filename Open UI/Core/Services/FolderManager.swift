@@ -1,7 +1,7 @@
 import Foundation
 import os.log
 
-/// Manages folder lifecycle operations against the OpenWebUI server.
+/// Manages folder lifecycle operations against the Iexa native server server.
 ///
 /// All methods are `async` and designed to be called from `@Observable`
 /// view models on the main actor. Expand/collapse sync is debounced

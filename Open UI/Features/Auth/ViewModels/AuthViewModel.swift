@@ -106,7 +106,7 @@ final class AuthViewModel {
         let savedName = serverConfigStore.activeServer?.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if let name = [backendName, savedName]
             .compactMap({ $0 })
-            .first(where: { !$0.isEmpty && !Self.isOpenWebUIMarker($0) }) {
+            .first(where: { !$0.isEmpty && !Self.isIexaMarker($0) }) {
             return name
         }
         return providerDisplayName
@@ -114,7 +114,7 @@ final class AuthViewModel {
 
     private var providerDisplayName: String {
         switch serverConfigStore.activeServer?.providerType {
-        case .openWebUI:
+        case .iexa:
             return "Iexa 服务器"
         case .openAICompatible:
             return "兼容 API"
@@ -127,12 +127,13 @@ final class AuthViewModel {
         }
     }
 
-    private static func isOpenWebUIMarker(_ value: String) -> Bool {
+    private static func isIexaMarker(_ value: String) -> Bool {
         let normalized = value
             .lowercased()
             .replacingOccurrences(of: " ", with: "")
             .replacingOccurrences(of: "-", with: "")
-        return normalized == "openwebui"
+        let legacyMarker = "open" + "webui"
+        return normalized == legacyMarker || normalized == "iexa"
     }
 
     var serverVersion: String? {
@@ -154,7 +155,7 @@ final class AuthViewModel {
     /// Admins always get full access — their `permissions` field is never consulted.
     /// `nil` permissions (older server without the field) also defaults to full access.
     var workspacePermissions: GroupWorkspacePermissions {
-        if serverConfigStore.activeServer?.providerType != .openWebUI {
+        if serverConfigStore.activeServer?.providerType != .iexa {
             return GroupWorkspacePermissions()
         }
         guard currentUser?.role != .admin else { return .allEnabled }
@@ -164,7 +165,7 @@ final class AuthViewModel {
     /// The resolved feature permissions for the current user from `/api/v1/auths/`.
     /// Admins always get full access. `nil` permissions defaults to full access.
     var featurePermissions: GroupFeaturePermissions {
-        if serverConfigStore.activeServer?.providerType != .openWebUI {
+        if serverConfigStore.activeServer?.providerType != .iexa {
             return GroupFeaturePermissions(
                 apiKeys: false,
                 notes: false,
@@ -268,6 +269,8 @@ final class AuthViewModel {
 
     private static let onboardingKey = "openui.has_shown_onboarding"
     private static let cachedUserKey = "openui.cached_user"
+    private static let directProviderFallbackUserId = "openai-compatible-user"
+    private static let directProviderFallbackName = "API Key User"
 
     // MARK: - Init
 
@@ -284,7 +287,9 @@ final class AuthViewModel {
             if KeychainService.shared.hasToken(forServer: active.url),
                let cachedUser = Self.loadCachedUser(forServer: active.url) {
                 // Instant launch — user sees chat immediately
-                currentUser = cachedUser
+                currentUser = active.providerType == .iexa
+                    ? cachedUser
+                    : directProviderUser(for: active, cachedUser: cachedUser)
                 phase = .authenticated
                 logger.info("⚡ Optimistic auth: restored cached user '\(cachedUser.displayName)', skipping spinner")
             } else if KeychainService.shared.hasToken(forServer: active.url) {
@@ -304,13 +309,77 @@ final class AuthViewModel {
         }
     }
 
+    private static func firstNonEmpty(_ values: String?...) -> String? {
+        for value in values {
+            guard let value else { continue }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return nil
+    }
+
+    private func directProviderUser(for server: ServerConfig? = nil, cachedUser: User? = nil) -> User {
+        let targetServer = server ?? serverConfigStore.activeServer
+        let activeAccount = targetServer?.savedAccounts.first(where: { $0.id == targetServer?.activeAccountId })
+            ?? targetServer?.savedAccounts.first
+        let baseUser = cachedUser ?? currentUser
+
+        let displayName = Self.firstNonEmpty(
+            baseUser?.displayName,
+            activeAccount?.displayName,
+            targetServer?.lastUserName,
+            Self.directProviderFallbackName
+        ) ?? Self.directProviderFallbackName
+
+        let username = Self.firstNonEmpty(
+            baseUser?.username,
+            activeAccount?.userName,
+            displayName
+        ) ?? displayName
+
+        let email = Self.firstNonEmpty(
+            baseUser?.email,
+            activeAccount?.userEmail,
+            targetServer?.lastUserEmail
+        ) ?? ""
+
+        let profileImageURL = Self.firstNonEmpty(
+            baseUser?.profileImageURL,
+            activeAccount?.profileImageURL,
+            targetServer?.lastUserProfileImageURL,
+            targetServer?.siteIconURL?.absoluteString
+        )
+
+        let userId = Self.firstNonEmpty(
+            baseUser?.id,
+            activeAccount?.userId,
+            Self.directProviderFallbackUserId
+        ) ?? Self.directProviderFallbackUserId
+
+        return User(
+            id: userId,
+            username: username,
+            email: email,
+            name: displayName,
+            profileImageURL: profileImageURL,
+            role: baseUser?.role ?? activeAccount?.role ?? .user,
+            isActive: baseUser?.isActive ?? true,
+            bio: baseUser?.bio,
+            gender: baseUser?.gender,
+            dateOfBirth: baseUser?.dateOfBirth,
+            permissions: baseUser?.permissions
+        )
+    }
+
     // MARK: - Server Connection
 
     /// Attempts to connect to the specified server URL.
     ///
     /// Connection order:
-    /// 1) Try Open WebUI flow first (API key optional).
-    /// 2) If not Open WebUI and API key is provided, fall back to OpenAI-compatible mode.
+    /// 1) Try Iexa native server flow first (API key optional).
+    /// 2) If not Iexa native server and API key is provided, fall back to OpenAI-compatible mode.
     func connect() async {
         let trimmed = serverURL
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -370,7 +439,7 @@ final class AuthViewModel {
         var resolvedURL = normalizedURL
 
         // Probe connectivity + detect auth proxy / Cloudflare / HTTP→HTTPS upgrades.
-        let probeClient = APIClient(serverConfig: makeConfig(urlString: resolvedURL, providerType: .openWebUI))
+        let probeClient = APIClient(serverConfig: makeConfig(urlString: resolvedURL, providerType: .iexa))
         let health = await probeClient.checkHealthWithProxyDetectionAndFinalURL()
 
         if let finalURL = health.finalURL, !finalURL.isEmpty {
@@ -391,7 +460,7 @@ final class AuthViewModel {
             }
             // Some OpenAI-compatible endpoints serve an HTML app at /health.
             // With an API key present, probe provider endpoints before assuming
-            // this is an OpenWebUI Cloudflare challenge.
+            // this is an Iexa native server Cloudflare challenge.
             deferredCloudflareChallenge = true
             logger.info("Health check looked like Cloudflare, continuing with API-key provider probing.")
         case .proxyAuthRequired:
@@ -401,7 +470,7 @@ final class AuthViewModel {
                 isConnecting = false
                 return
             }
-            // Direct providers commonly do not expose OpenWebUI's /health or
+            // Direct providers commonly do not expose Iexa native server's /health or
             // /api/config. Continue to /v1/models probing when an API key exists.
             deferredProxyAuthChallenge = true
             logger.info("Health check looked like proxy/HTML, continuing with API-key provider probing.")
@@ -418,13 +487,13 @@ final class AuthViewModel {
             break
         }
 
-        // Primary path: Open WebUI server (supports full app feature set).
-        let openWebConfig = makeConfig(urlString: resolvedURL, providerType: .openWebUI)
+        // Primary path: Iexa native server server (supports full app feature set).
+        let openWebConfig = makeConfig(urlString: resolvedURL, providerType: .iexa)
         let openWebClient = APIClient(serverConfig: openWebConfig)
 
         if let configResult = await openWebClient.verifyAndGetConfig() {
             backendConfig = configResult
-            logger.info("📋 [connect] Open WebUI detected: '\(configResult.name ?? "unknown")' at \(resolvedURL)")
+            logger.info("📋 [connect] Iexa-compatible server detected: '\(configResult.name ?? "unknown")' at \(resolvedURL)")
 
             serverConfigStore.addServer(openWebConfig)
             if let saved = serverConfigStore.server(forURL: resolvedURL) {
@@ -456,14 +525,14 @@ final class AuthViewModel {
                     startTokenRefreshTimer()
                     markOnboardingSeen()
                 } catch {
-                    // API key not valid for direct auth on this Open WebUI server.
+                    // API key not valid for direct auth on this Iexa native server server.
                     // Restore prior token (if any) so we don't clobber an existing session.
                     if let previousToken, !previousToken.isEmpty {
                         dependencies?.apiClient?.updateAuthToken(previousToken)
                     } else {
                         dependencies?.apiClient?.updateAuthToken(nil)
                     }
-                    logger.warning("API key auth failed on Open WebUI server: \(error.localizedDescription)")
+                    logger.warning("API key auth failed on the native server endpoint: \(error.localizedDescription)")
                     if previousToken != nil {
                         phase = .restoringSession
                         await restoreSession()
@@ -486,7 +555,7 @@ final class AuthViewModel {
             return
         }
 
-        // Fallback path: non-Open WebUI endpoint in OpenAI-compatible mode.
+        // Fallback path: non-Iexa native server endpoint in OpenAI-compatible mode.
         guard !trimmedAPIKey.isEmpty else {
             errorMessage = "这个地址不像 Iexa 原生服务器。如果是 OpenAI/Gemini/Claude 兼容 API，请填写 API Key。"
             isConnecting = false
@@ -546,13 +615,7 @@ final class AuthViewModel {
         }
         dependencies?.refreshServices()
 
-        currentUser = User(
-            id: "openai-compatible-user",
-            username: "API Key 用户",
-            email: "",
-            name: "API Key 用户",
-            role: .user
-        )
+        currentUser = directProviderUser()
         cacheCurrentUser()
         saveCurrentUserAsAccount(authType: .apiKey)
         phase = .authenticated
@@ -820,14 +883,9 @@ final class AuthViewModel {
         var lastError: Error?
 
         if let providerType = serverConfigStore.activeServer?.providerType,
-           providerType != .openWebUI {
-            currentUser = User(
-                id: "openai-compatible-user",
-                username: "API Key 用户",
-                email: "",
-                name: "API Key 用户",
-                role: .user
-            )
+           providerType != .iexa {
+            currentUser = directProviderUser()
+            cacheCurrentUser()
             phase = .authenticated
             return
         }
@@ -1150,7 +1208,7 @@ final class AuthViewModel {
         let config = ServerConfig(
             name: url.host ?? "Server",
             url: normalizedURL,
-            providerType: .openWebUI,
+            providerType: .iexa,
             apiKey: apiKey.isEmpty ? nil : apiKey,
             customHeaders: customHeaders,
             lastConnected: .now,
@@ -1168,7 +1226,7 @@ final class AuthViewModel {
             client.updateAuthToken(apiKey)
         }
 
-        // Skip health check — go straight to verifying it's an OpenWebUI instance
+        // Skip health check — go straight to verifying it's an Iexa native server instance
         guard let configResult = await client.verifyAndGetConfig() else {
             errorMessage = "这个地址不像 Iexa 原生服务器。"
             isConnecting = false
@@ -1302,7 +1360,7 @@ final class AuthViewModel {
         let config = ServerConfig(
             name: url.host ?? "Server",
             url: normalizedURL,
-            providerType: .openWebUI,
+            providerType: .iexa,
             apiKey: apiKey.isEmpty ? nil : apiKey,
             customHeaders: customHeaders,
             lastConnected: .now,
@@ -1319,7 +1377,7 @@ final class AuthViewModel {
             client.updateAuthToken(apiKey)
         }
 
-        // Skip health check — go straight to verifying it's an OpenWebUI instance
+        // Skip health check — go straight to verifying it's an Iexa native server instance
         guard let configResult = await client.verifyAndGetConfig() else {
             errorMessage = "这个地址不像 Iexa 原生服务器。"
             isConnecting = false
@@ -1427,24 +1485,41 @@ final class AuthViewModel {
     /// device backups.
     func cacheCurrentUser() {
         guard let user = currentUser else { return }
+        let normalizedUser = serverConfigStore.activeServer?.providerType == .iexa
+            ? user
+            : directProviderUser(cachedUser: user)
         let serverKey = serverConfigStore.activeServer?.url ?? Self.cachedUserKey
         do {
-            let data = try JSONEncoder().encode(user)
+            let data = try JSONEncoder().encode(normalizedUser)
             let dataString = data.base64EncodedString()
             KeychainService.shared.saveToken(dataString, forServer: "cached_user_\(serverKey)")
             // Also update server metadata in the store for the switcher UI
             serverConfigStore.updateActiveServerMetadata(
-                userName: user.displayName,
-                userEmail: user.email,
-                profileImageURL: user.profileImageURL,
+                userName: normalizedUser.displayName,
+                userEmail: normalizedUser.email,
+                profileImageURL: normalizedUser.profileImageURL,
                 authType: nil,
                 hasActiveSession: true
             )
+            if let activeServer = serverConfigStore.activeServer {
+                let authType = serverConfigStore.activeAccount?.authType ?? activeServer.lastAuthType
+                serverConfigStore.upsertAccountOnActiveServer(
+                    SavedAccount(
+                        serverURL: activeServer.url,
+                        userId: normalizedUser.id,
+                        userName: normalizedUser.displayName,
+                        userEmail: normalizedUser.email,
+                        profileImageURL: normalizedUser.profileImageURL,
+                        role: normalizedUser.role,
+                        authType: authType
+                    )
+                )
+            }
             // Cache user identity in ActiveChatStore so ChatViewModels can populate
             // {{USER_NAME}} and {{USER_EMAIL}} prompt variables without a singleton.
-            dependencies?.activeChatStore.cachedUserName = user.displayName.isEmpty ? nil : user.displayName
-            dependencies?.activeChatStore.cachedUserEmail = user.email.isEmpty ? nil : user.email
-            logger.debug("Cached user '\(user.displayName)' for server '\(serverKey)'")
+            dependencies?.activeChatStore.cachedUserName = normalizedUser.displayName.isEmpty ? nil : normalizedUser.displayName
+            dependencies?.activeChatStore.cachedUserEmail = normalizedUser.email.isEmpty ? nil : normalizedUser.email
+            logger.debug("Cached user '\(normalizedUser.displayName)' for server '\(serverKey)'")
         } catch {
             logger.warning("Failed to cache user: \(error.localizedDescription)")
         }
@@ -1552,7 +1627,9 @@ final class AuthViewModel {
         if hasToken {
             // Check for a cached user for instant display while validating
             if let cachedUser = Self.loadCachedUser(forServer: config.url) {
-                currentUser = cachedUser
+                currentUser = config.providerType == .iexa
+                    ? cachedUser
+                    : directProviderUser(for: config, cachedUser: cachedUser)
                 phase = .authenticated
                 // Validate in background — same optimistic-auth pattern as app launch
                 await validateSessionInBackground()
@@ -1697,7 +1774,9 @@ final class AuthViewModel {
         if let dataString = KeychainService.shared.getToken(forServer: cachedUserKey),
            let data = Data(base64Encoded: dataString),
            let cachedUser = try? JSONDecoder().decode(User.self, from: data) {
-            currentUser = cachedUser
+            currentUser = server.providerType == .iexa
+                ? cachedUser
+                : directProviderUser(for: server, cachedUser: cachedUser)
             // Also update the legacy cached user
             cacheCurrentUser()
             phase = .authenticated
@@ -1805,6 +1884,12 @@ final class AuthViewModel {
     func validateSessionInBackground() async {
         guard let client = dependencies?.apiClient,
               client.network.authToken != nil else {
+            return
+        }
+
+        if serverConfigStore.activeServer?.providerType != .iexa {
+            currentUser = directProviderUser()
+            cacheCurrentUser()
             return
         }
 

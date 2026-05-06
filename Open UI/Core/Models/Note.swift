@@ -3,7 +3,7 @@ import Foundation
 /// Represents a note with markdown content and optional local/server attachments.
 ///
 /// Supports both local-only mode and server-backed mode. When fetched from the
-/// OpenWebUI server, notes use the `/api/v1/notes/` endpoints. The server stores
+/// Iexa native server server, notes use the `/api/v1/notes/` endpoints. The server stores
 /// content in a nested structure: `data.content.md` for markdown, `data.content.html`
 /// for HTML. This model flattens that to a single `content` string (markdown).
 struct Note: Codable, Identifiable, Hashable, Sendable {
@@ -44,7 +44,7 @@ struct Note: Codable, Identifiable, Hashable, Sendable {
 
     // MARK: - Server JSON Parsing
 
-    /// Creates a `Note` from the OpenWebUI server JSON format.
+    /// Creates a `Note` from the Iexa native server server JSON format.
     ///
     /// The server sends timestamps as nanoseconds since epoch. Content is nested
     /// under `data.content.md` (markdown) and `data.content.html`. This matches
@@ -73,7 +73,7 @@ struct Note: Codable, Identifiable, Hashable, Sendable {
         )
     }
 
-    /// Parses an OpenWebUI timestamp which may be nanoseconds, microseconds,
+    /// Parses an Iexa native server timestamp which may be nanoseconds, microseconds,
     /// milliseconds, or seconds since epoch.
     private static func parseTimestamp(_ value: Any?) -> Date {
         guard let value else { return .now }

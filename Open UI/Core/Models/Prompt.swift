@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - Prompt Model
 
-/// Represents a prompt from the Open WebUI Prompt Library.
+/// Represents a prompt from the Iexa native server Prompt Library.
 /// Matches the server's `PromptModel` schema from `GET /api/v1/prompts/`.
 struct PromptItem: Identifiable, Hashable, Sendable {
     let id: String

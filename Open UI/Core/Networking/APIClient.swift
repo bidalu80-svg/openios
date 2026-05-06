@@ -1,7 +1,7 @@
 import Foundation
 import os.log
 
-/// High-level client for the OpenWebUI REST API, built on top of `NetworkManager`.
+/// High-level client for the Iexa native server REST API, built on top of `NetworkManager`.
 final class APIClient: @unchecked Sendable {
     let network: NetworkManager
     private let logger = Logger(subsystem: "com.openui", category: "API")
@@ -32,7 +32,7 @@ final class APIClient: @unchecked Sendable {
 
     private var modelsPath: String {
         switch network.serverConfig.providerType {
-        case .openWebUI:
+        case .iexa:
             return "/api/models"
         case .openAICompatible, .gemini, .anthropic:
             return "/models"
@@ -41,7 +41,7 @@ final class APIClient: @unchecked Sendable {
 
     private var chatCompletionsPath: String {
         switch network.serverConfig.providerType {
-        case .openWebUI:
+        case .iexa:
             return "/api/chat/completions"
         case .openAICompatible, .gemini:
             return "/chat/completions"
@@ -52,7 +52,7 @@ final class APIClient: @unchecked Sendable {
 
     private func chatCompletionBody(for request: ChatCompletionRequest) -> [String: Any] {
         switch network.serverConfig.providerType {
-        case .openWebUI:
+        case .iexa:
             return request.toJSON()
         case .openAICompatible, .gemini:
             return request.toOpenAICompatibleJSON()
@@ -274,7 +274,7 @@ final class APIClient: @unchecked Sendable {
 
     func verifyAndGetConfig() async -> BackendConfig? {
         guard let config = try? await getBackendConfig(),
-              config.isValidOpenWebUI
+              config.isValidIexaServer
         else { return nil }
         return config
     }
@@ -1040,7 +1040,7 @@ final class APIClient: @unchecked Sendable {
     /// Sends a pipe-model chat completion request and streams the SSE response
     /// directly from the HTTP response body.
     ///
-    /// Pipe/function models in OpenWebUI bypass the Redis async-task queue when
+    /// Pipe/function models in Iexa native server bypass the Redis async-task queue when
     /// `session_id`, `chat_id`, and `id` are absent from the request. Instead,
     /// they stream their output as standard OpenAI-format SSE in the HTTP response
     /// body. This method posts the request and returns the live `SSEStream` for
@@ -2309,7 +2309,7 @@ final class APIClient: @unchecked Sendable {
 
     /// GET /api/v1/tools/id/{id}/valves/spec — same as above, but also returns the
     /// property keys in their original JSON insertion order so the UI can match the
-    /// ordering shown in OpenWebUI.
+    /// ordering shown in Iexa native server.
     ///
     /// `JSONSerialization` returns an unordered `[String: Any]` dictionary, so we
     /// parse the raw bytes a second time with a lightweight scanner to extract the
@@ -3240,7 +3240,7 @@ final class APIClient: @unchecked Sendable {
     // MARK: - Title Generation
 
     /// Generates a title via `POST /api/v1/tasks/title/completions`.
-    /// Handles multiple response formats across OpenWebUI versions.
+    /// Handles multiple response formats across Iexa native server versions.
     func generateTitle(model: String, messages: [[String: Any]], chatId: String? = nil) async throws -> String? {
         var body: [String: Any] = [
             "model": model,
@@ -3498,7 +3498,7 @@ final class APIClient: @unchecked Sendable {
                     }
                 }
                 // Parse function_calling mode from info.params.
-                // OpenWebUI stores this as: info.params.function_calling = "native" | ""
+                // Iexa native server stores this as: info.params.function_calling = "native" | ""
                 // When "native", the model performs native tool calling.
                 // When absent/empty, the server uses its default (non-native) handling.
                 if let params = info["params"] as? [String: Any] {
@@ -3690,7 +3690,7 @@ final class APIClient: @unchecked Sendable {
         }
 
         // Parse top-level tasks array from the conversation JSON.
-        // OpenWebUI stores tasks at the root level of the chat object
+        // Iexa native server stores tasks at the root level of the chat object
         // (alongside "id", "title", "chat", etc.) — NOT inside "chat".
         let tasks: [ChatTask] = (json["tasks"] as? [[String: Any]])?.compactMap { t in
             guard let taskId = t["id"] as? String,
@@ -3780,7 +3780,7 @@ final class APIClient: @unchecked Sendable {
         return ordered.compactMap { msgData -> ChatMessage? in
             guard var message = parseSingleMessage(msgData) else { return nil }
 
-            // Attach sibling versions (OpenWebUI regeneration/edit history)
+            // Attach sibling versions (Iexa native server regeneration/edit history)
             let parentId = msgData["parentId"] as? String
             let msgId = msgData["id"] as? String
             let msgRole = msgData["role"] as? String
@@ -3994,7 +3994,7 @@ final class APIClient: @unchecked Sendable {
 
         var timestamp = Date()
         if let ts = msg["timestamp"] as? Double {
-            // OpenWebUI may send seconds or milliseconds
+            // Iexa native server may send seconds or milliseconds
             timestamp = ts > 1_000_000_000_000
                 ? Date(timeIntervalSince1970: ts / 1000)
                 : Date(timeIntervalSince1970: ts)
@@ -4059,7 +4059,7 @@ final class APIClient: @unchecked Sendable {
 
         let followUps = msg["followUps"] as? [String] ?? msg["follow_ups"] as? [String] ?? []
 
-        // Parse message-level embeds — OpenWebUI stores Rich UI HTML here when the
+        // Parse message-level embeds — Iexa native server stores Rich UI HTML here when the
         // tool call's <details> block has an empty embeds="" attribute.
         // Each entry is a full HTML string (audio player, image card, etc.).
         let embeds: [String] = {
@@ -4358,7 +4358,7 @@ final class APIClient: @unchecked Sendable {
         // Build the params dict — start with chatParams overrides (if any),
         // then layer in the system prompt so both are persisted together.
         var paramsDict: [String: Any] = chatParams?.toRequestParams() ?? [:]
-        // Also write system into params so Open WebUI's web UI shows it correctly.
+        // Also write system into params so Iexa native server's web UI shows it correctly.
         if let systemPrompt, !systemPrompt.trimmingCharacters(in: .whitespaces).isEmpty {
             paramsDict["system"] = systemPrompt
         } else if let sp = chatParams?.systemPrompt, !sp.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -4380,7 +4380,7 @@ final class APIClient: @unchecked Sendable {
         ]
 
         // Also write system at the top-level chat key for backwards compatibility
-        // (some older Open WebUI versions read chat.system instead of chat.params.system).
+        // (some older Iexa native server versions read chat.system instead of chat.params.system).
         if let systemPrompt, !systemPrompt.trimmingCharacters(in: .whitespaces).isEmpty {
             chat["system"] = systemPrompt
         } else if let sp = chatParams?.systemPrompt, !sp.trimmingCharacters(in: .whitespaces).isEmpty {

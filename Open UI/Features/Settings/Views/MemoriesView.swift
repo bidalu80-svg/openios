@@ -22,7 +22,7 @@ struct MemoriesView: View {
     @State private var isLoadingMemoryToggle = false
 
     private var usesLocalMemories: Bool {
-        dependencies.apiClient?.providerType != .openWebUI
+        dependencies.apiClient?.providerType != .iexa
     }
 
     private var memoryServerURL: String {

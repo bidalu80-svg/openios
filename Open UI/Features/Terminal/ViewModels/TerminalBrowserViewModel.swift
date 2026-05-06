@@ -5,7 +5,7 @@ import os.log
 ///
 /// Handles directory navigation, file operations (create, delete, upload, download),
 /// and command execution on the terminal server. All operations are proxied through
-/// the Open WebUI backend.
+/// the Iexa native server backend.
 @MainActor @Observable
 final class TerminalBrowserViewModel {
     // MARK: - State

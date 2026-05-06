@@ -154,7 +154,7 @@ final class NetworkManager: NSObject, Sendable {
                 request.setValue(token, forHTTPHeaderField: "x-api-key")
                 request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
                 request.setValue("true", forHTTPHeaderField: "anthropic-dangerous-direct-browser-access")
-            case .openWebUI, .openAICompatible, .gemini:
+            case .iexa, .openAICompatible, .gemini:
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
         }

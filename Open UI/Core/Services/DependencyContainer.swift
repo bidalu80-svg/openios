@@ -421,7 +421,7 @@ final class AppDependencyContainer: ServiceContainer {
         socketService?.dispose()
 
         let token = KeychainService.shared.getToken(forServer: config.url)
-        if config.providerType == .openWebUI {
+        if config.providerType == .iexa {
             socketService = SocketIOService(serverConfig: config, authToken: token)
             // Wire socket state to the dependency container's observable property
             wireSocketStateTracking()

@@ -918,7 +918,7 @@ struct MainChatView: View {
                 if let folderManager = dependencies.folderManager {
                     listViewModel.folderViewModel.configure(with: folderManager)
                 }
-                // Configure and load channels only for OpenWebUI servers.
+                // Configure and load channels only for Iexa native server servers.
                 if !usesDirectProvider, let apiClient = dependencies.apiClient {
                     var userId = dependencies.authViewModel.currentUser?.id
                     if userId == nil || userId?.isEmpty == true {
@@ -2146,7 +2146,7 @@ struct MainChatView: View {
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .contextMenu {
-                    // Share is an OpenWebUI server feature.
+                    // Share is an Iexa native server server feature.
                     if !usesDirectProvider {
                         Button {
                             sharingConversation = conversation
@@ -2196,7 +2196,7 @@ struct MainChatView: View {
                         )
                     }
 
-                    // Clone uses the OpenWebUI chats API.
+                    // Clone uses the Iexa native server chats API.
                     if !usesDirectProvider {
                         Button {
                             Task {

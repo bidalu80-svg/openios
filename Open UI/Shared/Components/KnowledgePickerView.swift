@@ -4,7 +4,7 @@ import SwiftUI
 
 /// A floating popup that appears above the chat input when the user types `#`.
 ///
-/// Shows three sections matching the OpenWebUI web client:
+/// Shows three sections matching the Iexa native server web client:
 /// - **Folders**: Chat folders
 /// - **Collections**: Knowledge bases (document groups with embeddings)
 /// - **Files**: Knowledge-associated files (not raw uploads)

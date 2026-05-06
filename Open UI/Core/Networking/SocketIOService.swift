@@ -29,7 +29,7 @@ extension SocketConnectionState: Equatable {
 ///
 /// Implements the Engine.IO v4 / Socket.IO v4 protocol on top of native
 /// `URLSession` WebSockets, providing real-time event handling for
-/// OpenWebUI chat events without requiring an external library.
+/// Iexa native server chat events without requiring an external library.
 ///
 /// Key features:
 /// - Automatic handshake and upgrade from polling to WebSocket
@@ -935,7 +935,7 @@ final class SocketIOService: NSObject, @unchecked Sendable, URLSessionWebSocketD
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.heartbeatTimer?.invalidate()
-            // OpenWebUI expects a heartbeat event every 30 seconds
+            // Iexa native server expects a heartbeat event every 30 seconds
             self.heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] timer in
                 guard let self, self.isConnected else {
                     timer.invalidate()

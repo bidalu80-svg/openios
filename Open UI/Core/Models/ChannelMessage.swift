@@ -29,7 +29,7 @@ enum ChannelSocketEventType: String {
 /// ChannelMessage represents multi-user collaborative messages with reactions, threads,
 /// pinning, and user attribution.
 ///
-/// Based on the exact `MessageUserResponse` schema from the Open WebUI API:
+/// Based on the exact `MessageUserResponse` schema from the Iexa native server API:
 /// - `reply_count` (int) — number of thread replies
 /// - `latest_reply_at` (int|null) — timestamp of most recent reply
 /// - `data` (boolean|null) — NOT an object
@@ -152,7 +152,7 @@ struct ChannelMessage: Identifiable, Hashable, Sendable {
         Self.parseMentions(in: content)
     }
     
-    /// Parses Open WebUI mention and channel-link formats into human-readable text.
+    /// Parses Iexa native server mention and channel-link formats into human-readable text.
     /// - `<@U:id|name>` / `<@M:id|name>` → `@name`
     /// - `<#C:id|name>` (or legacy `<#id|name>`) → `#name`
     static func parseMentions(in text: String) -> String {

@@ -576,10 +576,20 @@ struct RootView: View {
                 // Only fires if a user + baseURL are known at this point;
                 // if restoreSession hasn't completed yet, the avatar is prefetched
                 // once currentUser becomes available via the .task block below.
-                if let userId = viewModel.currentUser?.id,
-                   let baseURL = dependencies.apiClient?.baseURL,
-                   !userId.isEmpty, !baseURL.isEmpty,
-                   let avatarURL = URL(string: "\(baseURL)/api/v1/users/\(userId)/profile/image?v=\(viewModel.profileImageVersion)") {
+                let avatarURL: URL? = {
+                    guard let user = viewModel.currentUser else { return nil }
+                    if dependencies.apiClient?.providerType != .iexa {
+                        return dependencies.serverConfigStore.activeServer?.resolvedImageURL(from: user.profileImageURL)
+                            ?? dependencies.serverConfigStore.activeServer?.siteIconURL
+                    }
+                    if let external = dependencies.serverConfigStore.activeServer?.resolvedImageURL(from: user.profileImageURL) {
+                        return external
+                    }
+                    guard let baseURL = dependencies.apiClient?.baseURL,
+                          !user.id.isEmpty, !baseURL.isEmpty else { return nil }
+                    return URL(string: "\(baseURL)/api/v1/users/\(user.id)/profile/image?v=\(viewModel.profileImageVersion)")
+                }()
+                if let avatarURL {
                     Task {
                         await ImageCacheService.shared.prefetchUserAvatar(
                             url: avatarURL,

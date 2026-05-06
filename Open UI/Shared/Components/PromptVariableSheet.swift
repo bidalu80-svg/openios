@@ -7,7 +7,7 @@ import SwiftUI
 /// Shown when the user selects a prompt that contains custom input variables
 /// (e.g., `{{topic}}`, `{{priority | select:options=["High","Low"]}}`).
 ///
-/// Supports all Open WebUI variable types: text, textarea, select, number,
+/// Supports all Iexa native server variable types: text, textarea, select, number,
 /// checkbox, date, datetime-local, color, email, range, tel, time, url.
 ///
 /// Required fields are marked with an asterisk and validated before submission.

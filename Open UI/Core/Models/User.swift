@@ -1,6 +1,6 @@
 import Foundation
 
-/// Represents an authenticated user from the OpenWebUI server.
+/// Represents an authenticated user from the Iexa native server server.
 struct User: Codable, Identifiable, Sendable {
     let id: String
     var username: String

@@ -255,7 +255,7 @@ final class ChatViewModel {
 
     private var isOpenAICompatibleProvider: Bool {
         guard let providerType = manager?.providerType else { return false }
-        return providerType != .openWebUI
+        return providerType != .iexa
     }
 
     private var currentProviderType: ServerConfig.ProviderType? {
@@ -385,7 +385,7 @@ final class ChatViewModel {
     /// The attachment's `uploadStatus` will progress: uploading → completed/error.
     /// The send button is blocked while any attachment has `isUploading == true`.
     /// Scrapes a webpage URL and turns it into a text attachment.
-    /// Direct API providers do not expose Iexa/OpenWebUI retrieval endpoints, so
+    /// Direct API providers do not expose Iexa/Iexa native server retrieval endpoints, so
     /// they keep the text inline and send it with the next model request.
     func processWebURL(urlString: String) {
         var normalised = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -412,7 +412,7 @@ final class ChatViewModel {
         Task {
             do {
                 let content: String
-                if let apiClient = manager?.apiClient, apiClient.providerType == .openWebUI {
+                if let apiClient = manager?.apiClient, apiClient.providerType == .iexa {
                     do {
                         content = try await apiClient.processWebPage(url: normalised)
                     } catch {
@@ -437,7 +437,7 @@ final class ChatViewModel {
                     attachments[idx].data = textData
                 }
 
-                guard let mgr = manager, mgr.providerType == .openWebUI else {
+                guard let mgr = manager, mgr.providerType == .iexa else {
                     if let idx = attachments.firstIndex(where: { $0.id == attachmentId }) {
                         attachments[idx].uploadStatus = .completed
                         attachments[idx].uploadError = nil
@@ -446,7 +446,7 @@ final class ChatViewModel {
                     return
                 }
 
-                // OpenWebUI/Iexa server mode: upload through the normal files pipeline
+                // Iexa native server/Iexa server mode: upload through the normal files pipeline
                 // so server-side RAG can process it.
                 let fileResult: (String, [String: Any])
                 do {
@@ -2326,7 +2326,7 @@ final class ChatViewModel {
     /// Called when the user selects a skill from the `$` picker.
     ///
     /// Replaces the `$query` token with `<$slug|slug> ` in the input text
-    /// (matching the Open WebUI wire format), and records the skill ID in
+    /// (matching the Iexa native server wire format), and records the skill ID in
     /// `selectedSkillIds` so it is sent as `skill_ids` in the API request.
     func selectSkill(_ skill: SkillItem) {
         // Use the web UI format: <$slug|slug>
@@ -3033,7 +3033,7 @@ final class ChatViewModel {
         // Create user message - store file IDs (not base64) matching Flutter behavior
         let uploadedAttachmentIds = fileRefs.compactMap { $0["id"] as? String }
         var messageFiles: [ChatMessageFile] = fileRefs.map { ref in
-            // Derive content_type from filename so the Open WebUI web client
+            // Derive content_type from filename so the Iexa native server web client
             // knows to append `/content` to the file URL. Without content_type,
             // the web client constructs `/files/{id}` (returns JSON metadata)
             // instead of `/files/{id}/content` (returns actual file bytes).
@@ -3370,7 +3370,7 @@ final class ChatViewModel {
                 }
                 if !allFileRefs.isEmpty { request.files = allFileRefs }
 
-                // Build the user_message node required by updated OpenWebUI servers.
+                // Build the user_message node required by updated Iexa native server servers.
                 // Without this, the server doesn't link the user message into the history
                 // tree, causing it to disappear when the chat is re-opened.
                 var userMsgDict: [String: Any] = [
@@ -3396,7 +3396,7 @@ final class ChatViewModel {
                 if capturedUseSSEFallback {
                     // ── HTTP + POLLING FALLBACK ──
                     // Socket.IO is unavailable (e.g., Cloudflare blocks WebSocket).
-                    // OpenWebUI delivers content via socket events, not SSE — so we
+                    // Iexa native server delivers content via socket events, not SSE — so we
                     // use HTTP POST + aggressive server polling to pick up content
                     // in near-real-time. Poll every 1.5s with no initial delay.
                     self.logger.info("Using HTTP + polling fallback (no socket)")
@@ -3642,13 +3642,13 @@ final class ChatViewModel {
     ///
     /// If the targeted message is NOT the last assistant message, all messages
     /// after it are removed first (truncating the conversation to that point),
-    /// matching the OpenWebUI web client's regeneration behavior for mid-conversation
+    /// matching the Iexa native server web client's regeneration behavior for mid-conversation
     /// messages.
     func regenerateResponse(messageId: String) async {
         guard !isStreaming || isExternallyStreaming else { return }
         guard conversation != nil else { return }
 
-        // ── Tree-first regeneration (replicates OpenWebUI exactly) ──────────
+        // ── Tree-first regeneration (replicates Iexa native server exactly) ──────────
         // 1. Look up the old assistant node in the history tree.
         //    If the tree isn't populated yet, bootstrap it from the flat list.
         if !conversation!.history.isPopulated {
@@ -3868,7 +3868,7 @@ final class ChatViewModel {
 
     /// Edits a user message by creating a proper new branch.
     ///
-    /// This matches OpenWebUI's tree model exactly:
+    /// This matches Iexa native server's tree model exactly:
     /// - The OLD user message becomes a "version" (sibling node) storing its content,
     ///   the old assistant response, any regeneration versions on that assistant,
     ///   and ALL downstream messages (messages after the user+assistant pair).
@@ -3885,7 +3885,7 @@ final class ChatViewModel {
         guard !isStreaming || isExternallyStreaming else { return }
         guard conversation != nil else { return }
 
-        // ── Tree-first edit (replicates OpenWebUI exactly) ─────────────────
+        // ── Tree-first edit (replicates Iexa native server exactly) ─────────────────
         // 1. Look up the old user node in the history tree.
         //    If the tree isn't populated yet, bootstrap it from the flat list.
         if !conversation!.history.isPopulated {
@@ -3959,7 +3959,7 @@ final class ChatViewModel {
 
     /// Restores an old user message branch by switching `history.currentId` to the
     /// selected sibling's deepest leaf, then re-deriving the flat message list from
-    /// the tree. Matches OpenWebUI's `showMessage()` function exactly.
+    /// the tree. Matches Iexa native server's `showMessage()` function exactly.
     ///
     /// - Parameters:
     ///   - userMessageId: The ID of the user message currently on the active branch.
@@ -3992,7 +3992,7 @@ final class ChatViewModel {
     /// `history.currentId` to the selected sibling's deepest leaf, then
     /// re-deriving the flat message list from the tree.
     ///
-    /// Matches OpenWebUI's `showMessage()` function: change currentId, re-derive.
+    /// Matches Iexa native server's `showMessage()` function: change currentId, re-derive.
     ///
     /// - Parameters:
     ///   - assistantMessageId: The ID of the assistant message currently active.
@@ -4232,7 +4232,7 @@ final class ChatViewModel {
     }
 
     /// Deletes a specific message (and its entire descendant subtree) from the
-    /// conversation tree. Matches OpenWebUI's tree-based `deleteMessage()`:
+    /// conversation tree. Matches Iexa native server's tree-based `deleteMessage()`:
     ///
     /// 1. Remove the node from its parent's `childrenIds`
     /// 2. Remove the node and all descendants from `history.nodes`
@@ -5282,7 +5282,7 @@ final class ChatViewModel {
     }
 
     /// Syncs the UI toggles (web search pill, selected tools) with the selected
-    /// model's server-configured defaults. Matches the OpenWebUI web client's
+    /// model's server-configured defaults. Matches the Iexa native server web client's
     /// `setDefaults()` which pre-enables features and tools from model metadata.
     ///
     /// Called on:
@@ -5548,7 +5548,7 @@ final class ChatViewModel {
     }
 
     /// Builds chat features by merging user toggles with the model's admin-configured
-    /// default features. Matches the OpenWebUI web client's `setDefaults()` + `getFeatures()`.
+    /// default features. Matches the Iexa native server web client's `setDefaults()` + `getFeatures()`.
     ///
     /// Memory is based solely on the user's account setting (`memoryEnabled`), matching
     /// the web client which sends `features.memory` based on `$user.settings.ui.memory`
@@ -5609,7 +5609,7 @@ final class ChatViewModel {
     }
 
     private func shouldUseDirectImageGeneration(modelId: String) -> Bool {
-        guard currentProviderType != .openWebUI else { return false }
+        guard currentProviderType != .iexa else { return false }
         if let selectedModel,
            Self.modelSupportsBuiltinFeature(selectedModel, key: "image_generation") {
             return true
@@ -5994,11 +5994,11 @@ final class ChatViewModel {
         )
     }
 
-    /// Parses OpenWebUI source payloads into ChatSourceReference objects.
-    /// Matches the Flutter `parseOpenWebUISourceList` logic which handles
+    /// Parses Iexa native server source payloads into ChatSourceReference objects.
+    /// Matches the Flutter `parseIexa native serverSourceList` logic which handles
     /// nested `source`, `document`, `metadata`, `distances` arrays.
     ///
-    /// OpenWebUI sends sources as:
+    /// Iexa native server sends sources as:
     /// ```json
     /// [{ "source": {...}, "document": ["...","..."],
     ///    "metadata": [{"source":"url1","name":"..."}, {"source":"url2",...}],
@@ -6120,7 +6120,7 @@ final class ChatViewModel {
     }
 
     private func extractErrorContent(from data: [String: Any]) -> String {
-        // Try multiple error formats used by OpenWebUI/LiteLLM
+        // Try multiple error formats used by Iexa native server/LiteLLM
         if let err = data["error"] {
             if let errMap = err as? [String: Any] {
                 if let content = errMap["content"] as? String, !content.isEmpty { return content }

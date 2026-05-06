@@ -43,7 +43,7 @@ extension MarkdownInlineNode {
             // only triggers lineSpacing (small gap). This gives us:
             //   - Lines within a stanza: tight spacing (lineSpacing ~4pt)
             //   - Between stanzas (\n\n = separate paragraph blocks): big gap (paragraphSpacing 16pt)
-            // This matches Open WebUI / ChatGPT rendering of poems and structured content.
+            // This matches Iexa / ChatGPT rendering of poems and structured content.
             return NSAttributedString(string: "\u{2028}", attributes: [
                 .font: theme.fonts.body,
                 .foregroundColor: theme.colors.body,

@@ -4,7 +4,7 @@ import Foundation
 
 /// Represents a knowledge source that can be attached to a chat message.
 ///
-/// Knowledge items come in three flavors matching the OpenWebUI web client:
+/// Knowledge items come in three flavors matching the Iexa native server web client:
 /// - **Folder**: A chat folder (shown at the top of the `#` picker)
 /// - **Collection**: A knowledge base (group of documents with embeddings)
 /// - **File**: A knowledge-associated file (not raw uploads — only files in knowledge bases)

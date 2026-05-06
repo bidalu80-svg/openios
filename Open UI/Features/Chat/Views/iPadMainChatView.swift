@@ -176,7 +176,7 @@ struct iPadMainChatView: View {
         )
         // Channel-specific lifecycle wiring
         .task {
-            // Configure and load channels only for OpenWebUI servers.
+            // Configure and load channels only for Iexa native server servers.
             if !usesDirectProvider, let apiClient = dependencies.apiClient {
                 var userId = dependencies.authViewModel.currentUser?.id
                 if userId == nil || userId?.isEmpty == true {
@@ -1654,7 +1654,7 @@ private struct iPadConversationContextMenu: View {
     var body: some View {
         let usesDirectProvider = dependencies.conversationManager?.usesLocalConversationStore == true
 
-        // Share is an OpenWebUI server feature.
+        // Share is an Iexa native server server feature.
         if !usesDirectProvider {
             Button {
                 sharingConversation = conversation
@@ -1698,7 +1698,7 @@ private struct iPadConversationContextMenu: View {
                   systemImage: conversation.pinned ? "pin.slash" : "pin")
         }
 
-        // Clone uses the OpenWebUI chats API.
+        // Clone uses the Iexa native server chats API.
         if !usesDirectProvider {
             Button {
                 Task {

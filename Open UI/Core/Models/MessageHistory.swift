@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - HistoryNode
 
-/// A single node in the OpenWebUI history tree.
+/// A single node in the Iexa native server history tree.
 ///
 /// Mirrors the server's `history.messages[id]` structure exactly so that
 /// parse ↔ serialize is a direct mapping with no lossy transformations.
@@ -229,7 +229,7 @@ struct HistoryNode: Codable, Sendable {
 
 // MARK: - MessageHistory
 
-/// The tree-based message history that mirrors OpenWebUI's `history` object.
+/// The tree-based message history that mirrors Iexa native server's `history` object.
 ///
 /// Contains a dictionary of `HistoryNode` values keyed by message ID, plus
 /// a `currentId` pointing to the leaf of the active branch. The flat
@@ -326,7 +326,7 @@ struct MessageHistory: Codable, Sendable {
     ///
     /// For root-level nodes (parentId == nil), returns all root nodes with the same role.
     /// The returned array is ordered: oldest first, newest last. The active sibling
-    /// (the one on the current branch) is typically last, matching OpenWebUI's convention.
+    /// (the one on the current branch) is typically last, matching Iexa native server's convention.
     func siblings(of nodeId: String) -> [String] {
         guard let node = nodes[nodeId] else { return [nodeId] }
 
@@ -347,7 +347,7 @@ struct MessageHistory: Codable, Sendable {
 
     /// Walks from a node to its deepest leaf by always following the last child.
     ///
-    /// In OpenWebUI's convention, the last child in `childrenIds` is the "active"
+    /// In Iexa native server's convention, the last child in `childrenIds` is the "active"
     /// branch. This method finds the leaf of that active branch, which becomes
     /// the new `currentId` when switching to a sibling.
     func deepestLeaf(from nodeId: String) -> String {

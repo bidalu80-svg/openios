@@ -168,7 +168,7 @@ struct ChatMessage: Identifiable, Hashable, Sendable {
     /// regardless of model (OpenAI, Anthropic, Ollama, etc. all differ).
     var usage: [String: Any]?
     /// Rich UI HTML embeds stored at the message level by the server.
-    /// OpenWebUI stores embeds here when the tool call's `<details>` block
+    /// Iexa native server stores embeds here when the tool call's `<details>` block
     /// has an empty `embeds=""` attribute — the HTML is instead placed on the
     /// message object itself. The iOS app renders these via `RichUIEmbedView`
     /// (the same WKWebView path used for tool-level embeds).
@@ -359,7 +359,7 @@ private struct AnyEncodable: Encodable {
     }
 }
 
-/// A sibling node in the OpenWebUI history tree, used purely for the
+/// A sibling node in the Iexa native server history tree, used purely for the
 /// version-switcher UI ("2 / 3" counter and prev/next navigation).
 ///
 /// The tree is always the source of truth for branching. A `ChatMessageVersion`
@@ -467,7 +467,7 @@ struct ChatMessageVersion: Codable, Equatable, Hashable, Sendable {
     }
 }
 
-/// Error information for a chat message, matching OpenWebUI's error format.
+/// Error information for a chat message, matching Iexa native server's error format.
 struct ChatMessageError: Codable, Hashable, Sendable {
     var content: String?
 }

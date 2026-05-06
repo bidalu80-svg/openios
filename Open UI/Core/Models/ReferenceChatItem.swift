@@ -6,7 +6,7 @@ import Foundation
 ///
 /// When the user selects a chat from the "Reference Chats" picker (via the `+` menu),
 /// the selected chat is shown as a chip in the composer and included in the `files`
-/// array of the chat completion request — exactly matching the OpenWebUI web client.
+/// array of the chat completion request — exactly matching the Iexa native server web client.
 struct ReferenceChatItem: Identifiable, Equatable, Hashable, Sendable {
     let id: String
     let title: String
@@ -31,7 +31,7 @@ struct ReferenceChatItem: Identifiable, Equatable, Hashable, Sendable {
         }
     }
 
-    /// The time-range bucket label used by OpenWebUI, e.g. "Today", "Yesterday", etc.
+    /// The time-range bucket label used by Iexa native server, e.g. "Today", "Yesterday", etc.
     var timeRange: String {
         let calendar = Calendar.current
         if calendar.isDateInToday(updatedAt) {
@@ -49,7 +49,7 @@ struct ReferenceChatItem: Identifiable, Equatable, Hashable, Sendable {
     }
 
     /// Converts this item to the `files` array entry format expected by
-    /// the `/api/chat/completions` endpoint, matching the OpenWebUI web client format.
+    /// the `/api/chat/completions` endpoint, matching the Iexa native server web client format.
     func toChatFileRef() -> [String: Any] {
         return [
             "type": "chat",

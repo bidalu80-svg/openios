@@ -28,7 +28,7 @@ struct AIModelAction: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
-/// Metadata about an AI model available on an OpenWebUI server.
+/// Metadata about an AI model available on an Iexa native server server.
 struct AIModel: Codable, Identifiable, Hashable, Sendable {
     let id: String
     var name: String
@@ -45,10 +45,10 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
     var defaultFeatureIds: [String]
     /// The function calling mode configured for this model by the admin.
     /// Values: `"native"` for native tool calling, `nil`/absent for default (server-handled).
-    /// Sourced from `info.params.function_calling` in the OpenWebUI model payload.
+    /// Sourced from `info.params.function_calling` in the Iexa native server model payload.
     var functionCallingMode: String?
     /// Builtin tools enabled for this model by the admin.
-    /// Keys match OpenWebUI's `meta.builtinTools` object (e.g. `"memory"`, `"time"`,
+    /// Keys match Iexa native server's `meta.builtinTools` object (e.g. `"memory"`, `"time"`,
     /// `"web_search"`, `"image_generation"`, `"code_interpreter"`, etc.).
     /// A `true` value means the tool is available; `false` means it's disabled.
     var builtinTools: [String: Bool]
@@ -56,7 +56,7 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
     /// Used to drive the tag-filter pills in the model selector sheet.
     var tags: [String]
     /// The connection type for this model (e.g. `"external"`, `"internal"`).
-    /// Sourced from `connection_type` in the OpenWebUI model payload.
+    /// Sourced from `connection_type` in the Iexa native server model payload.
     var connectionType: String?
     /// Whether this is a pipe/function model.
     /// Pipe models require `model_item` + `params`/`tool_servers`/`features`/`variables`
@@ -65,7 +65,7 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
     /// hangs waiting for a Redis async task that never completes (~60s timeout).
     var isPipeModel: Bool
     /// Filter IDs associated with this model. Extracted from `filters[*].id` in the
-    /// OpenWebUI model payload. Sent as `filter_ids` in chat completion requests so
+    /// Iexa native server model payload. Sent as `filter_ids` in chat completion requests so
     /// the backend runs the correct filter pipeline for this model.
     var filterIds: [String]
     /// Raw action IDs from the model's `meta.actionIds` field. Used to resolve
@@ -204,7 +204,7 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
         return buildModelAvatarURL(baseURL: baseURL)
     }
 
-    /// Builds the model avatar URL using the OpenWebUI endpoint:
+    /// Builds the model avatar URL using the Iexa native server endpoint:
     /// `/api/v1/models/model/profile/image?id={modelId}`
     ///
     /// This endpoint requires authentication (handled by ``AuthenticatedImageView``

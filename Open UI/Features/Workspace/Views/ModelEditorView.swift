@@ -2142,7 +2142,7 @@ struct ModelAdvancedParamsSection: View {
     }
 
     // MARK: - Reasoning Tags Row
-    // 4 states matching Open WebUI (cycling pill pattern):
+    // 4 states matching Iexa native server (cycling pill pattern):
     //   Default  → advReasoningTagsEnabled == nil && advReasoningTagStart == nil
     //   Enabled  → advReasoningTagsEnabled == true
     //   Disabled → advReasoningTagsEnabled == false

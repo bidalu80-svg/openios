@@ -8,7 +8,7 @@ final class ConversationManager: @unchecked Sendable {
     private let localStore: LocalConversationStore
 
     var usesLocalConversationStore: Bool {
-        apiClient.providerType != .openWebUI
+        apiClient.providerType != .iexa
     }
 
     init(apiClient: APIClient, localStore: LocalConversationStore = .shared) {
@@ -357,7 +357,7 @@ final class ConversationManager: @unchecked Sendable {
 
 /// Local chat history used by direct API providers (OpenAI-compatible, Gemini, Claude).
 ///
-/// Those providers do not expose OpenWebUI's `/api/v1/chats` database, so the app
+/// Those providers do not expose Iexa native server's `/api/v1/chats` database, so the app
 /// persists conversations on-device and keeps the same drawer/history UX.
 actor LocalConversationStore {
     static let shared = LocalConversationStore()

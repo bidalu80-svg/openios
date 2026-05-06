@@ -38,7 +38,7 @@ enum ActionCallResponse {
 
 /// Streams SSE events from `/api/chat/actions/{actionId}`.
 ///
-/// Open WebUI action functions emit two kinds of events:
+/// Iexa native server action functions emit two kinds of events:
 /// - `__event_emitter__` — one-way: status, notification, replace, message
 /// - `__event_call__`    — bidirectional: input, confirmation, execute
 ///
@@ -85,7 +85,7 @@ final class ActionEventService {
         logger.info("🟢 [ActionEvent] stream() SSE stream created for actionId=\(actionId, privacy: .public)")
 
         // Buffer the most recent `event:` field name so it can be applied
-        // to the following `data:` payload. Open WebUI sends:
+        // to the following `data:` payload. Iexa native server sends:
         //   event: __event_call__
         //   data: {"type": "input", ...}
         // The two SSE fields arrive as separate yields from the iterator.

@@ -2,7 +2,7 @@
 
 A powerful pure UIKit framework for rendering Markdown documents with real-time parsing and rendering capabilities. Battle tested in [FlowDown](https://github.com/Lakr233/FlowDown).
 
-> **This is a fork of [Lakr233/MarkdownView](https://github.com/Lakr233/MarkdownView)** with enhancements for [Open UI](https://github.com/Ichigo3766/Open-UI), an iOS client for Open WebUI.
+> **This is a fork of [Lakr233/MarkdownView](https://github.com/Lakr233/MarkdownView)** with enhancements for [Iexa](https://github.com/Ichigo3766/Open-UI), an iOS client for Iexa.
 
 ## Fork Changes
 

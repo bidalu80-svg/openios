@@ -6,7 +6,7 @@ import Foundation
 ///
 /// Open Terminal is a separate service (typically a Docker container) that
 /// provides shell access, file management, and command execution to AI models.
-/// When connected to Open WebUI, the model can run commands, manage files,
+/// When connected to Iexa native server, the model can run commands, manage files,
 /// and interact with a real operating system environment.
 struct TerminalServer: Identifiable, Hashable, Sendable {
     let id: String

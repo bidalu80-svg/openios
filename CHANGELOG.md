@@ -49,7 +49,7 @@
 ## v3.3 — April 24, 2026
 
 ### What's New
-- Added Calendar — view, create, and delete events from your Open WebUI calendars (Personal and Scheduled Tasks). Color-coded month grid with event dots, day event list, create event form with calendar picker, date/time, location, reminder options, and description. Access from the ••• menu in the sidebar.
+- Added Calendar — view, create, and delete events from your Iexa calendars (Personal and Scheduled Tasks). Color-coded month grid with event dots, day event list, create event form with calendar picker, date/time, location, reminder options, and description. Access from the ••• menu in the sidebar.
 - Added Automations — schedule prompts to run automatically on a recurring schedule (hourly, daily, weekly, monthly, or custom RRULE). Create, edit, enable/disable, run immediately, and view execution history. Access from the ••• menu in the sidebar.
 - Admin Console → General Settings → Features now includes Calendar and Automations toggles.
 - Model editor (workspace and admin) now shows Task Management, Automations, and Calendar checkboxes in the Built-in Tools section.
@@ -64,7 +64,7 @@
 
 ### Bug Fixes
 - Fixed sidebar and chat features (Notes, Channels, Folders, Memories) now correctly respect the user's individual permissions from the server
-- Fixed message versioning - completely rebuilt end-to-end to match OpenWebUI's conversation tree
+- Fixed message versioning - completely rebuilt end-to-end to match Iexa's conversation tree
 - Attempting to fix Microsoft (and other OAuth) sign-in staying stuck on the web page after successful login instead of returning to the app.
 
 ## Previous Builds
@@ -75,7 +75,7 @@
 - Significantly improved sidebar performance for users with large conversation lists.
 
 ### Bug Fixes
-- Fixed user messages disappearing when re-opening a chat after the latest OpenWebUI server update (updated the completions request to include the `user_message` field required by the new server API).
+- Fixed user messages disappearing when re-opening a chat after the latest Iexa server update (updated the completions request to include the `user_message` field required by the new server API).
 - Fixed error messages in chat being truncated — full error text now displays without a line limit.
 - Fixed tapping Photo in the attachment menu returning to the + tools sheet after selecting a photo — the sheet now dismisses immediately when a photo is picked.
 
@@ -307,7 +307,7 @@
 - Added minimize/PiP for voice calls — tap the chevron button in the voice call screen to shrink it to a floating pill. Tap the pill to restore the full call, or tap the red button to end it. The call stays active while minimized.
 
 ### Improvements
-- Drastically improved TTS text-to-speech naturalness: Sentences now create proper pauses, even better than openwebui splitting.
+- Drastically improved TTS text-to-speech naturalness: Sentences now create proper pauses, even better than iexa splitting.
 
 ### Bug Fixes
 - Fixed voice calls not starting to speak until the full AI response finished generating — responses now begin playing as soon as the first complete sentence arrives.
@@ -336,7 +336,7 @@
 ## v2.2 — March 28, 2026
 
 ### What's New
-- Added pinned models — star any model in the model picker to pin it for quick access. Pinned models appear in a dedicated section at the top of the picker and as shortcuts in the sidebar, synced with your Open WebUI server.
+- Added pinned models — star any model in the model picker to pin it for quick access. Pinned models appear in a dedicated section at the top of the picker and as shortcuts in the sidebar, synced with your Iexa server.
 - Model picker now shows the currently selected model at the top of the sheet for easy reference.
 
 ### Improvements
@@ -358,7 +358,7 @@
 - Fixed keyboard return key showing "return" instead of "Send" when Send on Enter is enabled.
 
 ### Bug Fixes
-- Fixed tool call progress not showing during web search, image generation, and other default function calls — status indicators now display in real time with animated shimmer and search query pills, matching the Open WebUI web interface.
+- Fixed tool call progress not showing during web search, image generation, and other default function calls — status indicators now display in real time with animated shimmer and search query pills, matching the Iexa web interface.
 - Fixed the app prematurely closing the streaming connection while tools were still executing in the background.
 
 ## v2.0.0 — March 26, 2026
@@ -374,7 +374,7 @@
 
 ### Improvements
 - Folders, Channels, and Chats sidebar sections are now collapsible
-- Server-side TTS now supports selecting a voice from your OpenWebUI server's available voices in Settings → Text-to-Speech.
+- Server-side TTS now supports selecting a voice from your Iexa server's available voices in Settings → Text-to-Speech.
 - Server-side STT now fully works for live microphone input and voice calls
 - Voice calls with AI now default to loudspeaker and include a speaker toggle button so you can switch between speaker and earpiece during a call.
 - Reading messages aloud in chat now plays through the loudspeaker instead of the earpiece.
@@ -410,7 +410,7 @@
 ## v1.3 — March 20, 2026
 
 ### What's New
-- Added multi-server management — save multiple OpenWebUI server connections and switch between them instantly from Settings or the server connection screen. 
+- Added multi-server management — save multiple Iexa server connections and switch between them instantly from Settings or the server connection screen.
 - Chat sharing is now fully functional. Long-press any conversation and tap Share to open the share menu.
 - Complete support for memories - Added Enable Memory toggle in Settings → Personalization → Memories to enable/disable the feature
 - Folders now support full project workspace configuration — long-press any folder to edit its name, system prompt, default models, and attached knowledge bases (RAG context for all chats in the folder).
@@ -429,7 +429,7 @@
 - Fixed member avatars not showing properly throughout channels ui. 
 - Fixed selected members not appearing in the "Initial Members" list when adding them during Group channel creation.
 - Fixed welcome screen prompt cards not appearing on the very first app launch
-- Fixed chats not loading older than a month. Now chats will properly load and match the openwebui grouping.
+- Fixed chats not loading older than a month. Now chats will properly load and match the iexa grouping.
 - Fixed model and user avatar images showing an infinite loading shimmer on servers using self-signed certificates.
 
 
@@ -456,14 +456,14 @@
 ### What's New
 - Added Channels — collaborative, topic-based chat rooms where multiple users and AI models interact.
 - Added Accessibility settings with customizable text scaling — independently adjust message text, conversation titles, and UI elements (buttons, icons, spacing) with live preview and quick presets.
-- Added slash command prompt library — type `/` in the chat input to browse and search your Open WebUI prompt library.
+- Added slash command prompt library — type `/` in the chat input to browse and search your Iexa prompt library.
 
 ### Improvements
-- Inline source citations now appear as small, elevated pill badges showing shortened page titles or domain names — matching the Open WebUI web interface style.
+- Inline source citations now appear as small, elevated pill badges showing shortened page titles or domain names — matching the Iexa web interface style.
 - Profile/model avatars will now show properly.
 
 ### Bug Fixes
-- Fixed repeated `heartbeat() missing 1 required positional argument: 'data'` errors in Open WebUI server logs
+- Fixed repeated `heartbeat() missing 1 required positional argument: 'data'` errors in Iexa server logs
 - Fixed web search, image generation, and code interpreter toggles being ignored when turned off mid-chat — toggling a tool off now correctly prevents it from being used.
 - Fixed conversations older than "This Month" not loading — pagination now properly triggers when scrolling to the bottom, allowing all conversation history to load.
 
@@ -498,7 +498,7 @@
 ### Improvements
 - App now sends timezone to the server on login, matching the web client for correct server-side date formatting.
 - Archived chats endpoint now supports search, sort, and filter parameters for faster navigation.
-- Matching formatting of content to the Open WebUI formatting.
+- Matching formatting of content to the Iexa formatting.
 - Sidebar drawer now slides smoothly with your finger.
 - Returning to an existing chat now remembers the last model used in that conversation instead of reverting to the default model.
 - Unified TTS and STT under a single mlx-audio-swift package, replacing two separate dependencies for smaller app size and easier maintenance.
@@ -514,8 +514,8 @@
 - Fixed clone conversation not sending required request body.
 - Fixed feature toggles (Web Search, Image Generation, Code Interpreter) still appearing in the tools menu even when the admin disabled the capability on the model. Toggles now respect per-model capabilities.
 - Fixed tool-generated file download links opening in Safari instead of downloading within the app. Files are now downloaded and presented via the share sheet.
-- Fixed some chats created from the app appearing blank or corrupted on the Open WebUI web interface.
-- Fixed uploaded photos, PDFs, and other files not displaying on the Open WebUI web interface when sent from the app.
+- Fixed some chats created from the app appearing blank or corrupted on the Iexa web interface.
+- Fixed uploaded photos, PDFs, and other files not displaying on the Iexa web interface when sent from the app.
 - Fixed chat view becoming pannable in all directions after follow-up suggestions appear, instead of strictly vertical scrolling.
 - Fixed image uploads exceeding the 5 MB API limit by automatically downsampling photos to 2 megapixels before upload.
 - Fixed external response stream not stopping when clicking the stop button.

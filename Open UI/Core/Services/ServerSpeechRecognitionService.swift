@@ -4,7 +4,7 @@ import os.log
 
 /// Server-side speech recognition service.
 ///
-/// Records microphone audio, then sends it to the OpenWebUI server's
+/// Records microphone audio, then sends it to the Iexa native server server's
 /// `POST /api/v1/audio/transcriptions` endpoint for transcription.
 ///
 /// This is the drop-in server alternative to `SpeechRecognitionService`

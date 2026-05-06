@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Chat Task
 
 /// A task item managed by the model's built-in task management tools
-/// (`create_tasks` / `update_task`). Stored at the chat level by OpenWebUI.
+/// (`create_tasks` / `update_task`). Stored at the chat level by Iexa native server.
 struct ChatTask: Codable, Identifiable, Hashable, Sendable {
     var id: String
     var content: String
@@ -119,7 +119,7 @@ struct Conversation: Codable, Identifiable, Hashable, Sendable {
     }
 
     /// Whether this conversation is a temporary (incognito) chat that
-    /// hasn't been persisted to the server. Matches the Open WebUI
+    /// hasn't been persisted to the server. Matches the Iexa native server
     /// `local:` prefix convention used by the Conduit Flutter client.
     var isTemporary: Bool {
         id.hasPrefix("local:")

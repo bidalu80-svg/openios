@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Supporting Types
 
 /// Data stored on a folder that configures it as a project workspace.
-/// Maps to the `data` field in the Open WebUI folder API.
+/// Maps to the `data` field in the Iexa native server folder API.
 struct FolderData: Sendable, Hashable {
     /// Default model IDs for chats created inside this folder.
     var modelIds: [String]
@@ -73,7 +73,7 @@ struct FolderKnowledgeItem: Identifiable, Sendable, Hashable {
 }
 
 /// Metadata stored on a folder (visual & UI state).
-/// Maps to the `meta` field in the Open WebUI folder API.
+/// Maps to the `meta` field in the Iexa native server folder API.
 struct FolderMeta: Sendable, Hashable {
     /// URL of a background image (set via Edit Folder → Upload).
     var backgroundImageUrl: String?
@@ -100,7 +100,7 @@ struct FolderMeta: Sendable, Hashable {
 
 /// Represents a folder for organising chat conversations.
 ///
-/// Folders live on the Open WebUI server and are synced on every
+/// Folders live on the Iexa native server server and are synced on every
 /// load/refresh. Expand/collapse state is persisted to the server
 /// with a short debounce so local UI remains snappy.
 ///

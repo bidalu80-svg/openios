@@ -93,9 +93,23 @@ struct AccountPickerSheet: View {
 
     private func serverHeader(_ server: ServerConfig) -> some View {
         VStack(spacing: Spacing.xs) {
-            Image(systemName: "server.rack")
-                .scaledFont(size: 24)
-                .foregroundStyle(theme.brandPrimary)
+            if let iconURL = server.siteIconURL {
+                CachedAsyncImage(url: iconURL) { image in
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 44, height: 44)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                } placeholder: {
+                    Image(systemName: "server.rack")
+                        .scaledFont(size: 24)
+                        .foregroundStyle(theme.brandPrimary)
+                }
+            } else {
+                Image(systemName: "server.rack")
+                    .scaledFont(size: 24)
+                    .foregroundStyle(theme.brandPrimary)
+            }
 
             Text(server.name)
                 .scaledFont(size: 17, weight: .semibold)
@@ -215,12 +229,8 @@ struct AccountPickerSheet: View {
 
     private func accountAvatar(_ account: SavedAccount) -> some View {
         let server = dependencies.serverConfigStore.activeServer
-        let avatarURL: URL? = {
-            guard let imageURL = account.profileImageURL, !imageURL.isEmpty,
-                  let server else { return nil }
-            let full = imageURL.hasPrefix("http") ? imageURL : "\(server.url)\(imageURL)"
-            return URL(string: full)
-        }()
+        let dataURIString = account.profileImageURL?.hasPrefix("data:") == true ? account.profileImageURL : nil
+        let avatarURL = server?.resolvedImageURL(from: account.profileImageURL) ?? server?.siteIconURL
 
         // Use the live session token for the active account; for others, pull
         // their individual token from the Keychain.
@@ -236,7 +246,8 @@ struct AccountPickerSheet: View {
             size: 40,
             imageURL: avatarURL,
             name: account.displayName,
-            authToken: token
+            authToken: token,
+            dataURIString: dataURIString
         )
     }
 

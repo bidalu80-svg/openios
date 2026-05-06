@@ -31,7 +31,8 @@ struct SettingsView: View {
                                 name: user.displayName,
                                 email: user.email,
                                 avatarURL: profileImageURL(for: user),
-                                authToken: dependencies.apiClient?.network.authToken
+                                authToken: dependencies.apiClient?.network.authToken,
+                                dataURIString: profileImageDataURI(for: user)
                             ) {
                                 navigationPath.append(SettingsDestination.profile)
                             }
@@ -413,9 +414,26 @@ struct SettingsView: View {
     }
 
     private func profileImageURL(for user: User) -> URL? {
+        if profileImageDataURI(for: user) != nil { return nil }
+
+        if dependencies.apiClient?.providerType != .iexa {
+            return dependencies.serverConfigStore.activeServer?.resolvedImageURL(from: user.profileImageURL)
+                ?? dependencies.serverConfigStore.activeServer?.siteIconURL
+        }
+
+        if let external = dependencies.serverConfigStore.activeServer?.resolvedImageURL(from: user.profileImageURL) {
+            return external
+        }
+
         guard let baseURL = dependencies.apiClient?.baseURL,
               !user.id.isEmpty, !baseURL.isEmpty else { return nil }
         return URL(string: "\(baseURL)/api/v1/users/\(user.id)/profile/image?v=\(viewModel.profileImageVersion)")
+    }
+
+    private func profileImageDataURI(for user: User) -> String? {
+        guard let imageURL = user.profileImageURL,
+              imageURL.hasPrefix("data:") else { return nil }
+        return imageURL
     }
 }
 

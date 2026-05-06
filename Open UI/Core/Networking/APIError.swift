@@ -1,6 +1,6 @@
 import Foundation
 
-/// Categorized API error types for the OpenWebUI networking layer.
+/// Categorized API error types for the Iexa native server networking layer.
 enum APIError: LocalizedError, Sendable {
     /// The server returned an HTTP error status code.
     case httpError(statusCode: Int, message: String?, data: Data?)

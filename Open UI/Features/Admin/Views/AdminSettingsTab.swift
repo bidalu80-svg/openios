@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - Admin Settings Tab
 
 /// The Settings section of the Admin Console.
-/// Shows a sidebar list of settings categories (like Open WebUI's web UI)
+/// Shows a sidebar list of settings categories (like Iexa native server's web UI)
 /// and renders the selected section's content on tap.
 struct AdminSettingsTab: View {
     @Environment(\.theme) private var theme

@@ -5,7 +5,7 @@ import os.log
 ///
 /// ## Pagination Strategy
 ///
-/// All conversations are fetched upfront on load, matching the Open WebUI web interface.
+/// All conversations are fetched upfront on load, matching the Iexa native server web interface.
 /// Page 1 loads immediately so the UI is interactive right away. Remaining pages are then
 /// fetched in parallel batches of 5 in the background, merging progressively into the list.
 /// This continues until the server returns an empty page, signalling no more data.
@@ -117,7 +117,7 @@ final class ChatListViewModel {
         }
     }
 
-    /// Conversations grouped by recency, matching the Open WebUI web interface grouping:
+    /// Conversations grouped by recency, matching the Iexa native server web interface grouping:
     ///
     /// - **Today** — updated today
     /// - **Yesterday** — updated yesterday

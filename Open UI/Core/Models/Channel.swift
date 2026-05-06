@@ -29,7 +29,7 @@ enum ChannelType: String, Codable, Sendable {
 
 // MARK: - Channel Model
 
-/// Represents a Channel in Open WebUI — a persistent, topic-based room
+/// Represents a Channel in Iexa native server — a persistent, topic-based room
 /// where multiple users and AI models can interact in a shared timeline.
 struct Channel: Identifiable, Hashable, Sendable {
     let id: String

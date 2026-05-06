@@ -1293,7 +1293,7 @@ struct ModelDetail: Identifiable, Sendable {
         self.toolIds = meta["toolIds"] as? [String] ?? []
         self.filterIds = meta["filterIds"] as? [String] ?? []
         self.defaultFilterIds = meta["defaultFilterIds"] as? [String] ?? []
-        // OpenWebUI stores skill IDs under both "actionIds" and "skillIds" in meta.
+        // Iexa native server stores skill IDs under both "actionIds" and "skillIds" in meta.
         // Prefer "actionIds" but fall back to "skillIds" for compatibility with the web UI.
         self.actionIds = meta["actionIds"] as? [String]
             ?? meta["skillIds"] as? [String]

@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - Shared Timestamp Parser
 
-/// Centralized timestamp parsing for all Open WebUI API responses.
+/// Centralized timestamp parsing for all Iexa native server API responses.
 /// The server may return timestamps in seconds, milliseconds, microseconds, or nanoseconds.
 /// This utility detects the precision automatically and converts to `Date`.
 enum TimestampParser {
@@ -27,7 +27,7 @@ enum TimestampParser {
     }
     
     /// Detects timestamp precision (seconds/ms/µs/ns) and converts to `Date`.
-    /// Handles the Open WebUI API which may return nanosecond timestamps (19 digits).
+    /// Handles the Iexa native server API which may return nanosecond timestamps (19 digits).
     static func fromNumeric(_ ts: Double) -> Date {
         guard ts > 0 else { return .now }
         if ts > 1_000_000_000_000_000_000 {       // nanoseconds (19+ digits)

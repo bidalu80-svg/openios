@@ -1303,7 +1303,7 @@ final class ChannelViewModel {
     
     /// Emits the `events:channel` socket event with `type: last_read_at`.
     /// This tells the server to reset `unread_count` for the current user in this channel,
-    /// matching the behaviour of OpenWebUI's web client (Channel.svelte → updateLastReadAt).
+    /// matching the behaviour of Iexa native server's web client (Channel.svelte → updateLastReadAt).
     func markAsRead() {
         guard socketService != nil else { return }
         socketService?.emit("events:channel", data: [

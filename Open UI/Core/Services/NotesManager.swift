@@ -1,7 +1,7 @@
 import Foundation
 import os.log
 
-/// Manages note CRUD operations against the OpenWebUI server API.
+/// Manages note CRUD operations against the Iexa native server server API.
 ///
 /// Matches the Flutter `NotesList`, `NoteCreator`, `NoteUpdater`, and
 /// `NoteDeleter` providers which use the `/api/v1/notes/` endpoints.
@@ -234,7 +234,7 @@ final class NotesManager: @unchecked Sendable {
         }
     }
 
-    /// Pins or unpins a note (local-only; OpenWebUI does not have pin for notes).
+    /// Pins or unpins a note (local-only; Iexa native server does not have pin for notes).
     func togglePin(id: String) {
         var notes = fetchLocalNotes()
         if let index = notes.firstIndex(where: { $0.id == id }) {

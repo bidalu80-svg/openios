@@ -101,7 +101,7 @@ public struct MarkdownTheme: Equatable, @unchecked Sendable {
         public var cell: CGFloat = 32
         /// Spacing between paragraphs (after each paragraph block).
         /// Controls the visible gap between stanzas, sections, etc.
-        /// 16pt provides a clear visual break matching Open WebUI's web rendering.
+        /// 16pt provides a clear visual break matching Iexa's web rendering.
         public var paragraphSpacing: CGFloat = 16
         /// Line spacing within a paragraph (between soft-break lines).
         /// 4pt gives comfortable readability for poem lines within a stanza,

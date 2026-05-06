@@ -11,7 +11,7 @@ import NaturalLanguage
 ///
 /// ## Auto Mode Priority (when selected by user)
 /// 1. **On-device neural TTS** (Kokoro or Qwen3) — if model is downloaded and loaded
-/// 2. **Server TTS** (OpenWebUI API) — if configured
+/// 2. **Server TTS** (Iexa native server API) — if configured
 /// 3. **AVSpeechSynthesizer** (system) — fallback
 @MainActor @Observable
 final class TextToSpeechService: NSObject {
@@ -21,7 +21,7 @@ final class TextToSpeechService: NSObject {
     enum TTSEngine: String, Sendable {
         case kokoro   // On-device Kokoro TTS
         case qwen3    // On-device Qwen3 TTS (multilingual)
-        case server   // Server-side TTS via OpenWebUI API
+        case server   // Server-side TTS via Iexa native server API
         case system   // Apple AVSpeechSynthesizer
         case auto     // Prefer on-device neural if loaded → server → system
     }

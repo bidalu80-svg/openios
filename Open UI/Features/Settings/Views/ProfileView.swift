@@ -522,7 +522,7 @@ struct ProfileView: View {
     private var user: User? { viewModel.currentUser }
 
     private var isLocalOnlyProfile: Bool {
-        dependencies.apiClient?.providerType != .openWebUI
+        dependencies.apiClient?.providerType != .iexa
     }
 
     private var localProfileKey: String {
@@ -773,7 +773,7 @@ struct ProfileView: View {
                 dobValue = viewModel.currentUser?.dateOfBirth
             }
 
-            if api.providerType != .openWebUI {
+            if api.providerType != .iexa {
                 await saveProfileLocally(
                     name: trimmedName,
                     bio: editBio,

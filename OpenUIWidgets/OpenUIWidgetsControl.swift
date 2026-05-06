@@ -29,7 +29,7 @@ struct OpenUIWidgetsControl: ControlWidget {
 
 struct OpenNewChatControlIntent: AppIntent {
     static var title: LocalizedStringResource = "New Chat"
-    static var description = IntentDescription("Open a new chat in Open Relay.")
+    static var description = IntentDescription("Open a new chat in Iexa.")
     static var openAppWhenRun: Bool = true
     // Prevent this Control Center-only intent from appearing in the Shortcuts app.
     // The main app's NewChatIntent (in AppIntentsService.swift) is the canonical shortcut.

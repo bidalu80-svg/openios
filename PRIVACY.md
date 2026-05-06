@@ -1,8 +1,8 @@
-# Open UI Privacy Policy 
+# Iexa Privacy Policy
 
 Effective date: 2026-02-24
 
-Open UI is an open‑source mobile client for Open WebUI. This app acts as a client to a server you choose and configure. This policy describes how the app itself handles data on your device. Your configured server may collect, process, and store data under its own policies; please review your server's privacy terms separately.
+Iexa is an open‑source mobile client for Iexa. This app acts as a client to a server you choose and configure. This policy describes how the app itself handles data on your device. Your configured server may collect, process, and store data under its own policies; please review your server's privacy terms separately.
 
 ## Information We Collect
 - **Device-stored data:** minimal settings and preferences (e.g., theme, appearance options, server configurations) saved locally on your device.
@@ -20,7 +20,7 @@ Open UI is an open‑source mobile client for Open WebUI. This app acts as a cli
 - **Network transfer:** when you interact with the app, your data is sent to the server you configured. The app does not send your data to any developer‑controlled servers.
 
 ## Permissions
-Depending on how you use Open UI, the app may request:
+Depending on how you use Iexa, the app may request:
 - **Microphone:** to capture voice input for voice calls and speech recognition.
 - **Photos/Files:** to let you pick and upload attachments.
 - **Speech Recognition:** to transcribe your voice input on-device.
@@ -43,7 +43,7 @@ We use the iOS Keychain for sensitive credentials and follow platform security b
 - You can delete individual conversations or all local data from within the app.
 
 ## Children's Privacy
-Open UI is not directed to children under 13 (or the minimum age required in your jurisdiction). Do not use the app if you do not meet the applicable age requirements.
+Iexa is not directed to children under 13 (or the minimum age required in your jurisdiction). Do not use the app if you do not meet the applicable age requirements.
 
 ## Changes to This Policy
 We may update this policy to reflect improvements or legal requirements. Material changes will be reflected in the app bundle and version notes.

@@ -168,8 +168,7 @@ struct ServerManagementView: View {
 
     @ViewBuilder
     private var serverLogoView: some View {
-        if let urlString = activeServer?.url,
-           let faviconURL = URL(string: "\(urlString)/favicon.ico") {
+        if let faviconURL = activeServer?.siteIconURL {
             CachedAsyncImage(url: faviconURL) { image in
                 image
                     .resizable()
@@ -204,7 +203,7 @@ struct ServerManagementView: View {
         if isCheckingHealth { return "正在检查…" }
         switch serverHealthy {
         case .some(true):
-            if activeServer?.providerType == .openWebUI {
+            if activeServer?.providerType == .iexa {
                 return "已连接"
             }
             return "API 可用"
@@ -228,7 +227,7 @@ struct ServerManagementView: View {
             client.updateAuthToken(token)
         }
 
-        if config.providerType == .openWebUI {
+        if config.providerType == .iexa {
             async let healthTask = client.checkHealth()
             async let configTask: BackendConfig? = try? await client.getBackendConfig()
             let (healthy, freshConfig) = await (healthTask, configTask)
@@ -406,12 +405,9 @@ struct ServerManagementView: View {
     }
 
     private func accountAvatarView(_ account: SavedAccount) -> some View {
-        let avatarURL: URL? = {
-            guard let imageURL = account.profileImageURL, !imageURL.isEmpty,
-                  let server = activeServer else { return nil }
-            let full = imageURL.hasPrefix("http") ? imageURL : "\(server.url)\(imageURL)"
-            return URL(string: full)
-        }()
+        let dataURIString = account.profileImageURL?.hasPrefix("data:") == true ? account.profileImageURL : nil
+        let avatarURL = activeServer?.resolvedImageURL(from: account.profileImageURL)
+            ?? activeServer?.siteIconURL
 
         // Use the live session token for the active account; for others, pull
         // their individual token from the Keychain.
@@ -428,7 +424,8 @@ struct ServerManagementView: View {
             size: 36,
             imageURL: avatarURL,
             name: account.displayName,
-            authToken: token
+            authToken: token,
+            dataURIString: dataURIString
         )
     }
 

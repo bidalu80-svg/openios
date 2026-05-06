@@ -210,8 +210,8 @@ struct BackendConfig: Codable, Sendable {
         oauth = try? container.decodeIfPresent(OAuthConfig.self, forKey: .oauth)
     }
 
-    /// Whether this response looks like a valid OpenWebUI server.
-    var isValidOpenWebUI: Bool {
+    /// Whether this response looks like a valid Iexa native server.
+    var isValidIexaServer: Bool {
         status == true
             && version != nil
             && !(version?.isEmpty ?? true)
@@ -261,7 +261,7 @@ struct ChatCompletionRequest: Sendable {
     /// When set, the backend injects terminal tools (execute_command, file management, etc.)
     /// into the model's tool-calling pipeline.
     var terminalId: String?
-    /// OpenWebUI server-side parameters sent alongside the request.
+    /// Iexa native server server-side parameters sent alongside the request.
     /// The server's `apply_params_to_form_data()` consumes these before forwarding
     /// to the LLM. Key use: `function_calling` — controls native vs default tool mode.
     /// Example: `["function_calling": "native"]` enables native tool calling.
@@ -278,7 +278,7 @@ struct ChatCompletionRequest: Sendable {
     /// matching web-client behaviour. Required for pipe model compatibility.
     var toolServers: [[String: Any]]?
     /// The user message node sent to the server so it can correctly insert it into
-    /// the chat's history tree. Required by updated OpenWebUI servers — without this
+    /// the chat's history tree. Required by updated Iexa native server servers — without this
     /// the server doesn't link the user message into the history and it disappears
     /// when the chat is re-opened. Matches the web client's `user_message` field.
     var userMessage: [String: Any]?
@@ -322,7 +322,7 @@ struct ChatCompletionRequest: Sendable {
 
         // --- Pipe model compatibility fields ---
         // These MUST always be sent as their empty equivalents when absent so
-        // the OpenWebUI pipe function receives a consistent request shape.
+        // the Iexa native server pipe function receives a consistent request shape.
         // Omitting them causes the backend to route through the Redis async-task
         // queue (requires session_id + chat_id + id all present) which hangs ~60s.
 
@@ -346,7 +346,7 @@ struct ChatCompletionRequest: Sendable {
         // model_item: send when available (critical for pipe routing)
         if let modelItem { data["model_item"] = modelItem }
 
-        // user_message: required by updated OpenWebUI servers to correctly insert
+        // user_message: required by updated Iexa native server servers to correctly insert
         // the user message node into the chat's history tree. Without this field
         // the server doesn't link the user message and it disappears on re-open.
         if let userMessage { data["user_message"] = userMessage }

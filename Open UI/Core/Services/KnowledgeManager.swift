@@ -155,7 +155,7 @@ final class KnowledgeManager {
     /// adds them all to the knowledge base individually.
     ///
     /// The batch-add endpoint (`/files/batch/add`) triggers a broken server-side
-    /// `process_files_batch()` call on some OpenWebUI versions, so we use the
+    /// `process_files_batch()` call on some Iexa native server versions, so we use the
     /// individual `/file/add` endpoint instead. Uploads still run in parallel for speed.
     ///
     /// - Parameters:

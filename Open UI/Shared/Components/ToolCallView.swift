@@ -75,7 +75,7 @@ enum ContentSegment: Identifiable {
 
 // MARK: - Tool Call Parser
 
-/// Parses `<details>` blocks from OpenWebUI assistant message content,
+/// Parses `<details>` blocks from Iexa native server assistant message content,
 /// including both tool calls and reasoning/thinking blocks.
 enum ToolCallParser {
 
@@ -526,7 +526,7 @@ enum ToolCallParser {
         let doneStr = extractAttribute("done", from: block)
         let isDone = doneStr == "true"
         let arguments = extractAttribute("arguments", from: block)
-        // Try the result="" attribute first. If absent (OpenWebUI stores the output
+        // Try the result="" attribute first. If absent (Iexa native server stores the output
         // as the body between </summary> and </details>), fall back to body content.
         let resultAttr = extractAttribute("result", from: block)
         let result: String? = {
@@ -605,7 +605,7 @@ enum ToolCallParser {
 
     // MARK: - Raw Reasoning Tag Preprocessing
 
-    /// All tag pairs that OpenWebUI recognises by default for reasoning content.
+    /// All tag pairs that Iexa native server recognises by default for reasoning content.
     /// Order matters: more specific / longer tags first to avoid partial matches.
     private static let defaultReasoningTagPairs: [(open: String, close: String)] = [
         ("<|begin_of_thought|>", "<|end_of_thought|>"),
@@ -627,7 +627,7 @@ enum ToolCallParser {
     /// **Raw model tags** — Models like Qwen, DeepSeek R1, and others emit
     /// raw tags (`<think>`, `<thinking>`, `<reason>`, `<reasoning>`,
     /// `<thought>`, `<|begin_of_thought|>`) in their streaming output. The
-    /// OpenWebUI server converts these to `<details type="reasoning">` blocks
+    /// Iexa native server server converts these to `<details type="reasoning">` blocks
     /// *after* streaming completes. During streaming the app receives the raw
     /// tags which would otherwise render as visible text.
     ///
@@ -1010,7 +1010,7 @@ enum ToolCallParser {
     /// When tools like image generation complete, their results (stored in the
     /// `result` attribute of `<details>` blocks) often contain file references
     /// as JSON. This method scans the tool results for patterns that look like
-    /// OpenWebUI file IDs and returns them as `ChatMessageFile` objects.
+    /// Iexa native server file IDs and returns them as `ChatMessageFile` objects.
     ///
     /// This is a safety net: normally the server populates `message.files`, but
     /// if the app was backgrounded or had connectivity issues, the files array
@@ -1139,7 +1139,7 @@ enum ToolCallParser {
 // MARK: - Rich UI Embed View
 
 /// Renders a Rich UI embed — a full HTML document returned by a tool call —
-/// inside a sandboxed WKWebView. This brings Open WebUI's "Rich UI" feature
+/// inside a sandboxed WKWebView. This brings Iexa native server's "Rich UI" feature
 /// to the iOS app: tools can return interactive HTML (cards, dashboards, charts,
 /// forms, SMS composers, etc.) that render inline in the chat.
 struct RichUIEmbedView: View {
@@ -2152,7 +2152,7 @@ private struct ToolCallArgumentsView: View {
 
 // MARK: - Tool Call View
 
-/// Displays a single tool call styled like the Open WebUI web interface:
+/// Displays a single tool call styled like the Iexa native server web interface:
 /// - Header: checkmark/spinner + tool name + chevron (tappable to expand)
 /// - When expanded: INPUT (key-value pairs) + OUTPUT (syntax-highlighted scrollable JSON)
 /// - Rich UI HTML embeds always shown inline when present
@@ -2187,7 +2187,7 @@ struct ToolCallView: View {
                             .tint(theme.brandPrimary)
                     }
 
-                    // "View Result from tool_name" — matches Open WebUI web UI pattern
+                    // "View Result from tool_name" — matches Iexa native server web UI pattern
                     (Text("View Result from ")
                         .foregroundStyle(theme.textTertiary)
                      + Text(toolCall.name)
@@ -2363,7 +2363,7 @@ private struct CollapsedToolCallGroup: View {
 
 /// Renders a list of tool calls extracted from message content.
 /// Consecutive calls sharing the same MCP server prefix (the part before `__`)
-/// are collapsed into a single expandable summary row, matching the Open WebUI
+/// are collapsed into a single expandable summary row, matching the Iexa native server
 /// web UI. Plain tool names with no prefix are grouped by exact name.
 struct ToolCallsContainer: View {
     let toolCalls: [ToolCallData]
@@ -2381,7 +2381,7 @@ struct ToolCallsContainer: View {
     /// Groups all consecutive tool calls into a single group.
     /// All tool calls in a single `ToolCallsContainer` are already consecutive
     /// (they come from the same position in the message content), so we treat
-    /// them all as one group — matching the Open WebUI web UI behavior where
+    /// them all as one group — matching the Iexa native server web UI behavior where
     /// any mix of consecutive tools (e.g. web_search + fetch_page) collapses
     /// into a single "Explored N tool_a, tool_b" row.
     private static func subGroupByName(_ calls: [ToolCallData]) -> [[ToolCallData]] {
@@ -2542,7 +2542,7 @@ struct ReasoningContainer: View {
 /// tool was invoked and what came after.
 ///
 /// ## Message-level embeds
-/// OpenWebUI may store Rich UI HTML in the message object's `embeds` array
+/// Iexa native server may store Rich UI HTML in the message object's `embeds` array
 /// rather than inside the tool call `<details>` block (the `embeds=""` attribute
 /// is empty in those cases). When `messageEmbeds` is non-empty, the embeds are
 /// injected into the last tool call that has empty embeds — matching web UI

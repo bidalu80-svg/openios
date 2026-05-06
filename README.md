@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="openrelayicon.png" width="120" alt="Open Relay App Icon" style="border-radius: 22px;" />
+<img src="openrelayicon.png" width="120" alt="Iexa App Icon" style="border-radius: 22px;" />
 
-# Open Relay
+# Iexa
 
-**The best native iOS & iPadOS client for [Open WebUI](https://openwebui.com)**
+**The best native iOS & iPadOS client for [Iexa](https://github.com/bidalu80-svg/openios)**
 
 *Chat with any AI model on your self-hosted server — beautifully.*
 
@@ -21,14 +21,14 @@
 ---
 
 <div align="center">
-  <img src="openui.gif" alt="Open Relay in action" width="320" />
+  <img src="openui.gif" alt="Iexa in action" width="320" />
 </div>
 
 ---
 
 ## ⭐ Why Star This Repo?
 
-Open Relay is **completely free** and **open source**. If it saves you time or brings you joy, a ⭐ star helps other people discover it and motivates continued development. Takes 1 second — [star it here](https://github.com/Ichigo3766/Open-Relay/stargazers). Thank you! 🙏
+Iexa is **completely free** and **open source**. If it saves you time or brings you joy, a ⭐ star helps other people discover it and motivates continued development. Takes 1 second — [star it here](https://github.com/Ichigo3766/Open-Relay/stargazers). Thank you! 🙏
 
 ---
 
@@ -44,9 +44,9 @@ Open Relay is **completely free** and **open source**. If it saves you time or b
 
 ---
 
-## ✨ What Is Open Relay?
+## ✨ What Is Iexa?
 
-Open Relay is a **100% SwiftUI** native iOS & iPadOS app that connects to your self-hosted [Open WebUI](https://openwebui.com) server, giving you a fast, polished, truly native experience that the mobile web browser can't match.
+Iexa is a **100% SwiftUI** native iOS & iPadOS app that connects to your self-hosted [Iexa](https://github.com/bidalu80-svg/openios) server, giving you a fast, polished, truly native experience that the mobile web browser can't match.
 
 Think of it as **ChatGPT on your phone** — but pointed at *your* server, running *your* models, with *your* data staying private.
 
@@ -73,7 +73,7 @@ Think of it as **ChatGPT on your phone** — but pointed at *your* server, runni
 | 🎨 | **Deep Theming** | Accent color picker, pure black OLED mode, tinted surfaces — with live preview |
 | ♿ | **Accessibility** | Independent font size, UI scaling, and live preview with presets |
 | 🔐 | **Full Auth Support** | Username/password, LDAP, SSO, and auth proxy support (Authelia, Authentik, Keycloak, etc.) |
-| 🔗 | **Multi-Server** | Save multiple Open WebUI servers, switch instantly |
+| 🔗 | **Multi-Server** | Save multiple Iexa servers, switch instantly |
 | 🏠 | **Widgets & Shortcuts** | Home screen widgets and Action Button integration via Shortcuts |
 | 📱 | **iPad Native** | Full persistent sidebar, 4-column grids, persistent terminal panel |
 
@@ -95,7 +95,7 @@ Think of it as **ChatGPT on your phone** — but pointed at *your* server, runni
 | 📱 **Device** | iPhone or iPad |
 | 🍎 **iOS** | iOS 18.0 or later |
 | 🛠️ **Build** | Xcode 16.0+ / Swift 6.0+ |
-| 🌐 **Server** | A running [Open WebUI](https://openwebui.com) instance |
+| 🌐 **Server** | A running [Iexa](https://github.com/bidalu80-svg/openios) instance |
 
 ---
 
@@ -127,7 +127,7 @@ open "Open UI.xcodeproj"
 
 Select an **iOS 18+ simulator** or connected device → press **⌘R**
 
-On first launch, enter your Open WebUI server URL and sign in.
+On first launch, enter your Iexa server URL and sign in.
 
 ---
 
@@ -159,7 +159,7 @@ Pull requests are welcome! Whether it's a bug fix, improvement, or new feature �
 
 ## 🙏 Acknowledgments
 
-Special thanks to **Conduit by cogwheel** — a cross-platform Open WebUI mobile client and a real inspiration for this project.
+Special thanks to **Conduit by cogwheel** — a cross-platform Iexa mobile client and a real inspiration for this project.
 
 ---
 
@@ -171,7 +171,7 @@ This project is licensed under the **GPL License**. See [LICENSE](LICENSE) for d
 
 <div align="center">
 
-Made with ❤️ for the Open WebUI community
+Made with ❤️ for the Iexa community
 
 **[⭐ Star this repo](https://github.com/Ichigo3766/Open-Relay/stargazers) · [🐛 Report a Bug](https://github.com/Ichigo3766/Open-Relay/issues) · [💡 Request a Feature](https://github.com/Ichigo3766/Open-Relay/issues)**
 

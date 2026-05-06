@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Sheet for editing a user's role, name, email, and password.
-/// Matches the OpenWebUI web admin "Edit User" modal.
+/// Matches the Iexa native server web admin "Edit User" modal.
 struct EditUserSheet: View {
     @Bindable var viewModel: AdminViewModel
     @Environment(\.dismiss) private var dismiss

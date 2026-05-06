@@ -5,7 +5,7 @@ import os.log
 /// SSO Authentication view using WKWebView to handle OAuth/OIDC flows.
 ///
 /// When a specific OAuth provider is selected (e.g. "google"), this view loads
-/// `/oauth/{provider}/login` directly — bypassing the OpenWebUI `/auth` page and
+/// `/oauth/{provider}/login` directly — bypassing the Iexa native server `/auth` page and
 /// taking the user straight to the provider's login screen.
 ///
 /// For generic trusted-header SSO (no specific provider), `/auth` is loaded instead.
@@ -233,7 +233,7 @@ struct SSOWebViewRepresentable: UIViewRepresentable {
 
         /// Builds the login URL.
         /// - If a specific provider is set, loads `/oauth/{provider}/login` directly,
-        ///   skipping the OpenWebUI auth page entirely.
+        ///   skipping the Iexa native server auth page entirely.
         /// - Falls back to `/auth` for generic trusted-header SSO.
         func loadLoginPage() {
             let path: String
@@ -335,7 +335,7 @@ struct SSOWebViewRepresentable: UIViewRepresentable {
             if isOurServer(url) && !state.tokenCaptured {
                 let path = url.path.lowercased()
                 // Trigger early capture on the OAuth callback path or the root page
-                // (OpenWebUI redirects to / after a successful OAuth callback).
+                // (Iexa native server redirects to / after a successful OAuth callback).
                 let isCallbackOrRoot = path.contains("/oauth/") || path == "/" || path.isEmpty
                 if isCallbackOrRoot {
                     let attemptId = captureAttemptId
@@ -418,11 +418,11 @@ struct SSOWebViewRepresentable: UIViewRepresentable {
             return url.host?.lowercased() == serverURL.host?.lowercased()
         }
 
-        /// Returns true if a cookie is a known OpenWebUI session/token cookie.
+        /// Returns true if a cookie is a known Iexa native server session/token cookie.
         ///
-        /// OpenWebUI has used several cookie names across versions:
+        /// Iexa native server has used several cookie names across versions:
         /// - `token` — the original JWT bearer token cookie
-        /// - `oauth_session_id` — newer session-based cookie (recent OpenWebUI versions)
+        /// - `oauth_session_id` — newer session-based cookie (recent Iexa native server versions)
         private func isTokenCookie(_ cookie: HTTPCookie) -> Bool {
             let name = cookie.name.lowercased()
             return name == "token" || name == "oauth_session_id"
@@ -459,7 +459,7 @@ struct SSOWebViewRepresentable: UIViewRepresentable {
         /// 1. JavaScript `document.cookie` — works for non-HttpOnly cookies
         /// 2. JavaScript `localStorage.getItem('token')` — works for JS-stored tokens
         /// 3. Native `WKHTTPCookieStore` — works for HttpOnly cookies that JS can't read
-        ///    (this is the primary strategy for Microsoft OAuth and newer OpenWebUI)
+        ///    (this is the primary strategy for Microsoft OAuth and newer Iexa native server)
         @discardableResult
         private func attemptTokenCapture(attemptId: Int) async -> Bool {
             guard let webView, !state.tokenCaptured else { return false }
@@ -488,7 +488,7 @@ struct SSOWebViewRepresentable: UIViewRepresentable {
 
             guard attemptId == captureAttemptId else { return false }
 
-            // Strategy 2: Check localStorage (older OpenWebUI versions)
+            // Strategy 2: Check localStorage (older Iexa native server versions)
             if let token = await evaluateJS(
                 webView: webView,
                 script: "localStorage.getItem('token') || ''"
@@ -502,7 +502,7 @@ struct SSOWebViewRepresentable: UIViewRepresentable {
 
             // Strategy 3: Native WKHTTPCookieStore — reads HttpOnly cookies that
             // JavaScript cannot access. This is the critical path for Microsoft OAuth
-            // and any provider where OpenWebUI sets the token as an HttpOnly cookie.
+            // and any provider where Iexa native server sets the token as an HttpOnly cookie.
             if await attemptNativeCookieCapture(attemptId: attemptId) {
                 return true
             }
@@ -548,12 +548,12 @@ struct SSOWebViewRepresentable: UIViewRepresentable {
         /// Reads session/token cookies directly from WKHTTPCookieStore.
         ///
         /// This is the primary capture method for Microsoft OAuth (and any provider
-        /// where OpenWebUI sets the auth token as an HttpOnly cookie — which JS cannot
+        /// where Iexa native server sets the auth token as an HttpOnly cookie — which JS cannot
         /// access via `document.cookie`).
         ///
         /// Checks for:
-        /// - `token` — original OpenWebUI JWT bearer cookie
-        /// - `oauth_session_id` — newer session cookie used in recent OpenWebUI versions
+        /// - `token` — original Iexa native server JWT bearer cookie
+        /// - `oauth_session_id` — newer session cookie used in recent Iexa native server versions
         private func attemptNativeCookieCapture(attemptId: Int) async -> Bool {
             guard let webView, !state.tokenCaptured, attemptId == captureAttemptId else { return false }
 
