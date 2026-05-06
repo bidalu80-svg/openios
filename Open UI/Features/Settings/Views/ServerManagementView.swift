@@ -203,7 +203,11 @@ struct ServerManagementView: View {
     private var statusTitle: String {
         if isCheckingHealth { return "正在检查…" }
         switch serverHealthy {
-        case .some(true): return "已连接"
+        case .some(true):
+            if activeServer?.providerType == .openWebUI {
+                return "已连接"
+            }
+            return "API 可用"
         case .some(false): return "连接异常"
         case .none: return "未知状态"
         }
@@ -223,15 +227,27 @@ struct ServerManagementView: View {
         if let token = dependencies.apiClient?.network.authToken {
             client.updateAuthToken(token)
         }
-        async let healthTask = client.checkHealth()
-        async let configTask: BackendConfig? = try? await client.getBackendConfig()
-        let (healthy, freshConfig) = await (healthTask, configTask)
-        serverHealthy = healthy
-        if let fresh = freshConfig {
-            refreshedConfig = fresh
-            // Keep the view model in sync too
-            viewModel.backendConfig = fresh
+
+        if config.providerType == .openWebUI {
+            async let healthTask = client.checkHealth()
+            async let configTask: BackendConfig? = try? await client.getBackendConfig()
+            let (healthy, freshConfig) = await (healthTask, configTask)
+            serverHealthy = healthy
+            if let fresh = freshConfig {
+                refreshedConfig = fresh
+                // Keep the view model in sync too
+                viewModel.backendConfig = fresh
+            }
+        } else {
+            do {
+                _ = try await client.getModels()
+                serverHealthy = true
+                refreshedConfig = nil
+            } catch {
+                serverHealthy = false
+            }
         }
+
         isCheckingHealth = false
     }
 
