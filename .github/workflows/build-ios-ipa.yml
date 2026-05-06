@@ -235,7 +235,7 @@ jobs:
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: open-relay-ipa
+          name: iexa-ipa
           path: ${{ runner.temp }}/exported/*.ipa
 
       - name: Cleanup signing assets
