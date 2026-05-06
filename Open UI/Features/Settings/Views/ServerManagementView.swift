@@ -24,16 +24,16 @@ struct ServerManagementView: View {
                 connectionStatusSection
 
                 // Server details
-                SettingsSection(header: "Server Details") {
+                SettingsSection(header: "服务器详情") {
                     detailRow(icon: "globe", label: "URL", value: activeServer?.url ?? "—")
-                    detailRow(icon: "tag", label: "Name", value: displayedConfig?.name ?? activeServer?.name ?? "—")
+                    detailRow(icon: "tag", label: "名称", value: displayedConfig?.name ?? activeServer?.name ?? "—")
                     if let version = displayedConfig?.version ?? viewModel.serverVersion {
-                        detailRow(icon: "number", label: "Version", value: version)
+                        detailRow(icon: "number", label: "版本", value: version)
                     }
                     detailRow(
                         icon: "lock.shield",
-                        label: "Self-Signed Certs",
-                        value: activeServer?.allowSelfSignedCertificates == true ? "Allowed" : "Not Allowed",
+                        label: "自签名证书",
+                        value: activeServer?.allowSelfSignedCertificates == true ? "允许" : "不允许",
                         showDivider: false
                     )
                 }
@@ -42,11 +42,11 @@ struct ServerManagementView: View {
                 accountsSection
 
                 // Actions
-                SettingsSection(header: "Actions") {
+                SettingsSection(header: "操作") {
                     SettingsCell(
                         icon: "arrow.triangle.2.circlepath",
-                        title: "Check Connection",
-                        subtitle: isCheckingHealth ? "Checking..." : nil,
+                        title: "检查连接",
+                        subtitle: isCheckingHealth ? "正在检查..." : nil,
                         accessory: isCheckingHealth ? .none : .chevron
                     ) {
                         Task { await checkHealth() }
@@ -54,7 +54,7 @@ struct ServerManagementView: View {
 
                     SettingsCell(
                         icon: "pencil",
-                        title: "Edit Server",
+                        title: "编辑服务器",
                         showDivider: false,
                         accessory: .chevron
                     ) {
@@ -63,10 +63,10 @@ struct ServerManagementView: View {
                 }
 
                 // Danger zone
-                SettingsSection(header: "Danger Zone") {
+                SettingsSection(header: "危险操作") {
                     DestructiveSettingsCell(
                         icon: "trash",
-                        title: "Remove Server"
+                        title: "移除服务器"
                     ) {
                         showDeleteConfirmation = true
                     }
@@ -75,7 +75,7 @@ struct ServerManagementView: View {
             .padding(.vertical, Spacing.lg)
         }
         .background(theme.background)
-        .navigationTitle("Server")
+        .navigationTitle("服务器")
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await checkHealth()
@@ -84,36 +84,36 @@ struct ServerManagementView: View {
             editServerSheet
         }
         .confirmationDialog(
-            "Remove Server",
+            "移除服务器",
             isPresented: $showDeleteConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Remove & Sign Out", role: .destructive) {
+            Button("移除并退出登录", role: .destructive) {
                 Task { await viewModel.signOutAndDisconnect() }
             }
-            Button("Cancel", role: .cancel) {}
+            Button("取消", role: .cancel) {}
         } message: {
-            Text("This will sign you out and remove the server configuration.")
+            Text("这会退出登录并移除当前服务器配置。")
         }
         .confirmationDialog(
-            "Remove Account",
+            "移除账号",
             isPresented: $showRemoveAccountConfirmation,
             titleVisibility: .visible
         ) {
             if let account = accountToRemove {
-                Button("Remove \"\(account.displayName)\"", role: .destructive) {
+                Button("移除“\(account.displayName)”", role: .destructive) {
                     Task {
                         await viewModel.removeAccount(account)
                     }
                     accountToRemove = nil
                 }
             }
-            Button("Cancel", role: .cancel) {
+            Button("取消", role: .cancel) {
                 accountToRemove = nil
             }
         } message: {
             if let account = accountToRemove {
-                Text("This will remove the saved session for \"\(account.displayName)\". You can sign in again anytime.")
+                Text("这会移除“\(account.displayName)”的已保存会话。之后仍可随时重新登录。")
             }
         }
     }
@@ -201,16 +201,16 @@ struct ServerManagementView: View {
     }
 
     private var statusTitle: String {
-        if isCheckingHealth { return "Checking…" }
+        if isCheckingHealth { return "正在检查…" }
         switch serverHealthy {
-        case .some(true): return "Connected"
-        case .some(false): return "Connection Issue"
-        case .none: return "Unknown"
+        case .some(true): return "已连接"
+        case .some(false): return "连接异常"
+        case .none: return "未知状态"
         }
     }
 
     private var statusSubtitle: String {
-        activeServer?.url ?? "No server configured"
+        activeServer?.url ?? "未配置服务器"
     }
 
     // MARK: - Health Check
@@ -241,14 +241,14 @@ struct ServerManagementView: View {
         let accounts = viewModel.savedAccountsOnActiveServer
         let activeId = activeServer?.activeAccountId
 
-        return SettingsSection(header: "Accounts") {
+        return SettingsSection(header: "账号") {
             if accounts.isEmpty {
                 // No saved accounts yet — show a hint
                 HStack(spacing: Spacing.md) {
                     Image(systemName: "person.crop.circle.badge.questionmark")
                         .scaledFont(size: 16)
                         .foregroundStyle(theme.textTertiary)
-                    Text("No saved accounts")
+                    Text("暂无已保存账号")
                         .scaledFont(size: 14)
                         .foregroundStyle(theme.textSecondary)
                     Spacer()
@@ -282,7 +282,7 @@ struct ServerManagementView: View {
                         .foregroundStyle(theme.brandPrimary)
                         .frame(width: IconSize.lg)
 
-                    Text("Add Another Account")
+                    Text("添加另一个账号")
                         .scaledFont(size: 14, weight: .medium)
                         .foregroundStyle(theme.brandPrimary)
 
@@ -323,7 +323,7 @@ struct ServerManagementView: View {
                                 .lineLimit(1)
 
                             if account.role == .admin {
-                                Text("Admin")
+                                Text("管理员")
                                     .scaledFont(size: 9, weight: .semibold)
                                     .foregroundStyle(theme.brandPrimary)
                                     .padding(.horizontal, 4)
@@ -352,7 +352,7 @@ struct ServerManagementView: View {
                             .scaledFont(size: 18)
                             .foregroundStyle(theme.success)
                     } else {
-                        Text("Switch")
+                        Text("切换")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.brandPrimary)
                             .padding(.horizontal, 8)
@@ -471,7 +471,7 @@ struct ServerManagementView: View {
     private var editServerSheet: some View {
         NavigationStack {
             Form {
-                Section("Server URL") {
+                Section("服务器 URL") {
                     TextField("https://your-server.com", text: $editingURL)
                         .textContentType(.URL)
                         .autocorrectionDisabled()
@@ -479,32 +479,32 @@ struct ServerManagementView: View {
                         .keyboardType(.URL)
                 }
 
-                Section("Display Name") {
-                    TextField("My Server", text: $editingName)
+                Section("显示名称") {
+                    TextField("我的服务器", text: $editingName)
                 }
 
-                Section("Security") {
-                    Toggle("Allow Self-Signed Certificates", isOn: $editingSelfSigned)
+                Section("安全") {
+                    Toggle("允许自签名证书", isOn: $editingSelfSigned)
                 }
 
                 Section {
                     CustomHeadersEditor(entries: $editingHeaderEntries)
                         .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                 } header: {
-                    Text("Custom Headers")
+                    Text("自定义请求头")
                 } footer: {
-                    Text("HTTP headers sent with every request to this server. Useful for reverse proxies or services that require extra authentication headers.")
+                    Text("这些 HTTP 请求头会随每次请求发送到该服务器，适合反向代理或需要额外鉴权头的服务。")
                         .font(.caption)
                 }
             }
-            .navigationTitle("Edit Server")
+            .navigationTitle("编辑服务器")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { isEditing = false }
+                    Button("取消") { isEditing = false }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
+                    Button("保存") {
                         saveEdits()
                         isEditing = false
                     }

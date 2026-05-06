@@ -19,27 +19,27 @@ struct AppearanceSettingsView: View {
 
                 // Color Scheme
                 SettingsSection(
-                    header: "Appearance",
-                    footer: "Choose how Open Relay looks. System follows your device settings."
+                    header: "外观",
+                    footer: "选择 Iexa 的显示方式。“跟随系统”会使用设备当前设置。"
                 ) {
                     colorSchemePicker
                 }
 
                 // Accent Color
                 SettingsSection(
-                    header: "Accent Color",
-                    footer: "Personalizes buttons, links, and interactive elements. Tap the color wheel for any custom color."
+                    header: "强调色",
+                    footer: "用于按钮、链接和交互元素。点选色轮可以选择任意自定义颜色。"
                 ) {
                     accentColorGrid
                         .padding(Spacing.md)
                 }
 
                 // Theme Options
-                SettingsSection(header: "Theme Options") {
+                SettingsSection(header: "主题选项") {
                     SettingsCell(
                         icon: "moon.stars.fill",
-                        title: "Pure Black Dark Mode",
-                        subtitle: "Use OLED-friendly true black",
+                        title: "纯黑深色模式",
+                        subtitle: "使用更适合 OLED 屏幕的纯黑背景",
                         accessory: .toggle(
                             isOn: manager.usePureBlackDark,
                             onChange: { manager.usePureBlackDark = $0 }
@@ -48,8 +48,8 @@ struct AppearanceSettingsView: View {
 
                     SettingsCell(
                         icon: "paintpalette.fill",
-                        title: "Tinted Surfaces",
-                        subtitle: "Add a subtle accent tint to backgrounds",
+                        title: "背景染色",
+                        subtitle: "给背景加入轻微的强调色氛围",
                         accessory: .toggle(
                             isOn: manager.useTintedBackgrounds,
                             onChange: { manager.useTintedBackgrounds = $0 }
@@ -62,7 +62,7 @@ struct AppearanceSettingsView: View {
             .padding(.vertical, Spacing.lg)
         }
         .background(theme.background)
-        .navigationTitle("Appearance")
+        .navigationTitle("外观")
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -84,11 +84,11 @@ struct AppearanceSettingsView: View {
                         }
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("AI Assistant")
+                        Text("AI 助手")
                             .scaledFont(size: 11, weight: .semibold)
                             .foregroundStyle(theme.textTertiary)
 
-                        Text("Here's how your theme looks! Try different accent colors to find your style.")
+                        Text("这是当前主题的预览效果。试试不同强调色，找到最顺眼的风格。")
                             .scaledFont(size: 13)
                             .foregroundStyle(theme.chatBubbleAssistantText)
                             .padding(.horizontal, 12)
@@ -108,7 +108,7 @@ struct AppearanceSettingsView: View {
                 HStack {
                     Spacer(minLength: 60)
 
-                    Text("Looks great! 🎨")
+                    Text("看起来不错")
                         .scaledFont(size: 13)
                         .foregroundStyle(theme.chatBubbleUserText)
                         .padding(.horizontal, 12)
@@ -124,7 +124,7 @@ struct AppearanceSettingsView: View {
                             .scaledFont(size: 18)
                             .foregroundStyle(theme.textTertiary)
 
-                        Text("Message")
+                        Text("发送消息")
                             .scaledFont(size: 13)
                             .foregroundStyle(theme.inputPlaceholder)
 
@@ -197,7 +197,7 @@ struct AppearanceSettingsView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("\(mode.displayName) theme")
+                .accessibilityLabel("\(mode.displayName)主题")
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
             }
         }
@@ -282,14 +282,14 @@ struct AppearanceSettingsView: View {
                 }
                 .frame(width: 48, height: 48)
 
-                Text("Custom")
+                Text("自定义")
                     .scaledFont(size: 10, weight: isSelected ? .semibold : .medium)
                     .foregroundStyle(isSelected ? theme.textPrimary : theme.textTertiary)
                     .lineLimit(1)
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Custom color picker")
+        .accessibilityLabel("自定义颜色选择器")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
@@ -348,7 +348,7 @@ struct AppearanceSettingsView: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(preset.displayName) accent color")
+        .accessibilityLabel("\(preset.displayName)强调色")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
@@ -377,7 +377,7 @@ struct AppearanceSettingsView: View {
                         )
                         .shadow(color: wheelColor.opacity(0.3), radius: 12, y: 4)
 
-                    Text("Preview")
+                    Text("预览")
                         .scaledFont(size: 13, weight: .medium)
                         .foregroundStyle(theme.textTertiary)
                 }
@@ -386,7 +386,7 @@ struct AppearanceSettingsView: View {
                 // Sample buttons with chosen color
                 HStack(spacing: Spacing.md) {
                     // Primary button preview
-                    Text("Primary")
+                    Text("主按钮")
                         .scaledFont(size: 14, weight: .semibold)
                         .foregroundStyle(.white)
                         .padding(.horizontal, 20)
@@ -394,7 +394,7 @@ struct AppearanceSettingsView: View {
                         .background(Capsule().fill(wheelColor))
 
                     // Tinted button preview
-                    Text("Tinted")
+                    Text("浅色按钮")
                         .scaledFont(size: 14, weight: .semibold)
                         .foregroundStyle(wheelColor)
                         .padding(.horizontal, 20)
@@ -408,16 +408,16 @@ struct AppearanceSettingsView: View {
             }
             .frame(maxWidth: .infinity)
             .background(theme.background)
-            .navigationTitle("Pick a Color")
+            .navigationTitle("选择颜色")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
+                    Button("取消") {
                         showColorWheel = false
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Apply") {
+                    Button("应用") {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
                             manager.setCustomColor(wheelColor)
                         }

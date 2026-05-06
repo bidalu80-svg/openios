@@ -3,7 +3,7 @@ import Foundation
 import os.log
 import UIKit
 
-/// Manages device GPS location for Open Relay.
+/// Manages device GPS location for Iexa.
 ///
 /// Location sharing is entirely opt-in — the manager only starts updates after
 /// the user explicitly enables "Share Location" in Privacy & Security settings.

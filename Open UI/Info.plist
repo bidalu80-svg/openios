@@ -35,7 +35,7 @@
 		</dict>
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Open Relay uses your location to provide location-aware responses when you enable the Share Location feature in Privacy &amp; Security settings.</string>
+	<string>Iexa uses your location to provide location-aware responses when you enable the Share Location feature in Privacy &amp; Security settings.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Iexa saves generated images to your photo library when you tap Save.</string>
 	<key>NSAppTransportSecurity</key>
@@ -113,7 +113,7 @@
 				<string>public.data</string>
 			</array>
 			<key>UTTypeDescription</key>
-			<string>Open Relay Chat Item</string>
+			<string>Iexa Chat Item</string>
 			<key>UTTypeIdentifier</key>
 			<string>com.openui.chat-item</string>
 		</dict>

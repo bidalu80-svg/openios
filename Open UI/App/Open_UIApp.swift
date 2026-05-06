@@ -219,7 +219,7 @@ struct Open_UIApp: App {
 
         switch host {
         case "new-chat":
-            // Widget "Ask Open Relay" bar → new chat with keyboard auto-focus.
+            // Widget "Ask Iexa" bar → new chat with keyboard auto-focus.
             // Posts a notification that MainChatView/iPadMainChatView handle directly
             // (they own the activeConversationId state, not the router).
             NotificationCenter.default.post(name: .openUINewChatWithFocus, object: nil)

@@ -100,7 +100,7 @@ struct SkillPickerView: View {
         VStack(spacing: Spacing.sm) {
             ProgressView()
                 .controlSize(.small)
-            Text("Loading skills…")
+            Text("正在加载技能…")
                 .scaledFont(size: 12, weight: .medium)
                 .foregroundStyle(theme.textTertiary)
         }
@@ -116,14 +116,14 @@ struct SkillPickerView: View {
                 .scaledFont(size: 24)
                 .foregroundStyle(theme.textTertiary.opacity(0.5))
             if skills.isEmpty {
-                Text("No skills available")
+                Text("暂无可用技能")
                     .scaledFont(size: 13, weight: .medium)
                     .foregroundStyle(theme.textTertiary)
-                Text("Create skills in your Open WebUI workspace")
+                Text("请先在工作区创建技能")
                     .scaledFont(size: 11)
                     .foregroundStyle(theme.textTertiary.opacity(0.7))
             } else {
-                Text("No skills match \"$\(query)\"")
+                Text("没有匹配“\(query)”的技能")
                     .scaledFont(size: 13, weight: .medium)
                     .foregroundStyle(theme.textTertiary)
             }

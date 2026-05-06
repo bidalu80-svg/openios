@@ -870,7 +870,7 @@ struct ChatDetailView: View {
                     .scaledFont(size: 16, weight: .medium)
                     .foregroundStyle(theme.brandPrimary)
             }
-            Text("Photo")
+            Text("图片")
                 .scaledFont(size: 12, weight: .medium)
                 .fontWeight(.semibold)
                 .foregroundStyle(theme.textPrimary)
@@ -887,9 +887,9 @@ struct ChatDetailView: View {
 
     private var placeholderText: String {
         if let model = viewModel.selectedModel {
-            return String(localized: "Message \(model.shortName)")
+            return "给 \(model.shortName) 发消息"
         }
-        return String(localized: "Message")
+        return "发送消息"
     }
 
     /// Checks whether a feature (web_search, image_generation, code_interpreter)
@@ -2496,7 +2496,7 @@ struct ChatDetailView: View {
             Spacer()
             if !viewModel.isStreaming {
                 Button { Task { await viewModel.regenerateLastResponse() } } label: {
-                    Text("Retry").scaledFont(size: 12, weight: .medium).foregroundStyle(theme.brandPrimary)
+                    Text("重试").scaledFont(size: 12, weight: .medium).foregroundStyle(theme.brandPrimary)
                 }
             }
         }

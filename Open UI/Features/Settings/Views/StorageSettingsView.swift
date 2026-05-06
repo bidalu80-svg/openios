@@ -72,7 +72,7 @@ struct StorageSettingsView: View {
                 locationSection(location)
             }
         }
-        .navigationTitle("Storage")
+        .navigationTitle("存储")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -89,60 +89,60 @@ struct StorageSettingsView: View {
         }
         .task { await loadStorage() }
         .confirmationDialog(
-            "Delete All ML Models",
+            "删除所有本地模型",
             isPresented: $showDeleteAllModelsConfirm,
             titleVisibility: .visible
         ) {
-            Button("Delete All Models", role: .destructive) {
+            Button("删除所有模型", role: .destructive) {
                 let freed = StorageManager.shared.deleteAllMLModelFiles()
-                showActionFeedback("Freed \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))")
+                showActionFeedback("已释放 \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))")
                 Task { await loadStorage() }
             }
-            Button("Cancel", role: .cancel) {}
+            Button("取消", role: .cancel) {}
         } message: {
-            Text("This will delete all downloaded TTS and ASR model files from disk. Models will need to be re-downloaded on next use.")
+            Text("这会删除所有已下载的 TTS 和 ASR 模型文件。下次使用相关功能时需要重新下载。")
         }
         .confirmationDialog(
-            "Clear Hub Cache",
+            "清理 Hub 缓存",
             isPresented: $showClearHubCacheConfirm,
             titleVisibility: .visible
         ) {
-            Button("Clear Hub Cache", role: .destructive) {
+            Button("清理 Hub 缓存", role: .destructive) {
                 let freed = StorageManager.shared.cleanupHubCache()
-                showActionFeedback("Freed \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))")
+                showActionFeedback("已释放 \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))")
                 Task { await loadStorage() }
             }
-            Button("Cancel", role: .cancel) {}
+            Button("取消", role: .cancel) {}
         } message: {
-            Text("The HuggingFace Hub keeps a duplicate blob cache alongside each downloaded model. Deleting it is safe — the working model files are untouched.")
+            Text("HuggingFace Hub 会在已下载模型旁边保留一份重复缓存。清理它是安全的，不会影响正在使用的模型文件。")
         }
         .confirmationDialog(
-            "Clear Caches",
+            "清理缓存",
             isPresented: $showClearCachesConfirm,
             titleVisibility: .visible
         ) {
-            Button("Clear Caches", role: .destructive) {
+            Button("清理缓存", role: .destructive) {
                 let freed = StorageManager.shared.clearCachesDirectory()
-                showActionFeedback("Freed \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))")
+                showActionFeedback("已释放 \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))")
                 Task { await loadStorage() }
             }
-            Button("Cancel", role: .cancel) {}
+            Button("取消", role: .cancel) {}
         } message: {
-            Text("This clears the image cache, HTTP cache, and other cached data. The app will re-cache items as needed.")
+            Text("这会清理图片缓存、HTTP 缓存和其他缓存数据。App 会在需要时重新缓存。")
         }
         .confirmationDialog(
-            "Clear Temporary Files",
+            "清理临时文件",
             isPresented: $showClearTempConfirm,
             titleVisibility: .visible
         ) {
-            Button("Clear Temp Files", role: .destructive) {
+            Button("清理临时文件", role: .destructive) {
                 let freed = StorageManager.shared.clearTempDirectory()
-                showActionFeedback("Freed \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))")
+                showActionFeedback("已释放 \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))")
                 Task { await loadStorage() }
             }
-            Button("Cancel", role: .cancel) {}
+            Button("取消", role: .cancel) {}
         } message: {
-            Text("This removes all files from the app's temporary folder. These are recreated as needed.")
+            Text("这会删除 App 临时目录中的所有文件。需要时会自动重新创建。")
         }
         .overlay(alignment: .bottom) {
             if let feedback = actionFeedback {
@@ -160,7 +160,7 @@ struct StorageSettingsView: View {
                     Spacer()
                     VStack(spacing: 8) {
                         ProgressView()
-                        Text("Calculating storage…")
+                        Text("正在计算存储…")
                             .scaledFont(size: 13, weight: .medium)
                             .foregroundStyle(theme.textSecondary)
                     }
@@ -171,7 +171,7 @@ struct StorageSettingsView: View {
                 // Total storage usage
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Total App Storage")
+                        Text("应用总存储")
                             .scaledFont(size: 14, weight: .medium)
                             .foregroundStyle(theme.textSecondary)
                         Text(ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file))
@@ -197,7 +197,7 @@ struct StorageSettingsView: View {
                                 .background(colorForString(location.color).opacity(0.12))
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
 
-                            Text(location.label)
+                            Text(displayLocationLabel(location.label))
                                 .scaledFont(size: 15)
                                 .foregroundStyle(theme.textPrimary)
 
@@ -211,7 +211,7 @@ struct StorageSettingsView: View {
                 }
             }
         } header: {
-            Text("Storage Usage")
+            Text("存储占用")
         }
     }
 
@@ -226,10 +226,10 @@ struct StorageSettingsView: View {
                 } label: {
                     Label {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Delete Hub Blob Cache")
+                            Text("删除 Hub 重复缓存")
                                 .scaledFont(size: 15, weight: .medium)
                                 .foregroundStyle(theme.error)
-                            Text("Duplicate model data left by HuggingFace — safe to delete")
+                            Text("HuggingFace 留下的重复模型数据，可以安全删除")
                                 .scaledFont(size: 12, weight: .medium)
                                 .foregroundStyle(theme.textTertiary)
                         }
@@ -248,13 +248,13 @@ struct StorageSettingsView: View {
             } label: {
                 Label {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Clear Caches")
+                        Text("清理缓存")
                             .scaledFont(size: 15, weight: .medium)
                             .foregroundStyle(theme.textPrimary)
                         let cacheSize = locationSizes["Caches"] ?? 0
                         Text(cacheSize > 0
-                             ? "Image cache, HTTP cache · \(ByteCountFormatter.string(fromByteCount: cacheSize, countStyle: .file))"
-                             : "Image cache, HTTP cache")
+                             ? "图片缓存、HTTP 缓存 · \(ByteCountFormatter.string(fromByteCount: cacheSize, countStyle: .file))"
+                             : "图片缓存、HTTP 缓存")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textTertiary)
                     }
@@ -273,10 +273,10 @@ struct StorageSettingsView: View {
                 } label: {
                     Label {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Clear Temp Files")
+                            Text("清理临时文件")
                                 .scaledFont(size: 15, weight: .medium)
                                 .foregroundStyle(theme.textPrimary)
-                            Text("Temporary files · \(ByteCountFormatter.string(fromByteCount: tempSize, countStyle: .file))")
+                            Text("临时文件 · \(ByteCountFormatter.string(fromByteCount: tempSize, countStyle: .file))")
                                 .scaledFont(size: 12, weight: .medium)
                                 .foregroundStyle(theme.textTertiary)
                         }
@@ -296,10 +296,10 @@ struct StorageSettingsView: View {
                 } label: {
                     Label {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Delete All ML Models")
+                            Text("删除所有本地模型")
                                 .scaledFont(size: 15, weight: .medium)
                                 .foregroundStyle(theme.error)
-                            Text("TTS & ASR models · \(ByteCountFormatter.string(fromByteCount: mlSize, countStyle: .file))")
+                            Text("语音合成和识别模型 · \(ByteCountFormatter.string(fromByteCount: mlSize, countStyle: .file))")
                                 .scaledFont(size: 12, weight: .medium)
                                 .foregroundStyle(theme.textTertiary)
                         }
@@ -311,9 +311,9 @@ struct StorageSettingsView: View {
                 }
             }
         } header: {
-            Text("Quick Actions")
+            Text("快捷操作")
         } footer: {
-            Text("These actions free space immediately. ML models will re-download automatically the next time you use a feature that requires them.")
+            Text("这些操作会立即释放空间。需要模型的功能下次使用时会自动重新下载。")
         }
     }
 
@@ -345,7 +345,7 @@ struct StorageSettingsView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(location.label)
+                        Text(displayLocationLabel(location.label))
                             .scaledFont(size: 15, weight: .semibold)
                             .foregroundStyle(theme.textPrimary)
                         Text(location.url.path.replacingOccurrences(
@@ -374,7 +374,7 @@ struct StorageSettingsView: View {
             // File entries (only when expanded)
             if isExpanded {
                 if entries.isEmpty {
-                    Text("Empty")
+                    Text("空")
                         .scaledFont(size: 14)
                         .foregroundStyle(theme.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -387,14 +387,14 @@ struct StorageSettingsView: View {
                                 Button(role: .destructive) {
                                     deleteEntry(entry, inLocation: location.label)
                                 } label: {
-                                    Label("Delete", systemImage: "trash")
+                                    Label("删除", systemImage: "trash")
                                 }
                             }
                     }
                 }
             }
         } header: {
-            Text(location.label.uppercased())
+            Text(displayLocationLabel(location.label))
         }
     }
 
@@ -443,7 +443,7 @@ struct StorageSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 if entry.isDirectory, let children = entry.children {
-                    Text("\(children.count) item\(children.count == 1 ? "" : "s")")
+                    Text("\(children.count) 项")
                         .scaledFont(size: 11, weight: .medium)
                         .foregroundStyle(theme.textTertiary)
                 }
@@ -501,7 +501,7 @@ struct StorageSettingsView: View {
     private func deleteEntry(_ entry: StorageManager.StorageEntry, inLocation locationLabel: String) {
         let freed = StorageManager.shared.deleteItem(at: entry.url)
         if freed > 0 {
-            showActionFeedback("Freed \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))")
+            showActionFeedback("已释放 \(ByteCountFormatter.string(fromByteCount: freed, countStyle: .file))")
         }
         Haptics.play(.medium)
         // Refresh storage data
@@ -576,6 +576,16 @@ struct StorageSettingsView: View {
         case "green":  return .green
         case "red":    return .red
         default:       return .secondary
+        }
+    }
+
+    private func displayLocationLabel(_ label: String) -> String {
+        switch label {
+        case "Documents": return "文稿"
+        case "Application Support": return "应用支持"
+        case "Caches": return "缓存"
+        case "Temporary Files": return "临时文件"
+        default: return label
         }
     }
 

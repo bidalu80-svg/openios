@@ -834,7 +834,7 @@ struct ChannelDetailView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .scaledFont(size: 11)
-                        Text("Failed to send. Tap to retry.")
+                        Text("发送失败，点按重试。")
                             .scaledFont(size: 12, weight: .medium)
                     }
                     .foregroundStyle(theme.error)
@@ -1495,4 +1495,3 @@ struct ChannelBubbleShape: InsettableShape {
         return Path(bezier.cgPath)
     }
 }
-

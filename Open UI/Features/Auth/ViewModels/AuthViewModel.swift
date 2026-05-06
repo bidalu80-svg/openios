@@ -518,9 +518,9 @@ final class AuthViewModel {
 
         currentUser = User(
             id: "openai-compatible-user",
-            username: "API Key User",
+            username: "API Key 用户",
             email: "",
-            name: "API Key User",
+            name: "API Key 用户",
             role: .user
         )
         cacheCurrentUser()
@@ -793,9 +793,9 @@ final class AuthViewModel {
            providerType != .openWebUI {
             currentUser = User(
                 id: "openai-compatible-user",
-                username: "API Key User",
+                username: "API Key 用户",
                 email: "",
-                name: "API Key User",
+                name: "API Key 用户",
                 role: .user
             )
             phase = .authenticated

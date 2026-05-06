@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// About screen showing app version, server info, and links.
+/// About screen showing app version and local app details.
 struct AboutView: View {
     @Bindable var viewModel: AuthViewModel
     @Environment(\.theme) private var theme
@@ -19,18 +19,34 @@ struct AboutView: View {
                 // App icon and version
                 appHeader
 
+                SettingsSection(header: "关于 Iexa") {
+                    VStack(alignment: .leading, spacing: Spacing.sm) {
+                        Text("Iexa 是一款轻量的 AI 聊天应用，支持日常对话、图像生成、图片和文件理解、本地聊天记录，以及直连多种 API 服务。")
+                            .scaledFont(size: 14)
+                            .foregroundStyle(theme.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("它把模型、聊天和创作工具集中在一个简洁的移动工作区里。")
+                            .scaledFont(size: 13)
+                            .foregroundStyle(theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, Spacing.md)
+                    .padding(.vertical, Spacing.chatBubblePadding)
+                }
+
                 // App info
-                SettingsSection(header: "App") {
-                    detailRow(label: "Version", value: appVersion)
-                    detailRow(label: "Build", value: buildNumber)
-                    detailRow(label: "Platform", value: "iOS \(UIDevice.current.systemVersion)", showDivider: false)
+                SettingsSection(header: "应用") {
+                    detailRow(label: "版本", value: appVersion)
+                    detailRow(label: "构建", value: buildNumber)
+                    detailRow(label: "平台", value: "iOS \(UIDevice.current.systemVersion)", showDivider: false)
                 }
 
                 // Server info
-                SettingsSection(header: "Server") {
-                    detailRow(label: "Name", value: viewModel.serverName)
+                SettingsSection(header: "服务器") {
+                    detailRow(label: "名称", value: viewModel.serverName)
                     if let version = viewModel.serverVersion {
-                        detailRow(label: "Server Version", value: version)
+                        detailRow(label: "服务器版本", value: version)
                     }
                     detailRow(
                         label: "URL",
@@ -39,68 +55,9 @@ struct AboutView: View {
                     )
                 }
 
-                // Links
-                SettingsSection(header: "Links") {
-                    linkRow(
-                        icon: "safari",
-                        title: "Open WebUI Website",
-                        url: "https://openwebui.com"
-                    )
-                    linkRow(
-                        icon: "curlybraces",
-                        title: "Source Code",
-                        url: "https://github.com/Ichigo3766/Open-Relay"
-                    )
-                    linkRow(
-                        icon: "hand.raised",
-                        title: "Privacy Policy",
-                        url: "https://github.com/Ichigo3766/Open-Relay/blob/main/PRIVACY.md",
-                        showDivider: false
-                    )
-                }
-
-                // Feedback
-                SettingsSection(header: "Feedback") {
-                    linkRow(
-                        icon: "ladybug",
-                        iconColor: .red,
-                        title: "Report a Bug",
-                        subtitle: "Something broken? Let us know.",
-                        url: "https://github.com/Ichigo3766/Open-Relay/issues/new?template=bug_report.yml"
-                    )
-                    linkRow(
-                        icon: "sparkles",
-                        iconColor: .purple,
-                        title: "Request a Feature",
-                        subtitle: "Got an idea? We'd love to hear it.",
-                        url: "https://github.com/Ichigo3766/Open-Relay/issues/new?template=feature_request.yml"
-                    )
-                    linkRow(
-                        icon: "paintbrush",
-                        iconColor: .orange,
-                        title: "UI/UX Improvement",
-                        subtitle: "Design or layout feedback.",
-                        url: "https://github.com/Ichigo3766/Open-Relay/issues/new?template=ui_ux.yml"
-                    )
-                    linkRow(
-                        icon: "bolt",
-                        iconColor: .yellow,
-                        title: "Performance Issue",
-                        subtitle: "Slow, laggy, or draining battery?",
-                        url: "https://github.com/Ichigo3766/Open-Relay/issues/new?template=performance.yml"
-                    )
-                    linkRow(
-                        icon: "questionmark.circle",
-                        title: "Ask a Question",
-                        subtitle: "Need help with setup or a feature?",
-                        url: "https://github.com/Ichigo3766/Open-Relay/issues/new?template=question.yml",
-                        showDivider: false
-                    )
-                }
-
                 // Credits
                 VStack(spacing: Spacing.sm) {
-                    Text("Made with ❤️ for Open WebUI")
+                    Text("Iexa")
                         .scaledFont(size: 12, weight: .medium)
                         .foregroundStyle(theme.textTertiary)
                 }
@@ -119,11 +76,11 @@ struct AboutView: View {
                 .frame(width: 88, height: 88)
                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
 
-            Text("Open Relay")
+            Text("Iexa")
                 .scaledFont(size: 28, weight: .bold)
                 .foregroundStyle(theme.textPrimary)
 
-            Text("A native iOS client for Open WebUI")
+            Text("AI 聊天、图像工具和本地工作区")
                 .scaledFont(size: 14)
                 .foregroundStyle(theme.textSecondary)
 
@@ -162,25 +119,4 @@ struct AboutView: View {
         }
     }
 
-    private func linkRow(
-        icon: String,
-        iconColor: Color? = nil,
-        title: String,
-        subtitle: String? = nil,
-        url: String,
-        showDivider: Bool = true
-    ) -> some View {
-        SettingsCell(
-            icon: icon,
-            title: title,
-            subtitle: subtitle,
-            iconColor: iconColor,
-            showDivider: showDivider,
-            accessory: .chevron
-        ) {
-            if let url = URL(string: url) {
-                UIApplication.shared.open(url)
-            }
-        }
-    }
 }

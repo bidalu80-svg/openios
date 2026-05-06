@@ -328,13 +328,13 @@ struct ModelEditorView: View {
                 .padding(.bottom, Spacing.xl)
             }
             .background(theme.background)
-            .navigationTitle(isEditing ? "Edit Model" : "New Model")
+            .navigationTitle(isEditing ? "编辑模型" : "新建模型")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbarContent }
             .sheet(isPresented: $isSystemPromptExpanded) {
                 FullscreenContentEditor(
-                    title: "System Prompt",
-                    placeholder: "Write a system prompt…",
+                    title: "系统提示词",
+                    placeholder: "输入系统提示词…",
                     content: $systemPrompt
                 )
             }
@@ -374,26 +374,26 @@ struct ModelEditorView: View {
                 .presentationDragIndicator(.visible)
             }
             .confirmationDialog(
-                "Discard Changes?",
+                "放弃更改？",
                 isPresented: $showDiscardConfirm,
                 titleVisibility: .visible
             ) {
-                Button("Discard", role: .destructive) { dismiss() }
-                Button("Keep Editing", role: .cancel) {}
+                Button("放弃", role: .destructive) { dismiss() }
+                Button("继续编辑", role: .cancel) {}
             } message: {
-                Text("Your unsaved changes will be lost.")
+                Text("未保存的更改会丢失。")
             }
-            .alert("Validation Error", isPresented: .init(
+            .alert("校验错误", isPresented: .init(
                 get: { validationError != nil },
                 set: { if !$0 { validationError = nil } }
             )) {
-                Button("OK", role: .cancel) {}
+                Button("好", role: .cancel) {}
             } message: { Text(validationError ?? "") }
-            .alert("Access Error", isPresented: .init(
+            .alert("权限错误", isPresented: .init(
                 get: { accessUpdateError != nil },
                 set: { if !$0 { accessUpdateError = nil } }
             )) {
-                Button("OK", role: .cancel) {}
+                Button("好", role: .cancel) {}
             } message: { Text(accessUpdateError ?? "") }
         }
         .onAppear {
@@ -491,7 +491,7 @@ struct ModelEditorView: View {
                 )
                 Spacer()
             }
-            Text("Tap to change profile image")
+            Text("点按更换模型头像")
                 .scaledFont(size: 12)
                 .foregroundStyle(theme.textTertiary)
         }
@@ -502,16 +502,16 @@ struct ModelEditorView: View {
 
     private var basicInfoSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Model Info")
+            sectionHeader("模型信息")
             fieldCard {
                 VStack(spacing: 0) {
                     // Name
                     HStack {
-                        Text("Name")
+                        Text("名称")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textSecondary)
                             .frame(width: 90, alignment: .leading)
-                        TextField("e.g. AWS Chatbot", text: $name)
+                        TextField("例如 AWS 聊天助手", text: $name)
                             .scaledFont(size: 15)
                             .foregroundStyle(theme.textPrimary)
                             .focused($focusedField, equals: .name)
@@ -534,11 +534,11 @@ struct ModelEditorView: View {
 
                     // Model ID
                     HStack {
-                        Text("Model ID")
+                        Text("模型 ID")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textSecondary)
                             .frame(width: 90, alignment: .leading)
-                        TextField("e.g. aws-chatbot", text: $modelId)
+                        TextField("例如 aws-chatbot", text: $modelId)
                             .scaledFont(size: 15)
                             .foregroundStyle(isEditing ? theme.textSecondary : theme.textPrimary)
                             .focused($focusedField, equals: .modelId)
@@ -569,7 +569,7 @@ struct ModelEditorView: View {
                         logger.info("[BaseModelPicker] Opening base model picker (available models: \(availableModels.count))")
                     } label: {
                         HStack {
-                            Text("Base Model")
+                            Text("基础模型")
                                 .scaledFont(size: 14)
                                 .foregroundStyle(theme.textSecondary)
                                 .frame(width: 90, alignment: .leading)
@@ -579,7 +579,7 @@ struct ModelEditorView: View {
                                     .tint(theme.brandPrimary)
                                     .padding(.leading, 4)
                             } else if baseModelId.isEmpty {
-                                Text("Select a model")
+                                Text("选择模型")
                                     .scaledFont(size: 15)
                                     .foregroundStyle(theme.textTertiary)
                             } else {
@@ -612,11 +612,11 @@ struct ModelEditorView: View {
 
                     // Description
                     HStack {
-                        Text("Description")
+                        Text("描述")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textSecondary)
                             .frame(width: 90, alignment: .leading)
-                        TextField("Optional description", text: $description)
+                        TextField("可选描述", text: $description)
                             .scaledFont(size: 15)
                             .foregroundStyle(theme.textPrimary)
                             .focused($focusedField, equals: .description)
@@ -628,11 +628,11 @@ struct ModelEditorView: View {
 
                     // Tags
                     HStack {
-                        Text("Tags")
+                        Text("标签")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textSecondary)
                             .frame(width: 90, alignment: .leading)
-                        TextField("e.g. aws, chat (comma-separated)", text: $tags)
+                        TextField("例如 aws, chat（用英文逗号分隔）", text: $tags)
                             .scaledFont(size: 15)
                             .foregroundStyle(theme.textPrimary)
                             .autocorrectionDisabled()
@@ -649,7 +649,7 @@ struct ModelEditorView: View {
     private var systemPromptSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
             HStack(alignment: .firstTextBaseline) {
-                sectionHeader("System Prompt")
+                sectionHeader("系统提示词")
                 Spacer()
                 Button {
                     Haptics.play(.light)
@@ -682,7 +682,7 @@ struct ModelEditorView: View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
             // Header row: "PROMPTS" label + Default/Custom toggle button
             HStack {
-                sectionHeader("Prompts")
+                sectionHeader("快捷提示")
                 Spacer()
                 Button {
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -691,7 +691,7 @@ struct ModelEditorView: View {
                     }
                     Haptics.play(.light)
                 } label: {
-                    Text(useCustomPrompts ? "Custom" : "Default")
+                    Text(useCustomPrompts ? "自定义" : "默认")
                         .scaledFont(size: 12, weight: .semibold)
                         .foregroundStyle(useCustomPrompts ? theme.brandPrimary : theme.textTertiary)
                         .padding(.horizontal, 8)
@@ -710,11 +710,11 @@ struct ModelEditorView: View {
                             VStack(spacing: 0) {
                                 // Title field
                                 HStack {
-                                    Text("Title")
+                                    Text("标题")
                                         .scaledFont(size: 12)
                                         .foregroundStyle(theme.textTertiary)
                                         .frame(width: 56, alignment: .leading)
-                                    TextField("Optional title", text: Binding(
+                                    TextField("可选标题", text: Binding(
                                         get: { suggestionPrompts[idx].title },
                                         set: { suggestionPrompts[idx].title = $0 }
                                     ))
@@ -738,11 +738,11 @@ struct ModelEditorView: View {
 
                                 // Subtitle field
                                 HStack {
-                                    Text("Subtitle")
+                                    Text("副标题")
                                         .scaledFont(size: 12)
                                         .foregroundStyle(theme.textTertiary)
                                         .frame(width: 56, alignment: .leading)
-                                    TextField("Optional subtitle", text: Binding(
+                                    TextField("可选副标题", text: Binding(
                                         get: { suggestionPrompts[idx].subtitle },
                                         set: { suggestionPrompts[idx].subtitle = $0 }
                                     ))
@@ -755,11 +755,11 @@ struct ModelEditorView: View {
 
                                 // Prompt content field
                                 HStack {
-                                    Text("Prompt")
+                                    Text("提示词")
                                         .scaledFont(size: 12)
                                         .foregroundStyle(theme.textTertiary)
                                         .frame(width: 56, alignment: .leading)
-                                    TextField("Prompt text", text: Binding(
+                                    TextField("提示词内容", text: Binding(
                                         get: { suggestionPrompts[idx].content },
                                         set: { suggestionPrompts[idx].content = $0 }
                                     ))
@@ -782,7 +782,7 @@ struct ModelEditorView: View {
                                 Image(systemName: "plus")
                                     .scaledFont(size: 13, weight: .medium)
                                     .foregroundStyle(theme.brandPrimary)
-                                Text("Add Prompt")
+                                Text("添加提示词")
                                     .scaledFont(size: 14)
                                     .foregroundStyle(theme.brandPrimary)
                             }
@@ -802,8 +802,8 @@ struct ModelEditorView: View {
 
     private var knowledgeSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Knowledge")
-            Text("Attach knowledge collections or files to this model.")
+            sectionHeader("知识库")
+            Text("给这个模型挂载知识集合或文件。")
                 .scaledFont(size: 12)
                 .foregroundStyle(theme.textTertiary)
 
@@ -819,7 +819,7 @@ struct ModelEditorView: View {
                                 Text(entry.name)
                                     .scaledFont(size: 14, weight: .medium)
                                     .foregroundStyle(theme.textPrimary)
-                                Text(entry.type == .collection ? "Collection" : "File")
+                                Text(entry.type == .collection ? "知识集合" : "文件")
                                     .scaledFont(size: 12)
                                     .foregroundStyle(theme.textTertiary)
                             }
@@ -847,7 +847,7 @@ struct ModelEditorView: View {
                             Image(systemName: "plus")
                                 .scaledFont(size: 13, weight: .medium)
                                 .foregroundStyle(theme.brandPrimary)
-                            Text("Add Knowledge")
+                            Text("添加知识")
                                 .scaledFont(size: 14)
                                 .foregroundStyle(theme.brandPrimary)
                         }
@@ -901,18 +901,18 @@ struct ModelEditorView: View {
 
     private var toolsSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Tools")
+            sectionHeader("工具")
             if isFetchingToolsAndFunctions {
                 fieldCard {
                     HStack {
                         ProgressView().controlSize(.small).tint(theme.brandPrimary)
-                        Text("Loading tools…").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
+                        Text("正在加载工具…").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
                     }
                     .padding(Spacing.md)
                 }
             } else if allTools.isEmpty {
                 fieldCard {
-                    Text("No tools available. Add tools in the Tools workspace first.")
+                    Text("暂无可用工具。请先到“工具”工作区添加。")
                         .scaledFont(size: 13)
                         .foregroundStyle(theme.textTertiary)
                         .padding(Spacing.md)
@@ -929,7 +929,7 @@ struct ModelEditorView: View {
                         .padding(.horizontal, 4)
                     }
                 }
-                Text("To select toolkits here, add them to the \"Tools\" workspace first.")
+                Text("要在这里选择工具包，请先到“工具”工作区添加。")
                     .scaledFont(size: 12)
                     .foregroundStyle(theme.textTertiary)
                     .padding(.leading, 4)
@@ -941,18 +941,18 @@ struct ModelEditorView: View {
 
     private var skillsSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Skills")
+            sectionHeader("技能")
             if isFetchingToolsAndFunctions {
                 fieldCard {
                     HStack {
                         ProgressView().controlSize(.small).tint(theme.brandPrimary)
-                        Text("Loading skills…").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
+                        Text("正在加载技能…").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
                     }
                     .padding(Spacing.md)
                 }
             } else if allActions.isEmpty {
                 fieldCard {
-                    Text("No skills available. Add skills in the Skills workspace first.")
+                    Text("暂无可用技能。请先到“技能”工作区添加。")
                         .scaledFont(size: 13)
                         .foregroundStyle(theme.textTertiary)
                         .padding(Spacing.md)
@@ -967,7 +967,7 @@ struct ModelEditorView: View {
                     .padding(.vertical, 4)
                     .padding(.horizontal, 4)
                 }
-                Text("To select skills here, add them to the \"Skills\" workspace first.")
+                Text("要在这里选择技能，请先到“技能”工作区添加。")
                     .scaledFont(size: 12)
                     .foregroundStyle(theme.textTertiary)
                     .padding(.leading, 4)
@@ -979,18 +979,18 @@ struct ModelEditorView: View {
 
     private var filtersSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Filters")
+            sectionHeader("过滤器")
             if isFetchingToolsAndFunctions {
                 fieldCard {
                     HStack {
                         ProgressView().controlSize(.small).tint(theme.brandPrimary)
-                        Text("Loading filters…").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
+                        Text("正在加载过滤器…").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
                     }
                     .padding(Spacing.md)
                 }
             } else if allFilters.isEmpty {
                 fieldCard {
-                    Text("No filters available.")
+                    Text("暂无可用过滤器。")
                         .scaledFont(size: 13)
                         .foregroundStyle(theme.textTertiary)
                         .padding(Spacing.md)
@@ -1009,7 +1009,7 @@ struct ModelEditorView: View {
                 // Default Filters — only shows filters that are currently selected above
                 let checkedFilters = allFilters.filter { selectedFilterIds.contains($0.id) }
                 if !checkedFilters.isEmpty {
-                    sectionHeader("Default Filters")
+                    sectionHeader("默认过滤器")
                     fieldCard {
                         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 0) {
                             ForEach(checkedFilters, id: \.id) { filter in
@@ -1028,19 +1028,19 @@ struct ModelEditorView: View {
 
     private var capabilitiesSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Capabilities")
+            sectionHeader("能力")
             fieldCard {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 0) {
-                    capCheckbox("Vision", systemImage: "eye", value: $capVision)
-                    capCheckbox("File Upload", systemImage: "doc.badge.plus", value: $capFileUpload)
-                    capCheckbox("File Context", systemImage: "doc.text.magnifyingglass", value: $capFileContext)
-                    capCheckbox("Web Search", systemImage: "magnifyingglass", value: $capWebSearch)
-                    capCheckbox("Image Generation", systemImage: "photo.badge.plus", value: $capImageGeneration)
-                    capCheckbox("Code Interpreter", systemImage: "chevron.left.forwardslash.chevron.right", value: $capCodeInterpreter)
-                    capCheckbox("Usage", systemImage: "chart.bar", value: $capUsage)
-                    capCheckbox("Citations", systemImage: "quote.bubble", value: $capCitations)
-                    capCheckbox("Status Updates", systemImage: "info.circle", value: $capStatusUpdates)
-                    capCheckbox("Builtin Tools", systemImage: "wrench.and.screwdriver", value: $capBuiltinTools)
+                    capCheckbox("视觉识图", systemImage: "eye", value: $capVision)
+                    capCheckbox("文件上传", systemImage: "doc.badge.plus", value: $capFileUpload)
+                    capCheckbox("文件上下文", systemImage: "doc.text.magnifyingglass", value: $capFileContext)
+                    capCheckbox("联网搜索", systemImage: "magnifyingglass", value: $capWebSearch)
+                    capCheckbox("图像生成", systemImage: "photo.badge.plus", value: $capImageGeneration)
+                    capCheckbox("代码解释器", systemImage: "chevron.left.forwardslash.chevron.right", value: $capCodeInterpreter)
+                    capCheckbox("用量统计", systemImage: "chart.bar", value: $capUsage)
+                    capCheckbox("引用来源", systemImage: "quote.bubble", value: $capCitations)
+                    capCheckbox("状态更新", systemImage: "info.circle", value: $capStatusUpdates)
+                    capCheckbox("内置工具", systemImage: "wrench.and.screwdriver", value: $capBuiltinTools)
                 }
                 .padding(.vertical, 4)
                 .padding(.horizontal, 4)
@@ -1052,12 +1052,12 @@ struct ModelEditorView: View {
 
     private var defaultFeaturesSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Default Features")
+            sectionHeader("默认功能")
             fieldCard {
                 HStack(spacing: 0) {
-                    capCheckbox("Web Search", systemImage: "magnifyingglass", value: $defaultWebSearch)
-                    capCheckbox("Image Generation", systemImage: "photo.badge.plus", value: $defaultImageGen)
-                    capCheckbox("Code Interpreter", systemImage: "chevron.left.forwardslash.chevron.right", value: $defaultCodeInterpreter)
+                    capCheckbox("联网搜索", systemImage: "magnifyingglass", value: $defaultWebSearch)
+                    capCheckbox("图像生成", systemImage: "photo.badge.plus", value: $defaultImageGen)
+                    capCheckbox("代码解释器", systemImage: "chevron.left.forwardslash.chevron.right", value: $defaultCodeInterpreter)
                 }
                 .padding(.vertical, 4)
                 .padding(.horizontal, 4)
@@ -1069,21 +1069,21 @@ struct ModelEditorView: View {
 
     private var builtinToolsSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Builtin Tools")
+            sectionHeader("内置工具")
             fieldCard {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 0) {
-                    capCheckbox("Time & Calculation", systemImage: "clock", value: $builtinTime)
-                    capCheckbox("Memory", systemImage: "brain", value: $builtinMemory)
-                    capCheckbox("Chat History", systemImage: "bubble.left.and.bubble.right", value: $builtinChats)
-                    capCheckbox("Notes", systemImage: "note.text", value: $builtinNotes)
-                    capCheckbox("Knowledge Base", systemImage: "cylinder.split.1x2", value: $builtinKnowledge)
-                    capCheckbox("Channels", systemImage: "antenna.radiowaves.left.and.right", value: $builtinChannels)
-                    capCheckbox("Task Management", systemImage: "checklist", value: $builtinTaskManagement)
-                    capCheckbox("Automations", systemImage: "gearshape.2", value: $builtinAutomations)
-                    capCheckbox("Calendar", systemImage: "calendar", value: $builtinCalendar)
-                    capCheckbox("Web Search", systemImage: "magnifyingglass", value: $builtinWebSearch)
-                    capCheckbox("Image Generation", systemImage: "photo.badge.plus", value: $builtinImageGen)
-                    capCheckbox("Code Interpreter", systemImage: "chevron.left.forwardslash.chevron.right", value: $builtinCodeInterpreter)
+                    capCheckbox("时间和计算", systemImage: "clock", value: $builtinTime)
+                    capCheckbox("记忆", systemImage: "brain", value: $builtinMemory)
+                    capCheckbox("聊天记录", systemImage: "bubble.left.and.bubble.right", value: $builtinChats)
+                    capCheckbox("笔记", systemImage: "note.text", value: $builtinNotes)
+                    capCheckbox("知识库", systemImage: "cylinder.split.1x2", value: $builtinKnowledge)
+                    capCheckbox("频道", systemImage: "antenna.radiowaves.left.and.right", value: $builtinChannels)
+                    capCheckbox("任务管理", systemImage: "checklist", value: $builtinTaskManagement)
+                    capCheckbox("自动化", systemImage: "gearshape.2", value: $builtinAutomations)
+                    capCheckbox("日历", systemImage: "calendar", value: $builtinCalendar)
+                    capCheckbox("联网搜索", systemImage: "magnifyingglass", value: $builtinWebSearch)
+                    capCheckbox("图像生成", systemImage: "photo.badge.plus", value: $builtinImageGen)
+                    capCheckbox("代码解释器", systemImage: "chevron.left.forwardslash.chevron.right", value: $builtinCodeInterpreter)
                 }
                 .padding(.vertical, 4)
                 .padding(.horizontal, 4)
@@ -1095,10 +1095,10 @@ struct ModelEditorView: View {
 
     private var ttsVoiceSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("TTS Voice")
+            sectionHeader("语音合成声音")
             fieldCard {
                 HStack {
-                    TextField("e.g. alloy, echo, shimmer", text: $ttsVoice)
+                    TextField("例如 alloy、echo、shimmer", text: $ttsVoice)
                         .scaledFont(size: 15)
                         .foregroundStyle(theme.textPrimary)
                         .focused($focusedField, equals: .ttsVoice)
@@ -1115,7 +1115,7 @@ struct ModelEditorView: View {
 
     private var settingsSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Settings")
+            sectionHeader("设置")
             fieldCard {
                 VStack(spacing: 0) {
                     Toggle(isOn: $isActive) {
@@ -1131,10 +1131,10 @@ struct ModelEditorView: View {
                                     .foregroundStyle(isActive ? theme.brandPrimary : theme.textTertiary)
                             }
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Active")
+                                Text("启用")
                                     .scaledFont(size: 15)
                                     .foregroundStyle(theme.textPrimary)
-                                Text("Inactive models won't appear in the model picker.")
+                                Text("停用后不会出现在模型选择器里。")
                                     .scaledFont(size: 12)
                                     .foregroundStyle(theme.textTertiary)
                             }
@@ -1190,7 +1190,7 @@ struct ModelEditorView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            Button("Cancel") {
+            Button("取消") {
                 if hasChanges { showDiscardConfirm = true } else { dismiss() }
             }
             .scaledFont(size: 16)
@@ -1200,7 +1200,7 @@ struct ModelEditorView: View {
             if isSaving {
                 ProgressView().tint(theme.brandPrimary)
             } else {
-                Button("Save") {
+                Button("保存") {
                     Task { await save() }
                 }
                 .scaledFont(size: 16, weight: .semibold)
@@ -1861,10 +1861,10 @@ struct BaseModelPickerSheet: View {
                         Image(systemName: "cpu")
                             .font(.system(size: 44, weight: .light))
                             .foregroundStyle(theme.textTertiary)
-                        Text("No models found")
+                        Text("未找到模型")
                             .scaledFont(size: 17, weight: .semibold)
                             .foregroundStyle(theme.textPrimary)
-                        Text("Could not load available models from the server.")
+                        Text("无法从服务器加载可用模型。")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textTertiary)
                             .multilineTextAlignment(.center)
@@ -1887,7 +1887,7 @@ struct BaseModelPickerSheet: View {
                                                 .scaledFont(size: 14, weight: .medium)
                                                 .foregroundStyle(.red)
                                         }
-                                        Text("None (clear selection)")
+                                        Text("无（清除选择）")
                                             .scaledFont(size: 15)
                                             .foregroundStyle(.red)
                                         Spacer()
@@ -1945,12 +1945,12 @@ struct BaseModelPickerSheet: View {
                 }
             }
             .background(theme.background)
-            .navigationTitle("Select Base Model")
+            .navigationTitle("选择基础模型")
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $searchText, prompt: "Search Models")
+            .searchable(text: $searchText, prompt: "搜索模型")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Cancel") { onDismiss() }
+                    Button("取消") { onDismiss() }
                         .scaledFont(size: 16)
                         .foregroundStyle(theme.textSecondary)
                 }
@@ -2016,7 +2016,7 @@ struct ModelAdvancedParamsSection: View {
                 Haptics.play(.light)
             } label: {
                 HStack {
-                    Text("Advanced Params")
+                    Text("高级参数")
                         .scaledFont(size: 12, weight: .semibold)
                         .foregroundStyle(theme.textTertiary)
                         .padding(.leading, 4)
@@ -2051,35 +2051,35 @@ struct ModelAdvancedParamsSection: View {
     // First half: stream, function calling, reasoning, seed, stop, temperature, logit, max_tokens, top_k, top_p, min_p, freq, presence
     private var advParamsFirstHalf: some View {
         VStack(spacing: 0) {
-            advBoolRow(label: "Stream Chat Response", value: $advStreamResponse)
+            advBoolRow(label: "流式输出（stream）", value: $advStreamResponse)
             divider
-            advIntSliderRow(label: "Stream Delta Chunk Size", value: $advStreamDeltaChunkSize, range: 1...128, step: 1, defaultValue: 1)
+            advIntSliderRow(label: "流式分块大小（stream_delta_chunk_size）", value: $advStreamDeltaChunkSize, range: 1...128, step: 1, defaultValue: 1)
             divider
-            advNativeToggleRow(label: "Function Calling", value: $advFunctionCalling)
+            advNativeToggleRow(label: "函数调用（function_calling）", value: $advFunctionCalling)
             divider
-            advTextRow(label: "Reasoning Effort", placeholder: "e.g. low, medium, high", value: $advReasoningEffort)
+            advTextRow(label: "推理强度（reasoning_effort）", placeholder: "例如 low、medium、high", value: $advReasoningEffort)
             divider
             advReasoningTagsRow
             divider
-            advIntSliderRow(label: "Seed", value: $advSeed, range: 0...9999, step: 1)
+            advIntSliderRow(label: "随机种子（seed）", value: $advSeed, range: 0...9999, step: 1)
             divider
-            advTextRow(label: "Stop Sequence", placeholder: "Comma-separated", value: $advStopSequences)
+            advTextRow(label: "停止序列（stop）", placeholder: "多个值用英文逗号分隔", value: $advStopSequences)
             divider
-            advDoubleSliderRow(label: "Temperature", tooltip: "The temperature of the model. Increasing the temperature will make the model answer more creatively.", value: $advTemperature, range: 0...2, step: 0.05)
+            advDoubleSliderRow(label: "温度（temperature）", tooltip: "控制回答的随机性。数值越高越有创意，也更容易发散。", value: $advTemperature, range: 0...2, step: 0.05)
             divider
-            advTextRow(label: "logit_bias", placeholder: "Enter comma-separated \"token:bias_value\" pairs (example: 5432:100, 413:-100)", value: $advLogitBias)
+            advTextRow(label: "Token 偏置（logit_bias）", placeholder: "输入 token:bias_value，多个值用英文逗号分隔，例如 5432:100, 413:-100", value: $advLogitBias)
             divider
-            advIntSliderRow(label: "max_tokens", value: $advMaxTokens, range: 0...131072, step: 128)
+            advIntSliderRow(label: "最大 Token（max_tokens）", value: $advMaxTokens, range: 0...131072, step: 128)
             divider
-            advIntSliderRow(label: "top_k", value: $advTopK, range: 0...1000, step: 1)
+            advIntSliderRow(label: "采样候选数（top_k）", tooltip: "每次只从概率最高的前 K 个候选词里挑选。数值越小越保守。", value: $advTopK, range: 0...1000, step: 1)
             divider
-            advDoubleSliderRow(label: "top_p", tooltip: nil, value: $advTopP, range: 0...1, step: 0.05)
+            advDoubleSliderRow(label: "核心采样概率（top_p）", tooltip: "只从累计概率最高的一组候选词里采样。数值越低越稳，越高越发散。", value: $advTopP, range: 0...1, step: 0.05)
             divider
-            advDoubleSliderRow(label: "min_p", tooltip: nil, value: $advMinP, range: 0...1, step: 0.05)
+            advDoubleSliderRow(label: "最小概率阈值（min_p）", tooltip: "过滤掉概率过低的候选词，减少跑偏和怪词。", value: $advMinP, range: 0...1, step: 0.05)
             divider
-            advDoubleSliderRow(label: "frequency_penalty", tooltip: nil, value: $advFrequencyPenalty, range: -2...2, step: 0.05)
+            advDoubleSliderRow(label: "频率惩罚（frequency_penalty）", tooltip: "降低已经频繁出现词语的概率，数值越高越少重复。", value: $advFrequencyPenalty, range: -2...2, step: 0.05)
             divider
-            advDoubleSliderRow(label: "presence_penalty", tooltip: nil, value: $advPresencePenalty, range: -2...2, step: 0.05)
+            advDoubleSliderRow(label: "话题新鲜度惩罚（presence_penalty）", tooltip: "鼓励模型引入新内容，数值越高越容易换话题。", value: $advPresencePenalty, range: -2...2, step: 0.05)
         }
     }
 
@@ -2088,50 +2088,50 @@ struct ModelAdvancedParamsSection: View {
         VStack(spacing: 0) {
             divider
             VStack(alignment: .leading, spacing: 4) {
-                Text("Enable Mirostat sampling for controlling perplexity.")
+                Text("启用 Mirostat 采样，用来控制困惑度和输出稳定性。")
                     .scaledFont(size: 12)
                     .foregroundStyle(theme.textTertiary)
                     .padding(.horizontal, Spacing.md)
                     .padding(.top, 8)
             }
-            advIntSliderRow(label: "mirostat", value: $advMirostat, range: 0...2, step: 1)
+            advIntSliderRow(label: "困惑度控制模式（mirostat）", value: $advMirostat, range: 0...2, step: 1)
             divider
-            advDoubleSliderRow(label: "mirostat_eta", tooltip: nil, value: $advMirostatEta, range: 0...1, step: 0.01)
+            advDoubleSliderRow(label: "困惑度学习率（mirostat_eta）", tooltip: nil, value: $advMirostatEta, range: 0...1, step: 0.01)
             divider
-            advDoubleSliderRow(label: "mirostat_tau", tooltip: nil, value: $advMirostatTau, range: 0...10, step: 0.1)
+            advDoubleSliderRow(label: "困惑度目标值（mirostat_tau）", tooltip: nil, value: $advMirostatTau, range: 0...10, step: 0.1)
             divider
-            advIntSliderRow(label: "repeat_last_n", value: $advRepeatLastN, range: 0...128, step: 1)
+            advIntSliderRow(label: "重复检查范围（repeat_last_n）", value: $advRepeatLastN, range: 0...128, step: 1)
             divider
-            advDoubleSliderRow(label: "tfs_z", tooltip: nil, value: $advTfsZ, range: 0...2, step: 0.05)
+            advDoubleSliderRow(label: "尾部采样强度（tfs_z）", tooltip: nil, value: $advTfsZ, range: 0...2, step: 0.05)
             divider
-            advDoubleSliderRow(label: "repeat_penalty", tooltip: nil, value: $advRepeatPenalty, range: 0...2, step: 0.01)
+            advDoubleSliderRow(label: "重复惩罚（repeat_penalty）", tooltip: nil, value: $advRepeatPenalty, range: 0...2, step: 0.01)
             divider
-            advBoolRow(label: "use_mmap", value: $advUseMmap, defaultValue: true)
+            advBoolRow(label: "使用内存映射（use_mmap）", value: $advUseMmap, defaultValue: true)
             divider
-            advBoolRow(label: "use_mlock", value: $advUseMlock, defaultValue: false)
+            advBoolRow(label: "锁定模型内存（use_mlock）", value: $advUseMlock, defaultValue: false)
             divider
-            advBoolRow(label: "think (Ollama)", value: $advThink)
+            advBoolRow(label: "思考模式（think / Ollama）", value: $advThink)
             divider
-            advTextRow(label: "format (Ollama)", placeholder: "e.g. json", value: $advFormat)
+            advTextRow(label: "输出格式（format / Ollama）", placeholder: "例如 json", value: $advFormat)
             divider
-            advIntSliderRow(label: "num_keep (Ollama)", value: $advNumKeep, range: 0...10240000, step: 1)
+            advIntSliderRow(label: "保留上下文数（num_keep / Ollama）", value: $advNumKeep, range: 0...10240000, step: 1)
             divider
-            advIntSliderRow(label: "num_ctx (Ollama)", value: $advNumCtx, range: 512...10240000, step: 512)
+            advIntSliderRow(label: "上下文长度（num_ctx / Ollama）", value: $advNumCtx, range: 512...10240000, step: 512)
             divider
-            advIntSliderRow(label: "num_batch (Ollama)", value: $advNumBatch, range: 256...8192, step: 256)
+            advIntSliderRow(label: "批处理大小（num_batch / Ollama）", value: $advNumBatch, range: 256...8192, step: 256)
             divider
-            advIntSliderRow(label: "num_thread (Ollama)", value: $advNumThread, range: 1...256, step: 1)
+            advIntSliderRow(label: "线程数（num_thread / Ollama）", value: $advNumThread, range: 1...256, step: 1)
             divider
             VStack(alignment: .leading, spacing: 4) {
-                Text("Set the number of layers, which will be off-loaded to GPU. Increasing this value can significantly improve performance for models that are optimized for GPU acceleration but may also consume more power and GPU resources.")
+                Text("设置要卸载到 GPU 的层数。数值越高可能显著提升支持 GPU 加速模型的性能，但也会消耗更多电量和 GPU 资源。")
                     .scaledFont(size: 12)
                     .foregroundStyle(theme.textTertiary)
                     .padding(.horizontal, Spacing.md)
                     .padding(.top, 8)
             }
-            advIntSliderRow(label: "num_gpu (Ollama)", value: $advNumGpu, range: 0...256, step: 1)
+            advIntSliderRow(label: "GPU 层数（num_gpu / Ollama）", value: $advNumGpu, range: 0...256, step: 1)
             divider
-            advTextRow(label: "keep_alive (Ollama)", placeholder: "e.g. 5m", value: $advKeepAlive)
+            advTextRow(label: "保活时间（keep_alive / Ollama）", placeholder: "例如 5m", value: $advKeepAlive)
             divider
             customParamsSection
         }
@@ -2153,9 +2153,9 @@ struct ModelAdvancedParamsSection: View {
     }
 
     private var currentReasoningModeLabel: String {
-        if currentReasoningIsCustom { return "Custom" }
-        guard let enabled = advReasoningTagsEnabled else { return "Default" }
-        return enabled ? "Enabled" : "Disabled"
+        if currentReasoningIsCustom { return "自定义" }
+        guard let enabled = advReasoningTagsEnabled else { return "默认" }
+        return enabled ? "开启" : "关闭"
     }
 
     private var reasoningTagsIsActive: Bool {
@@ -2189,7 +2189,7 @@ struct ModelAdvancedParamsSection: View {
     private var advReasoningTagsRow: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Reasoning Tags")
+                Text("推理标签（Reasoning Tags）")
                     .scaledFont(size: 14)
                     .foregroundStyle(theme.textPrimary)
                 Spacer()
@@ -2197,7 +2197,7 @@ struct ModelAdvancedParamsSection: View {
                 Button {
                     cycleReasoningMode()
                 } label: {
-                    Text(reasoningTagsIsActive ? currentReasoningModeLabel : "Default")
+                    Text(reasoningTagsIsActive ? currentReasoningModeLabel : "默认")
                         .scaledFont(size: 12, weight: .semibold)
                         .foregroundStyle(theme.brandPrimary)
                         .padding(.horizontal, 6)
@@ -2248,7 +2248,7 @@ struct ModelAdvancedParamsSection: View {
     private var customParamsSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Custom Parameters")
+                Text("自定义参数")
                     .scaledFont(size: 13, weight: .semibold)
                     .foregroundStyle(theme.textSecondary)
                 Spacer()
@@ -2267,7 +2267,7 @@ struct ModelAdvancedParamsSection: View {
 
             ForEach(Array(customParams.enumerated()), id: \.offset) { idx, _ in
                 HStack(spacing: Spacing.sm) {
-                    TextField("Key", text: Binding(
+                    TextField("键", text: Binding(
                         get: { customParams[idx].key },
                         set: { customParams[idx].key = $0 }
                     ))
@@ -2279,7 +2279,7 @@ struct ModelAdvancedParamsSection: View {
 
                     Text(":").foregroundStyle(theme.textTertiary)
 
-                    TextField("Value", text: Binding(
+                    TextField("值", text: Binding(
                         get: { customParams[idx].value },
                         set: { customParams[idx].value = $0 }
                     ))
@@ -2308,7 +2308,7 @@ struct ModelAdvancedParamsSection: View {
     // MARK: - Reusable Pill
 
     private var defaultPill: some View {
-        Text("Default")
+        Text("默认")
             .scaledFont(size: 11)
             .foregroundStyle(theme.textTertiary)
             .padding(.horizontal, 6)
@@ -2325,9 +2325,9 @@ struct ModelAdvancedParamsSection: View {
         let current = value.wrappedValue
         let currentLabel: String = {
             switch current {
-            case .some(true):  return "On"
-            case .some(false): return "Off"
-            case .none:        return "Default"
+            case .some(true):  return "开启"
+            case .some(false): return "关闭"
+            case .none:        return "默认"
             }
         }()
         HStack {
@@ -2395,10 +2395,17 @@ struct ModelAdvancedParamsSection: View {
     }
 
     @ViewBuilder
-    private func advIntSliderRow(label: String, value: Binding<Int?>, range: ClosedRange<Double>, step: Double, defaultValue: Int? = nil) -> some View {
+    private func advIntSliderRow(label: String, tooltip: String? = nil, value: Binding<Int?>, range: ClosedRange<Double>, step: Double, defaultValue: Int? = nil) -> some View {
         let isCustom = value.wrappedValue != nil
         let activationValue = defaultValue ?? Int((range.lowerBound + range.upperBound) / 2)
         VStack(alignment: .leading, spacing: 4) {
+            if let tooltip, !tooltip.isEmpty {
+                Text(tooltip)
+                    .scaledFont(size: 12)
+                    .foregroundStyle(theme.textTertiary)
+                    .padding(.horizontal, Spacing.md)
+                    .padding(.top, 8)
+            }
             HStack {
                 Text(label).scaledFont(size: 14).foregroundStyle(theme.textPrimary)
                 Spacer()
@@ -2411,7 +2418,7 @@ struct ModelAdvancedParamsSection: View {
                 }
             }
             .padding(.horizontal, Spacing.md)
-            .padding(.top, 10)
+            .padding(.top, tooltip == nil ? 10 : 2)
 
             if isCustom {
                 Slider(value: Binding(get: { Double(value.wrappedValue ?? Int(range.lowerBound)) }, set: { value.wrappedValue = Int($0) }), in: range, step: step)
@@ -2453,7 +2460,7 @@ struct ModelAdvancedParamsSection: View {
     @ViewBuilder
     private func advNativeToggleRow(label: String, value: Binding<String?>) -> some View {
         let isNative = value.wrappedValue == "native"
-        let currentLabel = isNative ? "Native" : "Default"
+        let currentLabel = isNative ? "原生" : "默认"
         HStack {
             Text(label).scaledFont(size: 14).foregroundStyle(theme.textPrimary)
             Spacer()
@@ -2563,18 +2570,18 @@ struct ModelToolsAndCapabilitiesSection: View {
 
     private var toolsSectionView: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Tools")
+            sectionHeader("工具")
             if isFetchingToolsAndFunctions {
                 fieldCard {
                     HStack {
                         ProgressView().controlSize(.small).tint(theme.brandPrimary)
-                        Text("Loading tools…").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
+                        Text("正在加载工具…").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
                     }
                     .padding(Spacing.md)
                 }
             } else if allTools.isEmpty {
                 fieldCard {
-                    Text("No tools available. Add tools in the Tools workspace first.")
+                    Text("暂无可用工具。请先到“工具”工作区添加。")
                         .scaledFont(size: 13).foregroundStyle(theme.textTertiary).padding(Spacing.md)
                 }
             } else {
@@ -2586,7 +2593,7 @@ struct ModelToolsAndCapabilitiesSection: View {
                     }
                     .padding(.vertical, 4).padding(.horizontal, 4)
                 }
-                Text("To select toolkits here, add them to the \"Tools\" workspace first.")
+                Text("要在这里选择工具包，请先到“工具”工作区添加。")
                     .scaledFont(size: 12).foregroundStyle(theme.textTertiary).padding(.leading, 4)
             }
         }
@@ -2596,18 +2603,18 @@ struct ModelToolsAndCapabilitiesSection: View {
 
     private var skillsSectionView: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Skills")
+            sectionHeader("技能")
             if isFetchingToolsAndFunctions {
                 fieldCard {
                     HStack {
                         ProgressView().controlSize(.small).tint(theme.brandPrimary)
-                        Text("Loading skills…").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
+                        Text("正在加载技能…").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
                     }
                     .padding(Spacing.md)
                 }
             } else if allActions.isEmpty {
                 fieldCard {
-                    Text("No skills available. Add skills in the Skills workspace first.")
+                    Text("暂无可用技能。请先到“技能”工作区添加。")
                         .scaledFont(size: 13).foregroundStyle(theme.textTertiary).padding(Spacing.md)
                 }
             } else {
@@ -2619,7 +2626,7 @@ struct ModelToolsAndCapabilitiesSection: View {
                     }
                     .padding(.vertical, 4).padding(.horizontal, 4)
                 }
-                Text("To select skills here, add them to the \"Skills\" workspace first.")
+                Text("要在这里选择技能，请先到“技能”工作区添加。")
                     .scaledFont(size: 12).foregroundStyle(theme.textTertiary).padding(.leading, 4)
             }
         }
@@ -2632,18 +2639,18 @@ struct ModelToolsAndCapabilitiesSection: View {
     /// Per-model filters are editable checkboxes.
     private var filtersSectionView: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Filters")
+            sectionHeader("过滤器")
             if isFetchingToolsAndFunctions {
                 fieldCard {
                     HStack {
                         ProgressView().controlSize(.small).tint(theme.brandPrimary)
-                        Text("Loading filters…").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
+                        Text("正在加载过滤器…").scaledFont(size: 13).foregroundStyle(theme.textTertiary)
                     }
                     .padding(Spacing.md)
                 }
             } else if allFilters.isEmpty {
                 fieldCard {
-                    Text("No filters available.")
+                    Text("暂无可用过滤器。")
                         .scaledFont(size: 13).foregroundStyle(theme.textTertiary).padding(Spacing.md)
                 }
             } else {
@@ -2686,7 +2693,7 @@ struct ModelToolsAndCapabilitiesSection: View {
                 }
                 let checkedFilters = allFilters.filter { selectedFilterIds.contains($0.id) }
                 if !checkedFilters.isEmpty {
-                    sectionHeader("Default Filters")
+                    sectionHeader("默认过滤器")
                     fieldCard {
                         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 0) {
                             ForEach(checkedFilters, id: \.id) { filter in
@@ -2708,7 +2715,7 @@ struct ModelToolsAndCapabilitiesSection: View {
     private var actionFunctionsSectionView: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
             if !allActionFunctions.isEmpty {
-                sectionHeader("Actions")
+                sectionHeader("动作")
                 fieldCard {
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 0) {
                         ForEach(allActionFunctions, id: \.id) { fn in
@@ -2754,19 +2761,19 @@ struct ModelToolsAndCapabilitiesSection: View {
 
     private var capabilitiesSectionView: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Capabilities")
+            sectionHeader("能力")
             fieldCard {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 0) {
-                    capCheckbox("Vision", value: $capVision)
-                    capCheckbox("File Upload", value: $capFileUpload)
-                    capCheckbox("File Context", value: $capFileContext)
-                    capCheckbox("Web Search", value: $capWebSearch)
-                    capCheckbox("Image Generation", value: $capImageGeneration)
-                    capCheckbox("Code Interpreter", value: $capCodeInterpreter)
-                    capCheckbox("Usage", value: $capUsage)
-                    capCheckbox("Citations", value: $capCitations)
-                    capCheckbox("Status Updates", value: $capStatusUpdates)
-                    capCheckbox("Builtin Tools", value: $capBuiltinTools)
+                    capCheckbox("视觉识图", value: $capVision)
+                    capCheckbox("文件上传", value: $capFileUpload)
+                    capCheckbox("文件上下文", value: $capFileContext)
+                    capCheckbox("联网搜索", value: $capWebSearch)
+                    capCheckbox("图像生成", value: $capImageGeneration)
+                    capCheckbox("代码解释器", value: $capCodeInterpreter)
+                    capCheckbox("用量统计", value: $capUsage)
+                    capCheckbox("引用来源", value: $capCitations)
+                    capCheckbox("状态更新", value: $capStatusUpdates)
+                    capCheckbox("内置工具", value: $capBuiltinTools)
                 }
                 .padding(.vertical, 4).padding(.horizontal, 4)
             }
@@ -2777,12 +2784,12 @@ struct ModelToolsAndCapabilitiesSection: View {
 
     private var defaultFeaturesSectionView: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Default Features")
+            sectionHeader("默认功能")
             fieldCard {
                 HStack(spacing: 0) {
-                    capCheckbox("Web Search", value: $defaultWebSearch)
-                    capCheckbox("Image Generation", value: $defaultImageGen)
-                    capCheckbox("Code Interpreter", value: $defaultCodeInterpreter)
+                    capCheckbox("联网搜索", value: $defaultWebSearch)
+                    capCheckbox("图像生成", value: $defaultImageGen)
+                    capCheckbox("代码解释器", value: $defaultCodeInterpreter)
                 }
                 .padding(.vertical, 4).padding(.horizontal, 4)
             }
@@ -2793,21 +2800,21 @@ struct ModelToolsAndCapabilitiesSection: View {
 
     private var builtinToolsSectionView: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Builtin Tools")
+            sectionHeader("内置工具")
             fieldCard {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 0) {
-                    capCheckbox("Time & Calculation", value: $builtinTime)
-                    capCheckbox("Memory", value: $builtinMemory)
-                    capCheckbox("Chat History", value: $builtinChats)
-                    capCheckbox("Notes", value: $builtinNotes)
-                    capCheckbox("Knowledge Base", value: $builtinKnowledge)
-                    capCheckbox("Channels", value: $builtinChannels)
-                    capCheckbox("Task Management", value: $builtinTaskManagement)
-                    capCheckbox("Automations", value: $builtinAutomations)
-                    capCheckbox("Calendar", value: $builtinCalendar)
-                    capCheckbox("Web Search", value: $builtinWebSearch)
-                    capCheckbox("Image Generation", value: $builtinImageGen)
-                    capCheckbox("Code Interpreter", value: $builtinCodeInterpreter)
+                    capCheckbox("时间和计算", value: $builtinTime)
+                    capCheckbox("记忆", value: $builtinMemory)
+                    capCheckbox("聊天记录", value: $builtinChats)
+                    capCheckbox("笔记", value: $builtinNotes)
+                    capCheckbox("知识库", value: $builtinKnowledge)
+                    capCheckbox("频道", value: $builtinChannels)
+                    capCheckbox("任务管理", value: $builtinTaskManagement)
+                    capCheckbox("自动化", value: $builtinAutomations)
+                    capCheckbox("日历", value: $builtinCalendar)
+                    capCheckbox("联网搜索", value: $builtinWebSearch)
+                    capCheckbox("图像生成", value: $builtinImageGen)
+                    capCheckbox("代码解释器", value: $builtinCodeInterpreter)
                 }
                 .padding(.vertical, 4).padding(.horizontal, 4)
             }

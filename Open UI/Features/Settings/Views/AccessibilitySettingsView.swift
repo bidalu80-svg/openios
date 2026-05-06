@@ -13,8 +13,8 @@ struct AccessibilitySettingsView: View {
 
                 // Quick Presets
                 SettingsSection(
-                    header: "Quick Presets",
-                    footer: "Apply a preset to quickly adjust all scaling at once."
+                    header: "快速预设",
+                    footer: "选择预设可以一次性调整所有缩放比例。"
                 ) {
                     presetsRow
                         .padding(Spacing.md)
@@ -22,8 +22,8 @@ struct AccessibilitySettingsView: View {
 
                 // Content Text Scale
                 SettingsSection(
-                    header: "Message Text",
-                    footer: "Adjusts the size of chat messages, markdown content, and notes."
+                    header: "消息文字",
+                    footer: "调整聊天消息、Markdown 内容和笔记正文的字号。"
                 ) {
                     scaleSlider(
                         value: Binding(
@@ -32,15 +32,15 @@ struct AccessibilitySettingsView: View {
                         ),
                         range: AccessibilityManager.contentScaleRange,
                         icon: "text.bubble",
-                        label: "Content Text"
+                        label: "内容文字"
                     )
                     .padding(Spacing.md)
                 }
 
                 // List Text Scale
                 SettingsSection(
-                    header: "Titles & Lists",
-                    footer: "Adjusts conversation titles, folder names, and list items."
+                    header: "标题与列表",
+                    footer: "调整对话标题、文件夹名称和列表项目的字号。"
                 ) {
                     scaleSlider(
                         value: Binding(
@@ -49,15 +49,15 @@ struct AccessibilitySettingsView: View {
                         ),
                         range: AccessibilityManager.listScaleRange,
                         icon: "list.bullet",
-                        label: "List Text"
+                        label: "列表文字"
                     )
                     .padding(Spacing.md)
                 }
 
                 // UI Scale
                 SettingsSection(
-                    header: "UI Scale",
-                    footer: "Adjusts buttons, icons, spacing, and touch targets throughout the app."
+                    header: "界面缩放",
+                    footer: "调整整个 App 中按钮、图标、间距和可点击区域的大小。"
                 ) {
                     scaleSlider(
                         value: Binding(
@@ -66,7 +66,7 @@ struct AccessibilitySettingsView: View {
                         ),
                         range: AccessibilityManager.uiScaleRange,
                         icon: "square.resize",
-                        label: "Interface"
+                        label: "界面"
                     )
                     .padding(Spacing.md)
                 }
@@ -83,7 +83,7 @@ struct AccessibilitySettingsView: View {
                             HStack {
                                 Image(systemName: "arrow.counterclockwise")
                                     .font(.system(size: 14, weight: .medium))
-                                Text("Reset to Defaults")
+                                Text("恢复默认")
                                     .font(AppTypography.labelMediumFont)
                                     .fontWeight(.medium)
                             }
@@ -97,7 +97,7 @@ struct AccessibilitySettingsView: View {
             .padding(.vertical, Spacing.lg)
         }
         .background(theme.background)
-        .navigationTitle("Accessibility")
+        .navigationTitle("辅助功能")
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -121,11 +121,11 @@ struct AccessibilitySettingsView: View {
                         )
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Trip to Tokyo Planning")
+                        Text("东京旅行计划")
                             .font(.system(size: 14 * manager.listTextScale, weight: .medium))
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
-                        Text("Help me plan a week-long trip…")
+                        Text("帮我规划一周旅行…")
                             .font(.system(size: 12 * manager.listTextScale, weight: .regular))
                             .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
@@ -133,7 +133,7 @@ struct AccessibilitySettingsView: View {
 
                     Spacer()
 
-                    Text("2m ago")
+                    Text("2 分钟前")
                         .font(.system(size: 10 * manager.uiScale, weight: .medium))
                         .foregroundStyle(theme.textTertiary)
                 }
@@ -158,11 +158,11 @@ struct AccessibilitySettingsView: View {
                         }
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Assistant")
+                        Text("助手")
                             .font(.system(size: 10 * manager.uiScale, weight: .semibold))
                             .foregroundStyle(theme.textTertiary)
 
-                        Text("Here's a 7-day itinerary for Tokyo! Day 1: Explore Shibuya and Harajuku.")
+                        Text("这是东京 7 日行程建议！第 1 天可以逛涩谷和原宿。")
                             .font(.system(size: 15 * manager.contentTextScale, weight: .regular))
                             .foregroundStyle(theme.chatBubbleAssistantText)
                             .lineSpacing(2 * manager.contentTextScale)
@@ -175,7 +175,7 @@ struct AccessibilitySettingsView: View {
                 HStack {
                     Spacer(minLength: 40)
 
-                    Text("What about budget tips?")
+                    Text("预算方面有什么建议？")
                         .font(.system(size: 15 * manager.contentTextScale, weight: .regular))
                         .foregroundStyle(theme.chatBubbleUserText)
                         .padding(.horizontal, 12 * manager.uiScale)
@@ -249,7 +249,7 @@ struct AccessibilitySettingsView: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("\(preset.displayName) preset")
+                    .accessibilityLabel("\(preset.displayName)预设")
                     .accessibilityAddTraits(isSelected ? .isSelected : [])
                 }
             }
@@ -312,7 +312,7 @@ struct AccessibilitySettingsView: View {
                                 )
                                 .frame(width: 4, height: 4)
                             if tick == 1.0 {
-                                Text("Default")
+                                Text("默认")
                                     .font(.system(size: 8, weight: .medium))
                                     .foregroundStyle(theme.textTertiary)
                             }

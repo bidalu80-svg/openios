@@ -163,42 +163,42 @@ struct SkillsListView: View {
         }
         // Delete confirmation
         .confirmationDialog(
-            "Delete \"\(deletingSkill?.name ?? "")\"?",
+            "删除“\(deletingSkill?.name ?? "")”？",
             isPresented: .init(
                 get: { deletingSkill != nil },
                 set: { if !$0 { deletingSkill = nil } }
             ),
             titleVisibility: .visible
         ) {
-            Button("Delete", role: .destructive) {
+            Button("删除", role: .destructive) {
                 if let skill = deletingSkill {
                     deletingSkill = nil
                     Task { await deleteSkill(skill, manager: manager) }
                 }
             }
-            Button("Cancel", role: .cancel) { deletingSkill = nil }
+            Button("取消", role: .cancel) { deletingSkill = nil }
         } message: {
-            Text("This action cannot be undone.")
+            Text("此操作无法撤销。")
         }
         // Batch import confirmation
         .confirmationDialog(
-            "Import \(batchImportSkills.count) Skills?",
+            "导入 \(batchImportSkills.count) 个技能？",
             isPresented: $showBatchImportConfirm,
             titleVisibility: .visible
         ) {
-            Button("Import All") {
+            Button("全部导入") {
                 Task { await batchImport(skills: batchImportSkills, manager: manager) }
             }
-            Button("Cancel", role: .cancel) { batchImportSkills = [] }
+            Button("取消", role: .cancel) { batchImportSkills = [] }
         } message: {
-            Text("This will create \(batchImportSkills.count) new skills on the server.")
+            Text("这会在服务器上创建 \(batchImportSkills.count) 个新技能。")
         }
         // Error alert
-        .alert("Error", isPresented: .init(
+        .alert("错误", isPresented: .init(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
         )) {
-            Button("OK", role: .cancel) {}
+            Button("好", role: .cancel) {}
         } message: {
             Text(errorMessage ?? "")
         }
@@ -215,7 +215,7 @@ struct SkillsListView: View {
                             .scaledFont(size: 15, weight: .medium)
                             .foregroundStyle(theme.brandPrimary)
                     }
-                    .accessibilityLabel("Import Skill")
+                    .accessibilityLabel("导入技能")
 
                     // Export All button (admin only)
                     Button {
@@ -231,7 +231,7 @@ struct SkillsListView: View {
                         }
                     }
                     .disabled(isExportingAll || manager.skills.isEmpty)
-                    .accessibilityLabel("Export All Skills")
+                    .accessibilityLabel("导出全部技能")
                 }
 
                 // New Skill button
@@ -243,7 +243,7 @@ struct SkillsListView: View {
                         .scaledFont(size: 15, weight: .medium)
                         .foregroundStyle(theme.brandPrimary)
                 }
-                .accessibilityLabel("New Skill")
+                .accessibilityLabel("新建技能")
             }
         }
         .onChange(of: manager.error) { _, err in
@@ -258,7 +258,7 @@ struct SkillsListView: View {
             Image(systemName: "magnifyingglass")
                 .scaledFont(size: 14)
                 .foregroundStyle(theme.textTertiary)
-            TextField("Search Skills", text: $searchText)
+            TextField("搜索技能", text: $searchText)
                 .scaledFont(size: 15)
                 .foregroundStyle(theme.textPrimary)
                 .autocorrectionDisabled()
@@ -316,7 +316,7 @@ struct SkillsListView: View {
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
                     if !skill.isActive {
-                        Text("Inactive")
+                        Text("已停用")
                             .scaledFont(size: 10, weight: .semibold)
                             .foregroundStyle(theme.textTertiary)
                             .padding(.horizontal, 6)
@@ -355,7 +355,7 @@ struct SkillsListView: View {
             Button(role: .destructive) {
                 deletingSkill = skill
             } label: {
-                Label("Delete", systemImage: "trash")
+                Label("删除", systemImage: "trash")
             }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
@@ -364,7 +364,7 @@ struct SkillsListView: View {
                 Task { await toggleActive(id: skill.id, manager: manager) }
             } label: {
                 Label(
-                    skill.isActive ? "Deactivate" : "Activate",
+                    skill.isActive ? "停用" : "启用",
                     systemImage: skill.isActive ? "pause.circle" : "play.circle"
                 )
             }
@@ -374,14 +374,14 @@ struct SkillsListView: View {
             Button {
                 Task { await openEditor(for: skill, manager: manager) }
             } label: {
-                Label("Edit", systemImage: "pencil")
+                Label("编辑", systemImage: "pencil")
             }
             Button {
                 Haptics.play(.light)
                 Task { await toggleActive(id: skill.id, manager: manager) }
             } label: {
                 Label(
-                    skill.isActive ? "Deactivate" : "Activate",
+                    skill.isActive ? "停用" : "启用",
                     systemImage: skill.isActive ? "pause.circle" : "play.circle"
                 )
             }
@@ -390,21 +390,21 @@ struct SkillsListView: View {
                 Haptics.play(.light)
                 Task { await cloneSkill(skill, manager: manager) }
             } label: {
-                Label("Clone", systemImage: "plus.square.on.square")
+                Label("克隆", systemImage: "plus.square.on.square")
             }
             if dependencies.authViewModel.currentUser?.role == .admin {
                 Button {
                     Haptics.play(.light)
                     Task { await exportSingleSkill(skill, manager: manager) }
                 } label: {
-                    Label("Export", systemImage: "square.and.arrow.up")
+                    Label("导出", systemImage: "square.and.arrow.up")
                 }
             }
             Divider()
             Button(role: .destructive) {
                 deletingSkill = skill
             } label: {
-                Label("Delete", systemImage: "trash")
+                Label("删除", systemImage: "trash")
             }
         }
     }
@@ -417,7 +417,7 @@ struct SkillsListView: View {
             ProgressView()
                 .controlSize(.large)
                 .tint(theme.brandPrimary)
-            Text("Loading skills…")
+            Text("正在加载技能…")
                 .scaledFont(size: 15)
                 .foregroundStyle(theme.textSecondary)
             Spacer()
@@ -433,12 +433,12 @@ struct SkillsListView: View {
             Image(systemName: hasFilter ? "magnifyingglass" : "brain")
                 .scaledFont(size: 44)
                 .foregroundStyle(theme.textTertiary)
-            Text(hasFilter ? "No Matching Skills" : "No Skills Yet")
+            Text(hasFilter ? "没有匹配的技能" : "暂无技能")
                 .scaledFont(size: 18, weight: .semibold)
                 .foregroundStyle(theme.textPrimary)
             Text(hasFilter
-                 ? "Try a different search term."
-                 : "Create a skill to define reusable instruction sets for AI.")
+                 ? "换个关键词试试。"
+                 : "创建技能，用来保存可复用的 AI 指令集。")
                 .scaledFont(size: 14)
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -448,7 +448,7 @@ struct SkillsListView: View {
                     Haptics.play(.light)
                     showCreateSheet = true
                 } label: {
-                    Label("New Skill", systemImage: "plus")
+                    Label("新建技能", systemImage: "plus")
                         .scaledFont(size: 15, weight: .medium)
                         .foregroundStyle(.white)
                         .padding(.horizontal, Spacing.lg)
@@ -470,10 +470,10 @@ struct SkillsListView: View {
             Image(systemName: "exclamationmark.triangle")
                 .scaledFont(size: 44)
                 .foregroundStyle(theme.textTertiary)
-            Text("Not Available")
+            Text("不可用")
                 .scaledFont(size: 18, weight: .semibold)
                 .foregroundStyle(theme.textPrimary)
-            Text("Connect to a server to manage skills.")
+            Text("连接服务器后才能管理技能。")
                 .scaledFont(size: 14)
                 .foregroundStyle(theme.textSecondary)
             Spacer()

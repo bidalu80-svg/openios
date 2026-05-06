@@ -90,7 +90,7 @@ struct PythonCodeBlockView: View {
     private var headerBar: some View {
         HStack(spacing: 10) {
             // Language label
-            Label("python", systemImage: "chevron.left.forwardslash.chevron.right")
+            Label("Python", systemImage: "chevron.left.forwardslash.chevron.right")
                 .labelStyle(.titleOnly)
                 .font(.system(.caption, design: .monospaced))
                 .fontWeight(.semibold)
@@ -150,7 +150,7 @@ struct PythonCodeBlockView: View {
                     Image(systemName: "play.fill")
                         .scaledFont(size: 10, weight: .bold)
                 }
-                Text(isActive ? "Running…" : "Run")
+                Text(isActive ? "运行中…" : "运行")
                     .scaledFont(size: 12, weight: .semibold)
             }
             .foregroundStyle(.white)
@@ -173,7 +173,7 @@ struct PythonCodeBlockView: View {
             ProgressView()
                 .controlSize(.small)
                 .tint(.secondary)
-            Text("Loading Python runtime…")
+            Text("正在加载 Python 运行环境…")
                 .scaledFont(size: 12)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -188,7 +188,7 @@ struct PythonCodeBlockView: View {
             ProgressView()
                 .controlSize(.small)
                 .tint(.secondary)
-            Text("Executing…")
+            Text("正在执行…")
                 .scaledFont(size: 12)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -211,7 +211,7 @@ struct PythonCodeBlockView: View {
                 Image(systemName: result.status == .success ? "checkmark.circle.fill" : "xmark.circle.fill")
                     .scaledFont(size: 11)
                     .foregroundStyle(result.status == .success ? .green : .red)
-                Text("Output")
+                Text("输出")
                     .scaledFont(size: 11, weight: .semibold)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -281,13 +281,13 @@ struct PythonCodeBlockView: View {
                                         UIImageWriteToSavedPhotosAlbum(uiImage, nil, nil, nil)
                                         Haptics.notify(.success)
                                     } label: {
-                                        Label("Save to Photos", systemImage: "photo")
+                                        Label("保存到相册", systemImage: "photo")
                                     }
                                     Button {
                                         UIPasteboard.general.image = uiImage
                                         Haptics.notify(.success)
                                     } label: {
-                                        Label("Copy Image", systemImage: "doc.on.doc")
+                                        Label("复制图片", systemImage: "doc.on.doc")
                                     }
                                 }
                         }
@@ -302,7 +302,7 @@ struct PythonCodeBlockView: View {
                result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
                result.images.isEmpty {
                 HStack {
-                    Text("(no output)")
+                    Text("（无输出）")
                         .scaledFont(size: 12)
                         .foregroundStyle(.tertiary)
                         .italic()

@@ -96,27 +96,27 @@ struct LanguagePickerView: View {
                 }
             }
             .listStyle(.plain)
-            .searchable(text: $searchText, prompt: "Search language")
-            .navigationTitle("Language")
+            .searchable(text: $searchText, prompt: "搜索语言")
+            .navigationTitle("语言")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("取消") { dismiss() }
                 }
             }
         }
-        .alert("Restart Required", isPresented: $showRestartAlert) {
-            Button("Restart Now", role: .destructive) {
+        .alert("需要重启", isPresented: $showRestartAlert) {
+            Button("立即重启", role: .destructive) {
                 applyLanguage(pendingLocale)
             }
-            Button("Later", role: .cancel) {
+            Button("稍后", role: .cancel) {
                 pendingLocale = nil
             }
         } message: {
             if let lang = pendingLocale {
-                Text("The app will restart to apply \(lang.nativeName).")
+                Text("App 将重启以应用 \(lang.nativeName)。")
             } else {
-                Text("The app will restart to apply the system language.")
+                Text("App 将重启以应用系统语言。")
             }
         }
     }
@@ -134,10 +134,10 @@ struct LanguagePickerView: View {
                     .frame(width: 40)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("System Default")
+                    Text("跟随系统")
                         .scaledFont(size: 16, weight: .medium)
                         .foregroundStyle(theme.textPrimary)
-                    Text("Follows your iPhone language")
+                    Text("跟随 iPhone 的语言设置")
                         .scaledFont(size: 12)
                         .foregroundStyle(theme.textTertiary)
                 }

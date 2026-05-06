@@ -26,7 +26,7 @@ struct SettingsView: View {
                 VStack(spacing: Spacing.sectionGap) {
                     // Profile header
                     if let user = viewModel.currentUser {
-                        SettingsSection(header: "Account") {
+                        SettingsSection(header: "账号") {
                             SettingsProfileHeader(
                                 name: user.displayName,
                                 email: user.email,
@@ -40,11 +40,11 @@ struct SettingsView: View {
 
                     // Admin Console (only visible to admin users — placed prominently)
                     if viewModel.currentUser?.role == .admin {
-                        SettingsSection(header: "Administration") {
+                        SettingsSection(header: "管理") {
                             SettingsCell(
                                 icon: "shield.lefthalf.filled",
-                                title: "Admin Console",
-                                subtitle: "Manage users & roles",
+                                title: "管理员控制台",
+                                subtitle: "管理用户和角色",
                                 iconColor: .orange,
                                 showDivider: false,
                                 accessory: .chevron
@@ -55,10 +55,10 @@ struct SettingsView: View {
                     }
 
                     // Default Model
-                    SettingsSection(header: "Default Model") {
+                    SettingsSection(header: "默认模型") {
                         SettingsCell(
                             icon: "cpu",
-                            title: "Default Model",
+                            title: "默认模型",
                             subtitle: defaultModelDisplayName,
                             showDivider: false,
                             accessory: isLoadingModels ? .loading : .chevron
@@ -68,10 +68,10 @@ struct SettingsView: View {
                     }
 
                                     // Display & Customization
-                    SettingsSection(header: "Display") {
+                    SettingsSection(header: "显示") {
                         SettingsCell(
                             icon: "paintbrush",
-                            title: "Appearance",
+                            title: "外观",
                             subtitle: appearanceManager.colorSchemeMode.displayName,
                             showDivider: true,
                             accessory: .chevron
@@ -80,10 +80,10 @@ struct SettingsView: View {
                         }
                         SettingsCell(
                             icon: "textformat.size",
-                            title: "Accessibility",
+                            title: "辅助功能",
                             subtitle: dependencies.accessibilityManager.isCustomized
-                                ? (dependencies.accessibilityManager.matchingPreset?.displayName ?? "Custom")
-                                : "Standard",
+                                ? (dependencies.accessibilityManager.matchingPreset?.displayName ?? "自定义")
+                                : "标准",
                             iconColor: .purple,
                             showDivider: true,
                             accessory: .chevron
@@ -92,7 +92,7 @@ struct SettingsView: View {
                         }
                         SettingsCell(
                             icon: "globe",
-                            title: "Language",
+                            title: "语言",
                             subtitle: currentLanguageDisplayName,
                             iconColor: .blue,
                             showDivider: false,
@@ -103,11 +103,11 @@ struct SettingsView: View {
                     }
 
                     // Chat Settings
-                    SettingsSection(header: "Chat") {
+                    SettingsSection(header: "聊天") {
                         SettingsCell(
                             icon: "bubble.left.and.bubble.right",
-                            title: "Chat Behavior",
-                            subtitle: "Haptics, titles, suggestions",
+                            title: "聊天行为",
+                            subtitle: "触感、标题、建议",
                             showDivider: false,
                             accessory: .chevron
                         ) {
@@ -116,11 +116,11 @@ struct SettingsView: View {
                     }
 
                     // Voice
-                    SettingsSection(header: "Voice") {
+                    SettingsSection(header: "语音") {
                         SettingsCell(
                             icon: "waveform",
-                            title: "Text-to-Speech",
-                            subtitle: "Voice & speed settings",
+                            title: "文本转语音",
+                            subtitle: "语音和速度设置",
                             showDivider: true,
                             accessory: .chevron
                         ) {
@@ -128,8 +128,8 @@ struct SettingsView: View {
                         }
                         SettingsCell(
                             icon: "mic",
-                            title: "Speech-to-Text",
-                            subtitle: "Voice input settings",
+                            title: "语音转文字",
+                            subtitle: "语音输入设置",
                             showDivider: false,
                             accessory: .chevron
                         ) {
@@ -138,10 +138,10 @@ struct SettingsView: View {
                     }
 
                     // Notifications
-                    SettingsSection(header: "Notifications") {
+                    SettingsSection(header: "通知") {
                         SettingsCell(
                             icon: "bell.badge",
-                            title: "Notifications",
+                            title: "通知",
                             subtitle: notificationStatusSubtitle,
                             showDivider: false,
                             accessory: .chevron
@@ -151,10 +151,10 @@ struct SettingsView: View {
                     }
 
                     // Server & Connection
-                    SettingsSection(header: "Server") {
+                    SettingsSection(header: "服务器") {
                         SettingsCell(
                             icon: "server.rack",
-                            title: "Server Configuration",
+                            title: "服务器配置",
                             subtitle: viewModel.serverURL,
                             showDivider: true,
                             accessory: .chevron
@@ -164,10 +164,10 @@ struct SettingsView: View {
 
                         SettingsCell(
                             icon: "arrow.left.arrow.right.circle",
-                            title: "Manage Servers",
+                            title: "管理服务器",
                             subtitle: viewModel.savedServers.count == 1
-                                ? "1 server saved"
-                                : "\(viewModel.savedServers.count) servers saved",
+                                ? "已保存 1 个服务器"
+                                : "已保存 \(viewModel.savedServers.count) 个服务器",
                             iconColor: .teal,
                             showDivider: false,
                             accessory: .chevron
@@ -177,11 +177,11 @@ struct SettingsView: View {
                     }
 
                     // Personalization
-                    SettingsSection(header: "Personalization") {
+                    SettingsSection(header: "个性化") {
                         SettingsCell(
                             icon: "brain",
-                            title: "Memories",
-                            subtitle: "What the AI remembers about you",
+                            title: "记忆",
+                            subtitle: "AI 记住的与你有关的信息",
                             iconColor: .purple,
                             showDivider: false,
                             accessory: .chevron
@@ -191,11 +191,11 @@ struct SettingsView: View {
                     }
 
                     // Storage
-                    SettingsSection(header: "Storage") {
+                    SettingsSection(header: "存储") {
                         SettingsCell(
                             icon: "internaldrive",
-                            title: "Storage",
-                            subtitle: "Files, models & caches",
+                            title: "存储",
+                            subtitle: "文件、模型和缓存",
                             iconColor: .blue,
                             showDivider: false,
                             accessory: .chevron
@@ -205,10 +205,10 @@ struct SettingsView: View {
                     }
 
                     // Privacy & Security
-                    SettingsSection(header: "Privacy & Security") {
+                    SettingsSection(header: "隐私与安全") {
                         SettingsCell(
                             icon: "lock.shield",
-                            title: "Privacy & Security",
+                            title: "隐私与安全",
                             showDivider: false,
                             accessory: .chevron
                         ) {
@@ -217,10 +217,10 @@ struct SettingsView: View {
                     }
 
                     // About
-                    SettingsSection(header: "About") {
+                    SettingsSection(header: "关于") {
                         SettingsCell(
                             icon: "info.circle",
-                            title: "About Open Relay",
+                            title: "关于 Iexa",
                             showDivider: false,
                             accessory: .chevron
                         ) {
@@ -232,7 +232,7 @@ struct SettingsView: View {
                     SettingsSection {
                         DestructiveSettingsCell(
                             icon: "rectangle.portrait.and.arrow.right",
-                            title: "Sign Out"
+                            title: "退出登录"
                         ) {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                 showSignOutConfirmation = true
@@ -244,7 +244,7 @@ struct SettingsView: View {
                 .padding(.vertical, Spacing.lg)
             }
             .background(theme.background)
-            .navigationTitle("Settings")
+            .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -275,7 +275,7 @@ struct SettingsView: View {
                         SavedServersView(viewModel: viewModel, showAddServerButton: true)
                     }
                     .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-                    .navigationTitle("Manage Servers")
+                    .navigationTitle("管理服务器")
                     .navigationBarTitleDisplayMode(.inline)
                 case .privacySecurity:
                     PrivacySecurityView()
@@ -349,19 +349,19 @@ struct SettingsView: View {
                 return native
             }
         }
-        return String(localized: "System Default")
+        return "跟随系统"
     }
 
     private var notificationStatusSubtitle: String {
-        NotificationService.shared.isAuthorized ? "Enabled" : "Disabled"
+        NotificationService.shared.isAuthorized ? "已开启" : "已关闭"
     }
 
     private var defaultModelDisplayName: String {
-        if isLoadingModels { return "Loading..." }
+        if isLoadingModels { return "加载中..." }
         if let id = defaultModelId, let model = availableModels.first(where: { $0.id == id }) {
             return model.name
         }
-        return "Auto-select"
+        return "自动选择"
     }
 
     private func loadModels() async {
@@ -468,10 +468,10 @@ struct DefaultModelPickerView: View {
                         Image(systemName: "wand.and.stars")
                             .foregroundStyle(theme.brandPrimary)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Auto-select")
+                            Text("自动选择")
                                 .scaledFont(size: 16)
                                 .fontWeight(.semibold)
-                            Text("Use the server default model. ")
+                            Text("使用服务器默认模型。")
                                 .scaledFont(size: 12, weight: .medium)
                                 .foregroundStyle(theme.textTertiary)
                         }
@@ -498,7 +498,7 @@ struct DefaultModelPickerView: View {
                                     .fontWeight(.medium)
                                 HStack(spacing: 4) {
                                     if model.isMultimodal {
-                                        Label("Vision", systemImage: "photo")
+                                        Label("视觉", systemImage: "photo")
                                             .scaledFont(size: 10)
                                             .foregroundStyle(theme.brandPrimary)
                                     }
@@ -516,15 +516,15 @@ struct DefaultModelPickerView: View {
                     )
                 }
             }
-            .searchable(text: $searchText, prompt: "Search Models")
-            .navigationTitle("Default Model")
+            .searchable(text: $searchText, prompt: "搜索模型")
+            .navigationTitle("默认模型")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("取消") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
+                    Button("保存") {
                         onSave(localSelection)
                         dismiss()
                     }
@@ -581,83 +581,83 @@ struct ChatSettingsView: View {
 
     var body: some View {
         List {
-            Section("Input Behavior") {
-                Toggle("Send on Enter", isOn: $sendOnEnter)
+            Section("输入行为") {
+                Toggle("回车发送", isOn: $sendOnEnter)
                     .tint(theme.brandPrimary)
-                Text("When enabled, pressing Enter sends the message. When disabled, Enter creates a new line.")
+                Text("开启后按回车会发送消息；关闭后回车会换行。")
                     .scaledFont(size: 12, weight: .medium)
                     .foregroundStyle(theme.textTertiary)
                     .listRowSeparator(.hidden)
             }
 
             Section {
-                Toggle("Haptic feedback while streaming", isOn: $streamingHaptics)
+                Toggle("流式输出时触感反馈", isOn: $streamingHaptics)
                     .tint(theme.brandPrimary)
             } header: {
-                Text("Haptics")
+                Text("触感")
             } footer: {
-                Text("Haptic feedback pulses as each token streams in.")
+                Text("模型逐字输出时会有轻微触感反馈。")
             }
 
             Section {
-                Toggle("Auto-generate chat titles", isOn: $titleGenerationEnabled)
+                Toggle("自动生成聊天标题", isOn: $titleGenerationEnabled)
                     .tint(theme.brandPrimary)
                     .disabled(!serverTitleGenEnabled)
-                Toggle("Show follow-up suggestions", isOn: $suggestionsEnabled)
+                Toggle("显示追问建议", isOn: $suggestionsEnabled)
                     .tint(theme.brandPrimary)
                     .disabled(!serverFollowUpGenEnabled)
             } header: {
-                Text("Generation")
+                Text("生成")
             } footer: {
                 if !serverTitleGenEnabled || !serverFollowUpGenEnabled {
-                    Text("Some options are disabled by your server administrator.")
+                    Text("部分选项已被服务器管理员禁用。")
                 } else {
-                    Text("Disabling title generation reduces server load. Follow-up suggestions appear at the end of each response.")
+                    Text("关闭标题生成可降低服务器负载；追问建议会显示在回复末尾。")
                 }
             }
 
             Section {
-                Toggle("Temporary Chat by Default", isOn: $temporaryChatDefault)
+                Toggle("默认临时聊天", isOn: $temporaryChatDefault)
                     .tint(theme.brandPrimary)
             } header: {
-                Text("Privacy")
+                Text("隐私")
             } footer: {
-                Text("Temporary chats are not saved to the server. You can still save a temporary chat manually.")
+                Text("临时聊天不会保存到服务器，也可以手动保存。")
             }
 
             Section {
-                Toggle("Expand thinking while streaming", isOn: $expandThinkingWhileStreaming)
+                Toggle("思考时自动展开", isOn: $expandThinkingWhileStreaming)
                     .tint(theme.brandPrimary)
             } header: {
-                Text("Thinking...")
+                Text("思考过程")
             } footer: {
-                Text("When enabled, reasoning blocks expand automatically while the model is thinking and collapse once done. When disabled, they stay collapsed unless you tap to open them.")
+                Text("开启后模型思考时会自动展开推理内容，完成后收起；关闭后需要手动点开。")
             }
 
             Section {
-                Toggle("Show citation domains", isOn: $citationShowDomain)
+                Toggle("引用显示域名", isOn: $citationShowDomain)
                     .tint(theme.brandPrimary)
             } header: {
-                Text("Citations")
+                Text("引用")
             } footer: {
-                Text("When enabled, citation badges show the website domain (e.g. bbc.com). When disabled, the page title is shown instead.")
+                Text("开启后引用徽标显示网站域名；关闭后显示页面标题。")
             }
 
             Section {
-                Text("Choose which quick actions appear below the message input. Tap to toggle.")
+                Text("选择消息输入框下方显示的快捷操作，点击可切换。")
                     .scaledFont(size: 12, weight: .medium)
                     .foregroundStyle(theme.textTertiary)
                     .listRowSeparator(.hidden)
 
                 // Built-in pills
-                quickPillToggle(id: "web", icon: "magnifyingglass", name: "Web Search")
-                quickPillToggle(id: "image", icon: "photo", name: "Image Generation")
+                quickPillToggle(id: "web", icon: "magnifyingglass", name: "网页搜索")
+                quickPillToggle(id: "image", icon: "photo", name: "图像生成")
 
                 // Server tools
                 if isLoadingTools {
                     HStack {
                         ProgressView().controlSize(.small)
-                        Text("Loading tools…")
+                        Text("正在加载工具…")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textTertiary)
                     }
@@ -672,16 +672,16 @@ struct ChatSettingsView: View {
                         quickPillsData = ""
                         Haptics.play(.medium)
                     } label: {
-                        Label("Clear All Quick Actions", systemImage: "xmark.circle")
+                        Label("清空所有快捷操作", systemImage: "xmark.circle")
                     }
                 }
             } header: {
-                Text("Quick Actions")
+                Text("快捷操作")
             } footer: {
-                Text("\(selectedPillIds.count) action\(selectedPillIds.count == 1 ? "" : "s") selected")
+                Text("已选择 \(selectedPillIds.count) 个操作")
             }
         }
-        .navigationTitle("Chat Settings")
+        .navigationTitle("聊天设置")
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await loadTools()
@@ -765,18 +765,18 @@ struct TTSSettingsView: View {
 
     private var engineOptions: [(String, String, String)] {
         var options: [(String, String, String)] = [
-            ("auto",     "Auto",           "Best available: On-Device → Server → System"),
-            ("system",   "System (Apple)", "Built-in AVSpeechSynthesizer"),
+            ("auto",     "自动",           "最佳可用：本地 → 服务器 → 系统"),
+            ("system",   "系统（Apple）", "内置 AVSpeechSynthesizer"),
         ]
         if ttsService.isServerAvailable {
             options.insert(
-                ("server", "Server", "OpenWebUI server-side TTS"),
+                ("server", "服务器", "OpenWebUI 服务器端 TTS"),
                 at: options.count - 1
             )
         }
         if ttsService.isKokoroAvailable {
             options.insert(
-                ("ondevice", "On-Device", "Neural TTS running locally on your device"),
+                ("ondevice", "本地", "在设备上运行的神经语音"),
                 at: 1
             )
         }
@@ -804,7 +804,7 @@ struct TTSSettingsView: View {
                                         .foregroundStyle(theme.textPrimary)
 
                                     if value == "qwen3" {
-                                        Text("New")
+                                        Text("新")
                                             .scaledFont(size: 9, weight: .heavy)
                                             .foregroundStyle(.white)
                                             .padding(.horizontal, 5)
@@ -838,14 +838,14 @@ struct TTSSettingsView: View {
                     .buttonStyle(.plain)
                 }
             } header: {
-                Text("TTS Engine")
+                Text("语音合成引擎")
             } footer: {
                 if selectedEngine == "auto" {
-                    Text("Auto mode uses the on-device model when loaded, otherwise falls back to server or system.")
+                    Text("自动模式会优先使用已加载的本地模型，否则回退到服务器或系统语音。")
                 } else if selectedEngine == "kokoro" {
-                    Text("Kokoro runs locally on your device. Supports 54 voices across 9 languages.")
+                    Text("Kokoro 在本机运行，支持 9 种语言共 54 个声音。")
                 } else if selectedEngine == "qwen3" {
-                    Text("Qwen3 runs locally on your device. Supports English, Korean, German, Spanish, and 7 more languages.")
+                    Text("Qwen3 在本机运行，支持英语、韩语、德语、西班牙语等 11 种语言。")
                 }
             }
 
@@ -855,7 +855,7 @@ struct TTSSettingsView: View {
 
                 Section {
                     // Model selector — segmented picker inside the section
-                    Picker("Model", selection: $onDeviceModelRaw) {
+                    Picker("模型", selection: $onDeviceModelRaw) {
                         Text("Kokoro").tag(OnDeviceTTSModel.kokoro.rawValue)
                         Text("Qwen3").tag(OnDeviceTTSModel.qwen3.rawValue)
                     }
@@ -865,7 +865,7 @@ struct TTSSettingsView: View {
 
                     // Model status
                     HStack {
-                        Text("Status")
+                        Text("状态")
                             .scaledFont(size: 16)
                             .foregroundStyle(theme.textPrimary)
                         Spacer()
@@ -874,7 +874,7 @@ struct TTSSettingsView: View {
 
                     if isKokoro {
                         // Kokoro: Voice picker grouped by language
-                        Picker("Voice", selection: $kokoroVoice) {
+                        Picker("声音", selection: $kokoroVoice) {
                             ForEach(KokoroVoiceCatalog.groups, id: \.language) { group in
                                 Section(header: Text("\(group.flag) \(group.language)")) {
                                     ForEach(group.voices, id: \.id) { voice in
@@ -888,7 +888,7 @@ struct TTSSettingsView: View {
                         // Speed slider (Kokoro only)
                         VStack(alignment: .leading, spacing: Spacing.xs) {
                             HStack {
-                                Text("Speed")
+                                Text("速度")
                                     .scaledFont(size: 16)
                                     .foregroundStyle(theme.textPrimary)
                                 Spacer()
@@ -902,7 +902,7 @@ struct TTSSettingsView: View {
                         }
                     } else {
                         // Qwen3: Speaker picker
-                        Picker("Speaker", selection: $qwen3Voice) {
+                        Picker("说话人", selection: $qwen3Voice) {
                             ForEach(Qwen3VoiceCatalog.groups, id: \.language) { group in
                                 Section(header: Text("\(group.flag) \(group.language)")) {
                                     ForEach(group.voices, id: \.id) { voice in
@@ -914,7 +914,7 @@ struct TTSSettingsView: View {
                         .onChange(of: qwen3Voice) { _, _ in syncQwen3Config() }
 
                         // Qwen3: Language picker
-                        Picker("Language", selection: $qwen3Language) {
+                        Picker("语言", selection: $qwen3Language) {
                             ForEach(Qwen3VoiceCatalog.supportedLanguages, id: \.id) { lang in
                                 Text(lang.name).tag(lang.id)
                             }
@@ -927,12 +927,12 @@ struct TTSSettingsView: View {
                     onDeviceModelControls(isKokoro: isKokoro)
 
                 } header: {
-                    Text("On-Device Neural Voice")
+                    Text("本地神经语音")
                 } footer: {
                     if isKokoro {
-                        Text("Kokoro · 54 voices · 9 languages. Downloads from HuggingFace on first use.")
+                        Text("Kokoro · 54 个声音 · 9 种语言。首次使用会从 HuggingFace 下载。")
                     } else {
-                        Text("Qwen3 · 7 speakers · 11 languages including Korean, German & Spanish. Speaker sets the voice timbre — any speaker can speak any language.")
+                        Text("Qwen3 · 7 个说话人 · 11 种语言。说话人决定音色，任意说话人都可朗读任意语言。")
                     }
                 }
             }
@@ -944,15 +944,15 @@ struct TTSSettingsView: View {
                     if isLoadingServerConfig {
                         HStack(spacing: Spacing.sm) {
                             ProgressView().controlSize(.small)
-                            Text("Loading server config…")
+                            Text("正在加载服务器配置…")
                                 .scaledFont(size: 14)
                                 .foregroundStyle(theme.textSecondary)
                         }
                     } else {
                         HStack {
-                            Text("Model")
+                            Text("模型")
                             Spacer()
-                            Text(serverConfiguredModel.isEmpty ? "Not configured" : serverConfiguredModel)
+                            Text(serverConfiguredModel.isEmpty ? "未配置" : serverConfiguredModel)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
@@ -962,16 +962,16 @@ struct TTSSettingsView: View {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: "arrow.clockwise.circle")
                                     .scaledFont(size: 14, weight: .medium)
-                                Text("Refresh Config")
+                                Text("刷新配置")
                                     .scaledFont(size: 14)
                             }
                             .foregroundStyle(theme.brandPrimary)
                         }
                     }
                 } header: {
-                    Text("Server TTS Model")
+                    Text("服务器 TTS 模型")
                 } footer: {
-                    Text("The TTS model configured on your OpenWebUI server (/api/v1/audio/config).")
+                    Text("OpenWebUI 服务器上配置的语音合成模型（/api/v1/audio/config）。")
                 }
 
                 // --- Voice picker ---
@@ -979,15 +979,15 @@ struct TTSSettingsView: View {
                     if isLoadingServerVoices {
                         HStack(spacing: Spacing.sm) {
                             ProgressView().controlSize(.small)
-                            Text("Loading voices from server…")
+                            Text("正在从服务器加载声音…")
                                 .scaledFont(size: 14)
                                 .foregroundStyle(theme.textSecondary)
                         }
                     } else if serverVoices.isEmpty {
                         HStack {
-                            Text("Voice")
+                            Text("声音")
                             Spacer()
-                            Text(serverVoiceId.isEmpty ? "Server Default" : serverVoiceId)
+                            Text(serverVoiceId.isEmpty ? "服务器默认" : serverVoiceId)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
@@ -997,14 +997,14 @@ struct TTSSettingsView: View {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: "arrow.clockwise.circle")
                                     .scaledFont(size: 14, weight: .medium)
-                                Text("Load Available Voices")
+                                Text("加载可用声音")
                                     .scaledFont(size: 14)
                             }
                             .foregroundStyle(theme.brandPrimary)
                         }
                     } else {
-                        Picker("Voice", selection: $serverVoiceId) {
-                            Text("Server Default").tag("")
+                        Picker("声音", selection: $serverVoiceId) {
+                            Text("服务器默认").tag("")
                             ForEach(serverVoices, id: \.id) { voice in
                                 Text(voice.name).tag(voice.id)
                             }
@@ -1014,9 +1014,9 @@ struct TTSSettingsView: View {
                         }
                     }
                 } header: {
-                    Text("Server Voice")
+                    Text("服务器声音")
                 } footer: {
-                    Text("Voices available on your OpenWebUI server. The default uses the server's configured voice.")
+                    Text("OpenWebUI 服务器可用的声音。默认值会使用服务器配置的声音。")
                 }
             }
 
@@ -1033,11 +1033,11 @@ struct TTSSettingsView: View {
                         }
                     } label: {
                         HStack {
-                            Text("Voice")
+                            Text("声音")
                             Spacer()
                             Text(
                                 voiceIdentifier.isEmpty
-                                    ? "Auto (detect language)"
+                                    ? "自动（检测语言）"
                                     : (AVSpeechSynthesisVoice(identifier: voiceIdentifier)?.name ?? voiceIdentifier)
                             )
                             .foregroundStyle(.secondary)
@@ -1047,7 +1047,7 @@ struct TTSSettingsView: View {
 
                     VStack(alignment: .leading) {
                         HStack {
-                            Text("Speed")
+                            Text("速度")
                             Spacer()
                             Text("\(Int(speechRate * 100))%")
                                 .scaledFont(size: 12, weight: .medium)
@@ -1060,9 +1060,9 @@ struct TTSSettingsView: View {
                             }
                     }
                 } header: {
-                    Text("System Voice")
+                    Text("系统语音")
                 } footer: {
-                    Text("These settings apply when using Apple's built-in speech synthesizer.")
+                    Text("这些设置会在使用 Apple 内置语音合成器时生效。")
                 }
             }
 
@@ -1075,7 +1075,7 @@ struct TTSSettingsView: View {
                         Image(systemName: isSpeaking ? "stop.fill" : "play.fill")
                             .scaledFont(size: 14, weight: .medium)
                             .foregroundStyle(isSpeaking ? theme.error : theme.brandPrimary)
-                        Text(isSpeaking ? "Stop Preview" : "Preview Voice")
+                        Text(isSpeaking ? "停止试听" : "试听语音")
                             .scaledFont(size: 16)
                             .foregroundStyle(theme.textPrimary)
                         Spacer()
@@ -1088,9 +1088,9 @@ struct TTSSettingsView: View {
                                 case "ondevice": return selectedOnDeviceModel == .qwen3 ? "Qwen3" : "Kokoro"
                                 case "kokoro":   return "Kokoro"
                                 case "qwen3":    return "Qwen3"
-                                case "server":   return "Server"
-                                case "system":   return "System"
-                                default:         return "Auto"
+                                case "server":   return "服务器"
+                                case "system":   return "系统"
+                                default:         return "自动"
                                 }
                             }()
                             Text(engineLabel)
@@ -1100,13 +1100,13 @@ struct TTSSettingsView: View {
                     }
                 }
             } footer: {
-                Text("Tap preview to hear how the selected voice sounds.")
+                Text("点击试听，听听当前声音效果。")
             }
 
             // Model Storage Management
             Section {
                 HStack {
-                    Text("Kokoro TTS")
+                    Text("Kokoro 语音模型")
                         .scaledFont(size: 16)
                         .foregroundStyle(theme.textPrimary)
                     Spacer()
@@ -1120,12 +1120,12 @@ struct TTSSettingsView: View {
                         ttsService.kokoroService.unloadAndDeleteModel()
                         refreshModelSizes()
                     } label: {
-                        Label("Delete", systemImage: "trash")
+                        Label("删除", systemImage: "trash")
                     }
                 }
 
                 HStack {
-                    Text("Qwen3 TTS")
+                    Text("Qwen3 语音模型")
                         .scaledFont(size: 16)
                         .foregroundStyle(theme.textPrimary)
                     Spacer()
@@ -1139,16 +1139,16 @@ struct TTSSettingsView: View {
                         ttsService.kokoroService.unloadAndDeleteModel()
                         refreshModelSizes()
                     } label: {
-                        Label("Delete", systemImage: "trash")
+                        Label("删除", systemImage: "trash")
                     }
                 }
             } header: {
-                Text("Model Storage")
+                Text("模型存储")
             } footer: {
-                Text("Swipe left on a model row to delete it from disk and free storage.")
+                Text("在模型行上向左滑动即可从磁盘删除并释放空间。")
             }
         }
-        .navigationTitle("Text-to-Speech")
+        .navigationTitle("文本转语音")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             availableVoices = dependencies.textToSpeechService.availableVoices()
@@ -1173,27 +1173,27 @@ struct TTSSettingsView: View {
     private var onDeviceStatusBadge: some View {
         switch ttsService.kokoroState {
         case .unloaded:
-            statusPill("Not Loaded", color: theme.textTertiary)
+            statusPill("未加载", color: theme.textTertiary)
         case .downloading:
             HStack(spacing: 4) {
                 ProgressView().controlSize(.mini)
-                Text("Downloading…")
+                Text("正在下载…")
                     .scaledFont(size: 12, weight: .medium)
                     .foregroundStyle(theme.warning)
             }
         case .loading:
             HStack(spacing: 4) {
                 ProgressView().controlSize(.mini)
-                Text("Loading...")
+                Text("加载中...")
                     .scaledFont(size: 12, weight: .medium)
                     .foregroundStyle(theme.brandPrimary)
             }
         case .ready:
-            statusPill("Ready", color: theme.success)
+            statusPill("已就绪", color: theme.success)
         case .generating:
-            statusPill("Generating...", color: theme.brandPrimary)
+            statusPill("生成中...", color: theme.brandPrimary)
         case .error(let msg):
-            statusPill("Error", color: theme.error)
+            statusPill("错误", color: theme.error)
                 .help(msg)
         }
     }
@@ -1208,7 +1208,7 @@ struct TTSSettingsView: View {
                 HStack(spacing: Spacing.sm) {
                     Image(systemName: "arrow.down.circle")
                         .scaledFont(size: 16, weight: .medium)
-                    Text("Download & Load Model")
+                    Text("下载并加载模型")
                         .scaledFont(size: 16)
                         .fontWeight(.medium)
                 }
@@ -1218,14 +1218,14 @@ struct TTSSettingsView: View {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 HStack(spacing: Spacing.sm) {
                     ProgressView().controlSize(.small)
-                    Text("Downloading model…")
+                    Text("正在下载模型…")
                         .scaledFont(size: 16)
                         .foregroundStyle(theme.textSecondary)
                     Spacer()
                 }
                 ProgressView()
                     .tint(theme.brandPrimary)
-                Text("Please keep the app open")
+                Text("请保持 App 打开")
                     .scaledFont(size: 12, weight: .medium)
                     .foregroundStyle(theme.textTertiary)
             }
@@ -1236,7 +1236,7 @@ struct TTSSettingsView: View {
                 HStack(spacing: Spacing.sm) {
                     Image(systemName: "xmark.circle")
                         .scaledFont(size: 16, weight: .medium)
-                    Text("Unload Model (Free Memory)")
+                    Text("卸载模型（释放内存）")
                         .scaledFont(size: 16)
                         .fontWeight(.medium)
                 }
@@ -1248,7 +1248,7 @@ struct TTSSettingsView: View {
                 HStack(spacing: Spacing.sm) {
                     Image(systemName: "trash.circle")
                         .scaledFont(size: 16, weight: .medium)
-                    Text("Delete Downloaded Model")
+                    Text("删除已下载模型")
                         .scaledFont(size: 16)
                         .fontWeight(.medium)
                 }
@@ -1260,7 +1260,7 @@ struct TTSSettingsView: View {
                 HStack(spacing: Spacing.sm) {
                     Image(systemName: "arrow.clockwise.circle")
                         .scaledFont(size: 16, weight: .medium)
-                    Text("Retry Download")
+                    Text("重新下载")
                         .scaledFont(size: 16)
                         .fontWeight(.medium)
                 }
@@ -1401,8 +1401,8 @@ struct TTSSettingsView: View {
     private func refreshModelSizes() {
         let kokoro = StorageManager.shared.kokoroTTSModelSize()
         let qwen3  = StorageManager.shared.qwen3TTSModelSize()
-        kokoroModelSize = kokoro > 0 ? ByteCountFormatter.string(fromByteCount: kokoro, countStyle: .file) : "Not downloaded"
-        qwen3ModelSize  = qwen3  > 0 ? ByteCountFormatter.string(fromByteCount: qwen3,  countStyle: .file) : "Not downloaded"
+        kokoroModelSize = kokoro > 0 ? ByteCountFormatter.string(fromByteCount: kokoro, countStyle: .file) : "未下载"
+        qwen3ModelSize  = qwen3  > 0 ? ByteCountFormatter.string(fromByteCount: qwen3,  countStyle: .file) : "未下载"
     }
 
     private func previewVoice() {
@@ -1420,7 +1420,7 @@ struct TTSSettingsView: View {
                 isSpeaking = false
             }
             service.speak(
-                "Hello! This is a preview of the text-to-speech voice. I can read your AI assistant's responses aloud."
+                "你好！这是文本转语音的试听。我可以把 AI 助手的回复朗读出来。"
             )
         }
     }
@@ -1430,7 +1430,7 @@ struct TTSSettingsView: View {
         if size > 0 {
             kokoroModelSize = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
         } else {
-            kokoroModelSize = "Not downloaded"
+            kokoroModelSize = "未下载"
         }
     }
 
@@ -1451,7 +1451,7 @@ struct STTSettingsView: View {
 
     /// True when ASR model files are already cached on disk (but not necessarily loaded into memory).
     private var asrFilesOnDisk: Bool {
-        asrModelSize != "–" && asrModelSize != "Not downloaded"
+        asrModelSize != "–" && asrModelSize != "未下载"
     }
 
     private var asr: OnDeviceASRService { dependencies.asrService }
@@ -1481,8 +1481,8 @@ struct STTSettingsView: View {
                 } label: {
                     engineRow(
                         value: "device",
-                        label: "On-Device (Apple)",
-                        description: "Apple Speech framework",
+                        label: "本地（Apple）",
+                        description: "Apple 语音识别框架",
                         selected: selectedSTTEngine == "device"
                     )
                 }
@@ -1497,22 +1497,22 @@ struct STTSettingsView: View {
                     } label: {
                         engineRow(
                             value: "server",
-                            label: "Server (OpenWebUI)",
-                            description: "Server-side transcription via /api/v1/audio/transcriptions",
+                            label: "服务器（OpenWebUI）",
+                            description: "通过服务器端 /api/v1/audio/transcriptions 转写",
                             selected: selectedSTTEngine == "server"
                         )
                     }
                     .buttonStyle(.plain)
                 }
             } header: {
-                Text("Voice Transcription Engine")
+                Text("语音转写引擎")
             } footer: {
                 if selectedSTTEngine == "device" {
-                    Text("Used for live microphone input. Apple's Speech framework works offline with no data sent to external servers.")
+                    Text("用于实时麦克风输入。Apple 语音识别框架可离线工作，不会发送到外部服务器。")
                 } else if selectedSTTEngine == "server" {
-                    Text("Used for live microphone input. Sends audio to your OpenWebUI server for transcription. Requires internet.")
+                    Text("用于实时麦克风输入。会把音频发送到你的 OpenWebUI 服务器转写，需要网络。")
                 } else {
-                    Text("Select the engine used for live microphone input and voice calls.")
+                    Text("选择实时麦克风输入和语音通话使用的转写引擎。")
                 }
             }
 
@@ -1527,8 +1527,8 @@ struct STTSettingsView: View {
                 } label: {
                     engineRow(
                         value: "server",
-                        label: "Server",
-                        description: "Uploads audio to your OpenWebUI server — transcription happens automatically",
+                        label: "服务器",
+                        description: "上传音频到 OpenWebUI 服务器并自动转写",
                         selected: audioFileMode == "server"
                     )
                 }
@@ -1545,11 +1545,11 @@ struct STTSettingsView: View {
                     } label: {
                         HStack(spacing: Spacing.md) {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("On-Device (Qwen3 ASR)")
+                                Text("本地（Qwen3 ASR）")
                                     .scaledFont(size: 16)
                                     .fontWeight(.medium)
                                     .foregroundStyle(theme.textPrimary)
-                                Text("Multilingual with auto language detection, fully on-device")
+                                Text("多语言自动检测，全程在本机处理")
                                     .scaledFont(size: 12, weight: .medium)
                                     .foregroundStyle(theme.textTertiary)
                             }
@@ -1564,12 +1564,12 @@ struct STTSettingsView: View {
                     .buttonStyle(.plain)
                 }
             } header: {
-                Text("Audio File Transcription")
+                Text("音频文件转写")
             } footer: {
                 if audioFileMode == "server" {
-                    Text("Audio files attached in chat are uploaded to your server, which handles transcription automatically. No extra downloads needed.")
+                    Text("聊天中附加的音频文件会上传到服务器并自动转写，无需额外下载。")
                 } else {
-                    Text("Audio files are transcribed locally on your device using Qwen3 ASR. Fully private — no audio sent to the server. Supports multiple languages with auto-detection.")
+                    Text("音频文件会使用 Qwen3 ASR 在本机转写。更私密，不会把音频发送到服务器，并支持多语言自动检测。")
                 }
             }
 
@@ -1580,7 +1580,7 @@ struct STTSettingsView: View {
                 let modelLabel = activeVariant.displayName
                 Section {
                     HStack {
-                        Text("Status")
+                        Text("状态")
                             .scaledFont(size: 16)
                             .foregroundStyle(theme.textPrimary)
                         Spacer()
@@ -1589,7 +1589,7 @@ struct STTSettingsView: View {
 
                     if currentModelSize != "–" {
                         HStack {
-                            Text("Model Size on Disk")
+                            Text("磁盘占用")
                                 .scaledFont(size: 16)
                                 .foregroundStyle(theme.textPrimary)
                             Spacer()
@@ -1606,7 +1606,7 @@ struct STTSettingsView: View {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: asrFilesOnDisk ? "bolt.circle" : "arrow.down.circle")
                                     .scaledFont(size: 16, weight: .medium)
-                                Text(asrFilesOnDisk ? "Load Model" : "Download & Load Model")
+                                Text(asrFilesOnDisk ? "加载模型" : "下载并加载模型")
                                     .scaledFont(size: 16)
                                     .fontWeight(.medium)
                             }
@@ -1616,7 +1616,7 @@ struct STTSettingsView: View {
                         HStack(spacing: Spacing.sm) {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("Loading model…")
+                            Text("正在加载模型…")
                                 .scaledFont(size: 16)
                                 .foregroundStyle(theme.textSecondary)
                         }
@@ -1627,7 +1627,7 @@ struct STTSettingsView: View {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: "xmark.circle")
                                     .scaledFont(size: 16, weight: .medium)
-                                Text("Unload Model (Free Memory)")
+                                Text("卸载模型（释放内存）")
                                     .scaledFont(size: 16)
                                     .fontWeight(.medium)
                             }
@@ -1640,7 +1640,7 @@ struct STTSettingsView: View {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: "trash.circle")
                                     .scaledFont(size: 16, weight: .medium)
-                                Text("Delete Downloaded Model")
+                                Text("删除已下载模型")
                                     .scaledFont(size: 16)
                                     .fontWeight(.medium)
                             }
@@ -1653,7 +1653,7 @@ struct STTSettingsView: View {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: "arrow.clockwise.circle")
                                     .scaledFont(size: 16, weight: .medium)
-                                Text("Retry Download")
+                                Text("重新下载")
                                     .scaledFont(size: 16)
                                     .fontWeight(.medium)
                             }
@@ -1663,7 +1663,7 @@ struct STTSettingsView: View {
                 } header: {
                     Text("\(modelLabel)")
                 } footer: {
-                    Text("The model downloads from HuggingFace on first use and is cached locally. Unloading frees memory; deleting removes the download.")
+                    Text("模型首次使用会从 HuggingFace 下载并缓存在本地。卸载可释放内存，删除会移除下载文件。")
                 }
             }
 
@@ -1680,20 +1680,20 @@ struct STTSettingsView: View {
                         }
                     } label: {
                         HStack {
-                            Text("Language")
+                            Text("语言")
                             Spacer()
                             Text(
                                 sttLocale.isEmpty
-                                    ? "Auto"
+                                    ? "自动"
                                     : (Locale.current.localizedString(forIdentifier: sttLocale) ?? sttLocale)
                             )
                             .foregroundStyle(.secondary)
                         }
                     }
                 } header: {
-                    Text("Language")
+                    Text("语言")
                 } footer: {
-                    Text("Choose the language you'll speak. \"Auto\" uses your device's current language.")
+                    Text("选择你要说的语言。“自动”会使用设备当前语言。")
                 }
             }
 
@@ -1701,7 +1701,7 @@ struct STTSettingsView: View {
             Section {
                 VStack(alignment: .leading) {
                     HStack {
-                        Text("Silence Duration")
+                        Text("静音时长")
                         Spacer()
                         Text("\(String(format: "%.1f", silenceDuration))s")
                             .scaledFont(size: 12, weight: .medium)
@@ -1711,9 +1711,9 @@ struct STTSettingsView: View {
                         .tint(theme.brandPrimary)
                 }
             } header: {
-                Text("Voice Activity Detection")
+                Text("语音活动检测")
             } footer: {
-                Text("How long to wait after you stop speaking before finalizing the transcript. Shorter = faster, longer = catches pauses mid-sentence.")
+                Text("停止说话后等待多久再结束转写。越短越快，越长越能捕捉句中停顿。")
             }
 
             // Permissions
@@ -1722,13 +1722,13 @@ struct STTSettingsView: View {
                     Image(systemName: "mic.fill")
                         .scaledFont(size: 14)
                         .foregroundStyle(theme.brandPrimary)
-                    Text("Microphone")
+                    Text("麦克风")
                         .scaledFont(size: 16)
                     Spacer()
                     if micPermissionGranted {
-                        statusPill("Granted", color: theme.success)
+                        statusPill("已授权", color: theme.success)
                     } else {
-                        statusPill("Not Granted", color: theme.warning)
+                        statusPill("未授权", color: theme.warning)
                     }
                 }
 
@@ -1736,13 +1736,13 @@ struct STTSettingsView: View {
                     Image(systemName: "waveform")
                         .scaledFont(size: 14)
                         .foregroundStyle(theme.brandPrimary)
-                    Text("Speech Recognition")
+                    Text("语音识别")
                         .scaledFont(size: 16)
                     Spacer()
                     if speechPermissionGranted {
-                        statusPill("Granted", color: theme.success)
+                        statusPill("已授权", color: theme.success)
                     } else {
-                        statusPill("Not Granted", color: theme.warning)
+                        statusPill("未授权", color: theme.warning)
                     }
                 }
 
@@ -1755,7 +1755,7 @@ struct STTSettingsView: View {
                         HStack(spacing: Spacing.sm) {
                             Image(systemName: "gear")
                                 .scaledFont(size: 14, weight: .medium)
-                            Text("Open Settings to Grant Permissions")
+                            Text("打开设置授权")
                                 .scaledFont(size: 16)
                                 .fontWeight(.medium)
                         }
@@ -1763,12 +1763,12 @@ struct STTSettingsView: View {
                     }
                 }
             } header: {
-                Text("Permissions")
+                Text("权限")
             }
             // Model Storage Management
             Section {
                 HStack {
-                    Text("Qwen3 ASR")
+                    Text("Qwen3 语音识别模型")
                         .scaledFont(size: 16)
                         .foregroundStyle(theme.textPrimary)
                     Spacer()
@@ -1781,17 +1781,17 @@ struct STTSettingsView: View {
                         asr.unloadAndDeleteVariant(.qwen3ASR)
                         refreshModelSizes()
                     } label: {
-                        Label("Delete", systemImage: "trash")
+                        Label("删除", systemImage: "trash")
                     }
                 }
 
             } header: {
-                Text("Model Storage")
+                Text("模型存储")
             } footer: {
-                Text("Swipe left on a model row to delete it from disk and free storage.")
+                Text("在模型行上向左滑动即可从磁盘删除并释放空间。")
             }
         }
-        .navigationTitle("Audio & Transcription")
+        .navigationTitle("语音与转写")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             refreshPermissions()
@@ -1818,22 +1818,22 @@ struct STTSettingsView: View {
     private var asrStatusBadge: some View {
         switch asr.state {
         case .unloaded:
-            statusPill(asrFilesOnDisk ? "Not Loaded" : "Not Downloaded", color: theme.textTertiary)
+            statusPill(asrFilesOnDisk ? "未加载" : "未下载", color: theme.textTertiary)
         case .loading:
             HStack(spacing: 4) {
                 ProgressView().controlSize(.mini)
-                Text("Loading...")
+                Text("加载中...")
                     .scaledFont(size: 12, weight: .medium)
                     .foregroundStyle(theme.brandPrimary)
             }
         case .ready:
-            statusPill("Ready", color: theme.success)
+            statusPill("已就绪", color: theme.success)
         case .transcribing:
-            statusPill("Transcribing…", color: theme.brandPrimary)
+            statusPill("转写中…", color: theme.brandPrimary)
         case .paused:
-            statusPill("Paused", color: theme.textTertiary)
+            statusPill("已暂停", color: theme.textTertiary)
         case .error(let msg):
-            statusPill("Error", color: theme.error)
+            statusPill("错误", color: theme.error)
                 .help(msg)
         }
     }
@@ -1868,7 +1868,7 @@ struct STTSettingsView: View {
 
     private func refreshModelSizes() {
         let p = asr.modelSize(for: .qwen3ASR)
-        asrModelSize = p > 0 ? ByteCountFormatter.string(fromByteCount: p, countStyle: .file) : "Not downloaded"
+        asrModelSize = p > 0 ? ByteCountFormatter.string(fromByteCount: p, countStyle: .file) : "未下载"
     }
 
 }
@@ -1900,7 +1900,7 @@ struct STTLanguagePickerView: View {
                     dismiss()
                 } label: {
                     HStack {
-                        Text("Auto (Device Language)")
+                        Text("自动（设备语言）")
                         Spacer()
                         if sttLocale.isEmpty {
                             Image(systemName: "checkmark")
@@ -1928,8 +1928,8 @@ struct STTLanguagePickerView: View {
                 .foregroundStyle(.primary)
             }
         }
-        .searchable(text: $searchText, prompt: "Search language…")
-        .navigationTitle("STT Language")
+        .searchable(text: $searchText, prompt: "搜索语言…")
+        .navigationTitle("语音识别语言")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -1961,9 +1961,9 @@ struct TTSVoicePickerView: View {
                 } label: {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Auto (detect language)")
+                            Text("自动（检测语言）")
                                 .fontWeight(.medium)
-                            Text("Picks the best voice for each message's language")
+                            Text("根据每条消息的语言选择最合适的声音")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -2000,8 +2000,8 @@ struct TTSVoicePickerView: View {
                 .foregroundStyle(.primary)
             }
         }
-        .searchable(text: $searchText, prompt: "Search voice or language…")
-        .navigationTitle("TTS Voice")
+        .searchable(text: $searchText, prompt: "搜索声音或语言…")
+        .navigationTitle("语音声音")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -2017,15 +2017,15 @@ struct NotificationSettingsView: View {
     var body: some View {
         List {
             Section {
-                Toggle("Generation Complete", isOn: $notificationsEnabled)
+                Toggle("生成完成", isOn: $notificationsEnabled)
                     .tint(theme.brandPrimary)
-                Toggle("Show Response Preview", isOn: $showResponsePreview)
+                Toggle("显示回复预览", isOn: $showResponsePreview)
                     .tint(theme.brandPrimary)
                     .disabled(!notificationsEnabled)
             } header: {
-                Text("Notification Types")
+                Text("通知类型")
             } footer: {
-                Text("Receive a notification when an AI response finishes generating. When \"Show Response Preview\" is on, the first lines of the response appear in the notification.")
+                Text("AI 回复生成完成时发送通知。开启“显示回复预览”后，通知会显示回复开头内容。")
             }
 
             Section {
@@ -2033,13 +2033,13 @@ struct NotificationSettingsView: View {
                     Image(systemName: "bell.fill")
                         .scaledFont(size: 14)
                         .foregroundStyle(theme.brandPrimary)
-                    Text("System Permission")
+                    Text("系统权限")
                         .scaledFont(size: 16)
                     Spacer()
                     if systemPermissionGranted {
-                        permissionPill("Granted", color: theme.success)
+                        permissionPill("已授权", color: theme.success)
                     } else {
-                        permissionPill("Not Granted", color: theme.warning)
+                        permissionPill("未授权", color: theme.warning)
                     }
                 }
 
@@ -2053,7 +2053,7 @@ struct NotificationSettingsView: View {
                         HStack(spacing: Spacing.sm) {
                             Image(systemName: "bell.badge")
                                 .scaledFont(size: 14, weight: .medium)
-                            Text("Request Permission")
+                            Text("请求权限")
                                 .scaledFont(size: 16)
                                 .fontWeight(.medium)
                         }
@@ -2068,7 +2068,7 @@ struct NotificationSettingsView: View {
                         HStack(spacing: Spacing.sm) {
                             Image(systemName: "gear")
                                 .scaledFont(size: 14, weight: .medium)
-                            Text("Open iOS Settings")
+                            Text("打开 iOS 设置")
                                 .scaledFont(size: 16)
                                 .fontWeight(.medium)
                         }
@@ -2076,16 +2076,16 @@ struct NotificationSettingsView: View {
                     }
                 }
             } header: {
-                Text("Permission")
+                Text("权限")
             } footer: {
                 if systemPermissionGranted {
-                    Text("Notifications are authorized. You can manage notification style in iOS Settings.")
+                    Text("通知已授权。你可以在 iOS 设置中管理通知样式。")
                 } else {
-                    Text("Notifications require system permission. Tap \"Request Permission\" or enable them in iOS Settings → Open Relay → Notifications.")
+                    Text("通知需要系统权限。请点击“请求权限”，或在 iOS 设置 → Iexa → 通知中开启。")
                 }
             }
         }
-        .navigationTitle("Notifications")
+        .navigationTitle("通知")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             // Refresh permission state
@@ -2133,11 +2133,11 @@ struct SignOutConfirmationSheet: View {
                 .scaleEffect(appeared ? 1 : 0.7)
                 .animation(.spring(response: 0.4, dampingFraction: 0.7).delay(0.05), value: appeared)
 
-                Text("Sign Out")
+                Text("退出登录")
                     .scaledFont(size: 18, weight: .semibold)
                     .foregroundStyle(theme.textPrimary)
 
-                Text("Are you sure you want to sign out?")
+                Text("确定要退出登录吗？")
                     .scaledFont(size: 12, weight: .medium)
                     .foregroundStyle(theme.textSecondary)
                     .multilineTextAlignment(.center)
@@ -2154,16 +2154,16 @@ struct SignOutConfirmationSheet: View {
             // Action buttons
             VStack(spacing: Spacing.sm) {
                 signOutButton(
-                    title: "Sign Out",
-                    subtitle: "Keep server connection",
+                    title: "退出登录",
+                    subtitle: "保留服务器连接",
                     icon: "arrow.right.circle",
                     action: onSignOut,
                     index: 0
                 )
 
                 signOutButton(
-                    title: "Sign Out & Remove Server",
-                    subtitle: "Clear all connection data",
+                    title: "退出并移除服务器",
+                    subtitle: "清除所有连接数据",
                     icon: "trash.circle",
                     action: onSignOutAndRemove,
                     index: 1
@@ -2171,7 +2171,7 @@ struct SignOutConfirmationSheet: View {
 
                 // Cancel
                 Button(action: onCancel) {
-                    Text("Cancel")
+                    Text("取消")
                         .scaledFont(size: 16, weight: .medium)
                         .foregroundStyle(theme.textSecondary)
                         .frame(maxWidth: .infinity)

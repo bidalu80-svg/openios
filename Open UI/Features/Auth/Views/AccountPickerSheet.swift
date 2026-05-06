@@ -45,7 +45,7 @@ struct AccountPickerSheet: View {
                 .padding(.vertical, Spacing.md)
             }
             .background(theme.background)
-            .navigationTitle("Switch Account")
+            .navigationTitle("切换账号")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -65,12 +65,12 @@ struct AccountPickerSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .confirmationDialog(
-            "Remove Account",
+            "移除账号",
             isPresented: $showRemoveConfirmation,
             titleVisibility: .visible
         ) {
             if let account = accountToRemove {
-                Button("Remove \"\(account.displayName)\"", role: .destructive) {
+                Button("移除“\(account.displayName)”", role: .destructive) {
                     Task {
                         await viewModel.removeAccount(account)
                         if viewModel.savedAccountsOnActiveServer.isEmpty {
@@ -79,12 +79,12 @@ struct AccountPickerSheet: View {
                     }
                 }
             }
-            Button("Cancel", role: .cancel) {
+            Button("取消", role: .cancel) {
                 accountToRemove = nil
             }
         } message: {
             if let account = accountToRemove {
-                Text("This will remove the saved session for \"\(account.displayName)\". You can sign in again anytime.")
+                Text("这会移除“\(account.displayName)”的已保存会话。之后仍可随时重新登录。")
             }
         }
     }
@@ -107,7 +107,7 @@ struct AccountPickerSheet: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
 
-            Text("\(accounts.count) account\(accounts.count == 1 ? "" : "s")")
+            Text("\(accounts.count) 个账号")
                 .scaledFont(size: 12)
                 .foregroundStyle(theme.textSecondary)
         }
@@ -144,7 +144,7 @@ struct AccountPickerSheet: View {
                             .lineLimit(1)
 
                         if account.role == .admin {
-                            Text("Admin")
+                            Text("管理员")
                                 .scaledFont(size: 10, weight: .medium)
                                 .foregroundStyle(theme.brandPrimary)
                                 .padding(.horizontal, 5)
@@ -208,7 +208,7 @@ struct AccountPickerSheet: View {
         }
         .buttonStyle(.plain)
         .disabled(isSwitching)
-        .accessibilityLabel(isActive ? "Active account: \(account.displayName)" : "Switch to \(account.displayName)")
+        .accessibilityLabel(isActive ? "当前账号：\(account.displayName)" : "切换到 \(account.displayName)")
     }
 
     // MARK: - Account Avatar
@@ -252,7 +252,7 @@ struct AccountPickerSheet: View {
             HStack(spacing: Spacing.sm) {
                 Image(systemName: "person.badge.plus")
                     .scaledFont(size: 16)
-                Text("Add Another Account")
+                Text("添加另一个账号")
                     .scaledFont(size: 15, weight: .medium)
             }
             .foregroundStyle(theme.brandPrimary)
@@ -278,7 +278,7 @@ struct AccountPickerSheet: View {
 
     private func authTypeLabel(_ type: AuthType) -> String {
         switch type {
-        case .credentials: return "Email & Password"
+        case .credentials: return "邮箱和密码"
         case .ldap: return "LDAP"
         case .sso: return "SSO"
         case .apiKey: return "API Key"

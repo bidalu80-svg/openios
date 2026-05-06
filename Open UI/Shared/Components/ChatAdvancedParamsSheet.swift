@@ -30,14 +30,14 @@ struct ChatAdvancedParamsSheet: View {
                 streamFunctionSection
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("Chat Controls")
+            .navigationTitle("聊天控制")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("取消") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
+                    Button("保存") {
                         params = draft
                         dismiss()
                     }
@@ -47,7 +47,7 @@ struct ChatAdvancedParamsSheet: View {
                     Button(role: .destructive) {
                         draft = ChatAdvancedParams()
                     } label: {
-                        Label("Reset All", systemImage: "arrow.counterclockwise")
+                        Label("全部重置", systemImage: "arrow.counterclockwise")
                             .foregroundStyle(.red)
                     }
                 }
@@ -61,7 +61,7 @@ struct ChatAdvancedParamsSheet: View {
         Section {
             ZStack(alignment: .topLeading) {
                 if draft.systemPrompt?.isEmpty ?? true {
-                    Text("Override system prompt for this chat…")
+                    Text("为当前聊天覆盖系统提示词…")
                         .foregroundStyle(.secondary)
                         .font(.body)
                         .padding(.top, 8)
@@ -75,81 +75,81 @@ struct ChatAdvancedParamsSheet: View {
                 .frame(minHeight: 80)
             }
         } header: {
-            Text("System Prompt")
+            Text("系统提示词")
         } footer: {
-            Text("Overrides the model's default system prompt for this chat only.")
+            Text("只覆盖当前聊天的默认系统提示词。")
         }
     }
 
     private var basicSection: some View {
-        Section("Basic") {
-            paramDoubleRow(label: "Temperature", value: $draft.temperature,
+        Section("基础") {
+            paramDoubleRow(label: "温度", value: $draft.temperature,
                            range: 0...2, step: 0.05, defaultHint: "0.8")
-            paramIntRow(label: "Max Tokens", value: $draft.maxTokens,
+            paramIntRow(label: "最大 Token", value: $draft.maxTokens,
                         range: -1...131072, step: 1, defaultHint: "-1")
-            paramOptionalIntRow(label: "Seed", value: $draft.seed,
-                                range: 0...9_999_999, step: 1, defaultHint: "Random")
+            paramOptionalIntRow(label: "随机种子", value: $draft.seed,
+                                range: 0...9_999_999, step: 1, defaultHint: "随机")
         }
     }
 
     private var samplingSection: some View {
-        Section("Sampling") {
-            paramIntRow(label: "top_k", value: $draft.topK,
+        Section("采样") {
+            paramIntRow(label: "采样候选数（top_k）", value: $draft.topK,
                         range: 0...1000, step: 1, defaultHint: "40")
-            paramDoubleRow(label: "top_p", value: $draft.topP,
+            paramDoubleRow(label: "核心采样概率（top_p）", value: $draft.topP,
                            range: 0...1, step: 0.05, defaultHint: "0.9")
-            paramDoubleRow(label: "min_p", value: $draft.minP,
+            paramDoubleRow(label: "最小概率阈值（min_p）", value: $draft.minP,
                            range: 0...1, step: 0.05, defaultHint: "0.0")
-            paramDoubleRow(label: "frequency_penalty", value: $draft.frequencyPenalty,
+            paramDoubleRow(label: "频率惩罚（frequency_penalty）", value: $draft.frequencyPenalty,
                            range: -2...2, step: 0.05, defaultHint: "1.1")
-            paramDoubleRow(label: "presence_penalty", value: $draft.presencePenalty,
+            paramDoubleRow(label: "话题新鲜度惩罚（presence_penalty）", value: $draft.presencePenalty,
                            range: -2...2, step: 0.05, defaultHint: "0.0")
         }
     }
 
     private var mirostatSection: some View {
         Section("Mirostat") {
-            paramIntRow(label: "mirostat", value: $draft.mirostat,
+            paramIntRow(label: "困惑度控制模式（mirostat）", value: $draft.mirostat,
                         range: 0...2, step: 1, defaultHint: "0")
-            paramDoubleRow(label: "mirostat_eta", value: $draft.mirostatEta,
+            paramDoubleRow(label: "困惑度学习率（mirostat_eta）", value: $draft.mirostatEta,
                            range: 0...1, step: 0.01, defaultHint: "0.1")
-            paramDoubleRow(label: "mirostat_tau", value: $draft.mirostatTau,
+            paramDoubleRow(label: "困惑度目标值（mirostat_tau）", value: $draft.mirostatTau,
                            range: 0...10, step: 0.1, defaultHint: "5.0")
         }
     }
 
     private var repeatSection: some View {
-        Section("Repeat / Tail-Free") {
-            paramIntRow(label: "repeat_last_n", value: $draft.repeatLastN,
+        Section("重复 / Tail-Free") {
+            paramIntRow(label: "重复检查范围（repeat_last_n）", value: $draft.repeatLastN,
                         range: -1...128, step: 1, defaultHint: "64")
-            paramDoubleRow(label: "tfs_z", value: $draft.tfsZ,
+            paramDoubleRow(label: "尾部采样强度（tfs_z）", value: $draft.tfsZ,
                            range: 0...2, step: 0.05, defaultHint: "1.0")
-            paramDoubleRow(label: "repeat_penalty", value: $draft.repeatPenalty,
+            paramDoubleRow(label: "重复惩罚（repeat_penalty）", value: $draft.repeatPenalty,
                            range: -2...2, step: 0.05, defaultHint: "1.1")
         }
     }
 
     private var ollamaSection: some View {
         Section("Ollama") {
-            paramIntRow(label: "num_keep", value: $draft.numKeep,
+            paramIntRow(label: "保留上下文数（num_keep）", value: $draft.numKeep,
                         range: -1...10_240_000, step: 1, defaultHint: "24")
-            paramIntRow(label: "num_ctx", value: $draft.numCtx,
+            paramIntRow(label: "上下文长度（num_ctx）", value: $draft.numCtx,
                         range: -1...10_240_000, step: 1, defaultHint: "2048")
-            paramIntRow(label: "num_batch", value: $draft.numBatch,
+            paramIntRow(label: "批处理大小（num_batch）", value: $draft.numBatch,
                         range: 256...8192, step: 256, defaultHint: "512")
             thinkRow
-            paramTextRow(label: "format", value: $draft.format, placeholder: "e.g. json")
+            paramTextRow(label: "输出格式（format）", value: $draft.format, placeholder: "例如 json")
         }
     }
 
     private var reasoningSection: some View {
-        Section("Reasoning") {
+        Section("推理") {
             reasoningEffortRow
         }
     }
 
     private var streamFunctionSection: some View {
-        Section("Streaming & Function Calling") {
+        Section("流式与函数调用") {
             streamResponseRow
             functionCallingRow
         }
@@ -167,10 +167,10 @@ struct ChatAdvancedParamsSheet: View {
         activeColor: Color = .accentColor
     ) -> some View {
         let current = value.wrappedValue
-        let currentLabel: String = states.first(where: { $0.value == current })?.label ?? "Default"
+        let currentLabel: String = states.first(where: { $0.value == current })?.label ?? "默认"
 
         // All states including Default as first entry
-        let allStates: [(label: String, value: String?)] = [("Default", nil)] + states
+        let allStates: [(label: String, value: String?)] = [("默认", nil)] + states
         let currentIdx = allStates.firstIndex(where: { $0.value == current }) ?? 0
 
         HStack {
@@ -202,8 +202,8 @@ struct ChatAdvancedParamsSheet: View {
     private func cyclingBoolPillRow(
         label: String,
         value: Binding<Bool?>,
-        onLabel: String = "Enabled",
-        offLabel: String = "Disabled",
+        onLabel: String = "开启",
+        offLabel: String = "关闭",
         activeColor: Color = .accentColor
     ) -> some View {
         let current = value.wrappedValue
@@ -211,7 +211,7 @@ struct ChatAdvancedParamsSheet: View {
             switch current {
             case .some(true): return onLabel
             case .some(false): return offLabel
-            case .none: return "Default"
+            case .none: return "默认"
             }
         }()
 
@@ -248,12 +248,12 @@ struct ChatAdvancedParamsSheet: View {
     @ViewBuilder
     private var reasoningEffortRow: some View {
         let states: [(label: String, value: String?)] = [
-            ("low",    "low"),
-            ("medium", "medium"),
-            ("high",   "high"),
+            ("低", "low"),
+            ("中", "medium"),
+            ("高", "high"),
         ]
         cyclingPillRow(
-            label: "reasoning_effort",
+            label: "推理强度（reasoning_effort）",
             value: $draft.reasoningEffort,
             states: states
         )
@@ -270,16 +270,16 @@ struct ChatAdvancedParamsSheet: View {
 
         let currentLabel: String = {
             switch current {
-            case .default:       return "Default"
-            case .on:            return "On"
-            case .off:           return "Off"
-            case .custom(let s): return s.isEmpty ? "Custom" : s
+            case .default:       return "默认"
+            case .on:            return "开启"
+            case .off:           return "关闭"
+            case .custom(let s): return s.isEmpty ? "自定义" : s
             }
         }()
 
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("think (Ollama)")
+                Text("思考模式（think / Ollama）")
                     .font(.body)
                 Spacer()
                 // Single pill cycles: Default → On → Off → Custom → Default
@@ -304,7 +304,7 @@ struct ChatAdvancedParamsSheet: View {
                 .buttonStyle(.plain)
             }
             if isCustom {
-                TextField("budget string, e.g. medium", text: Binding(
+                TextField("预算字符串，例如 medium", text: Binding(
                     get: { draft.thinkCustom ?? "" },
                     set: {
                         draft.thinkCustom = $0
@@ -321,20 +321,20 @@ struct ChatAdvancedParamsSheet: View {
     @ViewBuilder
     private var streamResponseRow: some View {
         cyclingBoolPillRow(
-            label: "Stream Response",
+            label: "流式响应",
             value: $draft.streamResponse,
-            onLabel: "Enabled",
-            offLabel: "Disabled"
+            onLabel: "开启",
+            offLabel: "关闭"
         )
     }
 
     @ViewBuilder
     private var functionCallingRow: some View {
         let states: [(label: String, value: String?)] = [
-            ("Native", "native"),
+            ("原生", "native"),
         ]
         cyclingPillRow(
-            label: "Function Calling",
+            label: "函数调用",
             value: $draft.functionCalling,
             states: states
         )
@@ -363,7 +363,7 @@ struct ChatAdvancedParamsSheet: View {
                     }
                     .buttonStyle(.plain)
                 } else {
-                    Text("Default (\(defaultHint))")
+                    Text("默认（\(defaultHint)）")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Button {
@@ -408,7 +408,7 @@ struct ChatAdvancedParamsSheet: View {
                     }
                     .buttonStyle(.plain)
                 } else {
-                    Text("Default (\(defaultHint))")
+                    Text("默认（\(defaultHint)）")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Button {

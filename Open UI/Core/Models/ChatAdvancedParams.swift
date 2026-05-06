@@ -26,10 +26,10 @@ enum ThinkMode: Equatable, Sendable {
     /// Display label for the picker.
     var label: String {
         switch self {
-        case .default: return "Default"
-        case .on: return "On"
-        case .off: return "Off"
-        case .custom(let s): return s.isEmpty ? "Custom" : s
+        case .default: return "默认"
+        case .on: return "开启"
+        case .off: return "关闭"
+        case .custom(let s): return s.isEmpty ? "自定义" : s
         }
     }
 }

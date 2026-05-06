@@ -36,7 +36,7 @@ struct AddServerSheet: View {
                         Image(systemName: "info.circle.fill")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.brandPrimary)
-                        Text("Each server URL saves one session. To use a different account on the same server, switch to it and sign out first.")
+                        Text("每个服务器地址会保存一个会话。要在同一服务器使用不同账号，请先切换过去并退出登录。")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -50,8 +50,8 @@ struct AddServerSheet: View {
                     // Connection form — delegates entirely to the same ServerConnectionView UI
                     VStack(spacing: Spacing.lg) {
                         ModernTextField(
-                            label: "Server URL",
-                            placeholder: "https://your-server.com or https://api.example.com",
+                            label: "服务器 URL",
+                            placeholder: "https://your-server.com 或 https://api.example.com",
                             text: $url,
                             keyboardType: .URL,
                             textContentType: .URL,
@@ -61,17 +61,17 @@ struct AddServerSheet: View {
                         DisclosureGroup(isExpanded: $showAdvanced) {
                             VStack(spacing: Spacing.lg) {
                                 ModernTextField(
-                                    label: "API Key (optional)",
-                                    placeholder: "Optional for Open WebUI; required for OpenAI/Gemini/Claude endpoints",
+                                    label: "API Key（可选）",
+                                    placeholder: "Open WebUI 可选；OpenAI/Gemini/Claude 端点必填",
                                     text: $apiKey,
                                     isSecure: true
                                 )
                                 HStack {
                                     VStack(alignment: .leading, spacing: Spacing.xxs) {
-                                        Text("Self-Signed Certificates")
+                                        Text("自签名证书")
                                             .scaledFont(size: 14)
                                             .foregroundStyle(theme.textPrimary)
-                                        Text("For private servers with custom certs")
+                                        Text("适用于使用自定义证书的私有服务器")
                                             .scaledFont(size: 12, weight: .medium)
                                             .foregroundStyle(theme.textTertiary)
                                     }
@@ -86,7 +86,7 @@ struct AddServerSheet: View {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: "gearshape")
                                     .scaledFont(size: 14)
-                                Text("Advanced")
+                                Text("高级")
                                     .scaledFont(size: 14, weight: .medium)
                             }
                             .foregroundStyle(theme.textTertiary)
@@ -107,7 +107,7 @@ struct AddServerSheet: View {
                         }
 
                         AuthPrimaryButton(
-                            title: viewModel.isConnecting ? "Connecting..." : "Connect",
+                            title: viewModel.isConnecting ? "正在连接..." : "连接",
                             icon: viewModel.isConnecting ? nil : "link",
                             isLoading: viewModel.isConnecting,
                             isDisabled: url.isEmpty
@@ -128,11 +128,11 @@ struct AddServerSheet: View {
                 }
             }
             .background(theme.background)
-            .navigationTitle("Add Server")
+            .navigationTitle("添加服务器")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
+                    Button("取消") {
                         cancelAndRestore()
                     }
                 }

@@ -102,32 +102,32 @@ struct SkillEditorView: View {
                 .padding(.bottom, Spacing.xl)
             }
             .background(theme.background)
-            .navigationTitle(isEditing ? "Edit Skill" : "New Skill")
+            .navigationTitle(isEditing ? "编辑技能" : "新建技能")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbarContent }
             .confirmationDialog(
-                "Discard Changes?",
+                "放弃更改？",
                 isPresented: $showDiscardConfirm,
                 titleVisibility: .visible
             ) {
-                Button("Discard", role: .destructive) { dismiss() }
-                Button("Keep Editing", role: .cancel) {}
+                Button("放弃", role: .destructive) { dismiss() }
+                Button("继续编辑", role: .cancel) {}
             } message: {
-                Text("Your unsaved changes will be lost.")
+                Text("未保存的更改会丢失。")
             }
-            .alert("Validation Error", isPresented: .init(
+            .alert("校验错误", isPresented: .init(
                 get: { validationError != nil },
                 set: { if !$0 { validationError = nil } }
             )) {
-                Button("OK", role: .cancel) {}
+                Button("好", role: .cancel) {}
             } message: {
                 Text(validationError ?? "")
             }
-            .alert("Access Error", isPresented: .init(
+            .alert("权限错误", isPresented: .init(
                 get: { accessUpdateError != nil },
                 set: { if !$0 { accessUpdateError = nil } }
             )) {
-                Button("OK", role: .cancel) {}
+                Button("好", role: .cancel) {}
             } message: {
                 Text(accessUpdateError ?? "")
             }
@@ -145,15 +145,15 @@ struct SkillEditorView: View {
 
     private var basicInfoSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Skill Info")
+            sectionHeader("技能信息")
             fieldCard {
                 VStack(spacing: 0) {
                     HStack {
-                        Text("Name")
+                        Text("名称")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textSecondary)
                             .frame(width: 80, alignment: .leading)
-                        TextField("e.g. Code Review Expert", text: $name)
+                        TextField("例如 代码审查专家", text: $name)
                             .scaledFont(size: 15)
                             .foregroundStyle(theme.textPrimary)
                             .focused($focusedField, equals: .name)
@@ -194,11 +194,11 @@ struct SkillEditorView: View {
                     Divider().background(theme.inputBorder.opacity(0.4))
 
                     HStack {
-                        Text("Description")
+                        Text("描述")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textSecondary)
                             .frame(width: 80, alignment: .leading)
-                        TextField("Optional short description", text: $description)
+                        TextField("可选简短描述", text: $description)
                             .scaledFont(size: 15)
                             .foregroundStyle(theme.textPrimary)
                             .focused($focusedField, equals: .description)
@@ -215,7 +215,7 @@ struct SkillEditorView: View {
     private var contentSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
             HStack(alignment: .firstTextBaseline) {
-                sectionHeader("Instructions (Markdown)")
+                sectionHeader("指令（Markdown）")
                 Spacer()
                 Button {
                     Haptics.play(.light)
@@ -230,7 +230,7 @@ struct SkillEditorView: View {
                 }
                 .buttonStyle(.plain)
             }
-            Text("Write the instruction set in Markdown. Use headings, lists, and code blocks to structure the skill.")
+            Text("用 Markdown 编写指令集，可使用标题、列表和代码块组织内容。")
                 .scaledFont(size: 13)
                 .foregroundStyle(theme.textTertiary)
             fieldCard {
@@ -245,8 +245,8 @@ struct SkillEditorView: View {
         }
         .sheet(isPresented: $isContentExpanded) {
             FullscreenContentEditor(
-                title: "Instructions",
-                placeholder: "Write Markdown instructions here…",
+                title: "指令",
+                placeholder: "在这里编写 Markdown 指令…",
                 content: $content
             )
         }
@@ -256,7 +256,7 @@ struct SkillEditorView: View {
 
     private var settingsSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Settings")
+            sectionHeader("设置")
             fieldCard {
                 VStack(spacing: 0) {
                     // Active toggle
@@ -273,10 +273,10 @@ struct SkillEditorView: View {
                                     .foregroundStyle(isActive ? theme.brandPrimary : theme.textTertiary)
                             }
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Active")
+                                Text("启用")
                                     .scaledFont(size: 15)
                                     .foregroundStyle(theme.textPrimary)
-                                Text("Inactive skills won't appear in the chat picker.")
+                                Text("停用后不会出现在聊天选择器里。")
                                     .scaledFont(size: 12)
                                     .foregroundStyle(theme.textTertiary)
                             }
@@ -334,7 +334,7 @@ struct SkillEditorView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            Button("Cancel") {
+            Button("取消") {
                 if hasChanges { showDiscardConfirm = true } else { dismiss() }
             }
             .scaledFont(size: 16)
@@ -344,7 +344,7 @@ struct SkillEditorView: View {
             if isSaving {
                 ProgressView().tint(theme.brandPrimary)
             } else {
-                Button("Save") {
+                Button("保存") {
                     Task { await save() }
                 }
                 .scaledFont(size: 16, weight: .semibold)

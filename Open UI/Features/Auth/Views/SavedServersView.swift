@@ -61,11 +61,11 @@ struct SavedServersView: View {
                 .foregroundStyle(theme.brandPrimary)
                 .padding(.bottom, Spacing.xs)
 
-            Text("Your Servers")
+            Text("你的服务器")
                 .scaledFont(size: 28, weight: .bold, design: .rounded)
                 .foregroundStyle(theme.textPrimary)
 
-            Text("Select a server to continue")
+            Text("选择一个服务器继续")
                 .scaledFont(size: 15)
                 .foregroundStyle(theme.textSecondary)
         }
@@ -80,10 +80,10 @@ struct SavedServersView: View {
             Image(systemName: "network.slash")
                 .scaledFont(size: 44)
                 .foregroundStyle(theme.textTertiary)
-            Text("No Saved Servers")
+            Text("暂无已保存服务器")
                 .scaledFont(size: 17, weight: .semibold)
                 .foregroundStyle(theme.textPrimary)
-            Text("Connect to an OpenWebUI server to get started.")
+            Text("连接 OpenWebUI 服务器即可开始。")
                 .scaledFont(size: 14)
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -121,21 +121,21 @@ struct SavedServersView: View {
         }
         .padding(.horizontal, Spacing.screenPadding)
         .confirmationDialog(
-            "Remove Server",
+            "移除服务器",
             isPresented: $showDeleteConfirmation,
             titleVisibility: .visible
         ) {
             if let server = serverToDelete {
-                Button("Remove \"\(server.name)\"", role: .destructive) {
+                Button("移除“\(server.name)”", role: .destructive) {
                     Task { await viewModel.removeServer(id: server.id) }
                 }
             }
-            Button("Cancel", role: .cancel) {
+            Button("取消", role: .cancel) {
                 serverToDelete = nil
             }
         } message: {
             if let server = serverToDelete {
-                Text("This will remove \"\(server.name)\" and sign you out of that server. Your server-side data is not affected.")
+                Text("这会移除“\(server.name)”并退出该服务器。服务器端数据不会受到影响。")
             }
         }
     }
@@ -147,7 +147,7 @@ struct SavedServersView: View {
             // Present as a sheet — user can cancel without losing current session
             showAddServerSheet = true
         } label: {
-            Label("Add New Server", systemImage: "plus.circle.fill")
+            Label("添加新服务器", systemImage: "plus.circle.fill")
                 .scaledFont(size: 15, weight: .medium)
                 .foregroundStyle(theme.brandPrimary)
                 .frame(maxWidth: .infinity)
@@ -237,9 +237,9 @@ private struct ServerRowView: View {
     }
 
     private var statusLabel: String {
-        if isActive { return "Connected" }
-        if hasToken { return "Saved" }
-        return "Not signed in"
+        if isActive { return "已连接" }
+        if hasToken { return "已保存" }
+        return "未登录"
     }
 
     var body: some View {
@@ -319,7 +319,7 @@ private struct ServerRowView: View {
                     .foregroundStyle(theme.textTertiary)
                     .padding(Spacing.sm)
             }
-            .accessibilityLabel("Remove \(server.name)")
+            .accessibilityLabel("移除 \(server.name)")
         }
         .padding(.horizontal, Spacing.md)
         .padding(.vertical, Spacing.sm)
@@ -361,7 +361,7 @@ private struct ServerRowView: View {
                             .lineLimit(1)
 
                         if account.role == .admin {
-                            Text("Admin")
+                            Text("管理员")
                                 .scaledFont(size: 9, weight: .semibold)
                                 .foregroundStyle(theme.brandPrimary)
                                 .padding(.horizontal, 4)
@@ -390,7 +390,7 @@ private struct ServerRowView: View {
                         .scaledFont(size: 16)
                         .foregroundStyle(theme.success)
                 } else {
-                    Text("Switch")
+                    Text("切换")
                         .scaledFont(size: 11, weight: .medium)
                         .foregroundStyle(theme.brandPrimary)
                         .padding(.horizontal, 8)
@@ -442,7 +442,7 @@ private struct ServerRowView: View {
                             Image(systemName: "arrow.right.circle")
                                 .scaledFont(size: 13)
                         }
-                        Text("Connect")
+                        Text("连接")
                             .scaledFont(size: 13, weight: .medium)
                     }
                     .foregroundStyle(theme.brandPrimary)
@@ -456,7 +456,7 @@ private struct ServerRowView: View {
                     HStack(spacing: Spacing.xs) {
                         Image(systemName: "person.badge.plus")
                             .scaledFont(size: 12)
-                        Text("Add Another Account")
+                        Text("添加另一个账号")
                             .scaledFont(size: 12, weight: .medium)
                     }
                     .foregroundStyle(theme.brandPrimary)
@@ -481,7 +481,7 @@ struct CompactSavedServersSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            Text("Saved Servers")
+            Text("已保存服务器")
                 .scaledFont(size: 13, weight: .semibold)
                 .foregroundStyle(theme.textTertiary)
                 .padding(.horizontal, Spacing.xs)

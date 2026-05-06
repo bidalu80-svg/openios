@@ -34,7 +34,7 @@ struct MemoriesView: View {
             if isLoading {
                 VStack(spacing: Spacing.lg) {
                     ProgressView()
-                    Text("Loading memories…")
+                    Text("正在加载记忆…")
                         .scaledFont(size: 12, weight: .medium)
                         .foregroundStyle(theme.textTertiary)
                 }
@@ -44,7 +44,7 @@ struct MemoriesView: View {
             }
         }
         .background(theme.background)
-        .navigationTitle("Memories")
+        .navigationTitle("记忆")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -61,9 +61,9 @@ struct MemoriesView: View {
         }
         .destructiveConfirmation(
             isPresented: $showClearAllConfirmation,
-            title: "Clear All Memories",
-            message: "This will permanently delete all your memories. The AI will no longer have this context.",
-            destructiveTitle: "Clear All"
+            title: "清空所有记忆",
+            message: "这会永久删除你的所有记忆，AI 将不再使用这些上下文。",
+            destructiveTitle: "全部清空"
         ) {
             Task { await clearAllMemories() }
         }
@@ -73,14 +73,14 @@ struct MemoriesView: View {
 
     private var emptyState: some View {
         ContentUnavailableView {
-            Label("No Memories", systemImage: "brain")
+            Label("暂无记忆", systemImage: "brain")
         } description: {
-            Text("Memories help the AI remember important context about you across conversations. Add a memory to get started.")
+            Text("记忆可以让 AI 在不同对话中记住与你有关的重要信息。添加一条记忆即可开始使用。")
         } actions: {
             Button {
                 withAnimation { isAddingMemory = true }
             } label: {
-                Text("Add Memory")
+                Text("添加记忆")
             }
             .buttonStyle(.borderedProminent)
             .tint(theme.brandPrimary)
@@ -94,7 +94,7 @@ struct MemoriesView: View {
             // Memory enabled toggle
             Section {
                 Toggle(isOn: $memoryEnabled) {
-                    Label("Enable Memory", systemImage: "brain")
+                    Label("启用记忆", systemImage: "brain")
                 }
                 .tint(theme.brandPrimary)
                 .disabled(isLoadingMemoryToggle)
@@ -102,21 +102,21 @@ struct MemoriesView: View {
                     Task { await updateMemoryToggle(newValue) }
                 }
             } header: {
-                Text("Memory")
+                Text("记忆")
             } footer: {
-                Text("When enabled, the AI remembers context about you across conversations.")
+                Text("开启后，AI 会在不同对话中记住与你有关的上下文。")
             }
 
             // Add new memory section
             if isAddingMemory {
                 Section {
                     VStack(spacing: Spacing.sm) {
-                        TextField("What should the AI remember?", text: $newMemoryText, axis: .vertical)
+                        TextField("希望 AI 记住什么？", text: $newMemoryText, axis: .vertical)
                             .lineLimit(3...6)
                             .scaledFont(size: 16)
 
                         HStack {
-                            Button("Cancel") {
+                            Button("取消") {
                                 withAnimation {
                                     isAddingMemory = false
                                     newMemoryText = ""
@@ -129,7 +129,7 @@ struct MemoriesView: View {
                             Button {
                                 Task { await addMemory() }
                             } label: {
-                                Text("Save")
+                                Text("保存")
                                     .fontWeight(.semibold)
                             }
                             .buttonStyle(.borderedProminent)
@@ -138,7 +138,7 @@ struct MemoriesView: View {
                         }
                     }
                 } header: {
-                    Text("New Memory")
+                    Text("新增记忆")
                 }
             }
 
@@ -161,11 +161,11 @@ struct MemoriesView: View {
                             .foregroundStyle(theme.textTertiary.opacity(0.5))
                             .padding(.top, Spacing.lg)
                         
-                        Text("No Memories")
+                        Text("暂无记忆")
                             .scaledFont(size: 20, weight: .semibold)
                             .foregroundStyle(theme.textPrimary)
                         
-                        Text("Memories help the AI remember important context about you across conversations.")
+                        Text("记忆可以让 AI 在不同对话中记住与你有关的重要信息。")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textSecondary)
                             .multilineTextAlignment(.center)
@@ -174,7 +174,7 @@ struct MemoriesView: View {
                         Button {
                             withAnimation { isAddingMemory = true }
                         } label: {
-                            Text("Add Memory")
+                            Text("添加记忆")
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(theme.brandPrimary)
@@ -194,12 +194,12 @@ struct MemoriesView: View {
                     if editingMemoryId == memId {
                         // Edit mode
                         VStack(spacing: Spacing.sm) {
-                            TextField("Memory content", text: $editText, axis: .vertical)
+                            TextField("记忆内容", text: $editText, axis: .vertical)
                                 .lineLimit(3...6)
                                 .scaledFont(size: 16)
 
                             HStack {
-                                Button("Cancel") {
+                                Button("取消") {
                                     withAnimation { editingMemoryId = nil }
                                 }
                                 .buttonStyle(.bordered)
@@ -209,7 +209,7 @@ struct MemoriesView: View {
                                 Button {
                                     Task { await updateMemory(id: memId) }
                                 } label: {
-                                    Text("Save")
+                                    Text("保存")
                                         .fontWeight(.semibold)
                                 }
                                 .buttonStyle(.borderedProminent)
@@ -238,27 +238,27 @@ struct MemoriesView: View {
                                 editText = content
                                 withAnimation { editingMemoryId = memId }
                             } label: {
-                                Label("Edit", systemImage: "pencil")
+                                Label("编辑", systemImage: "pencil")
                             }
 
                             Button(role: .destructive) {
                                 Task { await deleteMemory(id: memId) }
                             } label: {
-                                Label("Delete", systemImage: "trash")
+                                Label("删除", systemImage: "trash")
                             }
                         }
                         .swipeActions(edge: .trailing) {
                             Button(role: .destructive) {
                                 Task { await deleteMemory(id: memId) }
                             } label: {
-                                Label("Delete", systemImage: "trash")
+                                Label("删除", systemImage: "trash")
                             }
 
                             Button {
                                 editText = content
                                 withAnimation { editingMemoryId = memId }
                             } label: {
-                                Label("Edit", systemImage: "pencil")
+                                Label("编辑", systemImage: "pencil")
                             }
                             .tint(theme.brandPrimary)
                         }
@@ -266,7 +266,7 @@ struct MemoriesView: View {
                 }
             } header: {
                 HStack {
-                    Text("\(memories.count) memor\(memories.count == 1 ? "y" : "ies")")
+                    Text("\(memories.count) 条记忆")
                     Spacer()
                 }
             }
@@ -279,7 +279,7 @@ struct MemoriesView: View {
                     } label: {
                         HStack {
                             Image(systemName: "trash")
-                            Text(isClearingAll ? "Clearing…" : "Clear All Memories")
+                            Text(isClearingAll ? "正在清空…" : "清空所有记忆")
                         }
                     }
                     .disabled(isClearingAll)
@@ -308,7 +308,7 @@ struct MemoriesView: View {
                 memories = try await api.getMemories()
             }
         } catch {
-            errorMessage = "Failed to load memories."
+            errorMessage = "加载记忆失败。"
         }
 
         isLoading = false
@@ -334,7 +334,7 @@ struct MemoriesView: View {
                 isAddingMemory = false
             }
         } catch {
-            errorMessage = "Failed to add memory."
+            errorMessage = "添加记忆失败。"
         }
     }
 
@@ -357,7 +357,7 @@ struct MemoriesView: View {
             }
             withAnimation { editingMemoryId = nil }
         } catch {
-            errorMessage = "Failed to update memory."
+            errorMessage = "更新记忆失败。"
         }
     }
 
@@ -374,7 +374,7 @@ struct MemoriesView: View {
                 memories.removeAll { ($0["id"] as? String) == id }
             }
         } catch {
-            errorMessage = "Failed to delete memory."
+            errorMessage = "删除记忆失败。"
         }
     }
 
@@ -390,7 +390,7 @@ struct MemoriesView: View {
             }
             withAnimation { memories.removeAll() }
         } catch {
-            errorMessage = "Failed to clear memories."
+            errorMessage = "清空记忆失败。"
         }
 
         isClearingAll = false

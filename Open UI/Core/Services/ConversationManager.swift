@@ -209,12 +209,24 @@ final class ConversationManager: @unchecked Sendable {
         try await apiClient.getModels()
     }
 
-    func generateImage(prompt: String, model: String) async throws -> String {
-        try await apiClient.generateImage(prompt: prompt, model: model)
+    func generateImage(prompt: String, model: String, size: String = "1024x1024") async throws -> String {
+        try await apiClient.generateImage(prompt: prompt, model: model, size: size)
     }
 
-    func editImage(prompt: String, model: String, imageData: Data, fileName: String) async throws -> String {
-        try await apiClient.editImage(prompt: prompt, model: model, imageData: imageData, fileName: fileName)
+    func editImage(
+        prompt: String,
+        model: String,
+        imageData: Data,
+        fileName: String,
+        size: String = "1024x1024"
+    ) async throws -> String {
+        try await apiClient.editImage(
+            prompt: prompt,
+            model: model,
+            imageData: imageData,
+            fileName: fileName,
+            size: size
+        )
     }
 
     func fetchDefaultModel() async -> String? {

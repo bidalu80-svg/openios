@@ -273,6 +273,115 @@ final class PythonExecutionService: NSObject {
               }
             }
 
+            function escapeRegExp(text) {
+              return String(text).replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+            }
+
+            function replacePendingTaskReprs(text, taskSummary) {
+              if (!text || !taskSummary || !Array.isArray(taskSummary.tasks)) {
+                return text || '';
+              }
+
+              let output = text;
+              for (let i = 0; i < taskSummary.tasks.length; i += 1) {
+                const task = taskSummary.tasks[i] || {};
+                const result = (taskSummary.results || [])[i] || {};
+                if (result.ok === false) {
+                  continue;
+                }
+                const replacement = result.value == null ? '' : String(result.value);
+                const name = task.name ? escapeRegExp(task.name) : '';
+
+                if (name) {
+                  const pyodideTaskPattern = new RegExp(
+                    `<PyodideTask pending name=['"]${name}['"][\\\\s\\\\S]*?cb=\\\\[WebLoop\\\\._decrement_in_progress\\\\(\\\\)\\\\]>`,
+                    'g'
+                  );
+                  output = output.replace(pyodideTaskPattern, replacement);
+
+                  const pythonTaskPattern = new RegExp(
+                    `<Task pending name=['"]${name}['"][\\\\s\\\\S]*?>`,
+                    'g'
+                  );
+                  output = output.replace(pythonTaskPattern, replacement);
+                }
+              }
+
+              if (output.includes('<PyodideTask pending') && (taskSummary.results || []).length === 1) {
+                const onlyResult = taskSummary.results[0] || {};
+                if (onlyResult.ok !== false) {
+                  const fallback = String(onlyResult.value || '');
+                  output = output.replace(
+                    /<PyodideTask pending[\\s\\S]*?cb=\\[WebLoop\\._decrement_in_progress\\(\\)\\]>/g,
+                    fallback
+                  );
+                }
+              }
+
+              return output;
+            }
+
+            async function waitForUserAsyncTasks(py) {
+              const summaryJson = await py.runPythonAsync(`
+        import asyncio, json
+
+        async def _openui_collect_pending_tasks():
+            current = asyncio.current_task()
+            tasks = []
+            tracked_tasks = list(globals().get("_openui_created_tasks", []))
+            for task in tracked_tasks:
+                if task is current:
+                    continue
+                if task not in tasks:
+                    tasks.append(task)
+
+            for task in list(asyncio.all_tasks()):
+                if task is current or task.done():
+                    continue
+                task_repr = repr(task)
+                # Wait for tasks spawned by the executed code cell. This avoids
+                # leaking "<PyodideTask pending ...>" into stdout when code uses
+                # asyncio.create_task(...) and then prints/returns that task.
+                if "<exec>" in task_repr and task not in tasks:
+                    tasks.append(task)
+
+            infos = [{"name": task.get_name(), "repr": repr(task)} for task in tasks]
+            results = []
+            if tasks:
+                try:
+                    values = await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=15
+                    )
+                except asyncio.TimeoutError:
+                    for task in tasks:
+                        task.cancel()
+                    values = [TimeoutError("等待异步任务超时")] * len(tasks)
+
+                for value in values:
+                    if isinstance(value, BaseException):
+                        results.append({
+                            "ok": False,
+                            "value": f"{type(value).__name__}: {value}"
+                        })
+                    else:
+                        results.append({
+                            "ok": True,
+                            "value": str(value)
+                        })
+
+            return json.dumps({"tasks": infos, "results": results}, ensure_ascii=False)
+
+        await _openui_collect_pending_tasks()
+        `);
+
+              try {
+                return JSON.parse(summaryJson || '{"tasks":[],"results":[]}');
+              } catch (_) {
+                return { tasks: [], results: [] };
+              }
+            }
+
             // ── Run Python ────────────────────────────────────────────────────
             async function runPython(code) {
               const py = window._pyodide;
@@ -292,15 +401,38 @@ final class PythonExecutionService: NSObject {
               let stderrBuf = '';
 
               py.runPython(`
-        import sys, io
+        import sys, io, asyncio
         _stdout_capture = io.StringIO()
         _stderr_capture = io.StringIO()
         sys.stdout = _stdout_capture
         sys.stderr = _stderr_capture
         _captured_images.clear()
+        _openui_created_tasks = []
+        _openui_orig_create_task = getattr(asyncio, "create_task", None)
+        _openui_orig_ensure_future = getattr(asyncio, "ensure_future", None)
+
+        def _openui_track_create_task(coro, *args, **kwargs):
+            task = _openui_orig_create_task(coro, *args, **kwargs)
+            _openui_created_tasks.append(task)
+            return task
+
+        def _openui_track_ensure_future(coro_or_future, *args, **kwargs):
+            future = _openui_orig_ensure_future(coro_or_future, *args, **kwargs)
+            try:
+                if hasattr(future, "done") and future not in _openui_created_tasks:
+                    _openui_created_tasks.append(future)
+            except Exception:
+                pass
+            return future
+
+        if _openui_orig_create_task is not None:
+            asyncio.create_task = _openui_track_create_task
+        if _openui_orig_ensure_future is not None:
+            asyncio.ensure_future = _openui_track_ensure_future
         `);
 
               let status = 'success';
+              let pendingSummary = { tasks: [], results: [] };
               try {
                 await py.runPythonAsync(code);
               } catch (e) {
@@ -315,15 +447,51 @@ final class PythonExecutionService: NSObject {
               }
 
               try {
+                pendingSummary = await waitForUserAsyncTasks(py);
+                if ((pendingSummary.results || []).some((item) => item && item.ok === false)) {
+                  status = 'error';
+                }
+              } catch (e) {
+                try {
+                  py.runPython(`
+        import sys
+        sys.stderr.write("\\n" + ${JSON.stringify(e.message || String(e))})
+        `);
+                } catch (_) {}
+              }
+
+              try {
                 stdoutBuf = py.runPython('_stdout_capture.getvalue()') || '';
                 stderrBuf = py.runPython('_stderr_capture.getvalue()') || '';
                 const imagesJson = py.runPython('json.dumps(_captured_images)') || '[]';
                 const images = JSON.parse(imagesJson);
 
+                stdoutBuf = replacePendingTaskReprs(stdoutBuf, pendingSummary);
+                if (!stdoutBuf.trim() && (pendingSummary.results || []).length > 0) {
+                  stdoutBuf = pendingSummary.results
+                    .filter((item) => item && item.ok !== false)
+                    .map((item) => item && item.value ? String(item.value) : '')
+                    .filter((line) => line.length > 0)
+                    .join('\\n');
+                }
+
+                const asyncErrors = (pendingSummary.results || [])
+                  .filter((item) => item && item.ok === false)
+                  .map((item) => item.value ? String(item.value) : '')
+                  .filter((line) => line.length > 0);
+                if (asyncErrors.length > 0) {
+                  stderrBuf = [stderrBuf, ...asyncErrors].filter(Boolean).join('\\n');
+                }
+
                 // Restore real stdout/stderr
                 py.runPython(`
+        import asyncio
         sys.stdout = sys.__stdout__
         sys.stderr = sys.__stderr__
+        if globals().get("_openui_orig_create_task") is not None:
+            asyncio.create_task = globals()["_openui_orig_create_task"]
+        if globals().get("_openui_orig_ensure_future") is not None:
+            asyncio.ensure_future = globals()["_openui_orig_ensure_future"]
         `);
 
                 window.webkit.messageHandlers.pyodideBridge.postMessage({

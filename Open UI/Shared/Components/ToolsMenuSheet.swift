@@ -355,7 +355,7 @@ struct ToolsMenuSheet: View {
                 }
             } label: {
                 HStack {
-                    Text("Tools")
+                    Text("工具")
                         .scaledFont(size: 14, weight: .medium)
                         .fontWeight(.semibold)
                         .foregroundStyle(theme.textSecondary)
@@ -374,7 +374,7 @@ struct ToolsMenuSheet: View {
                     HStack(spacing: Spacing.sm) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("Loading tools…")
+                        Text("正在加载工具…")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textSecondary)
                     }
@@ -389,7 +389,7 @@ struct ToolsMenuSheet: View {
                             .strokeBorder(theme.cardBorder.opacity(0.6), lineWidth: 0.5)
                     )
                 } else if tools.isEmpty {
-                    infoCard(message: "No tools available")
+                    infoCard(message: "暂无可用工具")
                 } else {
                     ForEach(tools) { tool in
                         toolTile(tool: tool)

@@ -48,7 +48,7 @@ struct ValvesSheet: View {
                     VStack(spacing: Spacing.lg) {
                         Spacer()
                         ProgressView().controlSize(.large).tint(theme.brandPrimary)
-                        Text("Loading valves…")
+                        Text("正在加载配置项…")
                             .scaledFont(size: 15)
                             .foregroundStyle(theme.textSecondary)
                         Spacer()
@@ -59,10 +59,10 @@ struct ValvesSheet: View {
                         Image(systemName: "slider.horizontal.3")
                             .scaledFont(size: 44)
                             .foregroundStyle(theme.textTertiary)
-                        Text("No valves")
+                        Text("暂无配置项")
                             .scaledFont(size: 18, weight: .semibold)
                             .foregroundStyle(theme.textPrimary)
-                        Text("This tool has no user-configurable settings.")
+                        Text("这个工具没有可由用户配置的设置。")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textSecondary)
                             .multilineTextAlignment(.center)
@@ -74,11 +74,11 @@ struct ValvesSheet: View {
                 }
             }
             .background(theme.background)
-            .navigationTitle("Valves")
+            .navigationTitle("配置项")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
+                    Button("取消") { dismiss() }
                         .scaledFont(size: 16)
                         .foregroundStyle(theme.textSecondary)
                 }
@@ -86,7 +86,7 @@ struct ValvesSheet: View {
                     if isSaving {
                         ProgressView().tint(theme.brandPrimary)
                     } else {
-                        Button("Save") {
+                        Button("保存") {
                             Task { await save() }
                         }
                         .scaledFont(size: 16, weight: .semibold)
@@ -95,11 +95,11 @@ struct ValvesSheet: View {
                     }
                 }
             }
-            .alert("Error", isPresented: .init(
+            .alert("错误", isPresented: .init(
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
             )) {
-                Button("OK", role: .cancel) {}
+                Button("好", role: .cancel) {}
             } message: {
                 Text(errorMessage ?? "")
             }
@@ -432,32 +432,32 @@ struct ToolEditorView: View {
                 .padding(.bottom, Spacing.xl)
             }
             .background(theme.background)
-            .navigationTitle(isEditing ? "Edit Tool" : "New Tool")
+            .navigationTitle(isEditing ? "编辑工具" : "新建工具")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbarContent }
             .confirmationDialog(
-                "Discard Changes?",
+                "放弃更改？",
                 isPresented: $showDiscardConfirm,
                 titleVisibility: .visible
             ) {
-                Button("Discard", role: .destructive) { dismiss() }
-                Button("Keep Editing", role: .cancel) {}
+                Button("放弃", role: .destructive) { dismiss() }
+                Button("继续编辑", role: .cancel) {}
             } message: {
-                Text("Your unsaved changes will be lost.")
+                Text("未保存的更改会丢失。")
             }
-            .alert("Validation Error", isPresented: .init(
+            .alert("校验错误", isPresented: .init(
                 get: { validationError != nil },
                 set: { if !$0 { validationError = nil } }
             )) {
-                Button("OK", role: .cancel) {}
+                Button("好", role: .cancel) {}
             } message: {
                 Text(validationError ?? "")
             }
-            .alert("Access Error", isPresented: .init(
+            .alert("权限错误", isPresented: .init(
                 get: { accessUpdateError != nil },
                 set: { if !$0 { accessUpdateError = nil } }
             )) {
-                Button("OK", role: .cancel) {}
+                Button("好", role: .cancel) {}
             } message: {
                 Text(accessUpdateError ?? "")
             }
@@ -475,15 +475,15 @@ struct ToolEditorView: View {
 
     private var basicInfoSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Tool Info")
+            sectionHeader("工具信息")
             fieldCard {
                 VStack(spacing: 0) {
                     HStack {
-                        Text("Name")
+                        Text("名称")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textSecondary)
                             .frame(width: 90, alignment: .leading)
-                        TextField("e.g. Weather Tool", text: $name)
+                        TextField("例如 天气工具", text: $name)
                             .scaledFont(size: 15)
                             .foregroundStyle(theme.textPrimary)
                             .focused($focusedField, equals: .name)
@@ -524,11 +524,11 @@ struct ToolEditorView: View {
                     Divider().background(theme.inputBorder.opacity(0.4))
 
                     HStack {
-                        Text("Description")
+                        Text("描述")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textSecondary)
                             .frame(width: 90, alignment: .leading)
-                        TextField("Short description", text: $description)
+                        TextField("简短描述", text: $description)
                             .scaledFont(size: 15)
                             .foregroundStyle(theme.textPrimary)
                             .focused($focusedField, equals: .description)
@@ -545,7 +545,7 @@ struct ToolEditorView: View {
     private var codeSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
             HStack(alignment: .firstTextBaseline) {
-                sectionHeader("Python Code")
+                sectionHeader("Python 代码")
                 Spacer()
                 Button {
                     Haptics.play(.light)
@@ -560,7 +560,7 @@ struct ToolEditorView: View {
                 }
                 .buttonStyle(.plain)
             }
-            Text("Write Python code defining the tool's functions. The class must inherit from `Tools`.")
+            Text("编写定义工具函数的 Python 代码。类必须继承 `Tools`。")
                 .scaledFont(size: 13)
                 .foregroundStyle(theme.textTertiary)
             fieldCard {
@@ -576,8 +576,8 @@ struct ToolEditorView: View {
         }
         .sheet(isPresented: $isContentExpanded) {
             FullscreenContentEditor(
-                title: "Python Code",
-                placeholder: "# Write your Python tool code here…\n\nclass Tools:\n    def __init__(self):\n        pass\n",
+                title: "Python 代码",
+                placeholder: "# 在这里编写 Python 工具代码…\n\nclass Tools:\n    def __init__(self):\n        pass\n",
                 content: $content
             )
         }
@@ -593,7 +593,7 @@ struct ToolEditorView: View {
                 }
             } label: {
                 HStack {
-                    sectionHeader("Manifest (Optional)")
+                    sectionHeader("清单（可选）")
                     Spacer()
                     Image(systemName: showManifestSection ? "chevron.up" : "chevron.down")
                         .scaledFont(size: 11, weight: .medium)
@@ -605,15 +605,15 @@ struct ToolEditorView: View {
             if showManifestSection {
                 fieldCard {
                     VStack(spacing: 0) {
-                        manifestRow(label: "Title", placeholder: "Tool display title", text: $manifestTitle)
+                        manifestRow(label: "标题", placeholder: "工具显示标题", text: $manifestTitle)
                         Divider().background(theme.inputBorder.opacity(0.4))
-                        manifestRow(label: "Author", placeholder: "Author name", text: $manifestAuthor)
+                        manifestRow(label: "作者", placeholder: "作者名称", text: $manifestAuthor)
                         Divider().background(theme.inputBorder.opacity(0.4))
-                        manifestRow(label: "Version", placeholder: "e.g. 1.0.0", text: $manifestVersion)
+                        manifestRow(label: "版本", placeholder: "例如 1.0.0", text: $manifestVersion)
                         Divider().background(theme.inputBorder.opacity(0.4))
-                        manifestRow(label: "License", placeholder: "e.g. MIT", text: $manifestLicense)
+                        manifestRow(label: "许可证", placeholder: "例如 MIT", text: $manifestLicense)
                         Divider().background(theme.inputBorder.opacity(0.4))
-                        manifestRow(label: "Requirements", placeholder: "pip packages, comma-separated", text: $manifestRequirements)
+                        manifestRow(label: "依赖", placeholder: "pip 包名，用英文逗号分隔", text: $manifestRequirements)
                     }
                     .padding(.horizontal, Spacing.md)
                 }
@@ -641,7 +641,7 @@ struct ToolEditorView: View {
 
     private var settingsSection: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
-            sectionHeader("Settings")
+            sectionHeader("设置")
             fieldCard {
                 accessControlSection
             }
@@ -681,7 +681,7 @@ struct ToolEditorView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            Button("Cancel") {
+            Button("取消") {
                 if hasChanges { showDiscardConfirm = true } else { dismiss() }
             }
             .scaledFont(size: 16)
@@ -691,7 +691,7 @@ struct ToolEditorView: View {
             if isSaving {
                 ProgressView().tint(theme.brandPrimary)
             } else {
-                Button("Save") {
+                Button("保存") {
                     Task { await save() }
                 }
                 .scaledFont(size: 16, weight: .semibold)

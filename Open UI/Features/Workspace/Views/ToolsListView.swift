@@ -124,50 +124,50 @@ struct ToolsListView: View {
                 .presentationDragIndicator(.visible)
         }
         // Import from URL alert
-        .alert("Import from URL", isPresented: $showImportURLSheet) {
-            TextField("https://…/tool.py or tool URL", text: $importURL)
+        .alert("从 URL 导入", isPresented: $showImportURLSheet) {
+            TextField("https://…/tool.py 或工具 URL", text: $importURL)
                 .autocorrectionDisabled()
                 .autocapitalization(.none)
             if isImportingURL {
                 // Can't show a spinner inside alert; just disable
             }
-            Button("Import") {
+            Button("导入") {
                 let url = importURL.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !url.isEmpty else { return }
                 Task { await importFromURL(url: url, manager: manager) }
             }
             .disabled(importURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            Button("Cancel", role: .cancel) {
+            Button("取消", role: .cancel) {
                 importURL = ""
             }
         } message: {
-            Text("Enter a URL to a Python tool file hosted online.")
+            Text("输入在线 Python 工具文件的 URL。")
         }
         // Delete confirmation
         .confirmationDialog(
-            "Delete \"\(deletingTool?.name ?? "")\"?",
+            "删除“\(deletingTool?.name ?? "")”？",
             isPresented: .init(
                 get: { deletingTool != nil },
                 set: { if !$0 { deletingTool = nil } }
             ),
             titleVisibility: .visible
         ) {
-            Button("Delete", role: .destructive) {
+            Button("删除", role: .destructive) {
                 if let tool = deletingTool {
                     deletingTool = nil
                     Task { await deleteTool(tool, manager: manager) }
                 }
             }
-            Button("Cancel", role: .cancel) { deletingTool = nil }
+            Button("取消", role: .cancel) { deletingTool = nil }
         } message: {
-            Text("This action cannot be undone.")
+            Text("此操作无法撤销。")
         }
         // Error alert
-        .alert("Error", isPresented: .init(
+        .alert("错误", isPresented: .init(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
         )) {
-            Button("OK", role: .cancel) {}
+            Button("好", role: .cancel) {}
         } message: {
             Text(errorMessage ?? "")
         }
@@ -185,7 +185,7 @@ struct ToolsListView: View {
                             .scaledFont(size: 15, weight: .medium)
                             .foregroundStyle(theme.brandPrimary)
                     }
-                    .accessibilityLabel("Import Tool from URL")
+                    .accessibilityLabel("从 URL 导入工具")
                 }
 
                 // Export All
@@ -203,7 +203,7 @@ struct ToolsListView: View {
                         }
                     }
                     .disabled(isExportingAll || manager.tools.isEmpty)
-                    .accessibilityLabel("Export Tools")
+                    .accessibilityLabel("导出工具")
                 }
 
                 // New Tool
@@ -215,7 +215,7 @@ struct ToolsListView: View {
                         .scaledFont(size: 15, weight: .medium)
                         .foregroundStyle(theme.brandPrimary)
                 }
-                .accessibilityLabel("New Tool")
+                .accessibilityLabel("新建工具")
             }
         }
         .onChange(of: manager.error) { _, err in
@@ -230,7 +230,7 @@ struct ToolsListView: View {
             Image(systemName: "magnifyingglass")
                 .scaledFont(size: 14)
                 .foregroundStyle(theme.textTertiary)
-            TextField("Search Tools", text: $searchText)
+            TextField("搜索工具", text: $searchText)
                 .scaledFont(size: 15)
                 .foregroundStyle(theme.textPrimary)
                 .autocorrectionDisabled()
@@ -304,7 +304,7 @@ struct ToolsListView: View {
                         .foregroundStyle(theme.textSecondary)
                         .lineLimit(2)
                 } else if let author = tool.authorName, !author.isEmpty {
-                    Text("by \(author)")
+                    Text("作者 \(author)")
                         .scaledFont(size: 12)
                         .foregroundStyle(theme.textTertiary)
                         .lineLimit(1)
@@ -322,7 +322,7 @@ struct ToolsListView: View {
             Button(role: .destructive) {
                 deletingTool = tool
             } label: {
-                Label("Delete", systemImage: "trash")
+                Label("删除", systemImage: "trash")
             }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
@@ -330,7 +330,7 @@ struct ToolsListView: View {
                 Haptics.play(.light)
                 Task { await cloneTool(tool, manager: manager) }
             } label: {
-                Label("Clone", systemImage: "plus.square.on.square")
+                Label("克隆", systemImage: "plus.square.on.square")
             }
             .tint(theme.brandPrimary)
         }
@@ -338,34 +338,34 @@ struct ToolsListView: View {
             Button {
                 Task { await openEditor(for: tool, manager: manager) }
             } label: {
-                Label("Edit", systemImage: "pencil")
+                Label("编辑", systemImage: "pencil")
             }
             Button {
                 Haptics.play(.light)
                 valvesItem = ValvesSheetItem(id: tool.id)
             } label: {
-                Label("Edit Valves", systemImage: "slider.horizontal.3")
+                Label("编辑配置项", systemImage: "slider.horizontal.3")
             }
             Divider()
             Button {
                 Haptics.play(.light)
                 Task { await cloneTool(tool, manager: manager) }
             } label: {
-                Label("Clone", systemImage: "plus.square.on.square")
+                Label("克隆", systemImage: "plus.square.on.square")
             }
             if dependencies.authViewModel.workspacePermissions.toolsExport {
                 Button {
                     Haptics.play(.light)
                     Task { await exportSingleTool(tool, manager: manager) }
                 } label: {
-                    Label("Export", systemImage: "square.and.arrow.up")
+                    Label("导出", systemImage: "square.and.arrow.up")
                 }
             }
             Divider()
             Button(role: .destructive) {
                 deletingTool = tool
             } label: {
-                Label("Delete", systemImage: "trash")
+                Label("删除", systemImage: "trash")
             }
         }
     }
@@ -378,7 +378,7 @@ struct ToolsListView: View {
             ProgressView()
                 .controlSize(.large)
                 .tint(theme.brandPrimary)
-            Text("Loading tools…")
+            Text("正在加载工具…")
                 .scaledFont(size: 15)
                 .foregroundStyle(theme.textSecondary)
             Spacer()
@@ -394,12 +394,12 @@ struct ToolsListView: View {
             Image(systemName: hasFilter ? "magnifyingglass" : "wrench.and.screwdriver")
                 .scaledFont(size: 44)
                 .foregroundStyle(theme.textTertiary)
-            Text(hasFilter ? "No Matching Tools" : "No Tools Yet")
+            Text(hasFilter ? "没有匹配的工具" : "暂无工具")
                 .scaledFont(size: 18, weight: .semibold)
                 .foregroundStyle(theme.textPrimary)
             Text(hasFilter
-                 ? "Try a different search term."
-                 : "Create a tool or import one from a URL to extend AI capabilities.")
+                 ? "换个关键词试试。"
+                 : "创建工具或从 URL 导入工具，用来扩展 AI 能力。")
                 .scaledFont(size: 14)
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -410,7 +410,7 @@ struct ToolsListView: View {
                         Haptics.play(.light)
                         showCreateSheet = true
                     } label: {
-                        Label("New Tool", systemImage: "plus")
+                        Label("新建工具", systemImage: "plus")
                             .scaledFont(size: 15, weight: .medium)
                             .foregroundStyle(.white)
                             .padding(.horizontal, Spacing.lg)
@@ -426,7 +426,7 @@ struct ToolsListView: View {
                             importURL = ""
                             showImportURLSheet = true
                         } label: {
-                            Label("Import URL", systemImage: "link.badge.plus")
+                            Label("导入 URL", systemImage: "link.badge.plus")
                                 .scaledFont(size: 15, weight: .medium)
                                 .foregroundStyle(theme.brandPrimary)
                                 .padding(.horizontal, Spacing.lg)
@@ -450,10 +450,10 @@ struct ToolsListView: View {
             Image(systemName: "exclamationmark.triangle")
                 .scaledFont(size: 44)
                 .foregroundStyle(theme.textTertiary)
-            Text("Not Available")
+            Text("不可用")
                 .scaledFont(size: 18, weight: .semibold)
                 .foregroundStyle(theme.textPrimary)
-            Text("Connect to a server to manage tools.")
+            Text("连接服务器后才能管理工具。")
                 .scaledFont(size: 14)
                 .foregroundStyle(theme.textSecondary)
             Spacer()

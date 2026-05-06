@@ -25,11 +25,11 @@ final class AccessibilityManager {
 
         var displayName: String {
             switch self {
-            case .compact:     return "Compact"
-            case .standard:    return "Standard"
-            case .comfortable: return "Comfortable"
-            case .large:       return "Large"
-            case .extraLarge:  return "Extra Large"
+            case .compact:     return "紧凑"
+            case .standard:    return "标准"
+            case .comfortable: return "舒适"
+            case .large:       return "大号"
+            case .extraLarge:  return "超大"
             }
         }
 

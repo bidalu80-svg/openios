@@ -20,16 +20,16 @@ struct PrivacySecurityView: View {
             VStack(spacing: Spacing.sectionGap) {
 
                 // Location
-                SettingsSection(header: "Location") {
+                SettingsSection(header: "位置") {
                     locationRow
                 }
 
                 // Data Management
-                SettingsSection(header: "Data Management") {
+                SettingsSection(header: "数据管理") {
                     SettingsCell(
                         icon: "arrow.down.circle",
-                        title: "Export Data",
-                        subtitle: isExporting ? "Exporting..." : "Download your conversations as JSON",
+                        title: "导出数据",
+                        subtitle: isExporting ? "正在导出..." : "将你的对话下载为 JSON",
                         showDivider: true,
                         accessory: isExporting ? .loading : .chevron
                     ) {
@@ -38,7 +38,7 @@ struct PrivacySecurityView: View {
 
                     DestructiveSettingsCell(
                         icon: "trash",
-                        title: "Clear Local Cache"
+                        title: "清理本地缓存"
                     ) {
                         clearDataConfirmation = true
                     }
@@ -47,19 +47,19 @@ struct PrivacySecurityView: View {
             .padding(.vertical, Spacing.lg)
         }
         .background(theme.background)
-        .navigationTitle("Privacy & Security")
+        .navigationTitle("隐私与安全")
         .navigationBarTitleDisplayMode(.inline)
         .confirmationDialog(
-            "Clear Local Cache",
+            "清理本地缓存",
             isPresented: $clearDataConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Clear Cache", role: .destructive) {
+            Button("清理缓存", role: .destructive) {
                 clearCache()
             }
-            Button("Cancel", role: .cancel) {}
+            Button("取消", role: .cancel) {}
         } message: {
-            Text("This will clear cached images and temporary data. Your account and conversations are stored on the server and will not be affected.")
+            Text("这会清理缓存图片和临时数据。你的账号和对话保存在服务器上，不会受到影响。")
         }
         .sheet(isPresented: $showExportSheet, onDismiss: {
             // FIX: Clean up the temp export file after sharing to prevent data leaks.
@@ -72,23 +72,23 @@ struct PrivacySecurityView: View {
                 ShareSheet(items: [url])
             }
         }
-        .alert("Export Failed", isPresented: .init(
+        .alert("导出失败", isPresented: .init(
             get: { exportError != nil },
             set: { if !$0 { exportError = nil } }
         )) {
-            Button("OK", role: .cancel) {}
+            Button("好", role: .cancel) {}
         } message: {
-            Text(exportError ?? "Unknown error")
+            Text(exportError ?? "未知错误")
         }
-        .alert("Location Access Denied", isPresented: $showLocationDeniedAlert) {
-            Button("Open Settings") {
+        .alert("位置权限被拒绝", isPresented: $showLocationDeniedAlert) {
+            Button("打开设置") {
                 if let url = URL(string: UIApplication.openSettingsURLString) {
                     UIApplication.shared.open(url)
                 }
             }
-            Button("Cancel", role: .cancel) {}
+            Button("取消", role: .cancel) {}
         } message: {
-            Text("Open Relay needs location access to use {{USER_LOCATION}} in prompts. Please enable it in Settings > Privacy & Security > Location Services.")
+            Text("Iexa 需要位置权限才能在提示词中使用 {{USER_LOCATION}}。请在“设置 > 隐私与安全 > 定位服务”中开启。")
         }
     }
 
@@ -108,7 +108,7 @@ struct PrivacySecurityView: View {
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Share Location")
+                Text("共享位置")
                     .scaledFont(size: 15)
                     .foregroundStyle(theme.textPrimary)
                 Text(locationSubtitle)
@@ -135,22 +135,22 @@ struct PrivacySecurityView: View {
     private var locationSubtitle: String {
         let status = locationManager.authorizationStatus
         if !locationManager.isLocationEnabled {
-            return "Enable to use {{USER_LOCATION}} in prompts"
+            return "开启后可在提示词中使用 {{USER_LOCATION}}"
         }
         switch status {
         case .notDetermined:
-            return "Tap to request location permission"
+            return "轻点请求位置权限"
         case .denied, .restricted:
-            return "Location access denied — tap to open Settings"
+            return "位置权限已被拒绝，轻点打开设置"
         case .authorizedWhenInUse, .authorizedAlways:
             if locationManager.cachedLocation != nil {
                 // Prefer human-readable place name; fall back to coords while geocoding
                 let place = locationManager.cachedPlaceName ?? locationManager.locationString ?? ""
-                return "Active · \(place)"
+                return "已启用 · \(place)"
             }
-            return "Waiting for GPS fix…"
+            return "正在等待 GPS 定位…"
         @unknown default:
-            return "Enable to use {{USER_LOCATION}} in prompts"
+            return "开启后可在提示词中使用 {{USER_LOCATION}}"
         }
     }
 

@@ -560,6 +560,21 @@ struct StreamingMarkdownView: View {
             .markdown("```\(block.language)\n\(block.content)\n```")
         }
 
+        func nextNonMarkdownWebBlockIndex(after start: Int) -> Int? {
+            var lookahead = start
+            while lookahead < units.count {
+                switch units[lookahead] {
+                case .markdown(_):
+                    lookahead += 1
+                case .block(let block) where isWebBlock(block):
+                    return lookahead
+                default:
+                    return nil
+                }
+            }
+            return nil
+        }
+
         while index < units.count {
             switch units[index] {
             case .markdown(let markdown):
@@ -576,18 +591,25 @@ struct StreamingMarkdownView: View {
                 }
 
                 var webBlocks: [ParsedBlock] = []
-                var consumed = 0
-                while index + consumed < units.count {
-                    guard case .block(let linkedBlock) = units[index + consumed],
-                          isWebBlock(linkedBlock)
-                    else { break }
-                    webBlocks.append(linkedBlock)
-                    consumed += 1
+                var cursor = index
+                scanWebBlocks: while cursor < units.count {
+                    switch units[cursor] {
+                    case .block(let linkedBlock) where isWebBlock(linkedBlock):
+                        webBlocks.append(linkedBlock)
+                        cursor += 1
+                    case .markdown(_):
+                        guard let nextWebIndex = nextNonMarkdownWebBlockIndex(after: cursor + 1) else {
+                            break scanWebBlocks
+                        }
+                        cursor = nextWebIndex
+                    default:
+                        break scanWebBlocks
+                    }
                 }
 
                 guard let htmlBlock = webBlocks.first(where: { $0.language == "html" }) else {
-                    webBlocks.forEach { segments.append(markdownBlock($0)) }
-                    index += max(consumed, 1)
+                    segments.append(markdownBlock(block))
+                    index += 1
                     continue
                 }
 
@@ -600,7 +622,7 @@ struct StreamingMarkdownView: View {
                 }
 
                 segments.append(.html(html, isStreaming: false))
-                index += max(consumed, 1)
+                index = max(cursor, index + 1)
             }
         }
 
@@ -675,7 +697,7 @@ private struct MarkdownInlineImageView: View {
                     Button {
                         Task { await saveImageToPhotos() }
                     } label: {
-                        Label("Save to Photos", systemImage: "photo")
+                        Label("保存到相册", systemImage: "photo")
                     }
                 }
 
@@ -701,7 +723,7 @@ private struct MarkdownInlineImageView: View {
             .buttonStyle(.plain)
             .padding(8)
         }
-        .accessibilityLabel(altText.isEmpty ? "Image" : altText)
+        .accessibilityLabel(altText.isEmpty ? "图片" : altText)
         .accessibilityAddTraits(.isImage)
     }
 
@@ -763,10 +785,10 @@ private struct MarkdownInlineImageView: View {
 
     private var saveLabel: String {
         switch saveState {
-        case .idle: return "Save"
-        case .saving: return "Saving"
-        case .saved: return "Saved"
-        case .failed: return "Failed"
+        case .idle: return "保存"
+        case .saving: return "保存中"
+        case .saved: return "已保存"
+        case .failed: return "失败"
         }
     }
 
@@ -819,7 +841,7 @@ struct FullCodeView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
-                        Button("Done") { dismiss() }
+                        Button("完成") { dismiss() }
                             .fontWeight(.semibold)
                     }
                     ToolbarItemGroup(placement: .topBarTrailing) {

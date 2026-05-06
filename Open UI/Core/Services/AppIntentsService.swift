@@ -4,10 +4,10 @@ import Foundation
 // MARK: - New Chat Intent
 
 /// Siri shortcut / Shortcuts app: start a new chat with keyboard focus.
-/// Mirrors the widget "Ask Open Relay" bar and the home-screen quick action.
+/// Mirrors the Iexa widget ask bar and the home-screen quick action.
 struct NewChatIntent: AppIntent {
-    static var title: LocalizedStringResource = "New Chat"
-    static var description = IntentDescription("Start a new chat conversation with the AI assistant.")
+    static var title: LocalizedStringResource = "新建聊天"
+    static var description = IntentDescription("用 AI 助手开始一个新对话。")
     static var openAppWhenRun: Bool = true
 
     func perform() async throws -> some IntentResult {
@@ -21,10 +21,10 @@ struct NewChatIntent: AppIntent {
 // MARK: - Voice Call Intent
 
 /// Siri shortcut / Shortcuts app: start a voice call with the AI assistant.
-/// Mirrors the widget mic button and the home-screen "Voice Call" quick action.
+/// Mirrors the widget mic button and the home-screen voice call quick action.
 struct VoiceCallIntent: AppIntent {
-    static var title: LocalizedStringResource = "Voice Call"
-    static var description = IntentDescription("Start a voice call with the AI assistant.")
+    static var title: LocalizedStringResource = "语音通话"
+    static var description = IntentDescription("与 AI 助手开始语音通话。")
     static var openAppWhenRun: Bool = true
 
     func perform() async throws -> some IntentResult {
@@ -38,10 +38,10 @@ struct VoiceCallIntent: AppIntent {
 // MARK: - Camera Chat Intent
 
 /// Siri shortcut / Shortcuts app: open a new chat and immediately launch the camera.
-/// Mirrors the widget camera button and the home-screen "Camera Chat" quick action.
+/// Mirrors the widget camera button and the home-screen camera chat quick action.
 struct CameraChatIntent: AppIntent {
-    static var title: LocalizedStringResource = "Camera Chat"
-    static var description = IntentDescription("Start a new chat and open the camera to attach a photo.")
+    static var title: LocalizedStringResource = "拍照聊天"
+    static var description = IntentDescription("开始新聊天并打开相机添加照片。")
     static var openAppWhenRun: Bool = true
 
     func perform() async throws -> some IntentResult {
@@ -60,8 +60,8 @@ struct CameraChatIntent: AppIntent {
 /// Siri shortcut / Shortcuts app: open a new chat and immediately launch the photo picker.
 /// Mirrors the widget photos button.
 struct PhotosChatIntent: AppIntent {
-    static var title: LocalizedStringResource = "Photos Chat"
-    static var description = IntentDescription("Start a new chat and open Photos to attach an image.")
+    static var title: LocalizedStringResource = "图片聊天"
+    static var description = IntentDescription("开始新聊天并打开相册添加图片。")
     static var openAppWhenRun: Bool = true
 
     func perform() async throws -> some IntentResult {
@@ -80,8 +80,8 @@ struct PhotosChatIntent: AppIntent {
 /// Siri shortcut / Shortcuts app: open a new chat and immediately launch the file picker.
 /// Mirrors the widget file/paperclip button.
 struct FileChatIntent: AppIntent {
-    static var title: LocalizedStringResource = "File Chat"
-    static var description = IntentDescription("Start a new chat and open Files to attach a document.")
+    static var title: LocalizedStringResource = "文件聊天"
+    static var description = IntentDescription("开始新聊天并打开文件选择器添加文档。")
     static var openAppWhenRun: Bool = true
 
     func perform() async throws -> some IntentResult {
@@ -98,10 +98,10 @@ struct FileChatIntent: AppIntent {
 // MARK: - New Channel Intent
 
 /// Siri shortcut / Shortcuts app: open the create-channel sheet.
-/// Mirrors the widget channel button and the home-screen "New Channel" quick action.
+/// Mirrors the widget channel button and the home-screen new channel quick action.
 struct NewChannelIntent: AppIntent {
-    static var title: LocalizedStringResource = "New Channel"
-    static var description = IntentDescription("Open the create-channel sheet in Open Relay.")
+    static var title: LocalizedStringResource = "新建频道"
+    static var description = IntentDescription("在 Iexa 中打开新建频道页面。")
     static var openAppWhenRun: Bool = true
 
     func perform() async throws -> some IntentResult {
@@ -123,66 +123,66 @@ struct OpenUIShortcutsProvider: AppShortcutsProvider {
         AppShortcut(
             intent: NewChatIntent(),
             phrases: [
-                "Start a new chat in \(.applicationName)",
-                "New conversation in \(.applicationName)",
-                "Chat with \(.applicationName)",
-                "Ask \(.applicationName) something"
+                "在 \(.applicationName) 新建聊天",
+                "在 \(.applicationName) 开始新对话",
+                "和 \(.applicationName) 聊天",
+                "问 \(.applicationName) 一个问题"
             ],
-            shortTitle: "New Chat",
+            shortTitle: "新建聊天",
             systemImageName: "bubble.left.and.text.bubble.right"
         )
 
         AppShortcut(
             intent: VoiceCallIntent(),
             phrases: [
-                "Call \(.applicationName)",
-                "Voice call with \(.applicationName)",
-                "Talk to \(.applicationName)"
+                "呼叫 \(.applicationName)",
+                "和 \(.applicationName) 语音通话",
+                "跟 \(.applicationName) 说话"
             ],
-            shortTitle: "Voice Call",
+            shortTitle: "语音通话",
             systemImageName: "mic.fill"
         )
 
         AppShortcut(
             intent: CameraChatIntent(),
             phrases: [
-                "Camera chat with \(.applicationName)",
-                "Take a photo for \(.applicationName)",
-                "Open camera in \(.applicationName)"
+                "用 \(.applicationName) 拍照聊天",
+                "给 \(.applicationName) 拍一张照片",
+                "在 \(.applicationName) 打开相机"
             ],
-            shortTitle: "Camera Chat",
+            shortTitle: "拍照聊天",
             systemImageName: "camera.fill"
         )
 
         AppShortcut(
             intent: PhotosChatIntent(),
             phrases: [
-                "Send a photo to \(.applicationName)",
-                "Photos chat in \(.applicationName)",
-                "Attach a photo in \(.applicationName)"
+                "发送图片给 \(.applicationName)",
+                "在 \(.applicationName) 图片聊天",
+                "在 \(.applicationName) 添加照片"
             ],
-            shortTitle: "Photos Chat",
+            shortTitle: "图片聊天",
             systemImageName: "photo.fill"
         )
 
         AppShortcut(
             intent: FileChatIntent(),
             phrases: [
-                "Send a file to \(.applicationName)",
-                "File chat in \(.applicationName)",
-                "Attach a document in \(.applicationName)"
+                "发送文件给 \(.applicationName)",
+                "在 \(.applicationName) 文件聊天",
+                "在 \(.applicationName) 添加文档"
             ],
-            shortTitle: "File Chat",
+            shortTitle: "文件聊天",
             systemImageName: "paperclip"
         )
 
         AppShortcut(
             intent: NewChannelIntent(),
             phrases: [
-                "New channel in \(.applicationName)",
-                "Create a channel in \(.applicationName)"
+                "在 \(.applicationName) 新建频道",
+                "用 \(.applicationName) 创建频道"
             ],
-            shortTitle: "New Channel",
+            shortTitle: "新建频道",
             systemImageName: "number"
         )
     }

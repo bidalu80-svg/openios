@@ -56,25 +56,25 @@ struct AuthenticatedImageView: View {
                                 UIPasteboard.general.image = image
                                 Haptics.notify(.success)
                             } label: {
-                                Label("Copy Image", systemImage: "doc.on.doc")
+                                Label("复制图片", systemImage: "doc.on.doc")
                             }
 
                             Button {
                                 Task { await saveImageToPhotos() }
                             } label: {
-                                Label("Save to Photos", systemImage: "photo")
+                                Label("保存到相册", systemImage: "photo")
                             }
 
                             Button {
                                 shareImage(image)
                             } label: {
-                                Label("Share", systemImage: "square.and.arrow.up")
+                                Label("分享", systemImage: "square.and.arrow.up")
                             }
 
                             Button {
                                 showFullScreen = true
                             } label: {
-                                Label("View Full Screen", systemImage: "arrow.up.left.and.arrow.down.right")
+                                Label("全屏查看", systemImage: "arrow.up.left.and.arrow.down.right")
                             }
                         }
                 } else if isLoading {
@@ -93,7 +93,7 @@ struct AuthenticatedImageView: View {
                         Image(systemName: "arrow.clockwise.circle")
                             .scaledFont(size: 28)
                             .foregroundStyle(theme.brandPrimary.opacity(0.7))
-                        Text("Tap to retry")
+                        Text("点击重试")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textTertiary)
                     }
@@ -173,10 +173,10 @@ struct AuthenticatedImageView: View {
 
     private var saveLabel: String {
         switch saveState {
-        case .idle: return "Save"
-        case .saving: return "Saving"
-        case .saved: return "Saved"
-        case .failed: return "Failed"
+        case .idle: return "保存"
+        case .saving: return "保存中"
+        case .saved: return "已保存"
+        case .failed: return "失败"
         }
     }
 

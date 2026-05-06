@@ -1011,7 +1011,7 @@ struct MainChatView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .openUINewChatWithFocus)) { _ in
-                // Widget "Ask Open Relay" bar — start new chat and auto-focus keyboard
+                // Widget "Ask Iexa" bar — start new chat and auto-focus keyboard
                 startNewChat()
                 // Give the view time to settle before requesting keyboard focus
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {

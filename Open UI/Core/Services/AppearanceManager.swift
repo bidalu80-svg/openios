@@ -14,9 +14,9 @@ final class AppearanceManager {
 
         var displayName: String {
             switch self {
-            case .system: return "System"
-            case .light: return "Light"
-            case .dark: return "Dark"
+            case .system: return "跟随系统"
+            case .light: return "浅色"
+            case .dark: return "深色"
             }
         }
 
@@ -47,7 +47,20 @@ final class AppearanceManager {
         case cyan = "cyan"
 
         var displayName: String {
-            rawValue.capitalized
+            switch self {
+            case .monochrome: return "黑白"
+            case .blue: return "蓝色"
+            case .indigo: return "靛蓝"
+            case .purple: return "紫色"
+            case .violet: return "紫罗兰"
+            case .pink: return "粉色"
+            case .red: return "红色"
+            case .orange: return "橙色"
+            case .amber: return "琥珀"
+            case .green: return "绿色"
+            case .teal: return "青绿"
+            case .cyan: return "青色"
+            }
         }
 
         /// The primary accent color for display in the picker.

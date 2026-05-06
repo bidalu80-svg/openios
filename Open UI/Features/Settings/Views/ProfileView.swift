@@ -81,7 +81,7 @@ struct ProfileView: View {
             .padding(.bottom, Spacing.xl)
         }
         .background(theme.background)
-        .navigationTitle("Your Account")
+        .navigationTitle("账号资料")
         .navigationBarTitleDisplayMode(.inline)
         .task { loadCurrentValues() }
         .onChange(of: selectedPhotoItem) { _, newItem in
@@ -112,25 +112,25 @@ struct ProfileView: View {
                         .offset(x: 2, y: 2)
                 }
             }
-            .confirmationDialog("Profile Photo", isPresented: $showImageActionSheet) {
-                Button("Choose from Library") {
+            .confirmationDialog("头像", isPresented: $showImageActionSheet) {
+                Button("从相册选择") {
                     showPhotoPicker = true
                 }
-                Button("Use Initials") {
+                Button("使用首字母头像") {
                     profileImageAction = .initials
                     profileImageData = nil
                 }
-                Button("Remove Photo") {
+                Button("移除头像") {
                     profileImageAction = .remove
                     profileImageData = nil
                 }
-                Button("Cancel", role: .cancel) {}
+                Button("取消", role: .cancel) {}
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotoItem, matching: .images)
 
             // Name + email + role
             VStack(alignment: .leading, spacing: 4) {
-                Text(user?.displayName ?? "User")
+                Text(user?.displayName ?? "用户")
                     .scaledFont(size: 20, weight: .semibold)
                     .foregroundStyle(theme.textPrimary)
 
@@ -139,8 +139,8 @@ struct ProfileView: View {
                     .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
 
-                if let role = user?.role.rawValue.capitalized {
-                    Text(role)
+                if let role = user?.role.rawValue {
+                    Text(roleDisplayName(role))
                         .scaledFont(size: 11, weight: .semibold)
                         .foregroundStyle(theme.brandPrimary)
                         .padding(.horizontal, 8)
@@ -161,20 +161,20 @@ struct ProfileView: View {
 
     private var profileSection: some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
-            sectionHeader("PROFILE")
+            sectionHeader("资料")
 
             VStack(spacing: 0) {
                 // Name
-                inlineEditRow(label: "Name", showDivider: true) {
-                    TextField("Your name", text: $editName)
+                inlineEditRow(label: "名称", showDivider: true) {
+                    TextField("你的名称", text: $editName)
                         .scaledFont(size: 16)
                         .multilineTextAlignment(.trailing)
                         .textFieldStyle(.plain)
                 }
 
                 // Bio
-                inlineEditRow(label: "Bio", showDivider: true) {
-                    TextField("Share your background and interests", text: $editBio, axis: .vertical)
+                inlineEditRow(label: "简介", showDivider: true) {
+                    TextField("介绍一下你的背景和兴趣", text: $editBio, axis: .vertical)
                         .scaledFont(size: 16)
                         .multilineTextAlignment(.trailing)
                         .textFieldStyle(.plain)
@@ -182,10 +182,10 @@ struct ProfileView: View {
                 }
 
                 // Gender
-                inlineEditRow(label: "Gender", showDivider: true) {
+                inlineEditRow(label: "性别", showDivider: true) {
                     Picker("", selection: $editGender) {
                         ForEach(genderOptions, id: \.self) { option in
-                            Text(option).tag(option)
+                            Text(genderDisplayName(option)).tag(option)
                         }
                     }
                     .labelsHidden()
@@ -193,7 +193,7 @@ struct ProfileView: View {
                 }
 
                 // Birth Date
-                inlineEditRow(label: "Birth Date", showDivider: false) {
+                inlineEditRow(label: "生日", showDivider: false) {
                     if let date = editBirthDate {
                         HStack(spacing: Spacing.xs) {
                             Text(date, style: .date)
@@ -217,7 +217,7 @@ struct ProfileView: View {
                                 showBirthDatePicker = true
                             }
                         } label: {
-                            Text("Set birth date")
+                            Text("设置生日")
                                 .scaledFont(size: 16)
                                 .foregroundStyle(theme.textTertiary)
                         }
@@ -226,7 +226,7 @@ struct ProfileView: View {
 
                 if showBirthDatePicker, editBirthDate != nil {
                     DatePicker(
-                        "Birth Date",
+                        "生日",
                         selection: Binding(
                             get: { editBirthDate ?? Date() },
                             set: { editBirthDate = $0 }
@@ -248,11 +248,11 @@ struct ProfileView: View {
 
     private var notificationsSection: some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
-            sectionHeader("NOTIFICATIONS")
+            sectionHeader("通知")
 
             VStack(spacing: 0) {
-                inlineEditRow(label: "Webhook URL", showDivider: false) {
-                    TextField("Enter URL", text: $editWebhookURL)
+                inlineEditRow(label: "Webhook 地址", showDivider: false) {
+                    TextField("输入 URL", text: $editWebhookURL)
                         .scaledFont(size: 16)
                         .multilineTextAlignment(.trailing)
                         .textFieldStyle(.plain)
@@ -270,7 +270,7 @@ struct ProfileView: View {
 
     private var securitySection: some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
-            sectionHeader("SECURITY")
+            sectionHeader("安全")
 
             VStack(spacing: 0) {
                 // Expand/collapse row
@@ -287,7 +287,7 @@ struct ProfileView: View {
                     }
                 } label: {
                     HStack {
-                        Text("Change Password")
+                        Text("修改密码")
                             .scaledFont(size: 16)
                             .foregroundStyle(theme.textPrimary)
                         Spacer()
@@ -304,19 +304,19 @@ struct ProfileView: View {
                     Divider().padding(.leading, Spacing.md)
 
                     VStack(spacing: Spacing.md) {
-                        SecureField("Current Password", text: $currentPassword)
+                        SecureField("当前密码", text: $currentPassword)
                             .textContentType(.password)
                             .padding(Spacing.md)
                             .background(theme.surfaceContainer)
                             .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
 
-                        SecureField("New Password", text: $newPassword)
+                        SecureField("新密码", text: $newPassword)
                             .textContentType(.newPassword)
                             .padding(Spacing.md)
                             .background(theme.surfaceContainer)
                             .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
 
-                        SecureField("Confirm New Password", text: $confirmPassword)
+                        SecureField("确认新密码", text: $confirmPassword)
                             .textContentType(.newPassword)
                             .padding(Spacing.md)
                             .background(theme.surfaceContainer)
@@ -332,7 +332,7 @@ struct ProfileView: View {
                             HStack(spacing: Spacing.xs) {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(theme.success)
-                                Text("Password changed successfully")
+                                Text("密码修改成功")
                                     .scaledFont(size: 12, weight: .medium)
                                     .foregroundStyle(theme.success)
                             }
@@ -345,7 +345,7 @@ struct ProfileView: View {
                                 if isChangingPassword {
                                     ProgressView().controlSize(.small)
                                 }
-                                Text("Update Password")
+                                Text("更新密码")
                                     .scaledFont(size: 15, weight: .semibold)
                             }
                             .frame(maxWidth: .infinity)
@@ -384,7 +384,7 @@ struct ProfileView: View {
                 HStack(spacing: Spacing.xs) {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(theme.success)
-                    Text("Profile saved")
+                    Text("资料已保存")
                         .scaledFont(size: 14, weight: .medium)
                         .foregroundStyle(theme.success)
                 }
@@ -399,7 +399,7 @@ struct ProfileView: View {
                             .controlSize(.small)
                             .tint(.white)
                     }
-                    Text("Save")
+                    Text("保存")
                         .scaledFont(size: 17, weight: .semibold)
                 }
                 .frame(maxWidth: .infinity)
@@ -421,6 +421,24 @@ struct ProfileView: View {
             .scaledFont(size: 12, weight: .medium)
             .foregroundStyle(theme.textTertiary)
             .padding(.leading, Spacing.md)
+    }
+
+    private func genderDisplayName(_ value: String) -> String {
+        switch value {
+        case "Male": return "男"
+        case "Female": return "女"
+        case "Custom": return "自定义"
+        case "Prefer not to say": return "不想透露"
+        default: return value
+        }
+    }
+
+    private func roleDisplayName(_ value: String) -> String {
+        switch value.lowercased() {
+        case "admin": return "管理员"
+        case "user": return "用户"
+        default: return value
+        }
     }
 
     private func inlineEditRow<Content: View>(
@@ -722,7 +740,7 @@ struct ProfileView: View {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             saveSuccess = false
         } catch {
-            saveError = APIError.from(error).errorDescription ?? "Failed to update profile."
+            saveError = APIError.from(error).errorDescription ?? "更新资料失败。"
             isSaving = false
         }
     }
@@ -732,11 +750,11 @@ struct ProfileView: View {
     private func changePassword() async {
         guard let api = dependencies.apiClient else { return }
         guard newPassword == confirmPassword else {
-            passwordChangeError = "Passwords do not match."
+            passwordChangeError = "两次输入的密码不一致。"
             return
         }
         guard newPassword.count >= 8 else {
-            passwordChangeError = "Password must be at least 8 characters."
+            passwordChangeError = "密码至少需要 8 个字符。"
             return
         }
 
@@ -753,9 +771,9 @@ struct ProfileView: View {
         } catch {
             let apiError = APIError.from(error)
             if case .httpError(let code, let msg, _) = apiError, code == 400 || code == 401 {
-                passwordChangeError = msg ?? "Current password is incorrect."
+                passwordChangeError = msg ?? "当前密码不正确。"
             } else {
-                passwordChangeError = apiError.errorDescription ?? "Failed to change password."
+                passwordChangeError = apiError.errorDescription ?? "修改密码失败。"
             }
         }
 

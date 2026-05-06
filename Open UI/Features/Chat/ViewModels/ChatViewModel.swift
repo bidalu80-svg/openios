@@ -2949,14 +2949,20 @@ final class ChatViewModel {
                             )
                         }
                         let imagePrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let requestedImageSize = Self.requestedImageSize(from: imagePrompt)
+                        let imagePromptForAPI = Self.promptWithImageSizeInstruction(
+                            imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
+                            size: requestedImageSize
+                        )
                         let imageReference: String
                         if let editImage = self.firstEditableImage(from: currentAttachments) {
                             imageReference = try await self.runImageRequestWithRateLimitRetry {
                                 try await manager.editImage(
-                                    prompt: imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
+                                    prompt: imagePromptForAPI,
                                     model: modelId,
                                     imageData: editImage.data,
-                                    fileName: editImage.fileName
+                                    fileName: editImage.fileName,
+                                    size: requestedImageSize
                                 )
                             }
                         } else {
@@ -2970,13 +2976,17 @@ final class ChatViewModel {
                                 )
                             }
                             imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                try await manager.generateImage(prompt: imagePrompt, model: modelId)
+                                try await manager.generateImage(
+                                    prompt: imagePromptForAPI,
+                                    model: modelId,
+                                    size: requestedImageSize
+                                )
                             }
                         }
                         let displayReference = await self.localDisplayImageReference(from: imageReference) ?? imageReference
                         self.updateAssistantMessage(
                             id: assistantMessageId,
-                            content: "Generated image",
+                            content: "已生成图片",
                             isStreaming: false
                         )
                         self.attachGeneratedImageFile(
@@ -5393,6 +5403,88 @@ final class ChatViewModel {
         return Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...]))
     }
 
+    private static func requestedImageSize(from prompt: String) -> String {
+        let defaultSize = "1024x1024"
+        let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return defaultSize }
+
+        if let exactSize = firstExactImageSize(in: text) {
+            return exactSize
+        }
+
+        if let aspectSize = firstAspectRatioSize(in: text) {
+            return aspectSize
+        }
+
+        let lowercased = text.lowercased()
+        if lowercased.contains("竖屏")
+            || lowercased.contains("纵向")
+            || lowercased.contains("手机")
+            || lowercased.contains("壁纸")
+            || lowercased.contains("海报")
+            || lowercased.contains("portrait") {
+            return "1024x1792"
+        }
+        if lowercased.contains("横屏")
+            || lowercased.contains("宽屏")
+            || lowercased.contains("landscape") {
+            return "1792x1024"
+        }
+        if lowercased.contains("方图")
+            || lowercased.contains("正方形")
+            || lowercased.contains("square") {
+            return defaultSize
+        }
+
+        return defaultSize
+    }
+
+    private static func firstExactImageSize(in text: String) -> String? {
+        let pattern = #"(?<!\d)(\d{2,5})\s*[xX×＊*]\s*(\d{2,5})(?!\d)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: nsRange),
+              match.numberOfRanges >= 3,
+              let widthRange = Range(match.range(at: 1), in: text),
+              let heightRange = Range(match.range(at: 2), in: text),
+              let width = Int(String(text[widthRange])),
+              let height = Int(String(text[heightRange])),
+              (64...4096).contains(width),
+              (64...4096).contains(height)
+        else { return nil }
+        return "\(width)x\(height)"
+    }
+
+    private static func firstAspectRatioSize(in text: String) -> String? {
+        let pattern = #"(?<!\d)(\d{1,3})\s*[:：]\s*(\d{1,3})(?!\d)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: nsRange),
+              match.numberOfRanges >= 3,
+              let widthRange = Range(match.range(at: 1), in: text),
+              let heightRange = Range(match.range(at: 2), in: text),
+              let width = Double(String(text[widthRange])),
+              let height = Double(String(text[heightRange])),
+              width > 0,
+              height > 0
+        else { return nil }
+
+        let ratio = width / height
+        if abs(ratio - 1.0) < 0.08 {
+            return "1024x1024"
+        }
+        return ratio > 1.0 ? "1792x1024" : "1024x1792"
+    }
+
+    private static func promptWithImageSizeInstruction(_ prompt: String, size: String) -> String {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return """
+        \(trimmed)
+
+        Canvas requirement: generate the image at exactly \(size) pixels and preserve that aspect ratio. Do not crop into a square unless the requested size is square.
+        """
+    }
+
     private func runImageRequestWithRateLimitRetry(
         maxAttempts: Int = 3,
         operation: @escaping () async throws -> String
@@ -5470,6 +5562,15 @@ final class ChatViewModel {
         """
     }
 
+    private static func projectContinuitySystemContext() -> String {
+        """
+        When generating code projects, treat every file as part of one connected project:
+        - Use exact relative file names and matching imports, links, entrypoints, and package/config files.
+        - For HTML/CSS/JavaScript projects split across index.html, style.css, and script.js, the HTML must link ./style.css and ./script.js, and the CSS/JS must be written for that same UI.
+        - For other languages, include the folder tree, entry file, dependency/config files, and imports so the project can run as a coherent whole instead of unrelated snippets.
+        """
+    }
+
     /// Builds API messages array, fetching image base64 from server for vision.
     /// Matches Flutter's `_buildMessagePayloadWithAttachments` which calls
     /// `api.getFileContent(fileId)` to get base64 data URLs for the LLM.
@@ -5503,7 +5604,7 @@ final class ChatViewModel {
             return conversation.systemPrompt
         }()
         let memoryContext = await localMemorySystemContext()
-        let combinedSystemPrompt = [asyncEffectiveSP, memoryContext]
+        let combinedSystemPrompt = [asyncEffectiveSP, Self.projectContinuitySystemContext(), memoryContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
