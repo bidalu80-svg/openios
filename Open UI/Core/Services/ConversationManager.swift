@@ -213,6 +213,24 @@ final class ConversationManager: @unchecked Sendable {
         try await apiClient.generateImage(prompt: prompt, model: model, size: size)
     }
 
+    func generateVideo(
+        prompt: String,
+        model: String,
+        size: String = "1024x1024",
+        duration: Int? = nil,
+        imageData: Data? = nil,
+        imageFileName: String = "image.png"
+    ) async throws -> String {
+        try await apiClient.generateVideo(
+            prompt: prompt,
+            model: model,
+            size: size,
+            duration: duration,
+            imageData: imageData,
+            imageFileName: imageFileName
+        )
+    }
+
     func editImage(
         prompt: String,
         model: String,

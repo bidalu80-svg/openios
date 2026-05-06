@@ -2,6 +2,7 @@ import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
 import AVFoundation
+import AVKit
 import QuickLook
 import MarkdownView
 import os.log
@@ -22,6 +23,14 @@ struct ChatDetailView: View {
     // MARK: Model selector sheet
     @State private var isShowingModelSelectorSheet = false
     @State private var isShowingChatParams = false
+    @AppStorage("tokenUsageInputTotal") private var tokenUsageInputTotal: Int = 0
+    @AppStorage("tokenUsageOutputTotal") private var tokenUsageOutputTotal: Int = 0
+    @AppStorage("tokenUsageCachedTotal") private var tokenUsageCachedTotal: Int = 0
+    @AppStorage("tokenUsageImageTotal") private var tokenUsageImageTotal: Int = 0
+    @AppStorage("tokenUsageImageCountTotal") private var tokenUsageImageCountTotal: Int = 0
+    @AppStorage("tokenUsageVideoCountTotal") private var tokenUsageVideoCountTotal: Int = 0
+    @AppStorage("tokenUsageExactMessagesTotal") private var tokenUsageExactMessagesTotal: Int = 0
+    @AppStorage("tokenUsageEstimatedMessagesTotal") private var tokenUsageEstimatedMessagesTotal: Int = 0
     @State private var editingModelDetail: ModelDetail? = nil
     @State private var isLoadingModelDetail = false
 
@@ -77,6 +86,31 @@ struct ChatDetailView: View {
     @State private var usagePopoverMessageId: String?
     @State private var sourcesSheetMessage: ChatMessage?
     @State private var randomPrompts: [SuggestedPrompt] = []
+
+    private var tokenUsageTotalsSnapshot: ChatTokenUsageSnapshot {
+        ChatTokenUsageSnapshot(
+            inputTokens: tokenUsageInputTotal,
+            outputTokens: tokenUsageOutputTotal,
+            cachedTokens: tokenUsageCachedTotal,
+            imageTokens: tokenUsageImageTotal,
+            imageCount: tokenUsageImageCountTotal,
+            videoCount: tokenUsageVideoCountTotal,
+            exactUsageMessages: tokenUsageExactMessagesTotal,
+            estimatedMessages: tokenUsageEstimatedMessagesTotal
+        )
+    }
+
+    private func resetTokenUsageTotals() {
+        tokenUsageInputTotal = 0
+        tokenUsageOutputTotal = 0
+        tokenUsageCachedTotal = 0
+        tokenUsageImageTotal = 0
+        tokenUsageImageCountTotal = 0
+        tokenUsageVideoCountTotal = 0
+        tokenUsageExactMessagesTotal = 0
+        tokenUsageEstimatedMessagesTotal = 0
+        Haptics.play(.medium)
+    }
 
     // MARK: Model mention (@ trigger)
     @State private var isShowingModelPicker = false
@@ -263,6 +297,16 @@ struct ChatDetailView: View {
                 ttsGeneratingMessageId = nil
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .chatTokenUsageDidAccumulate)) { notification in
+            tokenUsageInputTotal += notification.userInfo?["input"] as? Int ?? 0
+            tokenUsageOutputTotal += notification.userInfo?["output"] as? Int ?? 0
+            tokenUsageCachedTotal += notification.userInfo?["cached"] as? Int ?? 0
+            tokenUsageImageTotal += notification.userInfo?["image"] as? Int ?? 0
+            tokenUsageImageCountTotal += notification.userInfo?["imageCount"] as? Int ?? 0
+            tokenUsageVideoCountTotal += notification.userInfo?["videoCount"] as? Int ?? 0
+            tokenUsageExactMessagesTotal += notification.userInfo?["exact"] as? Int ?? 0
+            tokenUsageEstimatedMessagesTotal += notification.userInfo?["estimated"] as? Int ?? 0
+        }
         // Toasts & banners
         .overlay(alignment: .top) {
             if showCopiedToast { copiedToastView }
@@ -382,7 +426,7 @@ struct ChatDetailView: View {
                         ProgressView()
                             .controlSize(.large)
                             .tint(.white)
-                        Text("Downloading…")
+                        Text("下载中…")
                             .scaledFont(size: 14, weight: .medium)
                             .foregroundStyle(.white)
                     }
@@ -393,8 +437,8 @@ struct ChatDetailView: View {
                 .transition(.opacity)
             }
         }
-        .alert("Download Failed", isPresented: $showDownloadError) {
-            Button("OK", role: .cancel) {}
+        .alert("下载失败", isPresented: $showDownloadError) {
+            Button("好", role: .cancel) {}
         } message: {
             Text(downloadErrorMessage)
         }
@@ -423,7 +467,9 @@ struct ChatDetailView: View {
                             viewModel.pendingChatParams = newParams
                         }
                     }
-                )
+                ),
+                tokenUsage: tokenUsageTotalsSnapshot,
+                onResetTokenUsage: resetTokenUsageTotals
             )
             .themed()
         }
@@ -1530,7 +1576,7 @@ struct ChatDetailView: View {
                     }
                 }
             } label: {
-                Label("Delete", systemImage: "trash")
+                Label("删除", systemImage: "trash")
             }
         }
     }
@@ -2317,8 +2363,13 @@ struct ChatDetailView: View {
         let icon = fileIconName(for: fileExt)
 
         return Button {
-            if let fileId = file.url {
-                Task { await previewFileInApp(fileId: fileId, fileName: fileName) }
+            if let fileId = file.url, !fileId.isEmpty {
+                if let remoteURL = URL(string: fileId),
+                   ["http", "https"].contains(remoteURL.scheme?.lowercased()) {
+                    UIApplication.shared.open(remoteURL)
+                } else {
+                    Task { await previewFileReference(fileId: fileId, fileName: fileName) }
+                }
             }
         } label: {
             HStack(spacing: Spacing.sm) {
@@ -2363,7 +2414,7 @@ struct ChatDetailView: View {
         case "txt", "md", "rtf": return "doc.plaintext"
         case "js", "ts", "py", "swift", "dart", "java", "cpp", "c", "h", "rb", "go", "rs":
             return "chevron.left.forwardslash.chevron.right"
-        case "HTML", "css", "scss": return "globe"
+        case "html", "htm", "css", "scss": return "globe"
         case "zip", "tar", "gz", "rar", "7z": return "archivebox"
         case "mp3", "wav", "m4a", "flac": return "waveform"
         case "mp4", "mov", "avi", "mkv": return "film"
@@ -2379,11 +2430,53 @@ struct ChatDetailView: View {
         return UIImage(data: data)
     }
 
+    private func localFileURL(fromDataURL dataURL: String, fallbackName: String) throws -> URL? {
+        guard dataURL.hasPrefix("data:"),
+              let comma = dataURL.firstIndex(of: ",") else { return nil }
+        let header = String(dataURL[..<comma]).lowercased()
+        let base64 = String(dataURL[dataURL.index(after: comma)...])
+        guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else { return nil }
+
+        let ext: String
+        if header.contains("video/webm") {
+            ext = "webm"
+        } else if header.contains("video/quicktime") || header.contains("video/mov") {
+            ext = "mov"
+        } else if header.contains("image/png") {
+            ext = "png"
+        } else if header.contains("image/jpeg") || header.contains("image/jpg") {
+            ext = "jpg"
+        } else if header.contains("application/pdf") {
+            ext = "pdf"
+        } else {
+            ext = (fallbackName as NSString).pathExtension.isEmpty
+                ? "mp4"
+                : (fallbackName as NSString).pathExtension
+        }
+
+        let baseName = ((fallbackName as NSString).deletingPathExtension)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeName = baseName.isEmpty ? "generated-media" : baseName
+        let cacheDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("generated_media_cache", isDirectory: true)
+        try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        let url = cacheDir.appendingPathComponent("\(safeName)-\(abs(dataURL.hashValue)).\(ext)")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try data.write(to: url)
+        }
+        return url
+    }
+
     // MARK: - Tool-Generated Images
 
     @ViewBuilder
     private func messageFilesView(files: [ChatMessageFile]) -> some View {
         let imageFiles = files.filter { $0.type == "image" || ($0.contentType ?? "").hasPrefix("image/") }
+        let nonImageFiles = files.filter {
+            !($0.type == "image" || ($0.contentType ?? "").hasPrefix("image/"))
+                && $0.type != "collection"
+                && $0.type != "folder"
+        }
         if !imageFiles.isEmpty {
             let columns = imageFiles.count == 1
                 ? [GridItem(.flexible())]
@@ -2403,9 +2496,16 @@ struct ChatDetailView: View {
                             }
                             return fileUrl
                         }()
-                        AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+                        chatImageView(fileId: fileId)
                             .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
                     }
+                }
+            }
+        }
+        if !nonImageFiles.isEmpty {
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
+                    fileAttachmentCard(file: file)
                 }
             }
         }
@@ -2926,7 +3026,7 @@ struct ChatDetailView: View {
                         defaultValue: defaultVal
                     )
                 case "confirmation":
-                    let title = inner["title"] as? String ?? "Confirm"
+                    let title = inner["title"] as? String ?? "确认"
                     let msg   = inner["message"] as? String ?? inner["description"] as? String ?? "Are you sure?"
                     actionConfirmRequest = ActionConfirmRequest(title: title, message: msg)
                 default:
@@ -3218,16 +3318,35 @@ for item in items {
             previewFileURL = cachedFile
         } catch {
             withAnimation { isDownloadingFile = false }
-            downloadErrorMessage = "Failed to load file: \(error.localizedDescription)"
+            downloadErrorMessage = "文件加载失败：\(error.localizedDescription)"
             showDownloadError = true
         }
+    }
+
+    private func previewFileReference(fileId: String, fileName: String) async {
+        if fileId.hasPrefix("data:") {
+            do {
+                previewFileURL = try localFileURL(fromDataURL: fileId, fallbackName: fileName)
+            } catch {
+                downloadErrorMessage = "媒体预览失败：\(error.localizedDescription)"
+                showDownloadError = true
+            }
+            return
+        }
+
+        if let url = URL(string: fileId), url.isFileURL {
+            previewFileURL = url
+            return
+        }
+
+        await previewFileInApp(fileId: fileId, fileName: fileName)
     }
 
     /// Downloads a file from the server using the authenticated API client,
     /// saves it to a temp directory, and presents the iOS share sheet.
     private func downloadAndShareFile(fileId: String) async {
         guard let apiClient = dependencies.apiClient else {
-            downloadErrorMessage = "Not connected to server."
+            downloadErrorMessage = "尚未连接站点。"
             showDownloadError = true
             return
         }
@@ -3278,7 +3397,7 @@ for item in items {
 
         } catch {
             withAnimation { isDownloadingFile = false }
-            downloadErrorMessage = "Failed to download: \(error.localizedDescription)"
+            downloadErrorMessage = "下载失败：\(error.localizedDescription)"
             showDownloadError = true
         }
     }
@@ -3495,12 +3614,27 @@ private struct IsolatedAssistantMessage: View {
                             let splitIdx = liveTail.index(liveTail.startIndex, offsetBy: relProseBoundary)
                             let frozenTailProse = String(liveTail[..<splitIdx])
                             let liveProsTail   = String(liveTail[splitIdx...])
-                            StreamingMarkdownView(content: frozenTailProse, isStreaming: false)
+                            StreamingMarkdownView(
+                                content: frozenTailProse,
+                                isStreaming: false,
+                                authToken: authToken,
+                                serverBaseURL: serverBaseURL
+                            )
                             if !liveProsTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                StreamingMarkdownView(content: liveProsTail, isStreaming: true)
+                                StreamingMarkdownView(
+                                    content: liveProsTail,
+                                    isStreaming: true,
+                                    authToken: authToken,
+                                    serverBaseURL: serverBaseURL
+                                )
                             }
                         } else {
-                            StreamingMarkdownView(content: liveTail, isStreaming: true)
+                            StreamingMarkdownView(
+                                content: liveTail,
+                                isStreaming: true,
+                                authToken: authToken,
+                                serverBaseURL: serverBaseURL
+                            )
                         }
                     }
                 }
@@ -3535,10 +3669,20 @@ private struct IsolatedAssistantMessage: View {
                     let liveProse   = String(dc[splitIdx...])
                     VStack(alignment: .leading, spacing: 0) {
                         // Frozen paragraphs: hash changes only when boundary advances (~every 400 chars).
-                        StreamingMarkdownView(content: frozenProse, isStreaming: false)
+                        StreamingMarkdownView(
+                            content: frozenProse,
+                            isStreaming: false,
+                            authToken: authToken,
+                            serverBaseURL: serverBaseURL
+                        )
                         // Live tail: current paragraph only, changes every tick.
                         if !liveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            StreamingMarkdownView(content: liveProse, isStreaming: true)
+                            StreamingMarkdownView(
+                                content: liveProse,
+                                isStreaming: true,
+                                authToken: authToken,
+                                serverBaseURL: serverBaseURL
+                            )
                         }
                     }
                     .transaction { $0.animation = nil }
@@ -4057,14 +4201,14 @@ private extension View {
             }
             // MARK: __event_call__ — confirmation dialog
             .confirmationDialog(
-                actionConfirmRequest.wrappedValue?.title ?? "Confirm",
+                actionConfirmRequest.wrappedValue?.title ?? "确认",
                 isPresented: Binding(
                     get: { actionConfirmRequest.wrappedValue != nil },
                     set: { if !$0 { } }
                 ),
                 titleVisibility: .visible
             ) {
-                Button("Confirm") {
+                Button("确认") {
                     actionCallContinuation.wrappedValue?.resume(returning: .bool(true))
                     actionCallContinuation.wrappedValue = nil
                     actionConfirmRequest.wrappedValue = nil
@@ -4214,7 +4358,7 @@ struct ActionInputSheet: View {
 
             HStack(spacing: 12) {
                 Button(action: onCancel) {
-                    Text("Cancel")
+                    Text("取消")
                         .font(.system(size: 16, weight: .medium))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
@@ -4224,7 +4368,7 @@ struct ActionInputSheet: View {
                 .buttonStyle(.plain)
 
                 Button(action: onConfirm) {
-                    Text("Confirm")
+                    Text("确认")
                         .font(.system(size: 16, weight: .semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)

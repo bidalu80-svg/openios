@@ -1175,9 +1175,16 @@ struct AttachmentPreviewSheet: View {
     @State private var downloadedFileData: Data? = nil
     @State private var isLoadingPreview: Bool = false
 
-    enum FilePreviewTab: String, CaseIterable {
-        case content = "Content"
-        case preview = "Preview"
+    enum FilePreviewTab: CaseIterable {
+        case content
+        case preview
+
+        var title: String {
+            switch self {
+            case .content: return "内容"
+            case .preview: return "预览"
+            }
+        }
     }
 
     var body: some View {
@@ -1197,7 +1204,7 @@ struct AttachmentPreviewSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    Button("完成") { dismiss() }
                         .foregroundStyle(theme.brandPrimary)
                 }
                 // Copy button for content tab
@@ -1208,7 +1215,7 @@ struct AttachmentPreviewSheet: View {
                             UIPasteboard.general.string = content
                             Haptics.play(.light)
                         } label: {
-                            Label("Copy", systemImage: "doc.on.doc")
+                            Label("复制", systemImage: "doc.on.doc")
                         }
                         .foregroundStyle(theme.brandPrimary)
                     }
@@ -1291,9 +1298,9 @@ struct AttachmentPreviewSheet: View {
             }
         } else {
             ContentUnavailableView(
-                "No Preview",
+                "暂无预览",
                 systemImage: "photo",
-                description: Text("Image preview is not available.")
+                description: Text("无法预览这张图片。")
             )
             .padding(.top, 60)
         }
@@ -1314,9 +1321,9 @@ struct AttachmentPreviewSheet: View {
                         .textSelection(.enabled)
                 } else {
                     ContentUnavailableView(
-                        "No Transcript",
+                        "暂无转写",
                         systemImage: "waveform.slash",
-                        description: Text("This audio file has no transcribed text.")
+                        description: Text("这个音频文件没有转写文本。")
                     )
                     .padding(.top, 60)
                 }
@@ -1329,7 +1336,7 @@ struct AttachmentPreviewSheet: View {
                         UIPasteboard.general.string = text
                         Haptics.play(.light)
                     } label: {
-                        Label("Copy", systemImage: "doc.on.doc")
+                        Label("复制", systemImage: "doc.on.doc")
                     }
                     .foregroundStyle(theme.brandPrimary)
                 }
@@ -1348,9 +1355,9 @@ struct AttachmentPreviewSheet: View {
             Divider()
 
             // Tab selector
-            Picker("Tab", selection: $selectedTab) {
+            Picker("标签页", selection: $selectedTab) {
                 ForEach(FilePreviewTab.allCases, id: \.self) { tab in
-                    Text(tab.rawValue).tag(tab)
+                    Text(tab.title).tag(tab)
                 }
             }
             .pickerStyle(.segmented)
@@ -1393,7 +1400,7 @@ struct AttachmentPreviewSheet: View {
                         Text("•")
                             .scaledFont(size: 12)
                             .foregroundStyle(theme.textTertiary)
-                        Text("\(extractedLineCount) Extracted Lines")
+                        Text("已提取 \(extractedLineCount) 行")
                             .scaledFont(size: 12)
                             .foregroundStyle(theme.textTertiary)
                     }
@@ -1403,7 +1410,7 @@ struct AttachmentPreviewSheet: View {
                 }
 
                 if extractedContent != nil {
-                    Text("Formatting may be inconsistent from source.")
+                    Text("格式可能与原文件略有差异。")
                         .scaledFont(size: 11)
                         .foregroundStyle(theme.textTertiary)
                         .italic()
@@ -1423,7 +1430,7 @@ struct AttachmentPreviewSheet: View {
         if isLoadingContent {
             VStack {
                 Spacer()
-                ProgressView("Loading content…")
+                ProgressView("正在加载内容…")
                     .foregroundStyle(theme.textSecondary)
                 Spacer()
             }
@@ -1438,16 +1445,16 @@ struct AttachmentPreviewSheet: View {
             }
         } else if let error = loadError {
             ContentUnavailableView(
-                "Could Not Load Content",
+                "无法加载内容",
                 systemImage: "exclamationmark.triangle",
                 description: Text(error)
             )
             .padding(.top, 40)
         } else {
             ContentUnavailableView(
-                "No Content",
+                "暂无内容",
                 systemImage: "doc.text",
-                description: Text("No extracted content is available for this file.")
+                description: Text("这个文件没有可提取的文本内容。")
             )
             .padding(.top, 40)
         }
@@ -1463,7 +1470,7 @@ struct AttachmentPreviewSheet: View {
         if isLoadingPreview {
             VStack {
                 Spacer()
-                ProgressView("Loading preview…")
+                ProgressView("正在加载预览…")
                     .foregroundStyle(theme.textSecondary)
                 Spacer()
             }
@@ -1481,9 +1488,9 @@ struct AttachmentPreviewSheet: View {
             }
         } else {
             ContentUnavailableView(
-                "Preview Unavailable",
+                "无法预览",
                 systemImage: "eye.slash",
-                description: Text("A preview is not available for this file type.")
+                description: Text("这种文件类型暂不支持预览。")
             )
             .padding(.top, 40)
         }

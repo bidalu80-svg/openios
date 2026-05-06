@@ -120,6 +120,7 @@ struct MainChatView: View {
     @AppStorage("desktopPetOffsetY") private var desktopPetOffsetY = 0.0
     @State private var desktopPetExpanded = false
     @State private var desktopPetDragOffset: CGSize = .zero
+    @State private var desktopPetIsDragging = false
 
     /// Rename conversation state.
     @State private var renamingConversation: Conversation?
@@ -420,6 +421,14 @@ struct MainChatView: View {
                     }
             )
             } // end if isTerminalActiveInCurrentChat
+
+            if desktopPetEnabled && desktopPetExpanded && activeChannelId == nil && drawerFraction < 0.01 && fileBrowserFraction < 0.01 {
+                Color.clear
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { collapseDesktopPet() }
+                    .zIndex(19)
+            }
 
             if desktopPetEnabled && activeChannelId == nil && drawerFraction < 0.01 && fileBrowserFraction < 0.01 {
                 desktopPetOverlay
@@ -1237,67 +1246,102 @@ struct MainChatView: View {
     }
 
     private var desktopPetOverlay: some View {
-        VStack(alignment: .trailing, spacing: 10) {
-            if desktopPetExpanded {
-                VStack(alignment: .trailing, spacing: 8) {
-                    desktopPetAction(title: "网页", icon: "globe") {
-                        postPetQuickAction(.openUIWebChat)
-                    }
-                    desktopPetAction(title: "摄像头", icon: "camera.fill") {
-                        postPetQuickAction(.openUICameraChat)
-                    }
-                    desktopPetAction(title: "照片", icon: "photo.fill") {
-                        postPetQuickAction(.openUIPhotosChat)
-                    }
-                    desktopPetAction(title: "文件", icon: "doc.fill") {
-                        postPetQuickAction(.openUIFileChat)
-                    }
-                    desktopPetAction(title: "新对话", icon: "square.and.pencil") {
-                        startNewChat()
-                        collapseDesktopPet()
-                    }
-                }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+        VStack(alignment: .trailing, spacing: 8) {
+            if desktopPetExpanded && desktopPetShouldExpandDown {
+                desktopPetActions
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            Button {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
-                    desktopPetExpanded.toggle()
-                }
-                Haptics.play(.light)
-            } label: {
-                ZStack {
-                    Circle()
-                        .fill(theme.cardBackground.opacity(0.96))
-                    Circle()
-                        .strokeBorder(theme.brandPrimary.opacity(0.18), lineWidth: 1)
-                    Image("AppIconImage")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 38, height: 38)
-                }
-                .frame(width: 58, height: 58)
-                .shadow(color: .black.opacity(theme.isDark ? 0.35 : 0.12), radius: 14, y: 6)
+            desktopPetButton
+
+            if desktopPetExpanded && !desktopPetShouldExpandDown {
+                desktopPetActions
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("桌面宠物")
         }
-        .gesture(
-            DragGesture(minimumDistance: 8)
+    }
+
+    private var desktopPetShouldExpandDown: Bool {
+        currentDesktopPetOffset.height < -240
+    }
+
+    private var desktopPetActions: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            desktopPetAction(title: "网页", icon: "globe") {
+                postPetQuickAction(.openUIWebChat)
+            }
+            desktopPetAction(title: "摄像头", icon: "camera.fill") {
+                postPetQuickAction(.openUICameraChat)
+            }
+            desktopPetAction(title: "照片", icon: "photo.fill") {
+                postPetQuickAction(.openUIPhotosChat)
+            }
+            desktopPetAction(title: "文件", icon: "doc.fill") {
+                postPetQuickAction(.openUIFileChat)
+            }
+            desktopPetAction(title: "新对话", icon: "square.and.pencil") {
+                startNewChat()
+                collapseDesktopPet()
+            }
+            desktopPetAction(title: "清空对话", icon: "trash") {
+                clearCurrentChatFromPet()
+            }
+        }
+    }
+
+    private var desktopPetButton: some View {
+        ZStack {
+            Circle()
+                .fill(.ultraThinMaterial)
+                .frame(width: 48, height: 48)
+            Circle()
+                .fill(theme.cardBackground.opacity(theme.isDark ? 0.92 : 0.98))
+                .frame(width: 40, height: 40)
+            Circle()
+                .strokeBorder(theme.brandPrimary.opacity(desktopPetExpanded ? 0.36 : 0.18), lineWidth: 1)
+                .frame(width: 48, height: 48)
+            Image("AppIconImage")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 28, height: 28)
+                .clipShape(Circle())
+        }
+        .contentShape(Circle())
+        .shadow(color: .black.opacity(theme.isDark ? 0.32 : 0.12), radius: 12, y: 5)
+        .scaleEffect(desktopPetIsDragging ? 1.04 : 1)
+        .accessibilityLabel("桌面宠物")
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { value in
                     desktopPetDragOffset = value.translation
+                    desktopPetIsDragging = abs(value.translation.width) > 3 || abs(value.translation.height) > 3
+                    if desktopPetIsDragging && desktopPetExpanded {
+                        withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
+                            desktopPetExpanded = false
+                        }
+                    }
                 }
                 .onEnded { value in
-                    let stored = CGSize(width: desktopPetOffsetX, height: desktopPetOffsetY)
-                    let proposed = CGSize(
-                        width: stored.width + value.translation.width,
-                        height: stored.height + value.translation.height
-                    )
-                    let bounded = boundedDesktopPetOffset(proposed)
-                    desktopPetOffsetX = Double(bounded.width)
-                    desktopPetOffsetY = Double(bounded.height)
+                    let translation = value.translation
+                    let didDrag = abs(translation.width) > 6 || abs(translation.height) > 6
+                    if didDrag {
+                        let stored = CGSize(width: desktopPetOffsetX, height: desktopPetOffsetY)
+                        let proposed = CGSize(
+                            width: stored.width + translation.width,
+                            height: stored.height + translation.height
+                        )
+                        let bounded = boundedDesktopPetOffset(proposed)
+                        desktopPetOffsetX = Double(bounded.width)
+                        desktopPetOffsetY = Double(bounded.height)
+                        Haptics.play(.light)
+                    } else {
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                            desktopPetExpanded.toggle()
+                        }
+                        Haptics.play(.light)
+                    }
                     desktopPetDragOffset = .zero
-                    Haptics.play(.light)
+                    desktopPetIsDragging = false
                 }
         )
     }
@@ -1351,12 +1395,14 @@ struct MainChatView: View {
     }
 
     private func boundedDesktopPetOffset(_ proposed: CGSize) -> CGSize {
-        let maxLeft = -max(0, containerWidth - 94)
+        let petSize: CGFloat = 48
+        let horizontalMargin: CGFloat = 18
+        let maxLeft = -max(0, containerWidth - petSize - horizontalMargin * 2)
         let maxRight: CGFloat = 10
         let screenHeight = UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.screen.bounds.height }
             .first ?? 820
-        let maxUp = -max(0, screenHeight - 210)
+        let maxUp = -max(0, screenHeight - petSize - 150)
         let maxDown: CGFloat = 10
 
         return CGSize(
@@ -1391,6 +1437,23 @@ struct MainChatView: View {
         closeFileBrowserAnimated()
         terminalBrowserVM.reset()
         Haptics.play(.light)
+    }
+
+    private func clearCurrentChatFromPet() {
+        collapseDesktopPet()
+        if let conversationId = activeConversationId {
+            dependencies.activeChatStore.remove(conversationId)
+        } else {
+            dependencies.activeChatStore.remove(nil)
+        }
+        activeConversationId = nil
+        activeChannelId = nil
+        activeFolderWorkspaceId = nil
+        newChatGeneration += 1
+        closeFileBrowserAnimated()
+        terminalBrowserVM.reset()
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        Haptics.play(.medium)
     }
 
     // MARK: - Chat Content

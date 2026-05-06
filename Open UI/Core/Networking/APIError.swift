@@ -47,40 +47,40 @@ enum APIError: LocalizedError, Sendable {
             return Self.friendlyHTTPMessage(statusCode: statusCode, serverMessage: message)
 
         case .requestEncoding:
-            return "Something went wrong preparing your request. Please try again."
+            return "请求准备失败，请重试。"
 
         case .responseDecoding:
-            return "The server sent an unexpected response. Please try again."
+            return "服务器返回了无法识别的响应，请重试。"
 
         case .invalidURL:
-            return "The server URL is invalid. Please check your settings."
+            return "站点 URL 无效，请检查设置。"
 
         case .unauthorized:
-            return "You need to sign in to continue."
+            return "请先登录后继续。"
 
         case .tokenExpired:
-            return "Your session has expired. Please sign in again."
+            return "登录已过期，请重新登录。"
 
         case .proxyAuthRequired:
-            return "Your network requires authentication. Please sign in through your network proxy first."
+            return "当前网络需要代理认证，请先完成网络登录。"
 
         case .networkError(let error):
             return Self.friendlyNetworkMessage(error)
 
         case .sslError:
-            return "Couldn't establish a secure connection. If you're using a private server, enable self-signed certificates in Settings."
+            return "无法建立安全连接。如果是私有站点，请在设置中允许自签名证书。"
 
         case .streamError:
-            return "The response was interrupted. Please try again."
+            return "回复被中断，请重试。"
 
         case .redirectDetected:
-            return "The server is redirecting requests. Please check your server URL in Settings."
+            return "站点正在重定向请求，请检查站点 URL。"
 
         case .cancelled:
-            return "Request was cancelled."
+            return "请求已取消。"
 
         case .unknown:
-            return "Something went wrong. Please try again."
+            return "发生未知错误，请重试。"
         }
     }
 
@@ -113,35 +113,37 @@ enum APIError: LocalizedError, Sendable {
         switch statusCode {
         case 400:
             // Server 400 "detail" messages are typically user-facing (e.g. "Email already registered")
-            return serverMessage ?? "The request was invalid. Please check your input and try again."
+            return serverMessage ?? "请求无效，请检查输入后重试。"
         case 401:
-            return "Your session has expired. Please sign in again."
+            return "登录已过期，请重新登录。"
         case 403:
-            return serverMessage ?? "You don't have permission to do this."
+            return serverMessage ?? "你没有权限执行此操作。"
         case 404:
-            return "The requested item could not be found."
+            return "找不到请求的内容。"
+        case 405:
+            return "当前站点不支持这个请求方式。"
         case 409:
-            return serverMessage ?? "This conflicts with an existing item. Please use a different name or ID."
+            return serverMessage ?? "与现有内容冲突，请换一个名称或 ID。"
         case 413:
-            return "The file is too large. Please try a smaller file."
+            return "文件太大，请换一个更小的文件。"
         case 422:
-            return serverMessage ?? "Some of the information provided is invalid. Please check and try again."
+            return serverMessage ?? "部分信息无效，请检查后重试。"
         case 429:
-            return "Too many requests. Please wait a moment and try again."
+            return "请求过多，请稍等后重试。"
         case 500:
-            return "The server ran into a problem. Please try again later."
+            return "服务器出错了，请稍后重试。"
         case 502:
-            return "The server is temporarily unavailable. Please try again in a moment."
+            return "服务器暂时不可用，请稍后重试。"
         case 503:
-            return "The server is undergoing maintenance. Please try again later."
+            return "服务器正在维护，请稍后重试。"
         case 504:
-            return "The server took too long to respond. Please try again."
+            return "服务器响应超时，请重试。"
         default:
             if statusCode >= 500 {
-                return "The server encountered an error (\(statusCode)). Please try again later."
+                return "服务器出错（\(statusCode)），请稍后重试。"
             }
             // For other 4xx, show server message if available, otherwise generic
-            return serverMessage ?? "Request failed (\(statusCode)). Please try again."
+            return serverMessage ?? "请求失败（\(statusCode)），请重试。"
         }
     }
 
@@ -150,26 +152,26 @@ enum APIError: LocalizedError, Sendable {
         if let urlError = error as? URLError {
             switch urlError.code {
             case .notConnectedToInternet:
-                return "You're offline. Check your internet connection and try again."
+                return "当前离线，请检查网络后重试。"
             case .timedOut:
-                return "The request timed out. Please check your connection and try again."
+                return "请求超时，请检查网络后重试。"
             case .cannotFindHost:
-                return "Couldn't find the server. Please check your server URL."
+                return "找不到站点，请检查 URL。"
             case .cannotConnectToHost:
-                return "Couldn't connect to the server. Make sure it's running and reachable."
+                return "无法连接站点，请确认服务可访问。"
             case .networkConnectionLost:
-                return "Your connection was interrupted. Please try again."
+                return "连接被中断，请保持 Iexa 在前台或稍后重试。"
             case .dnsLookupFailed:
-                return "Couldn't look up the server address. Please check your server URL."
+                return "无法解析站点地址，请检查 URL。"
             case .internationalRoamingOff:
-                return "International roaming is off. Enable it in Settings to use data abroad."
+                return "国际漫游已关闭，请在系统设置中开启。"
             case .dataNotAllowed:
-                return "Cellular data is turned off. Enable it in Settings or connect to Wi-Fi."
+                return "蜂窝数据已关闭，请开启数据或连接 Wi-Fi。"
             default:
-                return "A network error occurred. Please check your connection and try again."
+                return "网络错误，请检查连接后重试。"
             }
         }
-        return "A network error occurred. Please check your connection and try again."
+        return "网络错误，请检查连接后重试。"
     }
 
     /// Whether this error indicates the user should re-authenticate.

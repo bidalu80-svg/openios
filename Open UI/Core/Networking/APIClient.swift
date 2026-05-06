@@ -433,7 +433,79 @@ final class APIClient: @unchecked Sendable {
             underlying: NSError(
                 domain: "APIClient",
                 code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Image generation returned no image URL."]
+                userInfo: [NSLocalizedDescriptionKey: "图片生成接口没有返回图片地址。"]
+            ),
+            data: Data()
+        )
+    }
+
+    func generateVideo(
+        prompt: String,
+        model: String,
+        size: String = "1024x1024",
+        duration: Int? = nil,
+        imageData: Data? = nil,
+        imageFileName: String = "image.png"
+    ) async throws -> String {
+        var body: [String: Any] = [
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            "size": size
+        ]
+        if let duration {
+            body["duration"] = duration
+        }
+
+        let bodyVariants: [[String: Any]] = {
+            guard let imageData else { return [body] }
+            let dataURL = "data:\(mimeType(for: imageFileName));base64,\(imageData.base64EncodedString())"
+            return [
+                body.merging(["image": dataURL]) { _, new in new },
+                body.merging(["image_url": dataURL]) { _, new in new },
+                body.merging(["input_image": dataURL]) { _, new in new },
+                body.merging(["images": [dataURL]]) { _, new in new },
+                body
+            ]
+        }()
+
+        let paths = [
+            "/videos/generations",
+            "/video/generations",
+            "/videos/generate",
+            "/video/generate"
+        ]
+        var lastError: Error?
+        for path in paths {
+            for requestBody in bodyVariants {
+                do {
+                    let json = try await network.requestJSON(
+                        path: path,
+                        method: .post,
+                        body: requestBody,
+                        timeout: 600
+                    )
+
+                    if let videoReference = firstVideoReference(in: json) {
+                        return videoReference
+                    }
+                } catch {
+                    lastError = error
+                    let apiError = APIError.from(error)
+                    if case .httpError(let statusCode, _, _) = apiError,
+                       [400, 404, 405, 422].contains(statusCode) {
+                        continue
+                    }
+                    throw error
+                }
+            }
+        }
+
+        throw APIError.responseDecoding(
+            underlying: NSError(
+                domain: "APIClient",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: lastError?.localizedDescription ?? "视频生成接口没有返回视频地址。"]
             ),
             data: Data()
         )
@@ -469,7 +541,7 @@ final class APIClient: @unchecked Sendable {
             underlying: NSError(
                 domain: "APIClient",
                 code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Image edit returned no image URL."]
+                userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
             ),
             data: Data()
         )
@@ -514,8 +586,56 @@ final class APIClient: @unchecked Sendable {
         return nil
     }
 
+    private func firstVideoReference(in value: Any?) -> String? {
+        guard let value else { return nil }
+
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") || trimmed.hasPrefix("data:video/") {
+                return trimmed
+            }
+            if looksLikeBase64Media(trimmed) {
+                return "data:video/mp4;base64,\(trimmed)"
+            }
+            return nil
+        }
+
+        if let dict = value as? [String: Any] {
+            for key in [
+                "url", "video_url", "video", "b64_json", "base64",
+                "file_url", "download_url", "output_url"
+            ] {
+                if let reference = firstVideoReference(in: dict[key]) {
+                    return reference
+                }
+            }
+            for key in ["data", "output", "videos", "content", "result", "results"] {
+                if let reference = firstVideoReference(in: dict[key]) {
+                    return reference
+                }
+            }
+            return nil
+        }
+
+        if let array = value as? [Any] {
+            for item in array {
+                if let reference = firstVideoReference(in: item) {
+                    return reference
+                }
+            }
+        }
+
+        return nil
+    }
+
     private func looksLikeBase64Image(_ string: String) -> Bool {
         guard string.count > 128, !string.contains(" ") else { return false }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
+        return string.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private func looksLikeBase64Media(_ string: String) -> Bool {
+        guard string.count > 256, !string.contains(" ") else { return false }
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
         return string.unicodeScalars.allSatisfy { allowed.contains($0) }
     }

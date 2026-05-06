@@ -203,8 +203,8 @@ struct ToolsMenuSheet: View {
     private var webSearchToggle: some View {
         featureToggleTile(
             icon: "magnifyingglass",
-            title: String(localized: "Web Search"),
-            subtitle: String(localized: "Search the web and cite sources in replies"),
+            title: "网页搜索",
+            subtitle: "联网搜索并在回复中引用来源",
             isOn: $webSearchEnabled
         )
     }
@@ -212,8 +212,8 @@ struct ToolsMenuSheet: View {
     private var imageGenerationToggle: some View {
         featureToggleTile(
             icon: "photo.badge.plus",
-            title: String(localized: "Image Generation"),
-            subtitle: String(localized: "Generate images from text descriptions"),
+            title: "图像生成",
+            subtitle: "根据文字描述生成图片",
             isOn: $imageGenerationEnabled
         )
     }
@@ -221,8 +221,8 @@ struct ToolsMenuSheet: View {
     private var codeInterpreterToggle: some View {
         featureToggleTile(
             icon: "chevron.left.forwardslash.chevron.right",
-            title: String(localized: "Code Interpreter"),
-            subtitle: String(localized: "Execute code and analyze data inline"),
+            title: "代码解释器",
+            subtitle: "内联运行代码并分析数据",
             isOn: $codeInterpreterEnabled
         )
     }
@@ -281,7 +281,7 @@ struct ToolsMenuSheet: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
-        .accessibilityValue(isOn.wrappedValue ? "On" : "Off")
+        .accessibilityValue(isOn.wrappedValue ? "已开启" : "已关闭")
         .accessibilityAddTraits(.isToggle)
     }
 
@@ -323,7 +323,7 @@ struct ToolsMenuSheet: View {
 
     private var builtinToolsSection: some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
-            Text("Built-in Tools")
+            Text("内置工具")
                 .scaledFont(size: 11, weight: .semibold)
                 .textCase(.uppercase)
                 .foregroundStyle(theme.textTertiary)
@@ -388,7 +388,7 @@ struct ToolsMenuSheet: View {
                             .strokeBorder(theme.cardBorder.opacity(0.6), lineWidth: 0.5)
                     )
                 } else if tools.isEmpty {
-                    infoCard(message: "暂无可用工具")
+                    localCapabilitiesSection
                 } else {
                     ForEach(tools) { tool in
                         toolTile(tool: tool)
@@ -451,11 +451,61 @@ struct ToolsMenuSheet: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(tool.name)
-        .accessibilityValue(isSelected ? "Enabled" : "Disabled")
+        .accessibilityValue(isSelected ? "已开启" : "已关闭")
         .accessibilityAddTraits(.isToggle)
     }
 
     // MARK: - Shared Sub-Views
+
+    private var localCapabilitiesSection: some View {
+        VStack(spacing: Spacing.xs) {
+            localCapabilityRow(
+                icon: "folder.badge.gearshape",
+                title: "本地工作区",
+                subtitle: "可在应用文档内创建、读取、写入和删除文件"
+            )
+            localCapabilityRow(
+                icon: "play.rectangle",
+                title: "代码预览与运行",
+                subtitle: "支持 HTML、SVG、Python 等代码块预览或运行"
+            )
+            localCapabilityRow(
+                icon: "doc.text.magnifyingglass",
+                title: "文件理解",
+                subtitle: "图片、PDF、文档和二进制文件都可作为上下文"
+            )
+            localCapabilityRow(
+                icon: "link",
+                title: "网页上下文",
+                subtitle: "可把网页链接发送给模型分析"
+            )
+        }
+    }
+
+    private func localCapabilityRow(icon: String, title: String, subtitle: String) -> some View {
+        HStack(spacing: Spacing.sm) {
+            toolGlyph(systemImage: icon, isSelected: false)
+
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text(title)
+                    .scaledFont(size: 14, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                Text(subtitle)
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+        }
+        .padding(Spacing.sm)
+        .background(theme.surfaceContainer.opacity(theme.isDark ? 0.32 : 0.12))
+        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.input, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: CornerRadius.input, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(0.55), lineWidth: 0.5)
+        )
+    }
 
     private func toolGlyph(systemImage: String, isSelected: Bool) -> some View {
         let accentStart = theme.brandPrimary.opacity(

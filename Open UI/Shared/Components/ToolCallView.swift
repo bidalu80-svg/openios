@@ -439,9 +439,9 @@ enum ToolCallParser {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
             if let dur = duration {
-                return "Thought for \(dur) seconds"
+                return "思考了 \(dur) 秒"
             }
-            return "Reasoning"
+            return "思考"
         }()
 
         // Extract content between </summary> and </details>.
@@ -666,7 +666,7 @@ enum ToolCallParser {
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     let replacement = """
                     <details type="reasoning" done="true">\
-                    <summary>Thinking</summary>\
+                    <summary>思考</summary>\
                     \(thinkContent)\
                     </details>
                     """
@@ -688,7 +688,7 @@ enum ToolCallParser {
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                         let replacement = """
                         <details type="reasoning" done="false">\
-                        <summary>Thinking</summary>\
+                        <summary>思考</summary>\
                         \(thinkContent)\
                         </details>
                         """
@@ -726,7 +726,7 @@ enum ToolCallParser {
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     let replacement = """
                     <details type="reasoning" done="true">\
-                    <summary>Thinking</summary>\
+                    <summary>思考</summary>\
                     \(thinkContent)\
                     </details>
                     """
@@ -747,7 +747,7 @@ enum ToolCallParser {
                             .trimmingCharacters(in: .whitespacesAndNewlines)
                         let replacement = """
                         <details type="reasoning" done="false">\
-                        <summary>Thinking</summary>\
+                        <summary>思考</summary>\
                         \(thinkContent)\
                         </details>
                         """
@@ -819,7 +819,7 @@ enum ToolCallParser {
                         let innerContent = nsResult.substring(with: match.range(at: 2))
 
                         // Extract summary if present, strip it from content
-                        var summary = "Thinking..."
+                        var summary = "思考中..."
                         var bodyContent = innerContent
                         if let summaryRegex = cachedRegex(#"<summary>([\s\S]*?)</summary>"#,
                             options: [.dotMatchesLineSeparators]) {
@@ -844,7 +844,7 @@ enum ToolCallParser {
                                     ), psMatch.numberOfRanges > 1 {
                                         summary = nsInner2.substring(with: psMatch.range(at: 1))
                                             .trimmingCharacters(in: .whitespacesAndNewlines)
-                                        if summary.isEmpty { summary = "Thinking..." }
+                                        if summary.isEmpty { summary = "思考中..." }
                                         bodyContent = (bodyContent as NSString)
                                             .replacingCharacters(in: psMatch.range, with: "")
                                             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -925,7 +925,7 @@ enum ToolCallParser {
                         // (Qwen no-opener pattern)
                         let replacement = """
                         <details type="reasoning" done="true">\
-                        <summary>Thinking</summary>\
+                        <summary>思考</summary>\
                         \(beforeContent)\
                         </details>
                         """
@@ -2694,7 +2694,9 @@ struct AssistantMessageContent: View {
                             // No inline images — render normally
                             MarkdownWithLoading(
                                 content: effectiveStr,
-                                isLoading: isLastText
+                                isLoading: isLastText,
+                                authToken: authToken,
+                                serverBaseURL: serverBaseURL
                             )
                         } else {
                             // Interleave text and images
@@ -2705,13 +2707,22 @@ struct AssistantMessageContent: View {
                                     if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                         MarkdownWithLoading(
                                             content: text,
-                                            isLoading: isLast
+                                            isLoading: isLast,
+                                            authToken: authToken,
+                                            serverBaseURL: serverBaseURL
                                         )
                                     }
-                                case .image(let fileId, _):
+                                case .image(let fileId, let altText):
                                     if let apiClient {
                                         AuthenticatedImageView(fileId: fileId, apiClient: apiClient)
                                             .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                                    } else {
+                                        MarkdownWithLoading(
+                                            content: "![\(altText)](\(fileId))",
+                                            isLoading: false,
+                                            authToken: authToken,
+                                            serverBaseURL: serverBaseURL
+                                        )
                                     }
                                 }
                             }
@@ -2814,7 +2825,7 @@ struct AssistantMessageContent: View {
     /// Segments produced by splitting markdown content at `![alt](url)` boundaries.
     enum InlineImageSegment {
         case text(String)
-        /// An inline image with the extracted file ID and alt text.
+    /// An inline image with either an extracted file ID or a resolved image URL.
         case image(fileId: String, altText: String)
     }
 
@@ -2827,7 +2838,7 @@ struct AssistantMessageContent: View {
     static func splitInlineImages(_ text: String) -> [InlineImageSegment] {
         // Match ![alt text](url) where url contains /api/v1/files/{uuid}/content
         // The URL may be relative (/api/...) or absolute (https://host/api/...)
-        let pattern = #"!\[([^\]]*)\]\(((?:https?://[^\s\)]+)?/api/v1/files/([a-f0-9\-]{36})/content)\)"#
+        let pattern = #"!\[([^\]]*)\]\(((?:https?://[^\s\)]+)?/api/(?:v1/)?files/([^/\)\s]+)/content|https?://[^\s\)]+|data:image/[^)\s]+)\)"#
         guard let regex = ToolCallParser.cachedRegex(pattern, options: []) else {
             return [.text(text)]
         }
@@ -2849,11 +2860,15 @@ struct AssistantMessageContent: View {
                 }
             }
 
-            // Extract the file ID (capture group 3)
+            // Extract the file ID when present; otherwise keep the full image URL.
             if match.numberOfRanges > 3 {
                 let altText = nsText.substring(with: match.range(at: 1))
-                let fileId = nsText.substring(with: match.range(at: 3))
-                segments.append(.image(fileId: fileId, altText: altText))
+                let rawURL = nsText.substring(with: match.range(at: 2))
+                let fileIdRange = match.range(at: 3)
+                let reference = fileIdRange.location != NSNotFound
+                    ? nsText.substring(with: fileIdRange)
+                    : rawURL
+                segments.append(.image(fileId: reference, altText: altText))
             }
 
             currentIndex = match.range.location + match.range.length

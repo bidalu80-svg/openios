@@ -33,6 +33,8 @@ struct StreamingMarkdownView: View {
     let content: String
     let isStreaming: Bool
     let textColor: SwiftUI.Color?
+    let authToken: String?
+    let serverBaseURL: String?
 
     @Environment(\.accessibilityScale) private var accessibilityScale
 
@@ -40,10 +42,18 @@ struct StreamingMarkdownView: View {
     /// We scale relative to this so the user's content text scale applies correctly.
     private static let baseBodyFontSize: CGFloat = UIFont.preferredFont(forTextStyle: .body).pointSize
 
-    init(content: String, isStreaming: Bool, textColor: SwiftUI.Color? = nil) {
+    init(
+        content: String,
+        isStreaming: Bool,
+        textColor: SwiftUI.Color? = nil,
+        authToken: String? = nil,
+        serverBaseURL: String? = nil
+    ) {
         self.content = content
         self.isStreaming = isStreaming
         self.textColor = textColor
+        self.authToken = authToken
+        self.serverBaseURL = serverBaseURL
     }
 
     /// Returns a MarkdownTheme with fonts scaled by the user's accessibility content scale,
@@ -266,7 +276,13 @@ struct StreamingMarkdownView: View {
         case .python(let code):
             PythonCodeBlockView(code: code)
         case .markdownImage(let imageURL, let altText, let linkURL):
-            MarkdownInlineImageView(imageURL: imageURL, altText: altText, linkURL: linkURL)
+            MarkdownInlineImageView(
+                imageURL: imageURL,
+                altText: altText,
+                linkURL: linkURL,
+                authToken: authToken,
+                serverBaseURL: serverBaseURL
+            )
         case .visualization(let html):
             // Pass isStreaming only while the VIZ block itself is still open.
             // Once \n@@@VIZ-END has arrived in the content the visualization is
@@ -677,11 +693,18 @@ private struct MarkdownInlineImageView: View {
     let imageURL: URL
     let altText: String
     let linkURL: URL?
+    let authToken: String?
+    let serverBaseURL: String?
 
     @Environment(\.theme) private var theme
     @Environment(\.openURL) private var openURL
     @State private var loadedUIImage: UIImage?
+    @State private var isLoading = false
+    @State private var didFailToLoad = false
+    @State private var retryTrigger = 0
     @State private var saveState: SaveState = .idle
+
+    private static let maxAutoRetries = 4
 
     private enum SaveState {
         case idle
@@ -725,6 +748,14 @@ private struct MarkdownInlineImageView: View {
         }
         .accessibilityLabel(altText.isEmpty ? "图片" : altText)
         .accessibilityAddTraits(.isImage)
+        .task(id: "\(imageURL.absoluteString)-\(retryTrigger)") {
+            await loadRemoteImageIfNeeded()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            if loadedUIImage == nil {
+                retryTrigger += 1
+            }
+        }
     }
 
     @ViewBuilder
@@ -737,41 +768,56 @@ private struct MarkdownInlineImageView: View {
                 .frame(maxWidth: .infinity, maxHeight: 300, alignment: .leading)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .onAppear { loadedUIImage = image }
-        } else {
-            CachedAsyncImage(url: imageURL) { image in
-                image
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: 300, alignment: .leading)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-            } placeholder: {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(theme.surfaceContainer.opacity(0.5))
-                    .frame(height: 160)
-                    .overlay {
-                        VStack(spacing: 6) {
-                            ProgressView()
-                            if !altText.isEmpty {
-                                Text(altText)
-                                    .scaledFont(size: 12)
-                                    .foregroundStyle(theme.textTertiary)
-                                    .lineLimit(1)
-                            }
-                        }
-                    }
-            }
-            .task(id: imageURL) {
-                loadedUIImage = await ImageCacheService.shared.loadImage(from: imageURL)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if let linkURL {
-                    openURL(linkURL)
-                } else {
-                    openURL(imageURL)
+        } else if let loadedUIImage {
+            Image(uiImage: loadedUIImage)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: .infinity, maxHeight: 300, alignment: .leading)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    openURL(linkURL ?? imageURL)
+                }
+                .accessibilityAddTraits(.isLink)
+        } else if didFailToLoad {
+            VStack(spacing: 8) {
+                Image(systemName: "arrow.clockwise.circle")
+                    .scaledFont(size: 28, weight: .medium)
+                    .foregroundStyle(theme.brandPrimary.opacity(0.78))
+                Text("点击重试")
+                    .scaledFont(size: 13, weight: .semibold)
+                    .foregroundStyle(theme.textSecondary)
+                if !altText.isEmpty {
+                    Text(altText)
+                        .scaledFont(size: 12)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(1)
                 }
             }
-            .accessibilityAddTraits(.isLink)
+            .frame(maxWidth: .infinity)
+            .frame(height: 160)
+            .background(theme.surfaceContainer.opacity(0.5))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .onTapGesture {
+                didFailToLoad = false
+                retryTrigger += 1
+            }
+        } else {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(theme.surfaceContainer.opacity(0.5))
+                .frame(height: 160)
+                .overlay {
+                    VStack(spacing: 6) {
+                        ProgressView()
+                            .tint(theme.brandPrimary)
+                        if !altText.isEmpty {
+                            Text(altText)
+                                .scaledFont(size: 12)
+                                .foregroundStyle(theme.textTertiary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
         }
     }
 
@@ -797,6 +843,40 @@ private struct MarkdownInlineImageView: View {
         let encoded = String(dataURI[dataURI.index(after: comma)...])
         guard let data = Data(base64Encoded: encoded) else { return nil }
         return UIImage(data: data)
+    }
+
+    @MainActor
+    private func loadRemoteImageIfNeeded() async {
+        guard imageURL.scheme != "data" else { return }
+        isLoading = true
+        didFailToLoad = false
+
+        let token = authTokenForImageURL()
+        for attempt in 0..<Self.maxAutoRetries {
+            guard !Task.isCancelled else { return }
+            if let image = await ImageCacheService.shared.loadImage(from: imageURL, authToken: token) {
+                loadedUIImage = image
+                isLoading = false
+                didFailToLoad = false
+                return
+            }
+            if attempt < Self.maxAutoRetries - 1 {
+                let seconds = min(6.0, pow(1.8, Double(attempt)))
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            }
+        }
+
+        isLoading = false
+        didFailToLoad = true
+    }
+
+    private func authTokenForImageURL() -> String? {
+        guard let authToken, !authToken.isEmpty else { return nil }
+        guard let serverBaseURL,
+              let base = URL(string: serverBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))),
+              let imageHost = imageURL.host?.lowercased(),
+              let baseHost = base.host?.lowercased() else { return nil }
+        return imageHost == baseHost ? authToken : nil
     }
 
     @MainActor
@@ -868,13 +948,20 @@ struct FullCodeView: View {
 struct MarkdownWithLoading: View {
     let content: String?
     let isLoading: Bool
+    var authToken: String? = nil
+    var serverBaseURL: String? = nil
 
     var body: some View {
         let text = content ?? ""
         if isLoading && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             TypingIndicator()
         } else {
-            StreamingMarkdownView(content: text, isStreaming: isLoading)
+            StreamingMarkdownView(
+                content: text,
+                isStreaming: isLoading,
+                authToken: authToken,
+                serverBaseURL: serverBaseURL
+            )
         }
     }
 }

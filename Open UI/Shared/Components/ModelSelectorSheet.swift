@@ -141,7 +141,7 @@ struct ModelSelectorSheet: View {
 
             // Title + count
             HStack(spacing: 6) {
-                Text("Models")
+                Text("模型")
                     .scaledFont(size: 17, weight: .semibold)
                     .foregroundStyle(theme.textPrimary)
                 if !models.isEmpty {
@@ -162,7 +162,7 @@ struct ModelSelectorSheet: View {
             // Done button
             HStack {
                 Spacer()
-                Button("Done") { dismiss() }
+                Button("完成") { dismiss() }
                     .scaledFont(size: 17, weight: .semibold)
                     .foregroundStyle(theme.brandPrimary)
                     .padding(.trailing, 20)
@@ -180,7 +180,7 @@ struct ModelSelectorSheet: View {
                 .scaledFont(size: 14)
                 .foregroundStyle(theme.textTertiary)
 
-            TextField("Search\u{2026}", text: $searchText)
+            TextField("搜索模型…", text: $searchText)
                 .scaledFont(size: 15)
                 .foregroundStyle(theme.textPrimary)
                 .tint(theme.brandPrimary)
@@ -216,7 +216,7 @@ struct ModelSelectorSheet: View {
     private var filterPillsRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                filterPill(label: "All",
+                filterPill(label: "全部",
                            isSelected: selectedTag == nil && selectedConnection == nil,
                            systemIcon: nil) {
                     withAnimation(.easeInOut(duration: 0.15)) {
@@ -327,21 +327,21 @@ struct ModelSelectorSheet: View {
             List {
                 // ── CURRENTLY SELECTED ──
                 if let current = currentModel {
-                    Section { modelRow(current) } header: { sectionHeader("Currently Selected") }
+                    Section { modelRow(current) } header: { sectionHeader("当前选中") }
                 }
 
                 // ── PINNED ──
                 if !pinnedModels.isEmpty {
                     Section {
                         ForEach(pinnedModels, id: \.id) { modelRow($0) }
-                    } header: { sectionHeader("Pinned") }
+                    } header: { sectionHeader("已置顶") }
                 }
 
                 // ── ALL MODELS ──
                 if !remainingModels.isEmpty {
                     Section {
                         ForEach(remainingModels, id: \.id) { modelRow($0) }
-                    } header: { sectionHeader("All Models") }
+                    } header: { sectionHeader("全部模型") }
                 }
             }
             .listStyle(.plain)
@@ -470,7 +470,7 @@ struct ModelSelectorSheet: View {
     private var loadingState: some View {
         VStack(spacing: 10) {
             ProgressView().tint(theme.brandPrimary)
-            Text("Loading models\u{2026}")
+            Text("正在加载模型…")
                 .scaledFont(size: 14)
                 .foregroundStyle(theme.textTertiary)
         }
@@ -483,7 +483,7 @@ struct ModelSelectorSheet: View {
             Image(systemName: "magnifyingglass")
                 .scaledFont(size: 28)
                 .foregroundStyle(theme.textTertiary)
-            Text(searchText.isEmpty ? "No models" : "No results for \u{201C}\(searchText)\u{201D}")
+            Text(searchText.isEmpty ? "暂无模型" : "没有找到“\(searchText)”")
                 .scaledFont(size: 15, weight: .medium)
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -491,7 +491,7 @@ struct ModelSelectorSheet: View {
                 Button {
                     withAnimation { selectedTag = nil; selectedConnection = nil }
                 } label: {
-                    Text("Clear filters")
+                    Text("清除筛选")
                         .scaledFont(size: 13)
                         .foregroundStyle(theme.brandPrimary)
                 }

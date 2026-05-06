@@ -18,6 +18,9 @@ extension Notification.Name {
     /// Posted when function config changes (toggle active/global in Admin, or model editor save).
     /// ChatViewModel observes this to re-resolve actions/filters for the current model immediately.
     static let functionsConfigChanged = Notification.Name("functionsConfigChanged")
+    /// Posted after a response completes so app-wide token counters can accumulate
+    /// across chats without resetting on new conversations.
+    static let chatTokenUsageDidAccumulate = Notification.Name("chatTokenUsageDidAccumulate")
 }
 
 /// Manages state and logic for a single chat conversation.
@@ -249,6 +252,7 @@ final class ChatViewModel {
     @ObservationIgnored nonisolated(unsafe) private var foregroundObserver: NSObjectProtocol?
     @ObservationIgnored nonisolated(unsafe) private var backgroundObserver: NSObjectProtocol?
     @ObservationIgnored nonisolated(unsafe) private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
+    @ObservationIgnored private var tokenUsageRecordedMessageIds: Set<String> = []
     /// Separate background task assertion for on-device ASR transcription.
     /// Independent from backgroundTaskId (which covers streaming completion).
     @ObservationIgnored nonisolated(unsafe) private var transcriptionBackgroundTaskId: UIBackgroundTaskIdentifier = .invalid
@@ -260,6 +264,21 @@ final class ChatViewModel {
 
     private var currentProviderType: ServerConfig.ProviderType? {
         manager?.providerType
+    }
+
+    @MainActor
+    private func beginStreamingBackgroundTaskIfNeeded() {
+        guard backgroundTaskId == .invalid else { return }
+        backgroundTaskId = UIApplication.shared.beginBackgroundTask { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let content = self.conversation?.messages.last(where: { $0.role == .assistant })?.content ?? ""
+                if !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    await self.sendCompletionNotificationIfNeeded(content: content)
+                }
+                self.endBackgroundTask()
+            }
+        }
     }
 
     /// Pending transcriptions that were interrupted when the app moved to the background
@@ -1685,7 +1704,11 @@ final class ChatViewModel {
             Task { @MainActor in
                 self.backgroundEnteredAt = Date()
                 guard self.isStreaming else { return }
-                self.startBackgroundCompletionPolling()
+                if !self.isOpenAICompatibleProvider {
+                    self.startBackgroundCompletionPolling()
+                } else {
+                    self.beginStreamingBackgroundTaskIfNeeded()
+                }
             }
         }
     }
@@ -1719,43 +1742,10 @@ final class ChatViewModel {
     /// iOS grants ~30s of background execution. If the generation completes within
     /// that window, we fire a local notification and adopt the server state.
     private func startBackgroundCompletionPolling() {
-        guard backgroundTaskId == .invalid else { return }
+        beginStreamingBackgroundTaskIfNeeded()
+        guard backgroundTaskId != .invalid else { return }
 
         let chatId = conversationId ?? conversation?.id
-
-        backgroundTaskId = UIApplication.shared.beginBackgroundTask { [weak self] in
-            guard let self else { return }
-            // Bug 1 fix: expiration handler — do one final check and fire a
-            // notification before iOS kills us, rather than silently giving up.
-            Task { @MainActor [weak self] in
-                guard let self, let chatId, let manager = self.manager else {
-                    self?.endBackgroundTask()
-                    return
-                }
-                if self.isStreaming {
-                    do {
-                        let refreshed = try await manager.fetchConversation(id: chatId)
-                        if let serverAssistant = refreshed.messages.last(where: { $0.role == .assistant }),
-                           !serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            self.logger.info("Background expiry: server completed, firing notification")
-                            self.adoptServerMessages(serverConversation: refreshed)
-                            await self.sendCompletionNotificationIfNeeded(content: serverAssistant.content)
-                            self.cleanupStreaming()
-                            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
-                        } else {
-                            // Still running — fire a "still processing" style notification
-                            // so the user at least knows the response is in-flight.
-                            self.logger.info("Background expiry: response still in progress, notifying user")
-                            let partialContent = self.conversation?.messages.last(where: { $0.role == .assistant })?.content ?? ""
-                            await self.sendCompletionNotificationIfNeeded(content: partialContent)
-                        }
-                    } catch {
-                        self.logger.warning("Background expiry check failed: \(error.localizedDescription)")
-                    }
-                }
-                self.endBackgroundTask()
-            }
-        }
 
         Task { @MainActor [weak self] in
             guard let self, let chatId, let manager = self.manager else {
@@ -1777,6 +1767,14 @@ final class ChatViewModel {
                        !serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         self.logger.info("Background poll: server completed (\(serverAssistant.content.count) chars)")
                         self.adoptServerMessages(serverConversation: refreshed)
+                        let lastUser = self.conversation?.messages.last(where: { $0.role == .user && !Self.isLocalWorkspaceAgentResult($0) })
+                        self.recordTokenUsageForCompletedTurn(
+                            assistantMessageId: serverAssistant.id,
+                            userText: lastUser?.content ?? "",
+                            assistantText: serverAssistant.content,
+                            userAttachments: [],
+                            usage: serverAssistant.usage
+                        )
                         await self.sendCompletionNotificationIfNeeded(content: serverAssistant.content)
                         self.cleanupStreaming()
                         self.endBackgroundTask()
@@ -1824,6 +1822,14 @@ final class ChatViewModel {
                 if let lastAssistantId = conversation?.messages.last(where: { $0.role == .assistant })?.id {
                     populateFilesFromToolResults(messageId: lastAssistantId)
                 }
+                let lastUser = conversation?.messages.last(where: { $0.role == .user && !Self.isLocalWorkspaceAgentResult($0) })
+                recordTokenUsageForCompletedTurn(
+                    assistantMessageId: serverAssistant.id,
+                    userText: lastUser?.content ?? "",
+                    assistantText: serverAssistant.content,
+                    userAttachments: [],
+                    usage: serverAssistant.usage
+                )
 
                 // Fix 3: Set bypass flag so the notification shows even if the
                 // user has already returned to this chat. The response completed
@@ -3177,6 +3183,7 @@ final class ChatViewModel {
         hasFinishedStreaming = false
         socketHasReceivedContent = false
         selfInitiatedStream = true
+        beginStreamingBackgroundTaskIfNeeded()
 
         // Activate the isolated streaming store so token updates bypass
         // conversation.messages and only invalidate the streaming message view.
@@ -3186,15 +3193,68 @@ final class ChatViewModel {
             streamingTask = Task { [weak self] in
                 guard let self else { return }
                 let acc = ContentAccumulator()
+                var exactUsage: [String: Any]?
 
                 do {
+                    if self.shouldUseDirectVideoGeneration(modelId: modelId) {
+                        let videoPrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !videoPrompt.isEmpty else {
+                            throw APIError.unknown(
+                                underlying: NSError(
+                                    domain: "ChatViewModel",
+                                    code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: "请输入视频生成提示词。"]
+                                )
+                            )
+                        }
+                        let requestedVideoSize = Self.requestedImageSize(from: videoPrompt)
+                        let videoSeedImage = self.firstEditableImage(from: currentAttachments)
+                        let videoReference = try await self.runMediaRequestWithRetry {
+                            try await manager.generateVideo(
+                                prompt: videoPrompt,
+                                model: modelId,
+                                size: requestedVideoSize,
+                                duration: Self.requestedVideoDuration(from: videoPrompt),
+                                imageData: videoSeedImage?.data,
+                                imageFileName: videoSeedImage?.fileName ?? "image.png"
+                            )
+                        }
+                        self.updateAssistantMessage(
+                            id: assistantMessageId,
+                            content: "已生成视频",
+                            isStreaming: false
+                        )
+                        self.attachGeneratedVideoFile(
+                            messageId: assistantMessageId,
+                            videoReference: videoReference
+                        )
+                        self.recordTokenUsageForCompletedTurn(
+                            assistantMessageId: assistantMessageId,
+                            userText: messageText,
+                            assistantText: "已生成视频",
+                            userAttachments: currentAttachments,
+                            mediaKind: .video,
+                            mediaCount: 1
+                        )
+                        self.hasFinishedStreaming = true
+                        self.isStreaming = false
+                        self.selfInitiatedStream = false
+                        self.activeTaskId = nil
+                        self.lastTaskExtractionLength = 0
+                        await self.persistLocalConversationIfNeeded()
+                        await self.sendCompletionNotificationIfNeeded(content: "已生成视频")
+                        self.endBackgroundTask()
+                        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                        return
+                    }
+
                     if self.shouldUseDirectImageGeneration(modelId: modelId) {
                         guard self.currentProviderType != .anthropic else {
                             throw APIError.unknown(
                                 underlying: NSError(
                                     domain: "ChatViewModel",
                                     code: -1,
-                                    userInfo: [NSLocalizedDescriptionKey: "Claude/Anthropic does not provide an image generation endpoint."]
+                                    userInfo: [NSLocalizedDescriptionKey: "Claude/Anthropic 不提供图片生成端点。"]
                                 )
                             )
                         }
@@ -3221,7 +3281,7 @@ final class ChatViewModel {
                                     underlying: NSError(
                                         domain: "ChatViewModel",
                                         code: -1,
-                                        userInfo: [NSLocalizedDescriptionKey: "Please enter a prompt for image generation."]
+                                        userInfo: [NSLocalizedDescriptionKey: "请输入图片生成提示词。"]
                                     )
                                 )
                             }
@@ -3244,12 +3304,22 @@ final class ChatViewModel {
                             imageReference: imageReference,
                             displayReference: displayReference
                         )
+                        self.recordTokenUsageForCompletedTurn(
+                            assistantMessageId: assistantMessageId,
+                            userText: messageText,
+                            assistantText: "已生成图片",
+                            userAttachments: currentAttachments,
+                            mediaKind: .image,
+                            mediaCount: 1
+                        )
                         self.hasFinishedStreaming = true
                         self.isStreaming = false
                         self.selfInitiatedStream = false
                         self.activeTaskId = nil
                         self.lastTaskExtractionLength = 0
                         await self.persistLocalConversationIfNeeded()
+                        await self.sendCompletionNotificationIfNeeded(content: "已生成图片")
+                        self.endBackgroundTask()
                         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                         return
                     }
@@ -3260,6 +3330,10 @@ final class ChatViewModel {
 
                     for try await event in sseStream {
                         if Task.isCancelled { break }
+
+                        if let usage = event.usage, !usage.isEmpty {
+                            exactUsage = usage
+                        }
 
                         if let delta = event.contentDelta, !delta.isEmpty {
                             acc.append(delta)
@@ -3278,7 +3352,7 @@ final class ChatViewModel {
                             id: assistantMessageId,
                             content: acc.content,
                             isStreaming: false,
-                            error: ChatMessageError(content: error.localizedDescription)
+                            error: ChatMessageError(content: Self.localizedGenerationError(error))
                         )
                         self.cleanupStreaming()
                         await self.persistLocalConversationIfNeeded()
@@ -3290,6 +3364,14 @@ final class ChatViewModel {
                 if Task.isCancelled { return }
 
                 self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+                self.applyUsage(exactUsage, toMessageId: assistantMessageId)
+                self.recordTokenUsageForCompletedTurn(
+                    assistantMessageId: assistantMessageId,
+                    userText: messageText,
+                    assistantText: acc.content,
+                    userAttachments: currentAttachments,
+                    usage: exactUsage
+                )
                 self.hasFinishedStreaming = true
                 self.isStreaming = false
                 self.selfInitiatedStream = false
@@ -3297,6 +3379,7 @@ final class ChatViewModel {
                 self.lastTaskExtractionLength = 0
                 await self.persistLocalConversationIfNeeded()
                 await self.sendCompletionNotificationIfNeeded(content: acc.content)
+                self.endBackgroundTask()
                 NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
             }
             return
@@ -4634,6 +4717,14 @@ final class ChatViewModel {
         // socket subscriptions yet. Follow-ups, title, and tags arrive
         // AFTER done:true via socket events, so we need to keep listening.
         updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+        let lastUser = conversation?.messages.last(where: { $0.role == .user && !Self.isLocalWorkspaceAgentResult($0) })
+        recordTokenUsageForCompletedTurn(
+            assistantMessageId: assistantMessageId,
+            userText: lastUser?.content ?? "",
+            assistantText: acc.content,
+            userAttachments: [],
+            usage: nil
+        )
         hasFinishedStreaming = true
         isStreaming = false
         recoveryTimer?.invalidate()
@@ -4793,6 +4884,14 @@ final class ChatViewModel {
         }
 
         updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+        let lastUser = conversation?.messages.last(where: { $0.role == .user && !Self.isLocalWorkspaceAgentResult($0) })
+        recordTokenUsageForCompletedTurn(
+            assistantMessageId: assistantMessageId,
+            userText: lastUser?.content ?? "",
+            assistantText: acc.content,
+            userAttachments: [],
+            usage: nil
+        )
 
         // Send background notification if app is not active
         await sendCompletionNotificationIfNeeded(content: acc.content)
@@ -5052,6 +5151,7 @@ final class ChatViewModel {
                 conversation?.messages[lastIdx].statusHistory = []
             }
         }
+        endBackgroundTask()
     }
 
     // MARK: - Private Helpers
@@ -5618,9 +5718,31 @@ final class ChatViewModel {
             .lowercased()
         let positives = [
             "image", "img", "dall-e", "dalle", "gpt-image", "imagen",
-            "flux", "sdxl", "stable-diffusion", "midjourney", "mj-"
+            "flux", "sdxl", "stable-diffusion", "midjourney", "mj-",
+            "banana", "nano-banana"
         ]
-        let negatives = ["vision", "ocr", "vl", "video"]
+        let negatives = [
+            "vision", "ocr", "vl", "video", "videos", "veo", "sora",
+            "wan", "kling", "hailuo", "runway", "luma", "pika", "vidu",
+            "seedance", "text-to-video", "image-to-video", "i2v", "t2v",
+            "生视频", "视频生成"
+        ]
+        return positives.contains(where: { haystack.contains($0) })
+            && !negatives.contains(where: { haystack.contains($0) })
+    }
+
+    private func shouldUseDirectVideoGeneration(modelId: String) -> Bool {
+        guard currentProviderType != .iexa else { return false }
+        let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
+            .lowercased()
+        let positives = [
+            "video", "videos", "veo", "sora", "wan", "kling", "hailuo",
+            "runway", "luma", "pika", "vidu", "seedance", "minimax-video",
+            "qwen-video", "wanx", "hunyuan-video", "cogvideo", "jimeng",
+            "即梦", "可灵", "海螺", "文生视频", "图生视频",
+            "text-to-video", "image-to-video", "i2v", "t2v", "生视频", "视频生成"
+        ]
+        let negatives = ["vision", "ocr", "vl", "video-chat", "videochat"]
         return positives.contains(where: { haystack.contains($0) })
             && !negatives.contains(where: { haystack.contains($0) })
     }
@@ -5735,7 +5857,25 @@ final class ChatViewModel {
         """
     }
 
+    private static func requestedVideoDuration(from prompt: String) -> Int? {
+        let pattern = #"(?<!\d)(\d{1,3})\s*(秒|s|sec|seconds)(?![A-Za-z])"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let nsRange = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
+        guard let match = regex.firstMatch(in: prompt, range: nsRange),
+              let range = Range(match.range(at: 1), in: prompt),
+              let seconds = Int(String(prompt[range]))
+        else { return nil }
+        return min(max(seconds, 1), 60)
+    }
+
     private func runImageRequestWithRateLimitRetry(
+        maxAttempts: Int = 3,
+        operation: @escaping () async throws -> String
+    ) async throws -> String {
+        try await runMediaRequestWithRetry(maxAttempts: maxAttempts, operation: operation)
+    }
+
+    private func runMediaRequestWithRetry(
         maxAttempts: Int = 3,
         operation: @escaping () async throws -> String
     ) async throws -> String {
@@ -5745,9 +5885,10 @@ final class ChatViewModel {
                 return try await operation()
             } catch {
                 lastError = error
-                guard isRateLimitError(error), attempt < maxAttempts - 1 else { throw error }
-                let delay = min(18.0, 4.0 * pow(2.0, Double(attempt)))
-                logger.warning("Image endpoint rate limited; retrying in \(delay)s")
+                guard (isRateLimitError(error) || isTransientMediaNetworkError(error)),
+                      attempt < maxAttempts - 1 else { throw error }
+                let delay = min(18.0, 3.0 * pow(2.0, Double(attempt)))
+                logger.warning("Media endpoint failed with retryable error; retrying in \(delay)s")
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
@@ -5760,6 +5901,19 @@ final class ChatViewModel {
             return statusCode == 429 || (message?.localizedCaseInsensitiveContains("too many") == true)
         }
         return error.localizedDescription.localizedCaseInsensitiveContains("too many requests")
+    }
+
+    private func isTransientMediaNetworkError(_ error: Error) -> Bool {
+        let apiError = APIError.from(error)
+        if case .cancelled = apiError {
+            return UIApplication.shared.applicationState != .active
+        }
+        guard apiError.isRetryable else { return false }
+        if case .networkError(let underlying) = apiError,
+           let urlError = underlying as? URLError {
+            return [.networkConnectionLost, .timedOut].contains(urlError.code)
+        }
+        return false
     }
 
     private func localDisplayImageReference(from imageReference: String) async -> String? {
@@ -5800,6 +5954,161 @@ final class ChatViewModel {
         }
     }
 
+    private func attachGeneratedVideoFile(
+        messageId: String,
+        videoReference: String
+    ) {
+        let fileName = videoReference.hasPrefix("data:video/")
+            ? "generated-video.mp4"
+            : ((URL(string: videoReference)?.lastPathComponent).flatMap { $0.isEmpty ? nil : $0 } ?? "generated-video.mp4")
+        let contentType: String = {
+            let lower = fileName.lowercased()
+            if lower.hasSuffix(".mov") { return "video/quicktime" }
+            if lower.hasSuffix(".webm") { return "video/webm" }
+            return "video/mp4"
+        }()
+        let file = ChatMessageFile(
+            type: "video",
+            url: videoReference,
+            name: fileName,
+            contentType: contentType,
+            displayURL: nil
+        )
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        if conversation?.messages[index].files.contains(where: { $0.url == file.url }) != true {
+            conversation?.messages[index].files.append(file)
+        }
+        conversation?.history.updateNode(id: messageId) { node in
+            if !node.files.contains(where: { $0.url == file.url }) {
+                node.files.append(file)
+            }
+        }
+    }
+
+    private enum GeneratedMediaKind {
+        case none
+        case image
+        case video
+    }
+
+    private func applyUsage(_ usage: [String: Any]?, toMessageId messageId: String) {
+        guard let usage, !usage.isEmpty else { return }
+        if let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) {
+            conversation?.messages[index].usage = usage
+        }
+        conversation?.history.updateNode(id: messageId) { node in
+            node.usage = usage
+        }
+    }
+
+    private func recordTokenUsageForCompletedTurn(
+        assistantMessageId: String? = nil,
+        userText: String,
+        assistantText: String,
+        userAttachments: [ChatAttachment],
+        usage: [String: Any]? = nil,
+        mediaKind: GeneratedMediaKind = .none,
+        mediaCount: Int = 0
+    ) {
+        if let assistantMessageId {
+            guard !tokenUsageRecordedMessageIds.contains(assistantMessageId) else { return }
+            tokenUsageRecordedMessageIds.insert(assistantMessageId)
+        }
+
+        let exactInput = Self.firstIntValue(in: usage, keys: [
+            "prompt_tokens", "input_tokens", "promptTokens", "inputTokens"
+        ])
+        let exactOutput = Self.firstIntValue(in: usage, keys: [
+            "completion_tokens", "output_tokens", "completionTokens", "outputTokens"
+        ])
+        let exactCached = Self.firstIntValue(in: usage, keys: [
+            "cached_tokens", "cachedTokens", "cache_read_input_tokens",
+            "cacheReadInputTokens", "input_cached_tokens"
+        ])
+
+        let estimatedInput = Self.estimatedTokenCount(for: userText)
+            + userAttachments.reduce(0) { total, attachment in
+                total + Self.estimatedAttachmentTokens(for: attachment)
+            }
+        let estimatedOutput = Self.estimatedTokenCount(for: assistantText)
+        let mediaTokens: Int = {
+            switch mediaKind {
+            case .none: return 0
+            case .image: return max(1, mediaCount) * 1_500
+            case .video: return max(1, mediaCount) * 12_000
+            }
+        }()
+
+        NotificationCenter.default.post(
+            name: .chatTokenUsageDidAccumulate,
+            object: nil,
+            userInfo: [
+                "input": exactInput ?? estimatedInput,
+                "output": exactOutput ?? estimatedOutput,
+                "cached": exactCached ?? 0,
+                "image": mediaTokens,
+                "imageCount": mediaKind == .image ? mediaCount : 0,
+                "videoCount": mediaKind == .video ? mediaCount : 0,
+                "exact": (exactInput != nil || exactOutput != nil) ? 1 : 0,
+                "estimated": (exactInput == nil && exactOutput == nil) ? 1 : 0
+            ]
+        )
+    }
+
+    private static func estimatedTokenCount(for text: String) -> Int {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+        let cjkCount = trimmed.unicodeScalars.filter {
+            (0x4E00...0x9FFF).contains(Int($0.value))
+        }.count
+        let otherCount = max(0, trimmed.count - cjkCount)
+        return max(1, cjkCount + Int(ceil(Double(otherCount) / 4.0)))
+    }
+
+    private static func estimatedAttachmentTokens(for attachment: ChatAttachment) -> Int {
+        switch attachment.type {
+        case .image:
+            return 900
+        case .audio:
+            return estimatedTokenCount(for: attachment.transcribedText ?? "")
+        case .file:
+            if let data = attachment.data {
+                return min(8_000, max(64, data.count / 4))
+            }
+            return 256
+        }
+    }
+
+    private static func firstIntValue(in usage: [String: Any]?, keys: [String]) -> Int? {
+        guard let usage else { return nil }
+        for key in keys {
+            if let intValue = usage[key] as? Int {
+                return intValue
+            }
+            if let doubleValue = usage[key] as? Double {
+                return Int(doubleValue)
+            }
+            if let number = usage[key] as? NSNumber {
+                return number.intValue
+            }
+            if let string = usage[key] as? String, let intValue = Int(string) {
+                return intValue
+            }
+        }
+        for value in usage.values {
+            if let nested = value as? [String: Any],
+               let nestedValue = firstIntValue(in: nested, keys: keys) {
+                return nestedValue
+            }
+        }
+        return nil
+    }
+
+    private static func localizedGenerationError(_ error: Error) -> String {
+        let apiError = APIError.from(error)
+        return apiError.errorDescription ?? error.localizedDescription
+    }
+
     private func localMemorySystemContext() async -> String? {
         guard isOpenAICompatibleProvider, memoryEnabled, let manager else { return nil }
         guard await LocalMemoryStore.shared.isEnabled(serverURL: manager.baseURL) else { return nil }
@@ -5818,6 +6127,7 @@ final class ChatViewModel {
         - Use exact relative file names and matching imports, links, entrypoints, and package/config files.
         - For HTML/CSS/JavaScript projects split across index.html, style.css, and script.js, the HTML must link ./style.css and ./script.js, and the CSS/JS must be written for that same UI.
         - For other languages, include the folder tree, entry file, dependency/config files, and imports so the project can run as a coherent whole instead of unrelated snippets.
+        - If the user only asks to "show", "preview", "write a page", or wants a single-file demo, return normal code blocks with an inline preview-friendly HTML file. Do not create workspace operations unless the user explicitly asks to save/create/modify/read/list/delete local files or folders.
 
         Iexa has a local workspace agent. When the user asks you to create, modify, read, list, or delete local project files, include exactly one fenced block with language `iexa_workspace` containing JSON. Paths are relative to the app's Documents/Iexa Workspace folder and must never be absolute or use `..`.
         Supported operations:
@@ -6263,12 +6573,34 @@ final class ChatViewModel {
         guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard content.localizedCaseInsensitiveContains("iexa_workspace") else { return }
         guard let role = conversation?.messages.first(where: { $0.id == messageId })?.role, role == .assistant else { return }
+        guard shouldExecuteLocalWorkspaceAgentForCurrentRequest() else { return }
         guard !localWorkspaceAgentExecutedMessageIds.contains(messageId) else { return }
 
         localWorkspaceAgentExecutedMessageIds.insert(messageId)
         Task { [weak self] in
             await self?.executeLocalWorkspaceAgent(messageId: messageId, content: content)
         }
+    }
+
+    private func shouldExecuteLocalWorkspaceAgentForCurrentRequest() -> Bool {
+        guard let userText = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalWorkspaceAgentResult($0)
+        })?.content.lowercased() else { return false }
+
+        let strongWorkspaceIntent = [
+            "本地工作区", "工作区", "保存到", "保存为", "写入文件", "创建文件", "新建文件",
+            "修改文件", "删除文件", "删除文件夹", "创建文件夹", "新建文件夹", "读取文件",
+            "列出文件", "生成项目", "创建项目", "项目文件", "workspace", "save file",
+            "write file", "create file", "modify file", "delete file", "mkdir", "append"
+        ].contains { userText.contains($0) }
+
+        let previewOnlyIntent = [
+            "给我看", "看看", "预览", "展示", "单文件", "不要创建", "不用创建",
+            "不需要创建", "不要保存", "不用保存", "只看", "直接给代码", "写一个",
+            "写个", "show me", "preview", "single file", "don't create", "do not create"
+        ].contains { userText.contains($0) }
+
+        return strongWorkspaceIntent && !previewOnlyIntent
     }
 
     private func executeLocalWorkspaceAgent(messageId: String, content: String) async {
