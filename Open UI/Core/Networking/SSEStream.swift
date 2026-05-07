@@ -125,10 +125,22 @@ enum SSEEvent: Sendable {
            let content = delta["content"] as? String {
             return content
         }
+        if let choices = json["choices"] as? [[String: Any]],
+           let first = choices.first,
+           let delta = first["delta"] as? [String: Any],
+           let reasoning = delta["reasoning"] as? String,
+           !reasoning.isEmpty {
+            return reasoning
+        }
         if json["type"] as? String == "content_block_delta",
            let delta = json["delta"] as? [String: Any],
            delta["type"] as? String == "text_delta",
            let text = delta["text"] as? String {
+            return text
+        }
+        if json["type"] as? String == "reasoning",
+           let text = json["content"] as? String,
+           !text.isEmpty {
             return text
         }
         return nil

@@ -5588,6 +5588,54 @@ final class ChatViewModel {
         if let fc = selectedModel?.functionCallingMode, fc == "native" {
             params["function_calling"] = "native"
         }
+
+        // Provider-specific reasoning/thinking compatibility:
+        // - OpenAI-style reasoning models generally honour `reasoning_effort`
+        // - Groq/Grok-compatible relays often expose `include_reasoning` / `reasoning_format`
+        // - Gemini OpenAI-compatible endpoints can accept `extra_body.google.thinking_config`
+        //   in addition to top-level `reasoning_effort`
+        if let effort = conversation?.chatParams?.reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !effort.isEmpty {
+            params["reasoning_effort"] = effort
+
+            let modelHaystack = "\(selectedModel?.id ?? "") \(selectedModel?.name ?? "")".lowercased()
+            if modelHaystack.contains("grok") || modelHaystack.contains("groq") {
+                params["include_reasoning"] = true
+                params["reasoning_format"] = "parsed"
+            }
+
+            if currentProviderType == .gemini {
+                let thinkingBudget: Int = {
+                    switch effort.lowercased() {
+                    case "minimal", "none": return 0
+                    case "low": return 1024
+                    case "medium": return 4096
+                    case "high", "xhigh": return 8192
+                    default: return 4096
+                    }
+                }()
+                params["extra_body"] = [
+                    "google": [
+                        "thinking_config": [
+                            "thinking_budget": thinkingBudget,
+                            "include_thoughts": true
+                        ]
+                    ]
+                ]
+            }
+        }
+
+        switch conversation?.chatParams?.thinkMode {
+        case .on:
+            params["think"] = true
+        case .off:
+            params["think"] = false
+        case .custom(let value):
+            if !value.isEmpty { params["think"] = value }
+        case .default, .none:
+            break
+        }
+
         if !params.isEmpty { request.params = params }
 
         // Always include usage stats in streaming response

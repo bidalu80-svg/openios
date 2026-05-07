@@ -395,7 +395,8 @@ struct ChatCompletionRequest: Sendable {
                 "mirostat", "mirostat_eta", "mirostat_tau",
                 "repeat_last_n", "tfs_z", "repeat_penalty",
                 "num_keep", "num_ctx", "num_batch",
-                "reasoning_effort", "think", "format"
+                "reasoning_effort", "think", "format",
+                "include_reasoning", "reasoning_format", "extra_body"
             ]
             for (key, value) in params where passthroughKeys.contains(key) {
                 data[key] = value
