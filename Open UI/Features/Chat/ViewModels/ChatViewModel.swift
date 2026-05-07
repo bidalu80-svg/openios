@@ -788,6 +788,15 @@ final class ChatViewModel {
         file.type == "image" || (file.contentType ?? "").hasPrefix("image/")
     }
 
+    private static func isRenderableImageReference(_ value: String?) -> Bool {
+        guard let value, !value.isEmpty else { return false }
+        if value.hasPrefix("data:image/") || value.hasPrefix("http://") || value.hasPrefix("https://") {
+            return true
+        }
+        let lower = value.lowercased()
+        return [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif", ".svg"].contains { lower.contains($0) }
+    }
+
     private static func preservingInlineImageFiles(
         local: [ChatMessageFile],
         incoming: [ChatMessageFile]
@@ -2584,14 +2593,18 @@ final class ChatViewModel {
                 if let index = conversation?.messages.firstIndex(where: { $0.id == msgId }) {
                     conversation?.messages[index].isStreaming = false
                 }
+                normalizeAssistantGeneratedMedia(messageId: msgId)
+                let normalizedContent = conversation?.messages
+                    .first(where: { $0.id == msgId })?.content ?? finalContent
                 let chatId = conversationId ?? conversation?.id
                 Task {
-                    await self.sendCompletionNotificationIfNeeded(content: finalContent)
+                    await self.sendCompletionNotificationIfNeeded(content: normalizedContent)
                     if let chatId {
                         try? await Task.sleep(nanoseconds: 500_000_000)
                         guard let manager = self.manager else { return }
                         if let serverConv = try? await manager.fetchConversation(id: chatId) {
                             self.adoptServerMessages(serverConversation: serverConv)
+                            self.normalizeAssistantGeneratedMedia(messageId: msgId)
                         }
                         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                     }
@@ -2611,6 +2624,7 @@ final class ChatViewModel {
             if let msgId = messageId,
                let index = conversation?.messages.firstIndex(where: { $0.id == msgId }) {
                 conversation?.messages[index].isStreaming = false
+                normalizeAssistantGeneratedMedia(messageId: msgId)
             }
             // Final sync to pick up complete content, files, sources
             let chatId = conversationId ?? conversation?.id
@@ -2621,6 +2635,9 @@ final class ChatViewModel {
                     guard let manager = self.manager else { return }
                     if let serverConv = try? await manager.fetchConversation(id: chatId) {
                         self.adoptServerMessages(serverConversation: serverConv)
+                        if let msgId = messageId {
+                            self.normalizeAssistantGeneratedMedia(messageId: msgId)
+                        }
                     }
                     NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                 }
@@ -2732,6 +2749,9 @@ final class ChatViewModel {
                 guard let manager = self.manager else { return }
                 if let serverConv = try? await manager.fetchConversation(id: chatId) {
                     self.adoptServerMessages(serverConversation: serverConv)
+                    if let lastAssistant = self.conversation?.messages.last(where: { $0.role == .assistant }) {
+                        self.normalizeAssistantGeneratedMedia(messageId: lastAssistant.id)
+                    }
                 }
                 NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
             }
@@ -3196,8 +3216,7 @@ final class ChatViewModel {
                 var exactUsage: [String: Any]?
 
                 do {
-                    if self.shouldUseDirectVideoGeneration(modelId: modelId)
-                        && Self.looksLikeImageGenerationPrompt(messageText) {
+                    if self.shouldUseDirectVideoGeneration(modelId: modelId) {
                         let videoPrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !videoPrompt.isEmpty else {
                             throw APIError.unknown(
@@ -3249,85 +3268,92 @@ final class ChatViewModel {
                         return
                     }
 
-                    if self.shouldUseDirectImageGeneration(modelId: modelId)
-                        && Self.looksLikeImageGenerationPrompt(messageText) {
-                        guard self.currentProviderType != .anthropic else {
-                            throw APIError.unknown(
-                                underlying: NSError(
-                                    domain: "ChatViewModel",
-                                    code: -1,
-                                    userInfo: [NSLocalizedDescriptionKey: "Claude/Anthropic 不提供图片生成端点。"]
-                                )
-                            )
-                        }
-                        let imagePrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let requestedImageSize = Self.requestedImageSize(from: imagePrompt)
-                        let imagePromptForAPI = Self.promptWithImageSizeInstruction(
-                            imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
-                            size: requestedImageSize
-                        )
-                        let imageReference: String
-                        if let editImage = self.firstEditableImage(from: currentAttachments) {
-                            imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                try await manager.editImage(
-                                    prompt: imagePromptForAPI,
-                                    model: modelId,
-                                    imageData: editImage.data,
-                                    fileName: editImage.fileName,
-                                    size: requestedImageSize
-                                )
-                            }
-                        } else {
-                            guard !imagePrompt.isEmpty else {
+                    if self.shouldUseDirectImageGeneration(modelId: modelId),
+                       !self.shouldPreferChatNativeImageGeneration(modelId: modelId) {
+                        do {
+                            guard self.currentProviderType != .anthropic else {
                                 throw APIError.unknown(
                                     underlying: NSError(
                                         domain: "ChatViewModel",
                                         code: -1,
-                                        userInfo: [NSLocalizedDescriptionKey: "请输入图片生成提示词。"]
+                                        userInfo: [NSLocalizedDescriptionKey: "Claude/Anthropic 不提供图片生成端点。"]
                                     )
                                 )
                             }
-                            imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                try await manager.generateImage(
-                                    prompt: imagePromptForAPI,
-                                    model: modelId,
-                                    size: requestedImageSize
-                                )
+                            let imagePrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let requestedImageSize = Self.requestedImageSize(from: imagePrompt)
+                            let imagePromptForAPI = Self.promptWithImageSizeInstruction(
+                                imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
+                                size: requestedImageSize
+                            )
+                            let imageReference: String
+                            if let editImage = self.firstEditableImage(from: currentAttachments) {
+                                imageReference = try await self.runImageRequestWithRateLimitRetry {
+                                    try await manager.editImage(
+                                        prompt: imagePromptForAPI,
+                                        model: modelId,
+                                        imageData: editImage.data,
+                                        fileName: editImage.fileName,
+                                        size: requestedImageSize
+                                    )
+                                }
+                            } else {
+                                guard !imagePrompt.isEmpty else {
+                                    throw APIError.unknown(
+                                        underlying: NSError(
+                                            domain: "ChatViewModel",
+                                            code: -1,
+                                            userInfo: [NSLocalizedDescriptionKey: "请输入图片生成提示词。"]
+                                        )
+                                    )
+                                }
+                                imageReference = try await self.runImageRequestWithRateLimitRetry {
+                                    try await manager.generateImage(
+                                        prompt: imagePromptForAPI,
+                                        model: modelId,
+                                        size: requestedImageSize
+                                    )
+                                }
                             }
+                            let displayReference = await self.localDisplayImageReference(from: imageReference) ?? imageReference
+                            self.updateAssistantMessage(
+                                id: assistantMessageId,
+                                content: "已生成图片",
+                                isStreaming: false
+                            )
+                            self.attachGeneratedImageFile(
+                                messageId: assistantMessageId,
+                                imageReference: imageReference,
+                                displayReference: displayReference
+                            )
+                            self.recordTokenUsageForCompletedTurn(
+                                assistantMessageId: assistantMessageId,
+                                userText: messageText,
+                                assistantText: "已生成图片",
+                                userAttachments: currentAttachments,
+                                mediaKind: .image,
+                                mediaCount: 1
+                            )
+                            self.hasFinishedStreaming = true
+                            self.isStreaming = false
+                            self.selfInitiatedStream = false
+                            self.activeTaskId = nil
+                            self.lastTaskExtractionLength = 0
+                            await self.persistLocalConversationIfNeeded()
+                            await self.sendCompletionNotificationIfNeeded(content: "已生成图片")
+                            self.endBackgroundTask()
+                            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                            return
+                        } catch {
+                            guard self.shouldFallbackToChatForImageGeneration(error) else { throw error }
+                            self.logger.warning("Direct image endpoint failed; falling back to chat-native image output: \(error.localizedDescription)")
                         }
-                        let displayReference = await self.localDisplayImageReference(from: imageReference) ?? imageReference
-                        self.updateAssistantMessage(
-                            id: assistantMessageId,
-                            content: "已生成图片",
-                            isStreaming: false
-                        )
-                        self.attachGeneratedImageFile(
-                            messageId: assistantMessageId,
-                            imageReference: imageReference,
-                            displayReference: displayReference
-                        )
-                        self.recordTokenUsageForCompletedTurn(
-                            assistantMessageId: assistantMessageId,
-                            userText: messageText,
-                            assistantText: "已生成图片",
-                            userAttachments: currentAttachments,
-                            mediaKind: .image,
-                            mediaCount: 1
-                        )
-                        self.hasFinishedStreaming = true
-                        self.isStreaming = false
-                        self.selfInitiatedStream = false
-                        self.activeTaskId = nil
-                        self.lastTaskExtractionLength = 0
-                        await self.persistLocalConversationIfNeeded()
-                        await self.sendCompletionNotificationIfNeeded(content: "已生成图片")
-                        self.endBackgroundTask()
-                        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
-                        return
                     }
 
                     var request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
                     if !fileRefs.isEmpty { request.files = fileRefs }
+                    await self.populateCommonRequestFields(&request)
+                    if !currentSkillIds.isEmpty { request.skillIds = currentSkillIds }
                     let sseStream = try await manager.sendMessageStreaming(request: request)
 
                     for try await event in sseStream {
@@ -3365,12 +3391,25 @@ final class ChatViewModel {
 
                 if Task.isCancelled { return }
 
+                if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.updateAssistantMessage(
+                        id: assistantMessageId,
+                        content: "",
+                        isStreaming: false,
+                        error: ChatMessageError(content: "未收到模型回复或图片数据，请重试。")
+                    )
+                    self.cleanupStreaming()
+                    return
+                }
+
                 self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+                self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+                let normalizedContent = self.conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? acc.content
                 self.applyUsage(exactUsage, toMessageId: assistantMessageId)
                 self.recordTokenUsageForCompletedTurn(
                     assistantMessageId: assistantMessageId,
                     userText: messageText,
-                    assistantText: acc.content,
+                    assistantText: normalizedContent,
                     userAttachments: currentAttachments,
                     usage: exactUsage
                 )
@@ -3380,7 +3419,7 @@ final class ChatViewModel {
                 self.activeTaskId = nil
                 self.lastTaskExtractionLength = 0
                 await self.persistLocalConversationIfNeeded()
-                await self.sendCompletionNotificationIfNeeded(content: acc.content)
+                await self.sendCompletionNotificationIfNeeded(content: normalizedContent)
                 self.endBackgroundTask()
                 NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
             }
@@ -3539,10 +3578,14 @@ final class ChatViewModel {
                                         self.isStreaming = false
                                         // Post-completion
                                         self.adoptServerMessages(serverConversation: refreshed)
+                                        self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
                                         await manager.sendChatCompleted(chatId: chatId, messageId: assistantMessageId, model: modelId, sessionId: socketSessionId, messages: self.buildSimpleAPIMessages())
                                         try? await self.refreshConversationMetadata(chatId: chatId, assistantMessageId: assistantMessageId)
+                                        self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
                                         self.cleanupStreaming()
-                                        await self.sendCompletionNotificationIfNeeded(content: serverContent)
+                                        let finalContent = self.conversation?.messages
+                                            .first(where: { $0.id == assistantMessageId })?.content ?? serverContent
+                                        await self.sendCompletionNotificationIfNeeded(content: finalContent)
                                         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                                         return
                                     }
@@ -3556,6 +3599,7 @@ final class ChatViewModel {
                     self.updateAssistantMessage(id: assistantMessageId,
                         content: self.conversation?.messages.last(where: { $0.role == .assistant })?.content ?? "",
                         isStreaming: false)
+                    self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
                     self.cleanupStreaming()
                     NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                 } else if request.isPipeModel {
@@ -4719,11 +4763,14 @@ final class ChatViewModel {
         // socket subscriptions yet. Follow-ups, title, and tags arrive
         // AFTER done:true via socket events, so we need to keep listening.
         updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+        normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+        let finalAssistantContent = conversation?.messages
+            .first(where: { $0.id == assistantMessageId })?.content ?? acc.content
         let lastUser = conversation?.messages.last(where: { $0.role == .user && !Self.isLocalWorkspaceAgentResult($0) })
         recordTokenUsageForCompletedTurn(
             assistantMessageId: assistantMessageId,
             userText: lastUser?.content ?? "",
-            assistantText: acc.content,
+            assistantText: finalAssistantContent,
             userAttachments: [],
             usage: nil
         )
@@ -4761,7 +4808,7 @@ final class ChatViewModel {
             // This ordering is critical: if endBackgroundTask() is called first,
             // iOS may immediately suspend the process before the notification
             // is scheduled — causing the banner to never appear.
-            await sendCompletionNotificationIfNeeded(content: acc.content)
+            await sendCompletionNotificationIfNeeded(content: finalAssistantContent)
             // Now it is safe to release the background time assertion.
             self.endBackgroundTask()
 
@@ -4803,11 +4850,13 @@ final class ChatViewModel {
                     // This handles the case where the server metadata doesn't include
                     // files but the tool response clearly references generated images.
                     self.populateFilesFromToolResults(messageId: assistantMessageId)
+                    self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
                 } else {
                     // Files already present — just wait for follow-ups/title
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
                     try? await refreshConversationMetadata(
                         chatId: chatId, assistantMessageId: assistantMessageId)
+                    self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
                 }
             }
             // NOTE: Do NOT call saveConversationToServer() here.
@@ -4827,7 +4876,7 @@ final class ChatViewModel {
             NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
             // Generate a suggested emoji for the response (fire-and-forget)
-            await self.generateSuggestedEmoji(for: acc.content)
+            await self.generateSuggestedEmoji(for: finalAssistantContent)
         }
     }
 
@@ -4886,17 +4935,30 @@ final class ChatViewModel {
         }
 
         updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+        normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+        var finalAssistantContent = conversation?.messages
+            .first(where: { $0.id == assistantMessageId })?.content ?? acc.content
+        if finalAssistantContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: "",
+                isStreaming: false,
+                error: ChatMessageError(content: "未收到模型回复或图片数据，请重试。")
+            )
+            cleanupStreaming()
+            return
+        }
         let lastUser = conversation?.messages.last(where: { $0.role == .user && !Self.isLocalWorkspaceAgentResult($0) })
         recordTokenUsageForCompletedTurn(
             assistantMessageId: assistantMessageId,
             userText: lastUser?.content ?? "",
-            assistantText: acc.content,
+            assistantText: finalAssistantContent,
             userAttachments: [],
             usage: nil
         )
 
         // Send background notification if app is not active
-        await sendCompletionNotificationIfNeeded(content: acc.content)
+        await sendCompletionNotificationIfNeeded(content: finalAssistantContent)
 
         await manager.sendChatCompleted(
             chatId: chatId, messageId: assistantMessageId,
@@ -4916,6 +4978,9 @@ final class ChatViewModel {
 
         // Last resort: extract file IDs from tool call results in content
         populateFilesFromToolResults(messageId: assistantMessageId)
+        normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+        finalAssistantContent = conversation?.messages
+            .first(where: { $0.id == assistantMessageId })?.content ?? finalAssistantContent
 
         // NOTE: Do NOT call saveConversationToServer() here — same reason
         // as finishStreamingSuccessfully. The server's chatCompleted has the
@@ -5590,54 +5655,6 @@ final class ChatViewModel {
         if let fc = selectedModel?.functionCallingMode, fc == "native" {
             params["function_calling"] = "native"
         }
-
-        // Provider-specific reasoning/thinking compatibility:
-        // - OpenAI-style reasoning models generally honour `reasoning_effort`
-        // - Groq/Grok-compatible relays often expose `include_reasoning` / `reasoning_format`
-        // - Gemini OpenAI-compatible endpoints can accept `extra_body.google.thinking_config`
-        //   in addition to top-level `reasoning_effort`
-        if let effort = conversation?.chatParams?.reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !effort.isEmpty {
-            params["reasoning_effort"] = effort
-
-            let modelHaystack = "\(selectedModel?.id ?? "") \(selectedModel?.name ?? "")".lowercased()
-            if modelHaystack.contains("grok") || modelHaystack.contains("groq") {
-                params["include_reasoning"] = true
-                params["reasoning_format"] = "parsed"
-            }
-
-            if currentProviderType == .gemini {
-                let thinkingBudget: Int = {
-                    switch effort.lowercased() {
-                    case "minimal", "none": return 0
-                    case "low": return 1024
-                    case "medium": return 4096
-                    case "high", "xhigh": return 8192
-                    default: return 4096
-                    }
-                }()
-                params["extra_body"] = [
-                    "google": [
-                        "thinking_config": [
-                            "thinking_budget": thinkingBudget,
-                            "include_thoughts": true
-                        ]
-                    ]
-                ]
-            }
-        }
-
-        switch conversation?.chatParams?.thinkMode {
-        case .on:
-            params["think"] = true
-        case .off:
-            params["think"] = false
-        case .custom(let value):
-            if !value.isEmpty { params["think"] = value }
-        case .default, .none:
-            break
-        }
-
         if !params.isEmpty { request.params = params }
 
         // Always include usage stats in streaming response
@@ -5709,7 +5726,12 @@ final class ChatViewModel {
         let modelAllowsImageGeneration = selectedModel.map {
             Self.modelSupportsBuiltinFeature($0, key: "image_generation")
         } ?? false
-        let shouldEnableImageGeneration = imageGenerationEnabled || modelAllowsImageGeneration
+        let modelNameSuggestsImageGeneration = selectedModelId.map {
+            shouldUseDirectImageGeneration(modelId: $0) || shouldPreferChatNativeImageGeneration(modelId: $0)
+        } ?? false
+        let shouldEnableImageGeneration = imageGenerationEnabled
+            || modelAllowsImageGeneration
+            || modelNameSuggestsImageGeneration
 
         // Use ONLY the current toggle state. Server defaults are already applied
         // to these toggles at init time via syncUIWithModelDefaults() — which runs
@@ -5769,17 +5791,47 @@ final class ChatViewModel {
         let positives = [
             "image", "img", "dall-e", "dalle", "gpt-image", "imagen",
             "flux", "sdxl", "stable-diffusion", "midjourney", "mj-",
-            "banana", "nano-banana", "image-preview", "imagine"
+            "banana", "nano-banana"
         ]
         let negatives = [
             "vision", "ocr", "vl", "video", "videos", "veo", "sora",
             "wan", "kling", "hailuo", "runway", "luma", "pika", "vidu",
             "seedance", "text-to-video", "image-to-video", "i2v", "t2v",
-            "生视频", "视频生成", "chat", "instruct", "reasoning",
-            "qwen3.6-plus", "qwen3.6", "qwen-plus", "gemini-3-pro-preview"
+            "生视频", "视频生成"
         ]
         return positives.contains(where: { haystack.contains($0) })
             && !negatives.contains(where: { haystack.contains($0) })
+    }
+
+    private func shouldPreferChatNativeImageGeneration(modelId: String) -> Bool {
+        let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
+            .lowercased()
+
+        // These are usually image-only OpenAI-compatible endpoints.
+        let directEndpointModels = [
+            "gpt-image", "dall-e", "dalle", "flux", "sdxl",
+            "stable-diffusion", "midjourney", "mj-",
+            "grok-imagine", "minimax-image"
+        ]
+        if directEndpointModels.contains(where: { haystack.contains($0) }) {
+            return false
+        }
+
+        // These providers/models often generate images through the normal chat
+        // completion path and return image URLs or inline media in the message.
+        if haystack.contains("gemini") && (haystack.contains("image") || haystack.contains("banana")) {
+            return true
+        }
+        if haystack.contains("qwen3.6")
+            || haystack.contains("qwen3-")
+            || haystack.contains("qwen-plus")
+            || haystack.contains("qwen-max") {
+            return true
+        }
+        if haystack.contains("grok-4") || haystack.contains("grok-3") {
+            return true
+        }
+        return false
     }
 
     private func shouldUseDirectVideoGeneration(modelId: String) -> Bool {
@@ -5979,11 +6031,13 @@ final class ChatViewModel {
         imageReference: String,
         displayReference: String
     ) {
+        let contentType = Self.imageContentType(for: displayReference)
+        let fileName = Self.imageFileName(for: imageReference, contentType: contentType)
         let file = ChatMessageFile(
             type: "image",
             url: imageReference,
-            name: "generated-image.jpg",
-            contentType: "image/jpeg",
+            name: fileName,
+            contentType: contentType,
             displayURL: displayReference
         )
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
@@ -5996,6 +6050,52 @@ final class ChatViewModel {
             if !node.files.contains(where: { $0.url == file.url || $0.displayURL == file.displayURL }) {
                 node.files.append(file)
             }
+        }
+    }
+
+    private func shouldFallbackToChatForImageGeneration(_ error: Error) -> Bool {
+        let apiError = APIError.from(error)
+        if case .httpError(let statusCode, _, _) = apiError {
+            return [400, 404, 405, 422].contains(statusCode)
+        }
+        let message = error.localizedDescription.lowercased()
+        return message.contains("does not support")
+            || message.contains("invalid_model")
+            || message.contains("没有返回图片")
+            || message.contains("no image")
+            || message.contains("not support")
+    }
+
+    private static func imageContentType(for reference: String) -> String {
+        let lower = reference.lowercased()
+        if lower.hasPrefix("data:image/") {
+            let afterPrefix = lower.dropFirst("data:".count)
+            if let semicolon = afterPrefix.firstIndex(of: ";") {
+                return String(afterPrefix[..<semicolon])
+            }
+        }
+        if lower.contains(".png") { return "image/png" }
+        if lower.contains(".webp") { return "image/webp" }
+        if lower.contains(".gif") { return "image/gif" }
+        if lower.contains(".avif") { return "image/avif" }
+        if lower.contains(".svg") { return "image/svg+xml" }
+        return "image/jpeg"
+    }
+
+    private static func imageFileName(for reference: String, contentType: String) -> String {
+        if let url = URL(string: reference),
+           let last = url.pathComponents.last,
+           !last.isEmpty,
+           last.contains(".") {
+            return last
+        }
+        switch contentType {
+        case "image/png": return "generated-image.png"
+        case "image/webp": return "generated-image.webp"
+        case "image/gif": return "generated-image.gif"
+        case "image/avif": return "generated-image.avif"
+        case "image/svg+xml": return "generated-image.svg"
+        default: return "generated-image.jpg"
         }
     }
 
@@ -6166,8 +6266,13 @@ final class ChatViewModel {
         """
     }
 
-    private static func projectContinuitySystemContext(includeWorkspaceAgent: Bool) -> String {
-        let workspaceInstructions = includeWorkspaceAgent ? """
+    private static func projectContinuitySystemContext() -> String {
+        """
+        When generating code projects, treat every file as part of one connected project:
+        - Use exact relative file names and matching imports, links, entrypoints, and package/config files.
+        - For HTML/CSS/JavaScript projects split across index.html, style.css, and script.js, the HTML must link ./style.css and ./script.js, and the CSS/JS must be written for that same UI.
+        - For other languages, include the folder tree, entry file, dependency/config files, and imports so the project can run as a coherent whole instead of unrelated snippets.
+        - If the user only asks to "show", "preview", "write a page", or wants a single-file demo, return normal code blocks with an inline preview-friendly HTML file. Do not create workspace operations unless the user explicitly asks to save/create/modify/read/list/delete local files or folders.
 
         Iexa has a local workspace agent. When the user asks you to create, modify, read, list, or delete local project files, include exactly one fenced block with language `iexa_workspace` containing JSON. Paths are relative to the app's Documents/Iexa Workspace folder and must never be absolute or use `..`.
         Supported operations:
@@ -6184,15 +6289,13 @@ final class ChatViewModel {
         }
         ```
         For multi-file projects, write all connected files in the same workspace block so the UI, styles, scripts, imports, and dependencies stay linked.
-        """ : ""
+        """
+    }
 
-        return """
-        When generating code projects, treat every file as part of one connected project:
-        - Use exact relative file names and matching imports, links, entrypoints, and package/config files.
-        - For HTML/CSS/JavaScript projects split across index.html, style.css, and script.js, the HTML must link ./style.css and ./script.js, and the CSS/JS must be written for that same UI.
-        - For other languages, include the folder tree, entry file, dependency/config files, and imports so the project can run as a coherent whole instead of unrelated snippets.
-        - If the user only asks to "show", "preview", "write a page", or wants a single-file demo, return normal code blocks with an inline preview-friendly HTML file. Do not create workspace operations unless the user explicitly asks to save/create/modify/read/list/delete local files or folders.
-        \(workspaceInstructions)
+    private static func workspaceGuardSystemContext() -> String {
+        """
+        Iexa can execute local workspace file operations, but only when the user explicitly asks to save/create/modify/read/list/delete files or folders in the local workspace.
+        If the user asks to write, show, preview, or demonstrate a webpage/app/component/code without explicitly asking to save it into local files, return normal Markdown code blocks and any preview-friendly single-file code. Do not output an `iexa_workspace` block in that case.
         """
     }
 
@@ -6229,11 +6332,10 @@ final class ChatViewModel {
             return conversation.systemPrompt
         }()
         let memoryContext = await localMemorySystemContext()
-        let combinedSystemPrompt = [
-            asyncEffectiveSP,
-            Self.projectContinuitySystemContext(includeWorkspaceAgent: shouldExecuteLocalWorkspaceAgentForCurrentRequest()),
-            memoryContext
-        ]
+        let workspaceContext = shouldExecuteLocalWorkspaceAgentForCurrentRequest()
+            ? Self.projectContinuitySystemContext()
+            : Self.workspaceGuardSystemContext()
+        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, memoryContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
@@ -6923,11 +7025,12 @@ final class ChatViewModel {
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
         let message = conversation!.messages[index]
 
-        // Only check assistant messages with content (tool results are embedded in content)
-        guard message.role == .assistant,
-              !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard message.role == .assistant else { return }
+        let hasContent = !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
-        let extractedFiles = ToolCallParser.extractFileReferences(from: message.content)
+        let extractedFiles = hasContent ? ToolCallParser.extractFileReferences(from: message.content) : []
+        let extractedImages = hasContent ? Self.extractInlineImageReferences(from: message.content) : []
+        var appendedFile = false
         if !extractedFiles.isEmpty {
             logger.info("Extracted \(extractedFiles.count) file(s) from tool results for message \(messageId)")
             var merged = message.files
@@ -6935,118 +7038,182 @@ final class ChatViewModel {
                 guard let url = file.url else { continue }
                 if !merged.contains(where: { $0.url == url || $0.displayURL == url }) {
                     merged.append(file)
+                    appendedFile = true
+                }
+            }
+            conversation?.messages[index].files = merged
+        }
+        if !extractedImages.isEmpty {
+            var merged = conversation?.messages[index].files ?? message.files
+            for image in extractedImages {
+                if !merged.contains(where: { $0.url == image.url || $0.displayURL == image.displayURL }) {
+                    merged.append(image)
+                    appendedFile = true
                 }
             }
             conversation?.messages[index].files = merged
         }
 
-        let extractedImageLinks = Self.extractImageLinks(from: message.content)
-        if !extractedImageLinks.isEmpty {
-            var merged = conversation?.messages[index].files ?? []
-            for link in extractedImageLinks {
-                if !merged.contains(where: { $0.url == link || $0.displayURL == link }) {
-                    merged.append(
-                        ChatMessageFile(
-                            type: "image",
-                            url: link,
-                            name: (URL(string: link)?.lastPathComponent).flatMap { $0.isEmpty ? nil : $0 } ?? "generated-image.jpg",
-                            contentType: Self.imageContentType(for: link),
-                            displayURL: nil
-                        )
-                    )
-                }
-            }
-            if merged.count != conversation?.messages[index].files.count {
-                logger.info("Extracted \(extractedImageLinks.count) inline image link(s) from assistant content for message \(messageId)")
-                conversation?.messages[index].files = merged
+        let cleanedContent = Self.cleanedAssistantContentAfterImageExtraction(message.content)
+        if cleanedContent != message.content {
+            conversation?.messages[index].content = cleanedContent
+        }
+        if appendedFile || cleanedContent != message.content {
+            let files = conversation?.messages[index].files ?? []
+            conversation?.history.updateNode(id: messageId) { node in
+                node.content = cleanedContent
+                node.files = files
+                node.done = true
             }
         }
     }
 
-    private static func extractImageLinks(from content: String) -> [String] {
-        guard !content.isEmpty else { return [] }
-        let patterns = [
-            #"(https?://[^\s<>\"]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^\s<>\"]*)?)"#,
-            #"!\[[^\]]*\]\((https?://[^)\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^)\s]*)?)\)"#,
-            #"<img[^>]+src=['\"](https?://[^'\"]+)['\"][^>]*>"#
-        ]
+    private func normalizeAssistantGeneratedMedia(messageId: String) {
+        populateFilesFromToolResults(messageId: messageId)
 
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        let message = conversation!.messages[index]
+        guard message.role == .assistant else { return }
+
+        let hasRenderableImage = message.files.contains { file in
+            Self.isImageFile(file)
+                && (Self.isRenderableImageReference(file.displayURL)
+                    || Self.isRenderableImageReference(file.url))
+        }
+        let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty, hasRenderableImage {
+            conversation?.messages[index].content = "已生成图片"
+            conversation?.history.updateNode(id: messageId) { node in
+                node.content = "已生成图片"
+                node.files = message.files
+                node.done = true
+            }
+        }
+    }
+
+    private static func extractInlineImageReferences(from content: String) -> [ChatMessageFile] {
+        let refs = extractImageReferenceStrings(from: content)
+        var seen = Set<String>()
+        var files: [ChatMessageFile] = []
+
+        for rawRef in refs {
+            let ref = rawRef.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !ref.isEmpty, !seen.contains(ref) else { continue }
+            seen.insert(ref)
+            let contentType = imageContentType(for: ref)
+            files.append(ChatMessageFile(
+                type: "image",
+                url: ref,
+                name: imageFileName(for: ref, contentType: contentType),
+                contentType: contentType,
+                displayURL: ref
+            ))
+        }
+
+        return files
+    }
+
+    private static func extractImageReferenceStrings(from content: String) -> [String] {
         var results: [String] = []
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
-            let nsRange = NSRange(content.startIndex..<content.endIndex, in: content)
-            let matches = regex.matches(in: content, range: nsRange)
-            for match in matches {
-                let captureRange = match.numberOfRanges > 1 ? match.range(at: 1) : match.range(at: 0)
-                guard let range = Range(captureRange, in: content) else { continue }
-                let raw = String(content[range]).trimmingCharacters(in: .whitespacesAndNewlines)
-                let cleaned = raw.trimmingCharacters(in: CharacterSet(charactersIn: ".,;!?)>]\"'"))
-                if !cleaned.isEmpty, !results.contains(cleaned) {
-                    results.append(cleaned)
-                }
+        let contextSuggestsImage = content.range(
+            of: #"(已生成图片|生成.*图|图片|图像|照片|image|photo|picture|generated)"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+
+        func addMatches(_ pattern: String, captureIndex: Int = 1) {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return }
+            let nsContent = content as NSString
+            let range = NSRange(location: 0, length: nsContent.length)
+            for match in regex.matches(in: content, range: range) where match.numberOfRanges > captureIndex {
+                let value = nsContent.substring(with: match.range(at: captureIndex))
+                results.append(value)
             }
         }
-        return results
+
+        addMatches(#"!\[[^\]]*\]\((data:image/[^)\s]+)\)"#)
+        addMatches(#"!\[[^\]]*\]\((https?://[^)\s]+)\)"#)
+        addMatches(#"!\[[^\]]*\]\((https?://[^)\s]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^)\s]*)?)\)"#)
+        addMatches(#"<img[^>]+src=["'](data:image/[^"']+)["']"#)
+        addMatches(#"<img[^>]+src=["'](https?://[^"']+)["']"#)
+        addMatches(#"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{128,})"#)
+        addMatches(#"(https?://[^\s"'<>]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^\s"'<>]+)?)"#)
+        addMatches(#"(https?://assets\.grok\.com/[^\s"'<>]+)"#)
+        addMatches(#"(https?://[^\s"'<>]+)"#)
+        addMatches(#"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"(https?://[^"]+)""#)
+        addMatches(#"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_-]{128,})""#)
+
+        return results.compactMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("data:image/") {
+                return trimmed
+            }
+            if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
+                return (isLikelyImageURL(trimmed) || contextSuggestsImage) ? trimmed : nil
+            }
+            guard looksLikeBase64Image(trimmed) else { return nil }
+            return "data:image/png;base64,\(trimmed)"
+        }
     }
 
-    static func stripExtractedImageLinks(from content: String) -> String {
-        var result = content
-        // Remove only embedded markup forms. Keep bare URLs visible as fallback
-        // so if a provider's external image fails to load, the user still sees
-        // the original link instead of an empty assistant message.
-        let embeddedPatterns = [
-            #"\!\[[^\]]*\]\((https?://[^)\s]+)\)"#,
-            #"<img[^>]+src=['\"](https?://[^'\"]+)['\"][^>]*>"#
+    private static func isLikelyImageURL(_ value: String) -> Bool {
+        guard let url = URL(string: value),
+              let host = url.host?.lowercased() else { return false }
+        let lower = value.lowercased()
+        if lower.range(of: #"\.(png|jpe?g|webp|gif|bmp|avif|svg)(\?|$)"#, options: .regularExpression) != nil {
+            return true
+        }
+        if lower.contains("data:image") || lower.contains("image/") {
+            return true
+        }
+        if ["assets.grok.com"].contains(host) {
+            return true
+        }
+        let imageHosts = ["image", "img", "cdn", "asset", "media", "static", "file", "files"]
+        if imageHosts.contains(where: { host.contains($0) }) {
+            return true
+        }
+        let imagePathHints = ["/image", "/images", "/generated", "/media", "/asset", "/assets", "/file", "/files"]
+        return imagePathHints.contains(where: { lower.contains($0) })
+    }
+
+    private static func cleanedAssistantContentAfterImageExtraction(_ content: String) -> String {
+        var cleaned = content
+        let patterns = [
+            #"!\[[^\]]*\]\(\s*data:image/[^)\s]+\s*\)"#,
+            #"!\[[^\]]*\]\(\s*https?://[^)\s]+\s*\)"#,
+            #"<img[^>]+src=["']data:image/[^"']+["'][^>]*>"#,
+            #"<img[^>]+src=["']https?://[^"']+["'][^>]*>"#,
+            #"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{128,}"#,
+            #"https?://assets\.grok\.com/[^\s"'<>]+"#,
+            #"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"https?://[^"]+""#,
+            #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"[A-Za-z0-9+/=_-]{128,}""#
         ]
-        for pattern in embeddedPatterns {
-            result = result.replacingOccurrences(
+        for pattern in patterns {
+            cleaned = cleaned.replacingOccurrences(
                 of: pattern,
                 with: "",
                 options: [.regularExpression, .caseInsensitive]
             )
         }
-        result = result.replacingOccurrences(
-            of: #"\n{3,}"#,
-            with: "\n\n",
-            options: .regularExpression
-        )
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func looksLikeImageGenerationPrompt(_ text: String) -> Bool {
-        let lower = text.lowercased()
-        let positives = [
-            "生成一张", "生成一幅", "生成一个", "生成图片", "帮我画", "画一张", "做一张图",
-            "出图", "生图", "绘制", "画个", "给我一张图",
-            "generate an image", "generate a picture", "create an image", "create a picture",
-            "draw a", "make an image", "render an image"
-        ]
-        let negatives = [
-            "图片链接", "image url", "html", "css", "js", "代码", "code", "接口文档", "api doc"
-        ]
-        return positives.contains(where: { lower.contains($0) })
-            && !negatives.contains(where: { lower.contains($0) })
-    }
-
-    private func shouldRouteImageGenerationThroughChat(modelId: String) -> Bool {
-        let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
-            .lowercased()
-        if currentProviderType == .gemini {
-            return haystack.contains("image-preview")
-                || haystack.contains("gemini-3-pro-image-preview")
-                || haystack.contains("gemini-2.5-flash-image")
+        for imageReference in extractImageReferenceStrings(from: content) where imageReference.hasPrefix("http") {
+            cleaned = cleaned.replacingOccurrences(of: imageReference, with: "")
         }
-        return false
-    }
+        cleaned = cleaned.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
-    private static func imageContentType(for urlString: String) -> String {
-        let lower = urlString.lowercased()
-        if lower.contains(".png") { return "image/png" }
-        if lower.contains(".webp") { return "image/webp" }
-        if lower.contains(".gif") { return "image/gif" }
-        if lower.contains(".bmp") { return "image/bmp" }
-        if lower.contains(".svg") { return "image/svg+xml" }
-        return "image/jpeg"
+        if !extractImageReferenceStrings(from: content).isEmpty {
+            let startsLikeRawJSON = cleaned.hasPrefix("{") || cleaned.hasPrefix("[")
+            let mostlyRequestJSON = startsLikeRawJSON
+                && (cleaned.contains("\"prompt\"") || cleaned.contains("\"size\"") || cleaned.contains("\"model\""))
+            if cleaned.isEmpty || mostlyRequestJSON {
+                return "已生成图片"
+            }
+            if cleaned.range(of: #"^https?://\S+$"#, options: .regularExpression) != nil {
+                return "已生成图片"
+            }
+        }
+
+        return cleaned
     }
 
     private func appendSources(id: String, sources: [ChatSourceReference]) {

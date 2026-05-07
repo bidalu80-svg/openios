@@ -245,7 +245,7 @@ actor ImageCacheService {
         let task = Task<UIImage?, Never> {
             // Acquire a download slot — suspends until < maxConcurrentDownloads are active
             await self.acquireDownloadSlot()
-            defer { Task { self.releaseDownloadSlot() } }
+            defer { Task { await self.releaseDownloadSlot() } }
 
             do {
                 var request = URLRequest(url: url)
@@ -254,6 +254,17 @@ actor ImageCacheService {
                 // cache can serve stale/failed responses for profile images
                 // whose URL never changes after an avatar upload.
                 request.cachePolicy = .reloadIgnoringLocalCacheData
+                request.setValue(
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+                    forHTTPHeaderField: "User-Agent"
+                )
+                request.setValue(
+                    "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                    forHTTPHeaderField: "Accept"
+                )
+                if url.host?.lowercased() == "assets.grok.com" {
+                    request.setValue("https://grok.com/", forHTTPHeaderField: "Referer")
+                }
                 if let authToken, !authToken.isEmpty {
                     request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
                 }
@@ -282,13 +293,6 @@ actor ImageCacheService {
                     return nil
                 }
 
-                if let mime = httpResponse.value(forHTTPHeaderField: "Content-Type"),
-                   !mime.lowercased().contains("image"),
-                   !mime.lowercased().contains("octet-stream") {
-                    self.logger.error("Image load rejected for \(url): unexpected content-type=\(mime)")
-                    return nil
-                }
-
                 // Downsample to target pixel size if requested, otherwise decode normally
                 let image: UIImage
                 if targetPixelSize > 0,
@@ -297,8 +301,6 @@ actor ImageCacheService {
                 } else if let fallback = UIImage(data: data), fallback.size.width > 0 {
                     image = fallback
                 } else {
-                    let prefix = String(decoding: data.prefix(160), as: UTF8.self)
-                    self.logger.error("Image decode failed for \(url). Content prefix: \(prefix, privacy: .public)")
                     return nil
                 }
 
