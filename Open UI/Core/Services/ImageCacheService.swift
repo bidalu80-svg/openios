@@ -282,6 +282,13 @@ actor ImageCacheService {
                     return nil
                 }
 
+                if let mime = httpResponse.value(forHTTPHeaderField: "Content-Type"),
+                   !mime.lowercased().contains("image"),
+                   !mime.lowercased().contains("octet-stream") {
+                    self.logger.error("Image load rejected for \(url): unexpected content-type=\(mime)")
+                    return nil
+                }
+
                 // Downsample to target pixel size if requested, otherwise decode normally
                 let image: UIImage
                 if targetPixelSize > 0,
@@ -290,6 +297,8 @@ actor ImageCacheService {
                 } else if let fallback = UIImage(data: data), fallback.size.width > 0 {
                     image = fallback
                 } else {
+                    let prefix = String(decoding: data.prefix(160), as: UTF8.self)
+                    self.logger.error("Image decode failed for \(url). Content prefix: \(prefix, privacy: .public)")
                     return nil
                 }
 
