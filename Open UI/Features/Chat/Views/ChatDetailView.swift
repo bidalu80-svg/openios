@@ -3558,8 +3558,9 @@ private struct IsolatedAssistantMessage: View {
         let displayContent: String = {
             if isActivelyStreaming { return rawContent }
             let resolved = Self.resolveRelativeURLs(rawContent, baseURL: serverBaseURL)
+            let withoutExtractedImageLinks = ChatViewModel.stripExtractedImageLinks(from: resolved)
             let preferDomain = UserDefaults.standard.object(forKey: "citationShowDomain") as? Bool ?? true
-            return Self.preprocessCitations(resolved, sources: effectiveSources, preferDomain: preferDomain)
+            return Self.preprocessCitations(withoutExtractedImageLinks, sources: effectiveSources, preferDomain: preferDomain)
         }()
 
         let effectiveIsStreaming = isActivelyStreaming || message.isStreaming

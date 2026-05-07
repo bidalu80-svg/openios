@@ -6880,6 +6880,78 @@ final class ChatViewModel {
             }
             conversation?.messages[index].files = merged
         }
+
+        let extractedImageLinks = Self.extractImageLinks(from: message.content)
+        if !extractedImageLinks.isEmpty {
+            var merged = conversation?.messages[index].files ?? []
+            for link in extractedImageLinks {
+                if !merged.contains(where: { $0.url == link || $0.displayURL == link }) {
+                    merged.append(
+                        ChatMessageFile(
+                            type: "image",
+                            url: link,
+                            name: (URL(string: link)?.lastPathComponent).flatMap { $0.isEmpty ? nil : $0 } ?? "generated-image.jpg",
+                            contentType: Self.imageContentType(for: link),
+                            displayURL: nil
+                        )
+                    )
+                }
+            }
+            if merged.count != conversation?.messages[index].files.count {
+                logger.info("Extracted \(extractedImageLinks.count) inline image link(s) from assistant content for message \(messageId)")
+                conversation?.messages[index].files = merged
+            }
+        }
+    }
+
+    private static func extractImageLinks(from content: String) -> [String] {
+        guard !content.isEmpty else { return [] }
+        let patterns = [
+            #"(https?://[^\s<>\"]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^\s<>\"]*)?)"#,
+            #"!\[[^\]]*\]\((https?://[^)\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^)\s]*)?)\)"#,
+            #"<img[^>]+src=['\"](https?://[^'\"]+)['\"][^>]*>"#
+        ]
+
+        var results: [String] = []
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let nsRange = NSRange(content.startIndex..<content.endIndex, in: content)
+            let matches = regex.matches(in: content, range: nsRange)
+            for match in matches {
+                let captureRange = match.numberOfRanges > 1 ? match.range(at: 1) : match.range(at: 0)
+                guard let range = Range(captureRange, in: content) else { continue }
+                let raw = String(content[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let cleaned = raw.trimmingCharacters(in: CharacterSet(charactersIn: ".,;!?)>]\"'"))
+                if !cleaned.isEmpty, !results.contains(cleaned) {
+                    results.append(cleaned)
+                }
+            }
+        }
+        return results
+    }
+
+    static func stripExtractedImageLinks(from content: String) -> String {
+        var result = content
+        let links = extractImageLinks(from: content)
+        for link in links {
+            result = result.replacingOccurrences(of: link, with: "")
+        }
+        result = result.replacingOccurrences(
+            of: #"\n{3,}"#,
+            with: "\n\n",
+            options: .regularExpression
+        )
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func imageContentType(for urlString: String) -> String {
+        let lower = urlString.lowercased()
+        if lower.contains(".png") { return "image/png" }
+        if lower.contains(".webp") { return "image/webp" }
+        if lower.contains(".gif") { return "image/gif" }
+        if lower.contains(".bmp") { return "image/bmp" }
+        if lower.contains(".svg") { return "image/svg+xml" }
+        return "image/jpeg"
     }
 
     private func appendSources(id: String, sources: [ChatSourceReference]) {
