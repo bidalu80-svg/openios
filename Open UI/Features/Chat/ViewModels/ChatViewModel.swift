@@ -6186,7 +6186,7 @@ final class ChatViewModel {
         For multi-file projects, write all connected files in the same workspace block so the UI, styles, scripts, imports, and dependencies stay linked.
         """ : ""
 
-        """
+        return """
         When generating code projects, treat every file as part of one connected project:
         - Use exact relative file names and matching imports, links, entrypoints, and package/config files.
         - For HTML/CSS/JavaScript projects split across index.html, style.css, and script.js, the HTML must link ./style.css and ./script.js, and the CSS/JS must be written for that same UI.
