@@ -254,20 +254,21 @@ jobs:
         if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outcome != 'success'
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
-          mkdir -p "$RUNNER_TEMP/exported" "$RUNNER_TEMP/unsigned-build" "$RUNNER_TEMP/unsigned-ipa/Payload"
+          mkdir -p "$RUNNER_TEMP/exported" "$RUNNER_TEMP/unsigned-build-app" "$RUNNER_TEMP/unsigned-ipa/Payload"
           xcodebuild \
             -project "Open UI.xcodeproj" \
             -scheme "Open UI" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
-            CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/unsigned-build" \
+            TARGET_BUILD_DIR="$RUNNER_TEMP/unsigned-build-app" \
+            BUILT_PRODUCTS_DIR="$RUNNER_TEMP/unsigned-build-app" \
             PRODUCT_BUNDLE_IDENTIFIER="$APP_BUNDLE_ID" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             build
 
-          APP_PATH="$(find "$RUNNER_TEMP/unsigned-build" -maxdepth 1 -name '*.app' | head -n 1)"
+          APP_PATH="$(find "$RUNNER_TEMP/unsigned-build-app" -maxdepth 1 -name '*.app' | head -n 1)"
           if [ -z "$APP_PATH" ]; then
             echo "::error::Unsigned .app was not produced"
             exit 1
