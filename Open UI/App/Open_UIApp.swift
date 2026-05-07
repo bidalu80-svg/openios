@@ -488,9 +488,9 @@ struct RootView: View {
                 .buttonStyle(.borderedProminent)
                 .padding(.top, 4)
 
-                Button("Sign in with different account") {
+                Button("重新编辑站点") {
                     viewModel.errorMessage = nil
-                    viewModel.phase = .authMethodSelection
+                    viewModel.phase = .serverConnection
                 }
                 .font(.footnote)
                 .foregroundStyle(.secondary)

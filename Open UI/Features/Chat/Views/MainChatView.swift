@@ -103,6 +103,7 @@ struct MainChatView: View {
 
     /// Cached container width from GeometryReader (avoids deprecated UIScreen.main).
     @State private var containerWidth: CGFloat = 360
+    @State private var containerHeight: CGFloat = 820
 
     /// Live drag offset for interactive drawer sliding.
     @State private var dragOffset: CGFloat = 0
@@ -182,6 +183,13 @@ struct MainChatView: View {
             } action: { newWidth in
                 if abs(containerWidth - newWidth) > 1 {
                     containerWidth = newWidth
+                }
+            }
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { newHeight in
+                if abs(containerHeight - newHeight) > 1 {
+                    containerHeight = newHeight
                 }
             }
     }
@@ -1247,22 +1255,42 @@ struct MainChatView: View {
 
     private var desktopPetOverlay: some View {
         VStack(alignment: .trailing, spacing: 8) {
-            if desktopPetExpanded && desktopPetShouldExpandDown {
+            if desktopPetExpanded && !desktopPetShouldExpandUpward {
                 desktopPetActions
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
 
             desktopPetButton
 
-            if desktopPetExpanded && !desktopPetShouldExpandDown {
+            if desktopPetExpanded && desktopPetShouldExpandUpward {
                 desktopPetActions
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
     }
 
-    private var desktopPetShouldExpandDown: Bool {
-        currentDesktopPetOffset.height < -240
+    private var desktopPetShouldExpandUpward: Bool {
+        let actionCount: CGFloat = 6
+        let actionHeight: CGFloat = 46
+        let actionSpacing: CGFloat = 8
+        let estimatedActionsHeight = actionCount * actionHeight + max(0, actionCount - 1) * actionSpacing
+        let petSize: CGFloat = 48
+        let bottomPadding: CGFloat = 92
+        let topPadding: CGFloat = 80
+        let petCenterY = max(
+            topPadding + petSize / 2,
+            containerHeight - bottomPadding - petSize / 2 + currentDesktopPetOffset.height
+        )
+        let availableBelow = max(0, containerHeight - bottomPadding - petCenterY - petSize / 2)
+        let availableAbove = max(0, petCenterY - topPadding - petSize / 2)
+
+        if availableBelow >= estimatedActionsHeight {
+            return false
+        }
+        if availableAbove >= estimatedActionsHeight {
+            return true
+        }
+        return availableAbove > availableBelow
     }
 
     private var desktopPetActions: some View {
@@ -1399,10 +1427,8 @@ struct MainChatView: View {
         let horizontalMargin: CGFloat = 18
         let maxLeft = -max(0, containerWidth - petSize - horizontalMargin * 2)
         let maxRight: CGFloat = 10
-        let screenHeight = UIApplication.shared.connectedScenes
-            .compactMap { ($0 as? UIWindowScene)?.screen.bounds.height }
-            .first ?? 820
-        let maxUp = -max(0, screenHeight - petSize - 150)
+        let usableHeight = max(containerHeight, 300)
+        let maxUp = -max(0, usableHeight - petSize - 150)
         let maxDown: CGFloat = 10
 
         return CGSize(

@@ -774,6 +774,7 @@ struct TTSSettingsView: View {
     @State private var isSpeaking = false
     @State private var availableVoices: [AVSpeechSynthesisVoice] = []
     @State private var isDownloadingModel = false
+    @State private var onDeviceModelErrorMessage: String?
     @State private var kokoroModelSize: String = "–"
     @State private var qwen3ModelSize: String = "–"
     @State private var serverVoices: [(id: String, name: String)] = []
@@ -1193,6 +1194,14 @@ struct TTSSettingsView: View {
                 await loadServerVoices()
             }
         }
+        .alert("本地语音模型不可用", isPresented: Binding(
+            get: { onDeviceModelErrorMessage != nil },
+            set: { if !$0 { onDeviceModelErrorMessage = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(onDeviceModelErrorMessage ?? "")
+        }
     }
 
     // MARK: - On-Device Status Badge
@@ -1411,7 +1420,11 @@ struct TTSSettingsView: View {
     private func preloadOnDeviceModel() {
         isDownloadingModel = true
         Task {
-            await ttsService.preloadKokoroModel()
+            do {
+                try await ttsService.kokoroService.loadModel()
+            } catch {
+                onDeviceModelErrorMessage = error.localizedDescription
+            }
             isDownloadingModel = false
             refreshModelSizes()
         }
@@ -1421,7 +1434,11 @@ struct TTSSettingsView: View {
         ttsService.unloadKokoroModel()
         isDownloadingModel = true
         Task {
-            await ttsService.preloadKokoroModel()
+            do {
+                try await ttsService.kokoroService.loadModel()
+            } catch {
+                onDeviceModelErrorMessage = error.localizedDescription
+            }
             isDownloadingModel = false
         }
     }
@@ -1476,6 +1493,7 @@ struct STTSettingsView: View {
     @State private var micPermissionGranted = false
     @State private var speechPermissionGranted = false
     @State private var asrModelSize: String = "–"
+    @State private var asrModelErrorMessage: String?
 
     /// True when ASR model files are already cached on disk (but not necessarily loaded into memory).
     private var asrFilesOnDisk: Bool {
@@ -1629,7 +1647,13 @@ struct STTSettingsView: View {
 
                     if case .unloaded = asr.state {
                         Button {
-                            Task { try? await asr.loadModel() }
+                            Task {
+                                do {
+                                    try await asr.loadModel()
+                                } catch {
+                                    asrModelErrorMessage = error.localizedDescription
+                                }
+                            }
                         } label: {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: asrFilesOnDisk ? "bolt.circle" : "arrow.down.circle")
@@ -1676,7 +1700,13 @@ struct STTSettingsView: View {
                     } else if case .error = asr.state {
                         Button {
                             asr.unloadModel()
-                            Task { try? await asr.loadModel() }
+                            Task {
+                                do {
+                                    try await asr.loadModel()
+                                } catch {
+                                    asrModelErrorMessage = error.localizedDescription
+                                }
+                            }
                         } label: {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: "arrow.clockwise.circle")
@@ -1824,6 +1854,14 @@ struct STTSettingsView: View {
         .onAppear {
             refreshPermissions()
             refreshModelSizes()
+        }
+        .alert("本地语音识别模型不可用", isPresented: Binding(
+            get: { asrModelErrorMessage != nil },
+            set: { if !$0 { asrModelErrorMessage = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(asrModelErrorMessage ?? "")
         }
     }
 

@@ -37,7 +37,7 @@ struct AccountPickerSheet: View {
                     }
                     .padding(.horizontal, Spacing.screenPadding)
 
-                    // Add account button
+                    // Re-edit current site
                     addAccountButton
                         .padding(.horizontal, Spacing.screenPadding)
                         .padding(.top, Spacing.sm)
@@ -251,7 +251,7 @@ struct AccountPickerSheet: View {
         )
     }
 
-    // MARK: - Add Account
+    // MARK: - Re-edit Site
 
     private var addAccountButton: some View {
         Button {
@@ -261,9 +261,9 @@ struct AccountPickerSheet: View {
             }
         } label: {
             HStack(spacing: Spacing.sm) {
-                Image(systemName: "person.badge.plus")
+                Image(systemName: "square.and.pencil")
                     .scaledFont(size: 16)
-                Text("添加另一个账号")
+                Text("重新编辑站点")
                     .scaledFont(size: 15, weight: .medium)
             }
             .foregroundStyle(theme.brandPrimary)

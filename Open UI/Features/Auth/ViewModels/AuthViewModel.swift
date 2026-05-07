@@ -1008,8 +1008,13 @@ final class AuthViewModel {
         signUpConfirmPassword = ""
         errorMessage = nil
 
-        // Return to auth method selection (server stays connected)
-        if serverConfigStore.activeServer != nil {
+        // API/direct-provider sites should go back to the server list/editor
+        // instead of reopening the removed email/password account flow.
+        if let activeServer = serverConfigStore.activeServer,
+           activeServer.providerType != .iexa {
+            backendConfig = nil
+            phase = serverConfigStore.servers.count > 1 ? .serverSwitcher : .serverConnection
+        } else if serverConfigStore.activeServer != nil {
             // Force-refresh backend config so sign-up/login/SSO options
             // reflect the latest server settings (e.g. admin disabled signup).
             backendConfig = nil
@@ -1024,6 +1029,10 @@ final class AuthViewModel {
 
     /// Signs out and disconnects from the server entirely.
     func signOutAndDisconnect() async {
+        if serverConfigStore.activeServer?.providerType != .iexa {
+            await signOut()
+            return
+        }
         await signOut()
         disconnect()
     }
@@ -1845,6 +1854,20 @@ final class AuthViewModel {
     /// Signs out the current user but keeps the server connected,
     /// landing on the auth method selection screen.
     func addAnotherAccountOnCurrentServer() async {
+        guard let activeServer = serverConfigStore.activeServer else { return }
+        if activeServer.providerType != .iexa {
+            serverURL = activeServer.url
+            apiKey = activeServer.apiKey ?? (dependencies?.apiClient?.network.authToken ?? "")
+            localUserName = activeServer.lastUserName ?? currentUser?.displayName ?? localUserName
+            customHeaderEntries = activeServer.customHeaders
+                .sorted { $0.key < $1.key }
+                .map { CustomHeaderEntry(key: $0.key, value: $0.value) }
+            allowSelfSignedCertificates = activeServer.allowSelfSignedCertificates
+            errorMessage = nil
+            phase = .serverConnection
+            return
+        }
+
         stopTokenRefreshTimer()
 
         // Don't call the server's logout endpoint — we want to keep

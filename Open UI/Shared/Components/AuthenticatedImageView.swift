@@ -193,7 +193,10 @@ struct AuthenticatedImageView: View {
             if loadedImage == nil {
                 isLoading = true
             }
-            let image = await ImageCacheService.shared.loadImage(from: remoteURL)
+            let image = await ImageCacheService.shared.loadImage(
+                from: remoteURL,
+                authToken: authTokenForRemoteURL(remoteURL)
+            )
             if let image {
                 loadedImage = image
                 hasError = false
@@ -278,6 +281,16 @@ struct AuthenticatedImageView: View {
     private static func remoteImageURL(from value: String) -> URL? {
         guard value.hasPrefix("http://") || value.hasPrefix("https://") else { return nil }
         return URL(string: value)
+    }
+
+    private func authTokenForRemoteURL(_ remoteURL: URL) -> String? {
+        guard let apiClient else { return nil }
+        guard let token = apiClient.network.authToken, !token.isEmpty else { return nil }
+        guard let baseURL = URL(string: apiClient.baseURL),
+              remoteURL.host?.lowercased() == baseURL.host?.lowercased() else {
+            return nil
+        }
+        return token
     }
 
     @MainActor

@@ -285,19 +285,17 @@ struct ServerManagementView: View {
                 }
             }
 
-            // Add another account button
+            // Re-edit current site
             Button {
-                Task {
-                    await viewModel.addAnotherAccountOnCurrentServer()
-                }
+                startEditing()
             } label: {
                 HStack(spacing: Spacing.md) {
-                    Image(systemName: "person.badge.plus")
+                    Image(systemName: "square.and.pencil")
                         .scaledFont(size: 14, weight: .medium)
                         .foregroundStyle(theme.brandPrimary)
                         .frame(width: IconSize.lg)
 
-                    Text("添加另一个账号")
+                    Text("重新编辑站点")
                         .scaledFont(size: 14, weight: .medium)
                         .foregroundStyle(theme.brandPrimary)
 

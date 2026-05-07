@@ -5917,14 +5917,8 @@ final class ChatViewModel {
     }
 
     private func localDisplayImageReference(from imageReference: String) async -> String? {
-        if imageReference.hasPrefix("data:image/") { return imageReference }
-        guard let url = URL(string: imageReference),
-              ["http", "https"].contains(url.scheme?.lowercased()) else { return nil }
-
-        if let image = await ImageCacheService.shared.loadImage(from: url) {
-            let data = FileAttachmentService.downsampleForUpload(image: image)
-            guard !data.isEmpty else { return nil }
-            return "data:image/jpeg;base64,\(data.base64EncodedString())"
+        if imageReference.hasPrefix("data:image/") {
+            return imageReference
         }
         return nil
     }
@@ -6591,13 +6585,17 @@ final class ChatViewModel {
             "本地工作区", "工作区", "保存到", "保存为", "写入文件", "创建文件", "新建文件",
             "修改文件", "删除文件", "删除文件夹", "创建文件夹", "新建文件夹", "读取文件",
             "列出文件", "生成项目", "创建项目", "项目文件", "workspace", "save file",
-            "write file", "create file", "modify file", "delete file", "mkdir", "append"
+            "write file", "create file", "modify file", "delete file", "mkdir", "append",
+            "落地到本地", "落地项目", "直接写到", "帮我保存", "存到工作区", "写入工作区",
+            "保存成文件", "create project", "save to workspace", "write to workspace"
         ].contains { userText.contains($0) }
 
         let previewOnlyIntent = [
             "给我看", "看看", "预览", "展示", "单文件", "不要创建", "不用创建",
             "不需要创建", "不要保存", "不用保存", "只看", "直接给代码", "写一个",
-            "写个", "show me", "preview", "single file", "don't create", "do not create"
+            "写个", "做一个给我看", "先看看", "先预览", "不要落地", "不要写入",
+            "不要生成项目", "别创建文件", "show me", "preview", "single file",
+            "don't create", "do not create", "just show", "only show"
         ].contains { userText.contains($0) }
 
         return strongWorkspaceIntent && !previewOnlyIntent

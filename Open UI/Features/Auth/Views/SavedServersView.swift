@@ -110,7 +110,7 @@ struct SavedServersView: View {
                         Task { await handleSwitchToAccount(account, on: server) }
                     },
                     onAddAccount: {
-                        Task { await handleAddAccount(on: server) }
+                        Task { await handleEditServer(on: server) }
                     },
                     onDelete: {
                         serverToDelete = server
@@ -197,18 +197,21 @@ struct SavedServersView: View {
         switchingAccountId = nil
     }
 
-    // MARK: - Add Account on a Server
+    // MARK: - Edit a Saved Server
 
-    private func handleAddAccount(on server: ServerConfig) async {
-        let isActiveServer = dependencies.serverConfigStore.activeServer?.id == server.id
-
-        if !isActiveServer {
-            // Switch to the server first
-            onDismiss?()
-            await viewModel.switchToServer(server)
-        }
-        // Now add another account
-        await viewModel.addAnotherAccountOnCurrentServer()
+    private func handleEditServer(on server: ServerConfig) async {
+        onDismiss?()
+        dependencies.serverConfigStore.setActiveServer(id: server.id)
+        dependencies.refreshServices()
+        viewModel.serverURL = server.url
+        viewModel.apiKey = server.apiKey ?? ""
+        viewModel.localUserName = server.lastUserName ?? viewModel.currentUser?.displayName ?? viewModel.localUserName
+        viewModel.allowSelfSignedCertificates = server.allowSelfSignedCertificates
+        viewModel.customHeaderEntries = server.customHeaders
+            .sorted { $0.key < $1.key }
+            .map { CustomHeaderEntry(key: $0.key, value: $0.value) }
+        viewModel.errorMessage = nil
+        viewModel.phase = .serverConnection
     }
 }
 
@@ -449,12 +452,12 @@ private struct ServerRowView: View {
                 }
                 .disabled(isSwitchingServer)
             } else {
-                // Has accounts — show "Add Another Account"
+                // Has accounts — allow re-editing the saved site instead of reopening account login
                 Button(action: onAddAccount) {
                     HStack(spacing: Spacing.xs) {
-                        Image(systemName: "person.badge.plus")
+                        Image(systemName: "square.and.pencil")
                             .scaledFont(size: 12)
-                        Text("添加另一个账号")
+                        Text("重新编辑站点")
                             .scaledFont(size: 12, weight: .medium)
                     }
                     .foregroundStyle(theme.brandPrimary)
