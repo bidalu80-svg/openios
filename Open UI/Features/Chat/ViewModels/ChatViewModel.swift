@@ -225,6 +225,8 @@ final class ChatViewModel {
     private var isSyncingExternalStream: Bool = false
     private(set) var sessionId: String = UUID().uuidString
     private let logger = Logger(subsystem: "com.openui", category: "ChatViewModel")
+    private let webLinkContextResolver = WebLinkContextResolver()
+    private var webLinkContextsByMessageId: [String: String] = [:]
     private var hasFinishedStreaming = false
     /// Tracks the content length at the last `extractAndApplyTasksFromContent` call.
     /// Prevents the O(n) task-extraction scan from running on every single token;
@@ -3186,6 +3188,12 @@ final class ChatViewModel {
         }
         conversation?.history.currentId = assistantMessageId
         // ────────────────────────────────────────────────────────────────────
+
+        await resolveWebLinkContextIfNeeded(
+            userMessageId: userMessage.id,
+            assistantMessageId: assistantMessageId,
+            text: messageText
+        )
 
         // Build API messages with image content fetched from server
         let apiMessages = await buildAPIMessagesAsync()
@@ -6323,6 +6331,91 @@ final class ChatViewModel {
         return msgs
     }
 
+    private func resolveWebLinkContextIfNeeded(
+        userMessageId: String,
+        assistantMessageId: String,
+        text: String
+    ) async {
+        guard WebLinkContextResolver.containsHTTPURL(text) else { return }
+
+        appendStatusUpdate(
+            id: assistantMessageId,
+            status: ChatStatusUpdate(
+                action: "link_context",
+                description: "正在读取链接内容...",
+                done: false
+            )
+        )
+
+        let result = await webLinkContextResolver.resolve(from: text, limit: 3)
+        if !result.context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            webLinkContextsByMessageId[userMessageId] = modelLinkContextPrompt(result.context)
+        }
+        for video in result.videos {
+            attachResolvedVideoFile(messageId: assistantMessageId, video: video)
+        }
+
+        let description: String
+        if result.successCount > 0 {
+            description = result.videos.isEmpty
+                ? "已读取 \(result.successCount) 个链接"
+                : "已解析 \(result.successCount) 个链接，找到 \(result.videos.count) 个 MP4"
+        } else {
+            description = "链接读取失败，已按原文发送"
+        }
+
+        appendStatusUpdate(
+            id: assistantMessageId,
+            status: ChatStatusUpdate(
+                action: "link_context",
+                description: description,
+                done: true,
+                count: result.successCount
+            )
+        )
+    }
+
+    private func modelLinkContextPrompt(_ context: String) -> String {
+        """
+
+        [客户端已读取的链接上下文]
+        用户消息里包含链接。以下内容由 iOS 客户端在发送前读取，用来帮助你回答；请把它当作该链接的可用上下文。若包含 MP4 URL，请直接返还给用户并结合页面标题/描述概括视频内容。
+        \(context)
+        [/客户端已读取的链接上下文]
+        """
+    }
+
+    private func contentForModel(message: ChatMessage) -> String {
+        guard message.role == .user,
+              let linkContext = webLinkContextsByMessageId[message.id],
+              !linkContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return message.content
+        }
+        if message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return linkContext
+        }
+        return message.content + "\n\n" + linkContext
+    }
+
+    private func attachResolvedVideoFile(messageId: String, video: ResolvedWebVideo) {
+        let file = ChatMessageFile(
+            type: "video",
+            url: video.url,
+            name: video.title,
+            contentType: "video/mp4",
+            displayURL: nil
+        )
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        if conversation?.messages[index].files.contains(where: { $0.url == file.url }) != true {
+            conversation?.messages[index].files.append(file)
+        }
+        conversation?.history.updateNode(id: messageId) { node in
+            if !node.files.contains(where: { $0.url == file.url }) {
+                node.files.append(file)
+            }
+        }
+    }
+
     private func buildAPIMessagesAsync() async -> [[String: Any]] {
         guard let conversation else { return [] }
         var apiMessages: [[String: Any]] = []
@@ -6343,6 +6436,7 @@ final class ChatViewModel {
             apiMessages.append(["role": "system", "content": combinedSystemPrompt])
         }
         for message in conversation.messages where !message.isStreaming && !Self.isLocalWorkspaceAgentResult(message) {
+            let modelContent = contentForModel(message: message)
             let imageFiles = message.files.filter { f in
                 f.type == "image" || (f.contentType ?? "").hasPrefix("image/")
             }
@@ -6354,8 +6448,8 @@ final class ChatViewModel {
                 // Build multimodal content array (OpenAI vision format)
                 // Fetch image base64 from server, matching Flutter behavior
                 var contentArray: [[String: Any]] = []
-                if !message.content.isEmpty {
-                    contentArray.append(["type": "text", "text": message.content])
+                if !modelContent.isEmpty {
+                    contentArray.append(["type": "text", "text": modelContent])
                 }
                 for imgFile in imageFiles {
                     if let fileId = imgFile.url, !fileId.isEmpty {
@@ -6416,7 +6510,7 @@ final class ChatViewModel {
             } else {
                 var msgDict: [String: Any] = [
                     "role": message.role.rawValue,
-                    "content": message.content
+                    "content": modelContent
                 ]
 
                 if !message.files.isEmpty {
