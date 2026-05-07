@@ -555,6 +555,9 @@ final class APIClient: @unchecked Sendable {
             if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") || trimmed.hasPrefix("data:image/") {
                 return trimmed
             }
+            if let resolved = resolveRelativeMediaReference(trimmed) {
+                return resolved
+            }
             if looksLikeBase64Image(trimmed) {
                 return "data:image/png;base64,\(trimmed)"
             }
@@ -593,6 +596,9 @@ final class APIClient: @unchecked Sendable {
             let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") || trimmed.hasPrefix("data:video/") {
                 return trimmed
+            }
+            if let resolved = resolveRelativeMediaReference(trimmed) {
+                return resolved
             }
             if looksLikeBase64Media(trimmed) {
                 return "data:video/mp4;base64,\(trimmed)"
@@ -638,6 +644,14 @@ final class APIClient: @unchecked Sendable {
         guard string.count > 256, !string.contains(" ") else { return false }
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
         return string.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private func resolveRelativeMediaReference(_ raw: String) -> String? {
+        guard !raw.isEmpty else { return nil }
+        guard !raw.contains(" ") else { return nil }
+        guard raw.hasPrefix("/") || raw.hasPrefix("./") || raw.hasPrefix("../") else { return nil }
+        guard let root = network.serverConfig.siteRootURL else { return nil }
+        return URL(string: raw, relativeTo: root)?.absoluteURL.absoluteString
     }
 
     func getDefaultModel() async -> String? {
