@@ -1276,13 +1276,23 @@ struct MainChatView: View {
         let estimatedActionsHeight = actionCount * actionHeight + max(0, actionCount - 1) * actionSpacing
         let petSize: CGFloat = 48
         let bottomPadding: CGFloat = 92
-        let topPadding: CGFloat = 80
+        let topBlockedHeight: CGFloat = 150
         let petCenterY = max(
-            topPadding + petSize / 2,
+            topBlockedHeight + petSize / 2,
             containerHeight - bottomPadding - petSize / 2 + currentDesktopPetOffset.height
         )
         let availableBelow = max(0, containerHeight - bottomPadding - petCenterY - petSize / 2)
-        let availableAbove = max(0, petCenterY - topPadding - petSize / 2)
+        let availableAbove = max(0, petCenterY - topBlockedHeight - petSize / 2)
+
+        // If the pet is already close to the top toolbar zone, always expand downward.
+        if petCenterY < topBlockedHeight + estimatedActionsHeight + 16 {
+            return false
+        }
+
+        // If the pet is close to the input bar, always expand upward.
+        if availableBelow < estimatedActionsHeight + 16 {
+            return true
+        }
 
         if availableBelow >= estimatedActionsHeight {
             return false
