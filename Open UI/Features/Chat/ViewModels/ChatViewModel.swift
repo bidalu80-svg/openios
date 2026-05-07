@@ -3249,8 +3249,7 @@ final class ChatViewModel {
                         return
                     }
 
-                    if self.shouldUseDirectImageGeneration(modelId: modelId)
-                        && Self.looksLikeImageGenerationPrompt(messageText) {
+                    if self.shouldUseDirectImageGeneration(modelId: modelId) {
                         guard self.currentProviderType != .anthropic else {
                             throw APIError.unknown(
                                 underlying: NSError(
@@ -3440,6 +3439,24 @@ final class ChatViewModel {
         streamingTask = Task { [weak self] in
             guard let self else { return }
             do {
+                if self.shouldUseDirectImageGeneration(modelId: modelId) {
+                    do {
+                        try await self.generateImageDirectly(
+                            manager: manager,
+                            modelId: modelId,
+                            messageText: messageText,
+                            currentAttachments: currentAttachments,
+                            assistantMessageId: assistantMessageId
+                        )
+                        return
+                    } catch {
+                        if !self.shouldFallbackToChatForImageGeneration(error) {
+                            throw error
+                        }
+                        self.logger.warning("Direct image endpoint failed; falling back to chat-native image output: \(error.localizedDescription)")
+                    }
+                }
+
                 var request = ChatCompletionRequest(
                     model: modelId, messages: apiMessages, stream: true,
                     chatId: effectiveChatId, sessionId: socketSessionId,
@@ -5759,7 +5776,6 @@ final class ChatViewModel {
     }
 
     private func shouldUseDirectImageGeneration(modelId: String) -> Bool {
-        guard currentProviderType != .iexa else { return false }
         if let selectedModel,
            Self.modelSupportsBuiltinFeature(selectedModel, key: "image_generation") {
             return true
@@ -5972,6 +5988,113 @@ final class ChatViewModel {
             return imageReference
         }
         return nil
+    }
+
+    private func generateImageDirectly(
+        manager: ConversationManager,
+        modelId: String,
+        messageText: String,
+        currentAttachments: [ChatAttachment],
+        assistantMessageId: String
+    ) async throws {
+        guard currentProviderType != .anthropic else {
+            throw APIError.unknown(
+                underlying: NSError(
+                    domain: "ChatViewModel",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Claude/Anthropic 不提供图片生成端点。"]
+                )
+            )
+        }
+
+        let imagePrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestedImageSize = Self.requestedImageSize(from: imagePrompt)
+        let imagePromptForAPI = Self.promptWithImageSizeInstruction(
+            imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
+            size: requestedImageSize
+        )
+
+        let imageReference: String
+        if let editImage = firstEditableImage(from: currentAttachments) {
+            imageReference = try await runImageRequestWithRateLimitRetry {
+                try await manager.editImage(
+                    prompt: imagePromptForAPI,
+                    model: modelId,
+                    imageData: editImage.data,
+                    fileName: editImage.fileName,
+                    size: requestedImageSize
+                )
+            }
+        } else {
+            guard !imagePrompt.isEmpty else {
+                throw APIError.unknown(
+                    underlying: NSError(
+                        domain: "ChatViewModel",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "请输入图片生成提示词。"]
+                    )
+                )
+            }
+            imageReference = try await runImageRequestWithRateLimitRetry {
+                try await manager.generateImage(
+                    prompt: imagePromptForAPI,
+                    model: modelId,
+                    size: requestedImageSize
+                )
+            }
+        }
+
+        let displayReference = await localDisplayImageReference(from: imageReference) ?? imageReference
+        updateAssistantMessage(
+            id: assistantMessageId,
+            content: "已生成图片",
+            isStreaming: false
+        )
+        attachGeneratedImageFile(
+            messageId: assistantMessageId,
+            imageReference: imageReference,
+            displayReference: displayReference
+        )
+        recordTokenUsageForCompletedTurn(
+            assistantMessageId: assistantMessageId,
+            userText: messageText,
+            assistantText: "已生成图片",
+            userAttachments: currentAttachments,
+            mediaKind: .image,
+            mediaCount: 1
+        )
+        hasFinishedStreaming = true
+        isStreaming = false
+        selfInitiatedStream = false
+        activeTaskId = nil
+        lastTaskExtractionLength = 0
+        await persistLocalConversationIfNeeded()
+        await sendCompletionNotificationIfNeeded(content: "已生成图片")
+        endBackgroundTask()
+        if currentProviderType == .iexa {
+            chatSubscription?.dispose()
+            chatSubscription = nil
+            channelSubscription?.dispose()
+            channelSubscription = nil
+        }
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func shouldFallbackToChatForImageGeneration(_ error: Error) -> Bool {
+        let apiError = APIError.from(error)
+        if case .httpError(let statusCode, _, _) = apiError {
+            return [400, 404, 405, 422, 501].contains(statusCode)
+        }
+        if case .responseDecoding = apiError {
+            return true
+        }
+        let text = error.localizedDescription.lowercased()
+        return text.contains("image") && (
+            text.contains("not found")
+                || text.contains("unsupported")
+                || text.contains("not support")
+                || text.contains("没有返回")
+        )
     }
 
     private func attachGeneratedImageFile(

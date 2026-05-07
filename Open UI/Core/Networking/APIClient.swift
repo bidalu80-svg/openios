@@ -487,13 +487,29 @@ final class APIClient: @unchecked Sendable {
                 "input": prompt
             ]
         ]
-        let paths = [
-            "/images/generations",
-            "/image/generations",
-            "/images/generate",
-            "/image/generate",
-            chatCompletionsPath
-        ]
+        let paths: [String] = {
+            let imagePaths: [String]
+            if network.serverConfig.providerType == .iexa {
+                imagePaths = [
+                    "/api/v1/images/generations",
+                    "/api/v1/image/generations",
+                    "/api/v1/images/generate",
+                    "/api/v1/image/generate",
+                    "/images/generations",
+                    "/image/generations",
+                    "/images/generate",
+                    "/image/generate"
+                ]
+            } else {
+                imagePaths = [
+                    "/images/generations",
+                    "/image/generations",
+                    "/images/generate",
+                    "/image/generate"
+                ]
+            }
+            return imagePaths + [chatCompletionsPath]
+        }()
 
         var lastError: Error?
         for path in paths {

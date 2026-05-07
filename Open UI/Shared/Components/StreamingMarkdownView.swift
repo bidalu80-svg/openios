@@ -275,9 +275,9 @@ struct StreamingMarkdownView: View {
             SVGPreviewView(code: code, isStreaming: streaming)
         case .python(let code):
             PythonCodeBlockView(code: code)
-        case .markdownImage(let imageURL, let altText, let linkURL):
+        case .markdownImage(let imageReference, let altText, let linkURL):
             MarkdownInlineImageView(
-                imageURL: imageURL,
+                imageReference: imageReference,
                 altText: altText,
                 linkURL: linkURL,
                 authToken: authToken,
@@ -314,7 +314,7 @@ struct StreamingMarkdownView: View {
         /// `isStreaming` — true while the closing ``` fence has not yet arrived.
         case svg(String, isStreaming: Bool)
         case python(String)
-        case markdownImage(imageURL: URL, altText: String, linkURL: URL?)
+        case markdownImage(imageReference: String, altText: String, linkURL: URL?)
         case visualization(String)
     }
 
@@ -354,7 +354,7 @@ struct StreamingMarkdownView: View {
     /// Data model for a parsed markdown image occurrence.
     private struct ParsedImage {
         let range: Range<String.Index>
-        let imageURL: URL
+        let imageReference: String
         let altText: String
         let linkURL: URL?
     }
@@ -374,7 +374,7 @@ struct StreamingMarkdownView: View {
                       let altRange = Range(match.range(at: 1), in: text),
                       let imgRange = Range(match.range(at: 2), in: text),
                       let linkRange = Range(match.range(at: 3), in: text),
-                      let imgURL = Self.makeImageURL(from: String(text[imgRange]))
+                      let imageReference = Self.makeImageReference(from: String(text[imgRange]))
                 else { continue }
 
                 let linkURLStr = String(text[linkRange])
@@ -382,7 +382,7 @@ struct StreamingMarkdownView: View {
 
                 results.append(ParsedImage(
                     range: swiftRange,
-                    imageURL: imgURL,
+                    imageReference: imageReference,
                     altText: String(text[altRange]),
                     linkURL: linkURL
                 ))
@@ -397,7 +397,7 @@ struct StreamingMarkdownView: View {
                       let swiftRange = Range(match.range, in: text),
                       let altRange = Range(match.range(at: 1), in: text),
                       let imgRange = Range(match.range(at: 2), in: text),
-                      let imgURL = Self.makeImageURL(from: String(text[imgRange]))
+                      let imageReference = Self.makeImageReference(from: String(text[imgRange]))
                 else { continue }
 
                 // Skip if this overlaps with any linked image already found
@@ -406,7 +406,7 @@ struct StreamingMarkdownView: View {
 
                 results.append(ParsedImage(
                     range: swiftRange,
-                    imageURL: imgURL,
+                    imageReference: imageReference,
                     altText: String(text[altRange]),
                     linkURL: nil
                 ))
@@ -418,13 +418,13 @@ struct StreamingMarkdownView: View {
         return results
     }
 
-    private static func makeImageURL(from raw: String) -> URL? {
+    private static func makeImageReference(from raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
-            return URL(string: trimmed)
-        }
-        if trimmed.hasPrefix("data:image/") {
-            return URL(string: trimmed)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("http://")
+            || trimmed.hasPrefix("https://")
+            || trimmed.hasPrefix("data:image/") {
+            return trimmed
         }
         return nil
     }
@@ -440,8 +440,13 @@ struct StreamingMarkdownView: View {
                   let urlRange = Range(match.range(at: 1), in: text) else { return nil }
             let raw = String(text[urlRange])
             let normalized = raw.hasPrefix("//") ? "https:\(raw)" : raw
-            guard let imageURL = Self.makeImageURL(from: normalized) else { return nil }
-            return ParsedImage(range: urlRange, imageURL: imageURL, altText: "", linkURL: imageURL)
+            guard let imageReference = Self.makeImageReference(from: normalized) else { return nil }
+            return ParsedImage(
+                range: urlRange,
+                imageReference: imageReference,
+                altText: "",
+                linkURL: URL(string: normalized)
+            )
         }
     }
 
@@ -488,7 +493,7 @@ struct StreamingMarkdownView: View {
                 segments.append(contentsOf: parseCodeBlocks(preceding))
             }
             // The image itself
-            segments.append(.markdownImage(imageURL: img.imageURL, altText: img.altText, linkURL: img.linkURL))
+            segments.append(.markdownImage(imageReference: img.imageReference, altText: img.altText, linkURL: img.linkURL))
             cursor = img.range.upperBound
         }
 
@@ -513,7 +518,7 @@ struct StreamingMarkdownView: View {
             if cursor < img.range.lowerBound {
                 segments.append(contentsOf: parseCodeBlocks(String(text[cursor..<img.range.lowerBound])))
             }
-            segments.append(.markdownImage(imageURL: img.imageURL, altText: img.altText, linkURL: img.linkURL))
+            segments.append(.markdownImage(imageReference: img.imageReference, altText: img.altText, linkURL: img.linkURL))
             cursor = img.range.upperBound
         }
         if cursor < text.endIndex {
@@ -709,21 +714,21 @@ struct StreamingMarkdownView: View {
 // MARK: - Markdown Inline Image View
 
 /// Renders a markdown image as a native SwiftUI async image with caching.
-/// Supports optional link wrapping — tapping opens the link URL in Safari.
+/// Supports remote and inline data images. Tapping opens an in-app full-screen preview.
 private struct MarkdownInlineImageView: View {
-    let imageURL: URL
+    let imageReference: String
     let altText: String
     let linkURL: URL?
     let authToken: String?
     let serverBaseURL: String?
 
     @Environment(\.theme) private var theme
-    @Environment(\.openURL) private var openURL
     @State private var loadedUIImage: UIImage?
     @State private var isLoading = false
     @State private var didFailToLoad = false
     @State private var retryTrigger = 0
     @State private var saveState: SaveState = .idle
+    @State private var showFullScreen = false
 
     private static let maxAutoRetries = 4
 
@@ -769,7 +774,7 @@ private struct MarkdownInlineImageView: View {
         }
         .accessibilityLabel(altText.isEmpty ? "图片" : altText)
         .accessibilityAddTraits(.isImage)
-        .task(id: "\(imageURL.absoluteString)-\(retryTrigger)") {
+        .task(id: "\(imageReference)-\(retryTrigger)") {
             await loadRemoteImageIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
@@ -777,18 +782,25 @@ private struct MarkdownInlineImageView: View {
                 retryTrigger += 1
             }
         }
+        .fullScreenCover(isPresented: $showFullScreen) {
+            if let image = loadedUIImage ?? dataURIImage(from: imageReference) {
+                FullScreenImageView(image: image)
+            }
+        }
     }
 
     @ViewBuilder
     private var imageContent: some View {
-        if imageURL.scheme == "data",
-           let image = dataURIImage(from: imageURL.absoluteString) {
+        if imageReference.hasPrefix("data:image/"),
+           let image = dataURIImage(from: imageReference) {
             Image(uiImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(maxWidth: .infinity, maxHeight: 300, alignment: .leading)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .onAppear { loadedUIImage = image }
+                .contentShape(Rectangle())
+                .onTapGesture { showFullScreen = true }
         } else if let loadedUIImage {
             Image(uiImage: loadedUIImage)
                 .resizable()
@@ -796,10 +808,7 @@ private struct MarkdownInlineImageView: View {
                 .frame(maxWidth: .infinity, maxHeight: 300, alignment: .leading)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .contentShape(Rectangle())
-                .onTapGesture {
-                    openURL(linkURL ?? imageURL)
-                }
-                .accessibilityAddTraits(.isLink)
+                .onTapGesture { showFullScreen = true }
         } else if didFailToLoad {
             VStack(spacing: 8) {
                 Image(systemName: "arrow.clockwise.circle")
@@ -862,17 +871,18 @@ private struct MarkdownInlineImageView: View {
     private func dataURIImage(from dataURI: String) -> UIImage? {
         guard let comma = dataURI.firstIndex(of: ",") else { return nil }
         let encoded = String(dataURI[dataURI.index(after: comma)...])
-        guard let data = Data(base64Encoded: encoded) else { return nil }
+        guard let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters) else { return nil }
         return UIImage(data: data)
     }
 
     @MainActor
     private func loadRemoteImageIfNeeded() async {
-        guard imageURL.scheme != "data" else { return }
+        guard !imageReference.hasPrefix("data:image/"),
+              let imageURL = URL(string: imageReference) else { return }
         isLoading = true
         didFailToLoad = false
 
-        let token = authTokenForImageURL()
+        let token = authTokenForImageURL(imageURL)
         for attempt in 0..<Self.maxAutoRetries {
             guard !Task.isCancelled else { return }
             if let image = await ImageCacheService.shared.loadImage(from: imageURL, authToken: token) {
@@ -891,7 +901,7 @@ private struct MarkdownInlineImageView: View {
         didFailToLoad = true
     }
 
-    private func authTokenForImageURL() -> String? {
+    private func authTokenForImageURL(_ imageURL: URL) -> String? {
         guard let authToken, !authToken.isEmpty else { return nil }
         guard let serverBaseURL,
               let base = URL(string: serverBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))),
@@ -904,7 +914,7 @@ private struct MarkdownInlineImageView: View {
     private func saveImageToPhotos() async {
         guard saveState != .saving else { return }
         saveState = .saving
-        let image = loadedUIImage ?? dataURIImage(from: imageURL.absoluteString)
+        let image = loadedUIImage ?? dataURIImage(from: imageReference)
         guard let image else {
             saveState = .failed
             return
