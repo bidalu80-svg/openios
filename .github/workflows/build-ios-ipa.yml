@@ -273,6 +273,9 @@ jobs:
             exit 1
           fi
 
+          rm -rf "$APP_PATH/PlugIns"
+          rm -rf "$APP_PATH/Extensions"
+
           cp -R "$APP_PATH" "$RUNNER_TEMP/unsigned-ipa/Payload/"
           cd "$RUNNER_TEMP/unsigned-ipa"
           /usr/bin/zip -qry "$RUNNER_TEMP/exported/Iexa-unsigned.ipa" Payload
