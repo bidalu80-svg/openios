@@ -377,6 +377,30 @@ struct ChatCompletionRequest: Sendable {
             "messages": messages
         ]
         if let files, !files.isEmpty { data["files"] = files }
+        if let streamOptions, !streamOptions.isEmpty {
+            data["stream_options"] = streamOptions
+        }
+
+        // Pass common generation controls through to OpenAI-compatible endpoints.
+        // Many providers (OpenAI-shims, Gemini shims, Ollama-compatible gateways,
+        // Groq/Grok-compatible relays, etc.) accept these keys at the top level.
+        // Previously they were only stored in `request.params`, which meant the UI
+        // showed "thinking/reasoning enabled" but the actual request silently dropped
+        // those settings for non-Iexa providers.
+        if let params, !params.isEmpty {
+            let passthroughKeys: Set<String> = [
+                "temperature", "seed", "max_tokens",
+                "top_k", "top_p", "min_p",
+                "frequency_penalty", "presence_penalty",
+                "mirostat", "mirostat_eta", "mirostat_tau",
+                "repeat_last_n", "tfs_z", "repeat_penalty",
+                "num_keep", "num_ctx", "num_batch",
+                "reasoning_effort", "think", "format"
+            ]
+            for (key, value) in params where passthroughKeys.contains(key) {
+                data[key] = value
+            }
+        }
         return data
     }
 
