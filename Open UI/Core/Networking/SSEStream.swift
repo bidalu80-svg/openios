@@ -95,6 +95,11 @@ struct SSEStream: AsyncSequence {
 
             // Raw text not matching SSE format
             if !line.isEmpty {
+                if (line.hasPrefix("{") || line.hasPrefix("[")),
+                   let data = line.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    return .json(json)
+                }
                 return .text(line)
             }
 
@@ -118,19 +123,30 @@ enum SSEEvent: Sendable {
 
     /// Extracts the content delta from an OpenAI-style streaming chunk.
     var contentDelta: String? {
+        if case .text(let text) = self {
+            return text.isEmpty ? nil : text
+        }
+
         guard case .json(let json) = self else { return nil }
         if let choices = json["choices"] as? [[String: Any]],
            let first = choices.first,
-           let delta = first["delta"] as? [String: Any],
-           let content = delta["content"] as? String {
-            return content
+           let delta = first["delta"] as? [String: Any] {
+            if let content = Self.renderContent(delta["content"]) {
+                return content
+            }
+            if let imageReference = Self.firstImageReference(in: delta) {
+                return Self.markdownImage(imageReference)
+            }
         }
         if let choices = json["choices"] as? [[String: Any]],
            let first = choices.first,
-           let delta = first["delta"] as? [String: Any],
-           let reasoning = delta["reasoning"] as? String,
-           !reasoning.isEmpty {
-            return reasoning
+           let message = first["message"] as? [String: Any] {
+            if let content = Self.renderContent(message["content"]) {
+                return content
+            }
+            if let imageReference = Self.firstImageReference(in: message) {
+                return Self.markdownImage(imageReference)
+            }
         }
         if json["type"] as? String == "content_block_delta",
            let delta = json["delta"] as? [String: Any],
@@ -138,10 +154,14 @@ enum SSEEvent: Sendable {
            let text = delta["text"] as? String {
             return text
         }
-        if json["type"] as? String == "reasoning",
-           let text = json["content"] as? String,
-           !text.isEmpty {
+        if let content = Self.renderContent(json["content"]) {
+            return content
+        }
+        if let text = json["text"] as? String, !text.isEmpty {
             return text
+        }
+        if let imageReference = Self.firstImageReference(in: json) {
+            return Self.markdownImage(imageReference)
         }
         return nil
     }
@@ -172,6 +192,215 @@ enum SSEEvent: Sendable {
         default:
             return false
         }
+    }
+
+    private static func renderContent(_ value: Any?) -> String? {
+        guard let value else { return nil }
+
+        if let text = value as? String {
+            if let imageReference = firstImageReferenceInText(text) {
+                return text.contains(imageReference) ? text : markdownImage(imageReference)
+            }
+            if looksLikeBase64Image(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return markdownImage("data:image/png;base64,\(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+            return text.isEmpty ? nil : text
+        }
+
+        if let dict = value as? [String: Any] {
+            if let imageReference = firstImageReference(in: dict) {
+                return markdownImage(imageReference)
+            }
+            for key in ["text", "content", "value"] {
+                if let rendered = renderContent(dict[key]) {
+                    return rendered
+                }
+            }
+            return nil
+        }
+
+        if let array = value as? [Any] {
+            let rendered = array.compactMap { renderContent($0) }.joined()
+            return rendered.isEmpty ? nil : rendered
+        }
+
+        return nil
+    }
+
+    private static func markdownImage(_ reference: String) -> String {
+        "\n\n![image](\(reference))\n\n"
+    }
+
+    private static func firstImageReference(in value: Any?) -> String? {
+        guard let value else { return nil }
+
+        if let text = value as? String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("{") || trimmed.hasPrefix("["),
+               let data = trimmed.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data),
+               let nested = firstImageReference(in: json) {
+                return nested
+            }
+            if trimmed.hasPrefix("data:image/") {
+                return trimmed
+            }
+            if let inText = firstImageReferenceInText(trimmed) {
+                return inText
+            }
+            if looksLikeBase64Image(trimmed) {
+                return "data:image/png;base64,\(trimmed)"
+            }
+            return nil
+        }
+
+        if let dict = value as? [String: Any] {
+            let typeHint = [
+                dict["type"], dict["mime_type"], dict["mimeType"],
+                dict["content_type"], dict["contentType"]
+            ].compactMap { $0.map { "\($0)" } }
+                .joined(separator: " ")
+                .lowercased()
+
+            if typeHint.contains("image"),
+               let base64 = dict["data"] as? String,
+               looksLikeBase64Image(base64) {
+                let mimeType = (dict["mime_type"] as? String)
+                    ?? (dict["mimeType"] as? String)
+                    ?? (dict["content_type"] as? String)
+                    ?? (dict["contentType"] as? String)
+                    ?? "image/png"
+                return "data:\(mimeType);base64,\(base64)"
+            }
+
+            let directImageKeys = [
+                "image_url", "imageUrl", "imageURL", "url",
+                "file_url", "download_url", "output_url",
+                "b64_json", "base64", "image_base64", "imageBase64",
+                "image", "data", "generated_image", "generatedImage",
+                "inline_data", "inlineData", "bytesBase64Encoded"
+            ]
+            for key in directImageKeys {
+                if let raw = dict[key] as? String,
+                   let reference = explicitImageReference(raw) {
+                    return reference
+                }
+                if let reference = firstImageReference(in: dict[key]) {
+                    return reference
+                }
+            }
+
+            for key in [
+                "output", "images", "content", "contents", "result", "results",
+                "response", "responses", "choices", "message", "messages",
+                "candidates", "candidate", "parts", "part", "artifact",
+                "artifacts", "asset", "assets", "media", "medias"
+            ] {
+                if let reference = firstImageReference(in: dict[key]) {
+                    return reference
+                }
+            }
+
+            return nil
+        }
+
+        if let array = value as? [Any] {
+            for item in array {
+                if let reference = firstImageReference(in: item) {
+                    return reference
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func explicitImageReference(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("data:image/") {
+            return trimmed
+        }
+        if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
+            return trimmed
+        }
+        if let inText = firstImageReferenceInText(trimmed) {
+            return inText
+        }
+        if looksLikeBase64Image(trimmed) {
+            return "data:image/png;base64,\(trimmed)"
+        }
+        return nil
+    }
+
+    private static func firstImageReferenceInText(_ text: String) -> String? {
+        let contextSuggestsImage = text.range(
+            of: #"(已生成图片|生成.*图|图片|图像|照片|image|photo|picture|generated)"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+        let patterns = [
+            #"!\[[^\]]*\]\((data:image/[^)\s]+)\)"#,
+            #"!\[[^\]]*\]\((https?://[^)\s]+)\)"#,
+            #"<img[^>]+src=["'](data:image/[^"']+)["']"#,
+            #"<img[^>]+src=["'](https?://[^"']+)["']"#,
+            #"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{128,})"#,
+            #"(https?://[^\s"'<>]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^\s"'<>]+)?)"#,
+            #"(https?://assets\.grok\.com/[^\s"'<>]+)"#,
+            #"(https?://[^\s"'<>]+)"#,
+            #"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"(https?://[^"]+)""#,
+            #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_-]{128,})""#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let nsText = text as NSString
+            let range = NSRange(location: 0, length: nsText.length)
+            guard let match = regex.firstMatch(in: text, range: range),
+                  match.numberOfRanges > 1 else { continue }
+            let value = nsText.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if value.hasPrefix("data:image/") {
+                return value
+            }
+            if value.hasPrefix("http://") || value.hasPrefix("https://") {
+                if contextSuggestsImage || isLikelyImageURL(value) {
+                    return value
+                }
+                continue
+            }
+            if looksLikeBase64Image(value) {
+                return "data:image/png;base64,\(value)"
+            }
+        }
+
+        return nil
+    }
+
+    private static func isLikelyImageURL(_ value: String) -> Bool {
+        guard let url = URL(string: value),
+              let host = url.host?.lowercased() else { return false }
+        let lower = value.lowercased()
+        if lower.range(of: #"\.(png|jpe?g|webp|gif|bmp|avif|svg)(\?|$)"#, options: .regularExpression) != nil {
+            return true
+        }
+        if lower.contains("data:image") || lower.contains("image/") {
+            return true
+        }
+        if host == "assets.grok.com" {
+            return true
+        }
+        let imageHosts = ["image", "img", "cdn", "asset", "media", "static", "file", "files"]
+        if imageHosts.contains(where: { host.contains($0) }) {
+            return true
+        }
+        let imagePathHints = ["/image", "/images", "/generated", "/media", "/asset", "/assets", "/file", "/files"]
+        return imagePathHints.contains(where: { lower.contains($0) })
+    }
+
+    private static func looksLikeBase64Image(_ string: String) -> Bool {
+        guard string.count > 128, !string.contains(" ") else { return false }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
+        return string.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 }
 

@@ -411,37 +411,131 @@ final class APIClient: @unchecked Sendable {
         return []
     }
 
+    private func requestAnyJSON(
+        path: String,
+        method: HTTPMethod = .get,
+        body: [String: Any]? = nil,
+        timeout: TimeInterval? = nil
+    ) async throws -> Any {
+        let bodyData: Data?
+        if let body {
+            bodyData = try JSONSerialization.data(withJSONObject: body)
+        } else {
+            bodyData = nil
+        }
+
+        let (data, _) = try await network.requestRaw(
+            path: path,
+            method: method,
+            body: bodyData,
+            timeout: timeout
+        )
+
+        guard !data.isEmpty else { return [String: Any]() }
+        if let json = try? JSONSerialization.jsonObject(with: data) {
+            return json
+        }
+        if let text = String(data: data, encoding: .utf8),
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return text
+        }
+        throw APIError.responseDecoding(
+            underlying: NSError(
+                domain: "APIClient",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Expected JSON, text, or image reference"]
+            ),
+            data: data
+        )
+    }
+
     func generateImage(prompt: String, model: String, size: String = "1024x1024") async throws -> String {
-        let body: [String: Any] = [
+        let baseBody: [String: Any] = [
             "model": model,
             "prompt": prompt,
             "n": 1,
             "size": size
         ]
-        let json = try await network.requestJSON(
-            path: "/images/generations",
-            method: .post,
-            body: body,
-            timeout: 300
-        )
+        let imageBodyVariants: [[String: Any]] = [
+            baseBody,
+            baseBody.merging(["response_format": "url"]) { _, new in new },
+            baseBody.merging(["response_format": "b64_json"]) { _, new in new },
+            baseBody.merging(["input": prompt]) { _, new in new },
+            [
+                "model": model,
+                "input": prompt,
+                "n": 1,
+                "size": size
+            ]
+        ]
+        let chatBodyVariants: [[String: Any]] = [
+            [
+                "model": model,
+                "stream": false,
+                "messages": [["role": "user", "content": prompt]],
+                "features": ["image_generation": true]
+            ],
+            [
+                "model": model,
+                "stream": false,
+                "messages": [["role": "user", "content": prompt]],
+                "modalities": ["text", "image"]
+            ],
+            [
+                "model": model,
+                "stream": false,
+                "input": prompt
+            ]
+        ]
+        let paths = [
+            "/images/generations",
+            "/image/generations",
+            "/images/generate",
+            "/image/generate",
+            chatCompletionsPath
+        ]
 
-        if let imageReference = firstImageReference(in: json) {
-            logger.info("🖼️ [generateImage] resolved image reference: \(imageReference, privacy: .public)")
-            return imageReference
-        }
-
-        if let raw = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]),
-           let rawString = String(data: raw, encoding: .utf8) {
-            logger.error("🖼️ [generateImage] no image reference found. Raw response: \(rawString, privacy: .public)")
+        var lastError: Error?
+        for path in paths {
+            let variants = path == chatCompletionsPath ? chatBodyVariants : imageBodyVariants
+            for requestBody in variants {
+                do {
+                    let payload = try await requestAnyJSON(
+                        path: path,
+                        method: .post,
+                        body: requestBody,
+                        timeout: 300
+                    )
+                    if let imageReference = firstImageReference(in: payload) {
+                        return imageReference
+                    }
+                    lastError = APIError.responseDecoding(
+                        underlying: NSError(
+                            domain: "APIClient",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "图片生成接口没有返回图片地址。"]
+                        ),
+                        data: nil
+                    )
+                } catch {
+                    lastError = error
+                    let apiError = APIError.from(error)
+                    if case .httpError(let statusCode, _, _) = apiError,
+                       [400, 404, 405, 422].contains(statusCode) {
+                        continue
+                    }
+                    throw error
+                }
+            }
         }
 
         throw APIError.responseDecoding(
             underlying: NSError(
                 domain: "APIClient",
                 code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "图片生成接口没有返回图片地址。"]
+                userInfo: [NSLocalizedDescriptionKey: lastError?.localizedDescription ?? "图片生成接口没有返回图片地址。"]
             ),
-            data: Data()
+            data: nil
         )
     }
 
@@ -558,11 +652,21 @@ final class APIClient: @unchecked Sendable {
 
         if let string = value as? String {
             let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") || trimmed.hasPrefix("data:image/") {
+            if trimmed.hasPrefix("{") || trimmed.hasPrefix("["),
+               let data = trimmed.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data),
+               let reference = firstImageReference(in: json) {
+                return reference
+            }
+            if trimmed.hasPrefix("data:image/") {
                 return trimmed
             }
-            if let resolved = resolveRelativeMediaReference(trimmed) {
-                return resolved
+            if (trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")),
+               isLikelyImageURL(trimmed) {
+                return trimmed
+            }
+            if let markdownImage = firstImageReferenceInText(trimmed) {
+                return markdownImage
             }
             if looksLikeBase64Image(trimmed) {
                 return "data:image/png;base64,\(trimmed)"
@@ -571,12 +675,35 @@ final class APIClient: @unchecked Sendable {
         }
 
         if let dict = value as? [String: Any] {
-            for key in ["url", "image_url", "b64_json", "base64", "image", "data"] {
+            if let mimeType = (dict["mime_type"] as? String) ?? (dict["mimeType"] as? String),
+               mimeType.hasPrefix("image/"),
+               let base64 = dict["data"] as? String,
+               looksLikeBase64Image(base64) {
+                return "data:\(mimeType);base64,\(base64)"
+            }
+
+            let directImageKeys = [
+                "url", "image_url", "imageUrl", "imageURL",
+                "file_url", "download_url", "output_url",
+                "b64_json", "base64", "image_base64", "imageBase64",
+                "image", "data", "generated_image", "generatedImage",
+                "inline_data", "inlineData", "bytesBase64Encoded"
+            ]
+            for key in directImageKeys {
+                if let raw = dict[key] as? String,
+                   let reference = explicitImageReference(raw) {
+                    return reference
+                }
                 if let reference = firstImageReference(in: dict[key]) {
                     return reference
                 }
             }
-            for key in ["output", "images", "content", "result", "results"] {
+            for key in [
+                "output", "images", "content", "contents", "result", "results",
+                "response", "responses", "choices", "message", "messages",
+                "candidates", "candidate", "parts", "part", "artifact",
+                "artifacts", "asset", "assets", "media", "medias"
+            ] {
                 if let reference = firstImageReference(in: dict[key]) {
                     return reference
                 }
@@ -595,6 +722,89 @@ final class APIClient: @unchecked Sendable {
         return nil
     }
 
+    private func explicitImageReference(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("data:image/") {
+            return trimmed
+        }
+        if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
+            return trimmed
+        }
+        if let markdownImage = firstImageReferenceInText(trimmed) {
+            return markdownImage
+        }
+        if looksLikeBase64Image(trimmed) {
+            return "data:image/png;base64,\(trimmed)"
+        }
+        return nil
+    }
+
+    private func firstImageReferenceInText(_ text: String) -> String? {
+        let contextSuggestsImage = text.range(
+            of: #"(已生成图片|生成.*图|图片|图像|照片|image|photo|picture|generated)"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+        let patterns = [
+            #"!\[[^\]]*\]\((data:image/[^)\s]+)\)"#,
+            #"!\[[^\]]*\]\((https?://[^)\s]+)\)"#,
+            #"!\[[^\]]*\]\((https?://[^)\s]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^)\s]*)?)\)"#,
+            #"<img[^>]+src=["'](data:image/[^"']+)["']"#,
+            #"<img[^>]+src=["'](https?://[^"']+)["']"#,
+            #"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{128,})"#,
+            #"(https?://[^\s"'<>]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^\s"'<>]+)?)"#,
+            #"(https?://assets\.grok\.com/[^\s"'<>]+)"#,
+            #"(https?://[^\s"'<>]+)"#,
+            #"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"(https?://[^"]+)""#,
+            #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_-]{128,})""#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let nsText = text as NSString
+            let range = NSRange(location: 0, length: nsText.length)
+            guard let match = regex.firstMatch(in: text, range: range),
+                  match.numberOfRanges > 1 else { continue }
+            let value = nsText.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if value.hasPrefix("data:image/") {
+                return value
+            }
+            if value.hasPrefix("http://") || value.hasPrefix("https://") {
+                if contextSuggestsImage || isLikelyImageURL(value) {
+                    return value
+                }
+                continue
+            }
+            if looksLikeBase64Image(value) {
+                return "data:image/png;base64,\(value)"
+            }
+        }
+
+        return nil
+    }
+
+    private func isLikelyImageURL(_ value: String) -> Bool {
+        guard let url = URL(string: value),
+              let host = url.host?.lowercased() else { return false }
+        let lower = value.lowercased()
+        if lower.range(of: #"\.(png|jpe?g|webp|gif|bmp|avif|svg)(\?|$)"#, options: .regularExpression) != nil {
+            return true
+        }
+        if lower.contains("data:image") || lower.contains("image/") {
+            return true
+        }
+        if host == "assets.grok.com" {
+            return true
+        }
+        let imageHosts = ["image", "img", "cdn", "asset", "media", "static", "file", "files"]
+        if imageHosts.contains(where: { host.contains($0) }) {
+            return true
+        }
+        let imagePathHints = ["/image", "/images", "/generated", "/media", "/asset", "/assets", "/file", "/files"]
+        return imagePathHints.contains(where: { lower.contains($0) })
+    }
+
     private func firstVideoReference(in value: Any?) -> String? {
         guard let value else { return nil }
 
@@ -602,9 +812,6 @@ final class APIClient: @unchecked Sendable {
             let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") || trimmed.hasPrefix("data:video/") {
                 return trimmed
-            }
-            if let resolved = resolveRelativeMediaReference(trimmed) {
-                return resolved
             }
             if looksLikeBase64Media(trimmed) {
                 return "data:video/mp4;base64,\(trimmed)"
@@ -650,14 +857,6 @@ final class APIClient: @unchecked Sendable {
         guard string.count > 256, !string.contains(" ") else { return false }
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
         return string.unicodeScalars.allSatisfy { allowed.contains($0) }
-    }
-
-    private func resolveRelativeMediaReference(_ raw: String) -> String? {
-        guard !raw.isEmpty else { return nil }
-        guard !raw.contains(" ") else { return nil }
-        guard raw.hasPrefix("/") || raw.hasPrefix("./") || raw.hasPrefix("../") else { return nil }
-        guard let root = network.serverConfig.siteRootURL else { return nil }
-        return URL(string: raw, relativeTo: root)?.absoluteURL.absoluteString
     }
 
     func getDefaultModel() async -> String? {

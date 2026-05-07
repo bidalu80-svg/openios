@@ -2484,7 +2484,10 @@ struct ChatDetailView: View {
                 ForEach(Array(imageFiles.enumerated()), id: \.element) { _, file in
                     if let fileUrl = file.url, !fileUrl.isEmpty {
                         let fileId: String = {
-                            if let displayURL = file.displayURL, displayURL.hasPrefix("data:image/") {
+                            if let displayURL = file.displayURL,
+                               displayURL.hasPrefix("data:image/")
+                                || displayURL.hasPrefix("http://")
+                                || displayURL.hasPrefix("https://") {
                                 return displayURL
                             }
                             if !fileUrl.contains("/") { return fileUrl }
@@ -3558,9 +3561,8 @@ private struct IsolatedAssistantMessage: View {
         let displayContent: String = {
             if isActivelyStreaming { return rawContent }
             let resolved = Self.resolveRelativeURLs(rawContent, baseURL: serverBaseURL)
-            let withoutExtractedImageLinks = ChatViewModel.stripExtractedImageLinks(from: resolved)
             let preferDomain = UserDefaults.standard.object(forKey: "citationShowDomain") as? Bool ?? true
-            return Self.preprocessCitations(withoutExtractedImageLinks, sources: effectiveSources, preferDomain: preferDomain)
+            return Self.preprocessCitations(resolved, sources: effectiveSources, preferDomain: preferDomain)
         }()
 
         let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
