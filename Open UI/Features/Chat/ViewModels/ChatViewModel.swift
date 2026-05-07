@@ -3196,7 +3196,8 @@ final class ChatViewModel {
                 var exactUsage: [String: Any]?
 
                 do {
-                    if self.shouldUseDirectVideoGeneration(modelId: modelId) {
+                    if self.shouldUseDirectVideoGeneration(modelId: modelId)
+                        && Self.looksLikeImageGenerationPrompt(messageText) {
                         let videoPrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !videoPrompt.isEmpty else {
                             throw APIError.unknown(
@@ -3248,7 +3249,8 @@ final class ChatViewModel {
                         return
                     }
 
-                    if self.shouldUseDirectImageGeneration(modelId: modelId) {
+                    if self.shouldUseDirectImageGeneration(modelId: modelId)
+                        && Self.looksLikeImageGenerationPrompt(messageText) {
                         guard self.currentProviderType != .anthropic else {
                             throw APIError.unknown(
                                 underlying: NSError(
@@ -5767,13 +5769,14 @@ final class ChatViewModel {
         let positives = [
             "image", "img", "dall-e", "dalle", "gpt-image", "imagen",
             "flux", "sdxl", "stable-diffusion", "midjourney", "mj-",
-            "banana", "nano-banana"
+            "banana", "nano-banana", "image-preview", "imagine"
         ]
         let negatives = [
             "vision", "ocr", "vl", "video", "videos", "veo", "sora",
             "wan", "kling", "hailuo", "runway", "luma", "pika", "vidu",
             "seedance", "text-to-video", "image-to-video", "i2v", "t2v",
-            "生视频", "视频生成"
+            "生视频", "视频生成", "chat", "instruct", "reasoning",
+            "qwen3.6-plus", "qwen3.6", "qwen-plus", "gemini-3-pro-preview"
         ]
         return positives.contains(where: { haystack.contains($0) })
             && !negatives.contains(where: { haystack.contains($0) })
@@ -6163,13 +6166,8 @@ final class ChatViewModel {
         """
     }
 
-    private static func projectContinuitySystemContext() -> String {
-        """
-        When generating code projects, treat every file as part of one connected project:
-        - Use exact relative file names and matching imports, links, entrypoints, and package/config files.
-        - For HTML/CSS/JavaScript projects split across index.html, style.css, and script.js, the HTML must link ./style.css and ./script.js, and the CSS/JS must be written for that same UI.
-        - For other languages, include the folder tree, entry file, dependency/config files, and imports so the project can run as a coherent whole instead of unrelated snippets.
-        - If the user only asks to "show", "preview", "write a page", or wants a single-file demo, return normal code blocks with an inline preview-friendly HTML file. Do not create workspace operations unless the user explicitly asks to save/create/modify/read/list/delete local files or folders.
+    private static func projectContinuitySystemContext(includeWorkspaceAgent: Bool) -> String {
+        let workspaceInstructions = includeWorkspaceAgent ? """
 
         Iexa has a local workspace agent. When the user asks you to create, modify, read, list, or delete local project files, include exactly one fenced block with language `iexa_workspace` containing JSON. Paths are relative to the app's Documents/Iexa Workspace folder and must never be absolute or use `..`.
         Supported operations:
@@ -6186,6 +6184,15 @@ final class ChatViewModel {
         }
         ```
         For multi-file projects, write all connected files in the same workspace block so the UI, styles, scripts, imports, and dependencies stay linked.
+        """ : ""
+
+        """
+        When generating code projects, treat every file as part of one connected project:
+        - Use exact relative file names and matching imports, links, entrypoints, and package/config files.
+        - For HTML/CSS/JavaScript projects split across index.html, style.css, and script.js, the HTML must link ./style.css and ./script.js, and the CSS/JS must be written for that same UI.
+        - For other languages, include the folder tree, entry file, dependency/config files, and imports so the project can run as a coherent whole instead of unrelated snippets.
+        - If the user only asks to "show", "preview", "write a page", or wants a single-file demo, return normal code blocks with an inline preview-friendly HTML file. Do not create workspace operations unless the user explicitly asks to save/create/modify/read/list/delete local files or folders.
+        \(workspaceInstructions)
         """
     }
 
@@ -6222,7 +6229,11 @@ final class ChatViewModel {
             return conversation.systemPrompt
         }()
         let memoryContext = await localMemorySystemContext()
-        let combinedSystemPrompt = [asyncEffectiveSP, Self.projectContinuitySystemContext(), memoryContext]
+        let combinedSystemPrompt = [
+            asyncEffectiveSP,
+            Self.projectContinuitySystemContext(includeWorkspaceAgent: shouldExecuteLocalWorkspaceAgentForCurrentRequest()),
+            memoryContext
+        ]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
@@ -6980,9 +6991,19 @@ final class ChatViewModel {
 
     static func stripExtractedImageLinks(from content: String) -> String {
         var result = content
-        let links = extractImageLinks(from: content)
-        for link in links {
-            result = result.replacingOccurrences(of: link, with: "")
+        // Remove only embedded markup forms. Keep bare URLs visible as fallback
+        // so if a provider's external image fails to load, the user still sees
+        // the original link instead of an empty assistant message.
+        let embeddedPatterns = [
+            #"\!\[[^\]]*\]\((https?://[^)\s]+)\)"#,
+            #"<img[^>]+src=['\"](https?://[^'\"]+)['\"][^>]*>"#
+        ]
+        for pattern in embeddedPatterns {
+            result = result.replacingOccurrences(
+                of: pattern,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
         }
         result = result.replacingOccurrences(
             of: #"\n{3,}"#,
@@ -6990,6 +7011,32 @@ final class ChatViewModel {
             options: .regularExpression
         )
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func looksLikeImageGenerationPrompt(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let positives = [
+            "生成一张", "生成一幅", "生成一个", "生成图片", "帮我画", "画一张", "做一张图",
+            "出图", "生图", "绘制", "画个", "给我一张图",
+            "generate an image", "generate a picture", "create an image", "create a picture",
+            "draw a", "make an image", "render an image"
+        ]
+        let negatives = [
+            "图片链接", "image url", "html", "css", "js", "代码", "code", "接口文档", "api doc"
+        ]
+        return positives.contains(where: { lower.contains($0) })
+            && !negatives.contains(where: { lower.contains($0) })
+    }
+
+    private func shouldRouteImageGenerationThroughChat(modelId: String) -> Bool {
+        let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
+            .lowercased()
+        if currentProviderType == .gemini {
+            return haystack.contains("image-preview")
+                || haystack.contains("gemini-3-pro-image-preview")
+                || haystack.contains("gemini-2.5-flash-image")
+        }
+        return false
     }
 
     private static func imageContentType(for urlString: String) -> String {
