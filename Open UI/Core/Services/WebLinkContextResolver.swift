@@ -65,18 +65,18 @@ struct WebLinkContextResolver: Sendable {
                 group.addTask {
                     do {
                         if Self.isDouyinURL(url) {
-                            let result = try await resolveDouyin(url)
+                            let result = try await self.resolveDouyin(url)
                             return LinkFetchOutcome(
                                 index: index,
-                                block: douyinContextBlock(result: result, index: index + 1),
+                                block: self.douyinContextBlock(result: result, index: index + 1),
                                 video: result.video,
                                 success: true
                             )
                         } else {
-                            let page = try await resolveWebPage(url)
+                            let page = try await self.resolveWebPage(url)
                             return LinkFetchOutcome(
                                 index: index,
-                                block: webPageContextBlock(page: page, index: index + 1),
+                                block: self.webPageContextBlock(page: page, index: index + 1),
                                 video: nil,
                                 success: true
                             )
@@ -385,21 +385,21 @@ struct WebLinkContextResolver: Sendable {
     }
 }
 
-private struct WebPageResult {
+private struct WebPageResult: Sendable {
     let url: String
     let title: String?
     let description: String?
     let text: String
 }
 
-private struct LinkFetchOutcome {
+private struct LinkFetchOutcome: Sendable {
     let index: Int
     let block: String?
     let video: ResolvedWebVideo?
     let success: Bool
 }
 
-private struct DouyinResolveResult {
+private struct DouyinResolveResult: Sendable {
     let sourceURL: String
     let pageURL: String
     let video: ResolvedWebVideo

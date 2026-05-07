@@ -7236,7 +7236,7 @@ final class ChatViewModel {
         addMatches(#"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"(https?://[^"]+)""#)
         addMatches(#"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_-]{128,})""#)
 
-        return results.compactMap { value in
+        return results.compactMap { value -> String? in
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.hasPrefix("data:image/") {
                 return trimmed
@@ -7247,6 +7247,21 @@ final class ChatViewModel {
             guard looksLikeBase64Image(trimmed) else { return nil }
             return "data:image/png;base64,\(trimmed)"
         }
+    }
+
+    private static func looksLikeBase64Image(_ value: String) -> Bool {
+        let compact = value
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard compact.count >= 128,
+              compact.range(of: #"^[A-Za-z0-9+/=_-]+$"#, options: .regularExpression) != nil else {
+            return false
+        }
+
+        return compact.hasPrefix("/9j/")
+            || compact.hasPrefix("iVBORw0KGgo")
+            || compact.hasPrefix("R0lGOD")
+            || compact.hasPrefix("UklGR")
     }
 
     private static func isLikelyImageURL(_ value: String) -> Bool {
