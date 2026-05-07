@@ -429,6 +429,22 @@ struct StreamingMarkdownView: View {
         return nil
     }
 
+    /// Detects a bare image URL in plain text so providers that return
+    /// "done text + image link" still render as an inline image.
+    private func findBareImageURLs(in text: String) -> [ParsedImage] {
+        let pattern = #"(?<![\(\["'])((?:https?:)?//[^\s<>"']+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^\s<>"']*)?)(?![\)"'])"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.matches(in: text, options: [], range: nsRange).compactMap { match in
+            guard match.numberOfRanges >= 2,
+                  let urlRange = Range(match.range(at: 1), in: text) else { return nil }
+            let raw = String(text[urlRange])
+            let normalized = raw.hasPrefix("//") ? "https:\(raw)" : raw
+            guard let imageURL = Self.makeImageURL(from: normalized) else { return nil }
+            return ParsedImage(range: urlRange, imageURL: imageURL, altText: "", linkURL: imageURL)
+        }
+    }
+
     private func parseSpecialBlocks(_ text: String) -> [ContentSegment] {
         // 0) First check for VIZ markers and expand them into segments.
         //    Each text chunk from the VIZ parse is then processed for images + code blocks.
@@ -449,7 +465,12 @@ struct StreamingMarkdownView: View {
 
         // 1) Extract markdown images first, splitting the text around them.
         //    This runs before code-block detection so images inside prose are found.
-        let images = findMarkdownImages(in: text)
+        var images = findMarkdownImages(in: text)
+        let bareImages = findBareImageURLs(in: text)
+        for bare in bareImages where !images.contains(where: { $0.range.overlaps(bare.range) }) {
+            images.append(bare)
+        }
+        images.sort { $0.range.lowerBound < $1.range.lowerBound }
 
         if images.isEmpty {
             // No images — fall through to code-block parsing directly.

@@ -426,7 +426,13 @@ final class APIClient: @unchecked Sendable {
         )
 
         if let imageReference = firstImageReference(in: json) {
+            logger.info("🖼️ [generateImage] resolved image reference: \(imageReference, privacy: .public)")
             return imageReference
+        }
+
+        if let raw = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]),
+           let rawString = String(data: raw, encoding: .utf8) {
+            logger.error("🖼️ [generateImage] no image reference found. Raw response: \(rawString, privacy: .public)")
         }
 
         throw APIError.responseDecoding(
