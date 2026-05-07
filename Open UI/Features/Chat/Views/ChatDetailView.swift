@@ -2348,7 +2348,7 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func chatImageView(fileId: String) -> some View {
-        if let image = inlineDataImage(from: fileId) {
+        if inlineDataImage(from: fileId) != nil {
             AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
         } else {
             AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)

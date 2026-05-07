@@ -1862,7 +1862,7 @@ final class AuthViewModel {
             customHeaderEntries = activeServer.customHeaders
                 .sorted { $0.key < $1.key }
                 .map { CustomHeaderEntry(key: $0.key, value: $0.value) }
-            allowSelfSignedCertificates = activeServer.allowSelfSignedCertificates
+            allowSelfSignedCerts = activeServer.allowSelfSignedCertificates
             errorMessage = nil
             phase = .serverConnection
             return

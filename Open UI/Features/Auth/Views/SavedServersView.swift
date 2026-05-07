@@ -206,7 +206,7 @@ struct SavedServersView: View {
         viewModel.serverURL = server.url
         viewModel.apiKey = server.apiKey ?? ""
         viewModel.localUserName = server.lastUserName ?? viewModel.currentUser?.displayName ?? viewModel.localUserName
-        viewModel.allowSelfSignedCertificates = server.allowSelfSignedCertificates
+        viewModel.allowSelfSignedCerts = server.allowSelfSignedCertificates
         viewModel.customHeaderEntries = server.customHeaders
             .sorted { $0.key < $1.key }
             .map { CustomHeaderEntry(key: $0.key, value: $0.value) }
