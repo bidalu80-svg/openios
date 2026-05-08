@@ -21,6 +21,7 @@ static char *iexa_dup_output(const char *message) {
 #if IEXA_LOCAL_ALPINE_ISH
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <netdb.h>
 #include <pthread.h>
 #include <resolv.h>
@@ -58,6 +59,40 @@ static size_t capture_capacity = 0;
 static bool capture_finished = false;
 static int capture_exit_code = 126;
 static int capture_pid = 0;
+
+static bool contains_case_insensitive(const char *value, const char *needle) {
+    if (value == NULL || needle == NULL || needle[0] == '\0') {
+        return false;
+    }
+
+    size_t needle_length = strlen(needle);
+    for (const char *cursor = value; *cursor != '\0'; cursor++) {
+        size_t index = 0;
+        while (index < needle_length &&
+               cursor[index] != '\0' &&
+               tolower((unsigned char) cursor[index]) == tolower((unsigned char) needle[index])) {
+            index++;
+        }
+        if (index == needle_length) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int command_timeout_seconds(const char *command) {
+    if (contains_case_insensitive(command, "apk add") ||
+        contains_case_insensitive(command, "apk upgrade") ||
+        contains_case_insensitive(command, "apk fix")) {
+        return 900;
+    }
+    if (contains_case_insensitive(command, "apk update") ||
+        contains_case_insensitive(command, "curl ") ||
+        contains_case_insensitive(command, "wget ")) {
+        return 120;
+    }
+    return 60;
+}
 
 static int ensure_directory(const char *path) {
     if (mkdir(path, 0777) == 0) {
@@ -418,17 +453,19 @@ char *iexa_local_alpine_execute(
     capture_pid = current->pid;
     task_start(current);
 
+    int timeout_seconds = command_timeout_seconds(command);
     pthread_mutex_lock(&capture_lock);
     while (!capture_finished) {
         struct timespec timeout;
         struct timeval now;
         gettimeofday(&now, NULL);
-        timeout.tv_sec = now.tv_sec + 30;
+        timeout.tv_sec = now.tv_sec + timeout_seconds;
         timeout.tv_nsec = now.tv_usec * 1000;
         int wait_result = pthread_cond_timedwait(&capture_done, &capture_lock, &timeout);
         if (wait_result == ETIMEDOUT) {
             capture_exit_code = 124;
-            const char *message = "Local Alpine command timed out after 30 seconds\n";
+            char message[96];
+            snprintf(message, sizeof(message), "Local Alpine command timed out after %d seconds\n", timeout_seconds);
             capture_append_locked(message, strlen(message));
             capture_finished = true;
             break;

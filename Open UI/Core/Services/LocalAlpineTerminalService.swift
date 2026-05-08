@@ -293,11 +293,26 @@ actor LocalAlpineTerminalService {
             """
         }
 
-        guard lowercased.hasPrefix("apk add ") else { return command }
+        return rewriteApkNodeAlias(in: command)
+    }
 
-        let commandBody = trimmed
+    private func rewriteApkNodeAlias(in command: String) -> String {
+        let rewrittenLines = command.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+            rewriteApkNodeAliasLine(String(line))
+        }
+        let rewritten = rewrittenLines.joined(separator: "\n")
+        return rewritten == command ? command : rewritten
+    }
+
+    private func rewriteApkNodeAliasLine(_ line: String) -> String {
+        let leadingWhitespace = line.prefix { $0 == " " || $0 == "\t" }
+        let command = line.dropFirst(leadingWhitespace.count)
+        let lowercased = command.lowercased()
+        guard lowercased.hasPrefix("apk add ") else { return line }
+
+        let commandBody = String(command)
         let tokens = commandBody.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-        guard tokens.count >= 3, tokens[0] == "apk", tokens[1] == "add" else { return command }
+        guard tokens.count >= 3, tokens[0] == "apk", tokens[1] == "add" else { return line }
 
         var rewritten: [String] = [tokens[0], tokens[1]]
         var changed = false
@@ -311,7 +326,7 @@ actor LocalAlpineTerminalService {
             }
         }
 
-        return changed ? rewritten.joined(separator: " ") : command
+        return changed ? String(leadingWhitespace) + rewritten.joined(separator: " ") : line
     }
 
     private func shellSingleQuoted(_ value: String) -> String {
