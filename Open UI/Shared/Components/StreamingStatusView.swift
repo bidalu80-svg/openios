@@ -205,22 +205,32 @@ struct StreamingStatusView: View {
     private func localAlpineTitle(for status: ChatStatusUpdate?) -> String {
         if status?.done == true { return "本地 Alpine 已完成" }
         let description = status?.description ?? ""
-        if description.contains("依赖") { return "正在准备依赖" }
+        if description.contains("依赖") && description.contains("执行") { return "正在执行命令" }
+        if description.contains("依赖") { return "正在检查依赖" }
         if description.contains("软件包") || description.contains("软件源") { return "正在安装软件包" }
         return "本地 Alpine 正在执行"
     }
 
     private func localAlpineStageTitles(for description: String) -> [String] {
-        if description.contains("依赖") || description.contains("软件包") || description.contains("软件源") {
+        if description.contains("软件包") || description.contains("软件源") {
             return ["准备", "检查", "安装", "执行"]
+        }
+        if description.contains("依赖") {
+            return ["准备", "检查", "执行", "完成"]
         }
         return ["准备", "启动", "执行", "完成"]
     }
 
     private func localAlpineActiveStage(for description: String, isDone: Bool) -> Int {
         if isDone { return 3 }
-        if description.contains("软件包") || description.contains("软件源") || description.contains("依赖") {
+        if description.contains("软件包") || description.contains("软件源") {
             return 2
+        }
+        if description.contains("依赖") && description.contains("执行") {
+            return 2
+        }
+        if description.contains("依赖") {
+            return 1
         }
         if description.contains("执行") {
             return 2

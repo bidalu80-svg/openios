@@ -3905,7 +3905,7 @@ final class ChatViewModel {
             return "正在更新 Alpine 软件源..."
         }
         if shouldLocalAlpineCheckDependencies(for: lowercased) {
-            return "正在检查并自动安装缺失依赖..."
+            return "正在检查依赖并执行命令..."
         }
         return "正在执行本地 Alpine 命令..."
     }
