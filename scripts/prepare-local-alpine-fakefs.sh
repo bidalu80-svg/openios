@@ -3,7 +3,7 @@ set -euo pipefail
 
 ish_dir="${1:-External/ish}"
 rootfs_archive="${2:-Open UI/Resources/iexa-alpine-rootfs.tar.gz}"
-fakefs_output="${3:-Open UI/Resources/iexa-alpine-rootfs.fakefs}"
+fakefs_output="${3:-.build/local-alpine-resources/iexa-alpine-rootfs.fakefs}"
 build_dir="${4:-$PWD/.build/local-alpine-fakefs}"
 
 if [ ! -d "$ish_dir" ]; then

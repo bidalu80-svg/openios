@@ -230,17 +230,19 @@ jobs:
           export PKG_CONFIG_PATH="$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
           bash scripts/prepare-ish-source.sh External/ish
+          mkdir -p ".build/local-alpine-resources"
           bash scripts/prepare-local-alpine-fakefs.sh \
             External/ish \
             "Open UI/Resources/iexa-alpine-rootfs.tar.gz" \
-            "Open UI/Resources/iexa-alpine-rootfs.fakefs"
-          test -d "Open UI/Resources/iexa-alpine-rootfs.fakefs/data"
-          test -s "Open UI/Resources/iexa-alpine-rootfs.fakefs/meta.db"
+            ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs"
+          test -d ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/data"
+          test -s ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db"
           bash scripts/build-local-alpine-ish-ci.sh External/ish "$RUNNER_TEMP/ish-products"
           bash scripts/enable-local-alpine-ish-ci.sh \
             "Open UI.xcodeproj/project.pbxproj" \
             "$RUNNER_TEMP/ish-products" \
-            "External/ish"
+            "External/ish" \
+            ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs"
 
       - name: Archive app
         id: archive_signed
