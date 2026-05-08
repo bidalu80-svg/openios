@@ -315,9 +315,7 @@ actor LocalAlpineTerminalService {
 
     private func commandWithAutoDependencyRepair(_ command: String) -> String {
         let requirements = inferredPackageRequirements(for: command)
-        let shouldRepairPythonModules = shouldRetryMissingPythonModule(for: command)
-        let shouldRepairNodeModules = shouldRetryMissingNodeModule(for: command)
-        guard !requirements.isEmpty || shouldRepairPythonModules || shouldRepairNodeModules else {
+        guard !requirements.isEmpty else {
             return command
         }
 
@@ -329,15 +327,6 @@ actor LocalAlpineTerminalService {
             """
         }.joined(separator: "\n")
 
-        let executableCommand: String
-        if shouldRepairPythonModules {
-            executableCommand = pythonModuleRepairWrapper(for: command)
-        } else if shouldRepairNodeModules {
-            executableCommand = nodeModuleRepairWrapper(for: command)
-        } else {
-            executableCommand = command
-        }
-
         return """
         IEXA_MISSING=""
         \(installLines)
@@ -346,7 +335,7 @@ actor LocalAlpineTerminalService {
           apk update
           apk add --no-cache $IEXA_MISSING
         fi
-        \(executableCommand)
+        \(command)
         """
     }
 
@@ -372,80 +361,6 @@ actor LocalAlpineTerminalService {
             }
         }
         return result
-    }
-
-    private func shouldRetryMissingPythonModule(for command: String) -> Bool {
-        let lowercased = command.lowercased()
-        return lowercased.contains("python3")
-            || lowercased.contains("python ")
-            || lowercased.contains(".py")
-    }
-
-    private func pythonModuleRepairWrapper(for command: String) -> String {
-        #"""
-        IEXA_PY_ERR="${TMPDIR:-/tmp}/iexa-python-error-$$.log"
-        (
-        \#(command)
-        ) 2>"$IEXA_PY_ERR"
-        IEXA_EXIT=$?
-        cat "$IEXA_PY_ERR" >&2
-        if [ "$IEXA_EXIT" -ne 0 ] && grep -Eq "ModuleNotFoundError: No module named|ImportError: No module named" "$IEXA_PY_ERR"; then
-          IEXA_MODULE="$(sed -n "s/.*No module named ['\\"]\\([^'\\"]*\\)['\\"].*/\\1/p" "$IEXA_PY_ERR" | head -n 1 | cut -d. -f1 | tr '_' '-')"
-          if [ -n "$IEXA_MODULE" ]; then
-            echo "[Iexa] Missing Python module: $IEXA_MODULE"
-            echo "[Iexa] Trying apk package py3-$IEXA_MODULE, then pip fallback"
-            apk update
-            apk add --no-cache "py3-$IEXA_MODULE" || {
-              apk add --no-cache py3-pip
-              python3 -m pip install "$IEXA_MODULE"
-            }
-            (
-        \#(command)
-            )
-            exit $?
-          fi
-        fi
-        exit "$IEXA_EXIT"
-        """#
-    }
-
-    private func shouldRetryMissingNodeModule(for command: String) -> Bool {
-        let lowercased = command.lowercased()
-        return lowercased.contains("node ")
-            || lowercased.contains("node\n")
-            || lowercased.contains("npm ")
-            || lowercased.contains(".js")
-    }
-
-    private func nodeModuleRepairWrapper(for command: String) -> String {
-        #"""
-        IEXA_NODE_ERR="${TMPDIR:-/tmp}/iexa-node-error-$$.log"
-        (
-        \#(command)
-        ) 2>"$IEXA_NODE_ERR"
-        IEXA_EXIT=$?
-        cat "$IEXA_NODE_ERR" >&2
-        if [ "$IEXA_EXIT" -ne 0 ] && grep -Eq "Cannot find module|Cannot find package" "$IEXA_NODE_ERR"; then
-          IEXA_MODULE="$(sed -n "s/.*Cannot find module ['\"]\([^'\"]*\)['\"].*/\1/p; s/.*Cannot find package ['\"]\([^'\"]*\)['\"].*/\1/p" "$IEXA_NODE_ERR" | head -n 1)"
-          case "$IEXA_MODULE" in
-            ""|/*|.*) ;;
-            *)
-              echo "[Iexa] Missing Node module: $IEXA_MODULE"
-              apk update
-              apk add --no-cache nodejs npm
-              if [ ! -f package.json ]; then
-                npm init -y >/dev/null 2>&1 || true
-              fi
-              npm install "$IEXA_MODULE"
-              (
-        \#(command)
-              )
-              exit $?
-              ;;
-          esac
-        fi
-        exit "$IEXA_EXIT"
-        """#
     }
 
     private func rewriteApkNodeAlias(in command: String) -> String {

@@ -253,8 +253,8 @@ final class AppearanceManager {
         let storedMode = UserDefaults.standard.string(forKey: Self.modeKey) ?? "system"
         self.colorSchemeMode = ColorSchemeMode(rawValue: storedMode) ?? .system
 
-        let storedAccent = UserDefaults.standard.string(forKey: Self.accentKey) ?? "blue"
-        self.accentColorPreset = AccentColorPreset(rawValue: storedAccent) ?? .blue
+        let storedAccent = UserDefaults.standard.string(forKey: Self.accentKey) ?? "monochrome"
+        self.accentColorPreset = AccentColorPreset(rawValue: storedAccent) ?? .monochrome
 
         self.useDynamicType = UserDefaults.standard.object(forKey: Self.dynamicTypeKey) as? Bool ?? true
         self.reduceMotion = UserDefaults.standard.object(forKey: Self.reduceMotionKey) as? Bool ?? false

@@ -445,27 +445,11 @@ final class APIClient: @unchecked Sendable {
     private static func defaultAnthropicModels() -> [AIModel] {
         [
             AIModel(
-                id: "claude-sonnet-4-6",
-                name: "Claude Sonnet 4.6",
-                description: "Anthropic Claude API fallback model",
-                isMultimodal: true,
-                contextLength: 1_000_000,
-                tags: ["Claude", "Anthropic"]
-            ),
-            AIModel(
-                id: "claude-haiku-4-5-20251001",
-                name: "Claude Haiku 4.5",
+                id: "claude-opus-4-1-20250805",
+                name: "Claude Opus 4.1",
                 description: "Anthropic Claude API fallback model",
                 isMultimodal: true,
                 contextLength: 200_000,
-                tags: ["Claude", "Anthropic"]
-            ),
-            AIModel(
-                id: "claude-opus-4-7",
-                name: "Claude Opus 4.7",
-                description: "Anthropic Claude API fallback model",
-                isMultimodal: true,
-                contextLength: 1_000_000,
                 tags: ["Claude", "Anthropic"]
             ),
             AIModel(
@@ -487,6 +471,14 @@ final class APIClient: @unchecked Sendable {
             AIModel(
                 id: "claude-sonnet-4-20250514",
                 name: "Claude Sonnet 4",
+                description: "Anthropic Claude API fallback model",
+                isMultimodal: true,
+                contextLength: 200_000,
+                tags: ["Claude", "Anthropic"]
+            ),
+            AIModel(
+                id: "claude-3-haiku-20240307",
+                name: "Claude Haiku 3",
                 description: "Anthropic Claude API fallback model",
                 isMultimodal: true,
                 contextLength: 200_000,
