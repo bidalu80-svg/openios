@@ -2944,7 +2944,7 @@ final class ChatViewModel {
            (terminalEnabled && selectedTerminalIsLocalAlpine || shouldAutoUseLocalAlpine) {
             selectedTerminalServer = .localAlpine
             terminalEnabled = true
-            await sendDirectLocalAlpineCommand(normalizedLocalAlpineText, modelId: modelId)
+            await sendDirectLocalAlpineCommand(currentText, modelId: modelId)
             return
         }
 
@@ -3777,6 +3777,9 @@ final class ChatViewModel {
     private func sendDirectLocalAlpineCommand(_ rawCommand: String, modelId: String) async {
         let command = Self.normalizedLocalAlpineCommand(rawCommand)
         guard !command.isEmpty else { return }
+        let displayCommand = rawCommand
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"^\$\s+"#, with: "", options: .regularExpression)
 
         inputText = ""
         attachments = []
@@ -3784,7 +3787,7 @@ final class ChatViewModel {
 
         let userMessage = ChatMessage(
             role: .user,
-            content: command,
+            content: displayCommand.isEmpty ? command : displayCommand,
             timestamp: .now
         )
         let assistantMessageId = UUID().uuidString
@@ -3793,7 +3796,7 @@ final class ChatViewModel {
         })?.id
 
         if conversation == nil {
-            let chatTitle = String(command.prefix(50))
+            let chatTitle = String(userMessage.content.prefix(50))
             conversation = Conversation(
                 id: isTemporaryChat ? "local:\(UUID().uuidString)" : UUID().uuidString,
                 title: chatTitle,
@@ -3827,7 +3830,7 @@ final class ChatViewModel {
             parentId: userMessageParentId,
             childrenIds: [assistantMessageId],
             role: .user,
-            content: command,
+            content: userMessage.content,
             timestamp: userMessage.timestamp,
             models: [modelId]
         )
@@ -3853,7 +3856,7 @@ final class ChatViewModel {
         selfInitiatedStream = true
 
         let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
-        let output = formatDirectLocalAlpineOutput(command: command, result: result)
+        let output = formatDirectLocalAlpineOutput(command: userMessage.content, result: result)
         updateAssistantMessage(id: assistantMessageId, content: output, isStreaming: false)
 
         hasFinishedStreaming = true
