@@ -253,6 +253,9 @@ final class ChatViewModel {
     /// been applied. Prevents duplicate writes when a completion is refreshed
     /// or retried after streaming finishes.
     private var localWorkspaceAgentExecutedMessageIds: Set<String> = []
+    /// Assistant message IDs whose Local Alpine command blocks have already
+    /// been executed. Keeps refresh/retry paths from running shell commands twice.
+    private var localAlpineAgentExecutedMessageIds: Set<String> = []
     private(set) var serverBaseURL: String = ""
     @ObservationIgnored nonisolated(unsafe) private var foregroundObserver: NSObjectProtocol?
     @ObservationIgnored nonisolated(unsafe) private var backgroundObserver: NSObjectProtocol?
@@ -922,6 +925,11 @@ final class ChatViewModel {
     private static func isLocalWorkspaceAgentResult(_ message: ChatMessage) -> Bool {
         message.metadata?["iexa_local_workspace_result"] == "true"
             || (message.role == .system && message.content.hasPrefix("本地工作区执行结果"))
+    }
+
+    private static func isLocalAlpineAgentResult(_ message: ChatMessage) -> Bool {
+        message.metadata?["iexa_local_alpine_result"] == "true"
+            || (message.role == .system && message.content.hasPrefix("Local Alpine 执行结果"))
     }
 
     // MARK: - Initialisation
@@ -2929,6 +2937,16 @@ final class ChatViewModel {
         let currentAttachments = processedAttachments
         errorMessage = nil
 
+        let shouldAutoUseLocalAlpine = shouldAutoRouteExplicitLocalAlpineCommand(currentText)
+        if processedAttachments.isEmpty,
+           shouldSendTextDirectlyToLocalAlpine(currentText),
+           (terminalEnabled && selectedTerminalIsLocalAlpine || shouldAutoUseLocalAlpine) {
+            selectedTerminalServer = .localAlpine
+            terminalEnabled = true
+            await sendDirectLocalAlpineCommand(currentText, modelId: modelId)
+            return
+        }
+
         // Build file references from pre-uploaded attachments.
         // Files are uploaded at attach time (uploadAttachmentImmediately),
         // so we just collect the already-assigned file IDs here.
@@ -3132,7 +3150,9 @@ final class ChatViewModel {
 
         // Capture the ID of the last message before appending the user message.
         // This becomes the user message's parentId in the history tree.
-        let userMessageParentId = conversation?.messages.last(where: { !Self.isLocalWorkspaceAgentResult($0) })?.id
+        let userMessageParentId = conversation?.messages.last(where: {
+            !Self.isLocalWorkspaceAgentResult($0) && !Self.isLocalAlpineAgentResult($0)
+        })?.id
 
         // Ensure conversation exists on server (skip for temporary chats)
         if conversation == nil {
@@ -3721,6 +3741,144 @@ final class ChatViewModel {
                 }
             }
         }
+    }
+
+    private func shouldSendTextDirectlyToLocalAlpine(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.contains("\n") { return true }
+        if trimmed.hasPrefix("$ ") { return true }
+        if trimmed.hasPrefix("./") || trimmed.hasPrefix("/") { return true }
+        if trimmed.range(of: #"[;&|`$<>]"#, options: .regularExpression) != nil { return true }
+
+        let command = trimmed.split(separator: " ", maxSplits: 1).first.map(String.init) ?? trimmed
+        let knownCommands: Set<String> = [
+            "apk", "ash", "sh", "bash", "cat", "cd", "chmod", "chown", "cp", "date",
+            "df", "du", "echo", "env", "find", "free", "gcc", "grep", "head", "id", "ls",
+            "mkdir", "mv", "node", "npm", "ps", "pwd", "python", "python3", "rm", "rmdir",
+            "sed", "sleep", "tail", "tar", "top", "touch", "uname", "vi", "vim", "wget",
+            "which", "whoami"
+        ]
+        return knownCommands.contains(command)
+    }
+
+    private func shouldAutoRouteExplicitLocalAlpineCommand(_ text: String) -> Bool {
+        let lowercased = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lowercased.isEmpty else { return false }
+        let alpineTerms = [
+            "alpine", "apk ", "/etc/alpine-release", "python3", "gcc", "vim", "node",
+            "uname", "whoami", "ls /", "pwd", "/mnt/iexa"
+        ]
+        return alpineTerms.contains { lowercased.contains($0) }
+    }
+
+    private func sendDirectLocalAlpineCommand(_ rawCommand: String, modelId: String) async {
+        let command = rawCommand
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"^\$\s+"#, with: "", options: .regularExpression)
+        guard !command.isEmpty else { return }
+
+        inputText = ""
+        attachments = []
+        errorMessage = nil
+
+        let userMessage = ChatMessage(
+            role: .user,
+            content: command,
+            timestamp: .now
+        )
+        let assistantMessageId = UUID().uuidString
+        let userMessageParentId = conversation?.messages.last(where: {
+            !Self.isLocalWorkspaceAgentResult($0) && !Self.isLocalAlpineAgentResult($0)
+        })?.id
+
+        if conversation == nil {
+            let chatTitle = String(command.prefix(50))
+            conversation = Conversation(
+                id: isTemporaryChat ? "local:\(UUID().uuidString)" : UUID().uuidString,
+                title: chatTitle,
+                model: modelId,
+                messages: [userMessage]
+            )
+            if let pending = pendingChatParams {
+                conversation?.chatParams = pending
+                pendingChatParams = nil
+            }
+            if isOpenAICompatibleProvider, let id = conversation?.id {
+                activeChatStore?.promoteNewChat(to: id)
+            }
+            NotificationService.shared.activeConversationId = conversation?.id
+        } else {
+            conversation?.messages.append(userMessage)
+        }
+
+        conversation?.messages.append(ChatMessage(
+            id: assistantMessageId,
+            role: .assistant,
+            content: "",
+            timestamp: .now,
+            model: "Local Alpine",
+            isStreaming: true,
+            metadata: ["iexa_local_alpine_direct": "true"]
+        ))
+
+        let userHistoryNode = HistoryNode(
+            id: userMessage.id,
+            parentId: userMessageParentId,
+            childrenIds: [assistantMessageId],
+            role: .user,
+            content: command,
+            timestamp: userMessage.timestamp,
+            models: [modelId]
+        )
+        let assistantHistoryNode = HistoryNode(
+            id: assistantMessageId,
+            parentId: userMessage.id,
+            childrenIds: [],
+            role: .assistant,
+            content: "",
+            timestamp: userMessage.timestamp,
+            model: "Local Alpine",
+            done: false
+        )
+        conversation?.history.nodes[userMessage.id] = userHistoryNode
+        conversation?.history.nodes[assistantMessageId] = assistantHistoryNode
+        if let pid = userMessageParentId {
+            conversation?.history.appendChildId(userMessage.id, to: pid)
+        }
+        conversation?.history.currentId = assistantMessageId
+
+        isStreaming = true
+        hasFinishedStreaming = false
+        selfInitiatedStream = true
+
+        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
+        let output = formatDirectLocalAlpineOutput(command: command, result: result)
+        updateAssistantMessage(id: assistantMessageId, content: output, isStreaming: false)
+
+        hasFinishedStreaming = true
+        isStreaming = false
+        selfInitiatedStream = false
+        activeTaskId = nil
+        lastTaskExtractionLength = 0
+
+        await persistLocalConversationIfNeeded()
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
+        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "（无输出）"
+            : result.output
+        let exit = result.exitCode.map(String.init) ?? "unknown"
+        return """
+        ```text
+        $ \(command)
+        \(output)
+        ```
+
+        exit: `\(exit)`
+        """
     }
 
     /// Stops the current streaming response by cancelling the server-side task
@@ -6349,6 +6507,25 @@ final class ChatViewModel {
         """
     }
 
+    private static func localAlpineAgentSystemContext() -> String {
+        """
+        Iexa has an on-device Local Alpine Linux terminal. When terminal mode is enabled and the selected terminal is Local Alpine, you may operate that local Alpine environment for the user.
+        Use it for concrete shell work such as checking Alpine status, listing files, installing packages with apk, running python3/node/gcc/vim checks, creating files under /mnt/iexa, or diagnosing command output.
+        To execute commands, include exactly one fenced block with language `iexa_alpine` containing JSON. The app will run those commands locally on the device and append the real output.
+        Prefer safe, bounded commands. Do not ask the user to run commands manually when you can run them through this tool. Do not output this block unless command execution is actually needed.
+
+        Example:
+        ```iexa_alpine
+        {
+          "iexa_alpine": [
+            {"command": "cat /etc/alpine-release && uname -m && pwd", "cwd": "/mnt/iexa"},
+            {"command": "python3 --version || apk add python3 && python3 --version", "cwd": "/mnt/iexa"}
+          ]
+        }
+        ```
+        """
+    }
+
     /// Builds API messages array, fetching image base64 from server for vision.
     /// Matches Flutter's `_buildMessagePayloadWithAttachments` which calls
     /// `api.getFileContent(fileId)` to get base64 data URLs for the LLM.
@@ -6367,7 +6544,8 @@ final class ChatViewModel {
         if let sp = simpleEffectiveSP, !sp.trimmingCharacters(in: .whitespaces).isEmpty {
             msgs.append(["role": "system", "content": sp])
         }
-        for msg in conversation.messages where !msg.isStreaming && !Self.isLocalWorkspaceAgentResult(msg) {
+        for msg in conversation.messages where !msg.isStreaming
+            && !Self.isLocalWorkspaceAgentResult(msg) {
             msgs.append(["role": msg.role.rawValue, "content": msg.content])
         }
         return msgs
@@ -6470,14 +6648,18 @@ final class ChatViewModel {
         let workspaceContext = shouldExecuteLocalWorkspaceAgentForCurrentRequest()
             ? Self.projectContinuitySystemContext()
             : Self.workspaceGuardSystemContext()
-        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, memoryContext]
+        let alpineContext = selectedTerminalIsLocalAlpine && terminalEnabled
+            ? Self.localAlpineAgentSystemContext()
+            : nil
+        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, alpineContext, memoryContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
         if !combinedSystemPrompt.isEmpty {
             apiMessages.append(["role": "system", "content": combinedSystemPrompt])
         }
-        for message in conversation.messages where !message.isStreaming && !Self.isLocalWorkspaceAgentResult(message) {
+        for message in conversation.messages where !message.isStreaming
+            && !Self.isLocalWorkspaceAgentResult(message) {
             let modelContent = contentForModel(message: message)
             let imageFiles = message.files.filter { f in
                 f.type == "image" || (f.contentType ?? "").hasPrefix("image/")
@@ -6873,6 +7055,20 @@ final class ChatViewModel {
         }
     }
 
+    private func scheduleLocalAlpineAgentIfNeeded(messageId: String, content: String, error: ChatMessageError?) {
+        guard error == nil else { return }
+        guard terminalEnabled, selectedTerminalIsLocalAlpine else { return }
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard content.localizedCaseInsensitiveContains("iexa_alpine") else { return }
+        guard let role = conversation?.messages.first(where: { $0.id == messageId })?.role, role == .assistant else { return }
+        guard !localAlpineAgentExecutedMessageIds.contains(messageId) else { return }
+
+        localAlpineAgentExecutedMessageIds.insert(messageId)
+        Task { [weak self] in
+            await self?.executeLocalAlpineAgent(messageId: messageId, content: content)
+        }
+    }
+
     private func shouldExecuteLocalWorkspaceAgentForCurrentRequest() -> Bool {
         guard let userText = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalWorkspaceAgentResult($0)
@@ -6909,6 +7105,37 @@ final class ChatViewModel {
             timestamp: .now,
             isStreaming: false,
             metadata: ["iexa_local_workspace_result": "true"]
+        )
+        let resultNode = HistoryNode(
+            id: resultMessage.id,
+            parentId: messageId,
+            childrenIds: [],
+            role: .system,
+            content: result.summary,
+            timestamp: resultMessage.timestamp,
+            done: true
+        )
+
+        conversation?.messages.append(resultMessage)
+        conversation?.history.addNode(resultNode)
+        conversation?.history.appendChildId(resultMessage.id, to: messageId)
+        conversation?.history.currentId = resultMessage.id
+
+        await persistLocalConversationIfNeeded()
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func executeLocalAlpineAgent(messageId: String, content: String) async {
+        let result = await LocalAlpineAgentService.shared.executeBlocks(in: content)
+        guard result.didExecute else { return }
+        guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
+
+        let resultMessage = ChatMessage(
+            role: .system,
+            content: result.summary,
+            timestamp: .now,
+            isStreaming: false,
+            metadata: ["iexa_local_alpine_result": "true"]
         )
         let resultNode = HistoryNode(
             id: resultMessage.id,
@@ -7032,6 +7259,7 @@ final class ChatViewModel {
         }
 
         if let completedAssistantContentForAgent {
+            scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
             scheduleLocalWorkspaceAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
         }
     }
