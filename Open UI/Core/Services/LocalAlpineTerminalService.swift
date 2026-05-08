@@ -130,6 +130,7 @@ actor LocalAlpineTerminalService {
         let runtimeRootFSURL: URL
         do {
             runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
+            try ensureResolverConfiguration(in: runtimeRootFSURL)
         } catch {
             return LocalAlpineCommandResult(
                 command: trimmed,
@@ -198,6 +199,28 @@ actor LocalAlpineTerminalService {
         }
         try fileManager.moveItem(at: temporaryURL, to: writableURL)
         return writableURL.standardizedFileURL
+    }
+
+    private func ensureResolverConfiguration(in runtimeRootFSURL: URL) throws {
+        guard runtimeRootFSURL.pathExtension == "fakefs" else { return }
+
+        let dataURL = runtimeRootFSURL.appendingPathComponent("data", isDirectory: true)
+        let etcURL = dataURL.appendingPathComponent("etc", isDirectory: true)
+        let resolvURL = etcURL.appendingPathComponent("resolv.conf")
+        let resolver = """
+        nameserver 1.1.1.1
+        nameserver 8.8.8.8
+        options timeout:2 attempts:2
+
+        """
+
+        if let existing = try? String(contentsOf: resolvURL, encoding: .utf8),
+           existing.contains("nameserver") {
+            return
+        }
+
+        try fileManager.createDirectory(at: etcURL, withIntermediateDirectories: true)
+        try resolver.write(to: resolvURL, atomically: true, encoding: .utf8)
     }
 
     private func resolve(path rawPath: String, root: URL, allowRoot: Bool) throws -> URL {

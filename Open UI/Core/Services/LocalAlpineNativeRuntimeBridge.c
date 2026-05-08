@@ -209,6 +209,24 @@ static bool resolve_root_data_path(const char *root_archive_path, char *root_dat
     return false;
 }
 
+static void write_file_in_fakefs(const char *path, const char *contents) {
+    struct fd *fd = generic_open(path, O_WRONLY_ | O_CREAT_ | O_TRUNC_, 0666);
+    if (IS_ERR(fd)) {
+        return;
+    }
+    fd->ops->write(fd, contents, strlen(contents));
+    fd_close(fd);
+}
+
+static void configure_dns(void) {
+    const char *resolv_conf =
+        "nameserver 1.1.1.1\n"
+        "nameserver 8.8.8.8\n"
+        "nameserver 223.5.5.5\n"
+        "options timeout:2 attempts:2\n";
+    write_file_in_fakefs("/etc/resolv.conf", resolv_conf);
+}
+
 static int boot_runtime(const char *root_archive_path, const char *workspace_path, char **error_out) {
     if (runtime_booted) {
         return 0;
@@ -235,6 +253,7 @@ static int boot_runtime(const char *root_archive_path, const char *workspace_pat
     create_some_device_nodes();
     do_mount(&procfs, "proc", "/proc", "", 0);
     do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
+    configure_dns();
     tty_drivers[TTY_CONSOLE_MAJOR] = &iexa_headless_tty_driver;
     set_console_device(TTY_CONSOLE_MAJOR, 1);
 
