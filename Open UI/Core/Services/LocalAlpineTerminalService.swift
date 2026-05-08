@@ -270,27 +270,48 @@ actor LocalAlpineTerminalService {
     private func compatibilityCommand(for command: String) -> String {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowercased = trimmed.lowercased()
-        guard lowercased.hasPrefix("curl ") else { return command }
 
-        let rest = trimmed.dropFirst("curl ".count).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !rest.isEmpty,
-              rest.range(of: #"[;&|`$<>(){}]"#, options: .regularExpression) == nil else {
-            return command
+        if lowercased.hasPrefix("curl ") {
+            let rest = trimmed.dropFirst("curl ".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !rest.isEmpty,
+                  rest.range(of: #"[;&|`$<>(){}]"#, options: .regularExpression) == nil else {
+                return command
+            }
+
+            let passthroughOptions: Set<String> = ["-s", "-S", "-sS", "-L"]
+            let parts = rest.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            let unsupportedOption = parts.dropLast().contains { $0.hasPrefix("-") && !passthroughOptions.contains($0) }
+            guard !unsupportedOption, let url = parts.last, !url.hasPrefix("-") else { return command }
+
+            let escapedURL = shellSingleQuoted(url)
+            return """
+            if command -v curl >/dev/null 2>&1; then
+              \(command)
+            else
+              wget -qO- \(escapedURL)
+            fi
+            """
         }
 
-        let passthroughOptions: Set<String> = ["-s", "-S", "-sS", "-L"]
-        let parts = rest.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-        let unsupportedOption = parts.dropLast().contains { $0.hasPrefix("-") && !passthroughOptions.contains($0) }
-        guard !unsupportedOption, let url = parts.last, !url.hasPrefix("-") else { return command }
+        guard lowercased.hasPrefix("apk add ") else { return command }
 
-        let escapedURL = shellSingleQuoted(url)
-        return """
-        if command -v curl >/dev/null 2>&1; then
-          \(command)
-        else
-          wget -qO- \(escapedURL)
-        fi
-        """
+        let commandBody = trimmed
+        let tokens = commandBody.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        guard tokens.count >= 3, tokens[0] == "apk", tokens[1] == "add" else { return command }
+
+        var rewritten: [String] = [tokens[0], tokens[1]]
+        var changed = false
+        for token in tokens.dropFirst(2) {
+            if token == "node" {
+                rewritten.append("nodejs")
+                rewritten.append("npm")
+                changed = true
+            } else {
+                rewritten.append(token)
+            }
+        }
+
+        return changed ? rewritten.joined(separator: " ") : command
     }
 
     private func shellSingleQuoted(_ value: String) -> String {

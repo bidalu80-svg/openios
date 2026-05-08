@@ -7254,6 +7254,19 @@ final class ChatViewModel {
             if let error { conversation?.messages[index].error = error }
         }
 
+        if terminalEnabled, selectedTerminalIsLocalAlpine,
+           let alpineContent = completedAssistantContentForAgent {
+            let visibleAlpineContent = LocalAlpineAgentService.visibleContent(from: alpineContent)
+            if visibleAlpineContent != alpineContent,
+               let index = conversation?.messages.firstIndex(where: { $0.id == id }) {
+                conversation?.messages[index].content = visibleAlpineContent
+                conversation?.history.updateNode(id: id) { node in
+                    node.content = visibleAlpineContent
+                    node.done = true
+                }
+            }
+        }
+
         // Extract and apply task list updates live from the streaming content.
         // Gate on a 100-char delta to avoid the O(n) string scan on every token.
         // The function also guards internally (only fires when the magic keywords are present),

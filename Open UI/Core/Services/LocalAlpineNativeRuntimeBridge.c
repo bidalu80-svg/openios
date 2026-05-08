@@ -20,7 +20,10 @@ static char *iexa_dup_output(const char *message) {
 
 #if IEXA_LOCAL_ALPINE_ISH
 
+#include <arpa/inet.h>
+#include <netdb.h>
 #include <pthread.h>
+#include <resolv.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -219,11 +222,59 @@ static void write_file_in_fakefs(const char *path, const char *contents) {
 }
 
 static void configure_dns(void) {
-    const char *resolv_conf =
-        "nameserver 1.1.1.1\n"
-        "nameserver 8.8.8.8\n"
-        "nameserver 223.5.5.5\n"
-        "options timeout:2 attempts:2\n";
+    char resolv_conf[2048];
+    size_t used = 0;
+    resolv_conf[0] = '\0';
+
+    struct __res_state res;
+    memset(&res, 0, sizeof(res));
+    if (res_ninit(&res) == EXIT_SUCCESS) {
+        if (res.dnsrch[0] != NULL) {
+            int written = snprintf(resolv_conf + used, sizeof(resolv_conf) - used, "search");
+            if (written > 0) {
+                used += (size_t) written < sizeof(resolv_conf) - used ? (size_t) written : sizeof(resolv_conf) - used - 1;
+            }
+            for (int i = 0; res.dnsrch[i] != NULL && used < sizeof(resolv_conf) - 1; i++) {
+                written = snprintf(resolv_conf + used, sizeof(resolv_conf) - used, " %s", res.dnsrch[i]);
+                if (written > 0) {
+                    used += (size_t) written < sizeof(resolv_conf) - used ? (size_t) written : sizeof(resolv_conf) - used - 1;
+                }
+            }
+            if (used < sizeof(resolv_conf) - 1) {
+                resolv_conf[used++] = '\n';
+                resolv_conf[used] = '\0';
+            }
+        }
+
+        union res_sockaddr_union servers[NI_MAXSERV];
+        int servers_found = res_getservers(&res, servers, NI_MAXSERV);
+        char address[NI_MAXHOST];
+        for (int i = 0; i < servers_found && used < sizeof(resolv_conf) - 1; i++) {
+            union res_sockaddr_union server = servers[i];
+            if (server.sin.sin_len == 0) {
+                continue;
+            }
+            if (getnameinfo((struct sockaddr *) &server.sin, server.sin.sin_len,
+                            address, sizeof(address),
+                            NULL, 0, NI_NUMERICHOST) != 0) {
+                continue;
+            }
+            int written = snprintf(resolv_conf + used, sizeof(resolv_conf) - used, "nameserver %s\n", address);
+            if (written > 0) {
+                used += (size_t) written < sizeof(resolv_conf) - used ? (size_t) written : sizeof(resolv_conf) - used - 1;
+            }
+        }
+    }
+
+    if (strstr(resolv_conf, "nameserver ") == NULL) {
+        snprintf(resolv_conf, sizeof(resolv_conf),
+                 "nameserver 1.1.1.1\n"
+                 "nameserver 8.8.8.8\n"
+                 "nameserver 223.5.5.5\n");
+    }
+
+    strncat(resolv_conf, "options timeout:2 attempts:2\n",
+            sizeof(resolv_conf) - strlen(resolv_conf) - 1);
     write_file_in_fakefs("/etc/resolv.conf", resolv_conf);
 }
 

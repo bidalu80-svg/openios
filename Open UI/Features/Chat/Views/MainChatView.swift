@@ -300,6 +300,7 @@ struct MainChatView: View {
                             }
                         }
                     }
+                    .simultaneousGesture(rightEdgeFileBrowserGesture)
             }
             .ignoresSafeArea(.keyboard)
             .allowsHitTesting(drawerFraction < 0.01 && !isDraggingDrawer && !isDraggingFileBrowser)
@@ -485,41 +486,6 @@ struct MainChatView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            // MARK: Right edge overlay — exclusively captures right-edge swipe to open file browser.
-            // Only shown when terminal is active and file browser is closed.
-            if isTerminalActiveInCurrentChat && !showFileBrowser && !showDrawer {
-                Color.clear
-                    .frame(width: 40)
-                    .frame(maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 12, coordinateSpace: .local)
-                            .onChanged { value in
-                                let horizontal = value.translation.width
-                                let vertical = abs(value.translation.height)
-                                guard abs(horizontal) > vertical, horizontal < 0 else { return }
-                                if !isDraggingFileBrowser {
-                                    configureTerminalBrowserIfNeeded()
-                                    UIApplication.shared.sendAction(
-                                        #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                                }
-                                isDraggingFileBrowser = true
-                                fileBrowserDragOffset = horizontal
-                            }
-                            .onEnded { value in
-                                guard isDraggingFileBrowser else { return }
-                                let horizontal = abs(value.translation.width)
-                                let velocity = abs(value.velocity.width)
-                                isDraggingFileBrowser = false
-                                if horizontal > fileBrowserWidth * 0.3 || velocity > 500 {
-                                    openFileBrowserAnimated()
-                                } else {
-                                    closeFileBrowserAnimated()
-                                }
-                            }
-                    )
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
         }
     }
 
@@ -1255,6 +1221,37 @@ struct MainChatView: View {
             showFileBrowser = false
             fileBrowserDragOffset = 0
         }
+    }
+
+    private var rightEdgeFileBrowserGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .local)
+            .onChanged { value in
+                guard isTerminalActiveInCurrentChat, !showFileBrowser, !showDrawer else { return }
+                guard value.startLocation.x >= max(0, containerWidth - 24) else { return }
+
+                let horizontal = value.translation.width
+                let vertical = abs(value.translation.height)
+                guard abs(horizontal) > vertical, horizontal < 0 else { return }
+
+                if !isDraggingFileBrowser {
+                    configureTerminalBrowserIfNeeded()
+                    UIApplication.shared.sendAction(
+                        #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                }
+                isDraggingFileBrowser = true
+                fileBrowserDragOffset = horizontal
+            }
+            .onEnded { value in
+                guard isDraggingFileBrowser else { return }
+                let horizontal = abs(value.translation.width)
+                let velocity = abs(value.velocity.width)
+                isDraggingFileBrowser = false
+                if horizontal > fileBrowserWidth * 0.3 || velocity > 500 {
+                    openFileBrowserAnimated()
+                } else {
+                    closeFileBrowserAnimated()
+                }
+            }
     }
 
     private var desktopPetOverlay: some View {
