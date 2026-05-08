@@ -81,7 +81,7 @@ actor LocalAlpineTerminalService {
     func writeFile(data: Data, fileName: String, destinationPath: String) async throws {
         let root = try ensureSharedWorkspaceDirectory()
         let directory = try resolve(path: destinationPath, root: root, allowRoot: true)
-        let safeName = sanitizedFileName(fileName)
+        let safeName = try sanitizedFileName(fileName)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         try data.write(to: directory.appendingPathComponent(safeName), options: .atomic)
     }
