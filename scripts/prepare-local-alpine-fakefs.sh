@@ -32,6 +32,11 @@ fi
   -I"$ish_dir" \
   "$ish_dir/tools/fakefsify.c" \
   "$ish_dir/tools/fakefs.c" \
+  "$ish_dir/kernel/log.c" \
+  "$ish_dir/kernel/task.c" \
+  "$ish_dir/kernel/user.c" \
+  "$ish_dir/util/fifo.c" \
+  "$ish_dir/util/sync.c" \
   "$ish_dir/util/fchdir.c" \
   "$ish_dir/fs/fake-db.c" \
   "$ish_dir/fs/fake-migrate.c" \
