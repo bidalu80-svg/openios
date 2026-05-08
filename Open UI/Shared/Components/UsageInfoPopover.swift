@@ -37,7 +37,7 @@ struct UsageInfoPopover: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(theme.brandPrimary)
             }
-            Text("Token Usage")
+            Text("Token 使用量")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(theme.textPrimary)
             Spacer()
@@ -188,12 +188,57 @@ struct UsageInfoPopover: View {
     }
 
     private func humanize(_ key: String) -> String {
-        key.replacingOccurrences(of: "_", with: " ")
+        let normalizedKey = key
+            .replacingOccurrences(of: #"([a-z0-9])([A-Z])"#, with: "$1_$2", options: .regularExpression)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+        if let localized = localizedUsageLabels[normalizedKey] {
+            return localized
+        }
+        return normalizedKey.replacingOccurrences(of: "_", with: " ")
             .components(separatedBy: " ")
             .map { word in
                 word.isEmpty ? word : (word.prefix(1).uppercased() + word.dropFirst())
             }
             .joined(separator: " ")
+    }
+
+    private var localizedUsageLabels: [String: String] {
+        [
+            "prompt_tokens": "输入 Token",
+            "completion_tokens": "输出 Token",
+            "total_tokens": "总 Token",
+            "input_tokens": "输入 Token",
+            "output_tokens": "输出 Token",
+            "prompt_token_count": "输入 Token",
+            "candidates_token_count": "输出 Token",
+            "total_token_count": "总 Token",
+            "thoughts_token_count": "思考 Token",
+            "reasoning_tokens": "推理 Token",
+            "cached_tokens": "缓存 Token",
+            "audio_tokens": "音频 Token",
+            "image_tokens": "图片 Token",
+            "video_tokens": "视频 Token",
+            "tool_tokens": "工具 Token",
+            "web_search_tokens": "联网搜索 Token",
+            "accepted_prediction_tokens": "接受预测 Token",
+            "rejected_prediction_tokens": "拒绝预测 Token",
+            "cache_read_input_tokens": "缓存读取 Token",
+            "cache_creation_input_tokens": "缓存写入 Token",
+            "input_cached_tokens": "输入缓存 Token",
+            "prompt_cache_hit_tokens": "缓存命中 Token",
+            "prompt_cache_miss_tokens": "缓存未命中 Token",
+            "completion_tokens_details": "输出 Token 详情",
+            "prompt_tokens_details": "输入 Token 详情",
+            "input_tokens_details": "输入 Token 详情",
+            "output_tokens_details": "输出 Token 详情",
+            "usage": "Token 使用量",
+            "cost": "费用",
+            "model": "模型",
+            "service_tier": "服务层级",
+            "num_model_requests": "模型请求次数",
+            "tokens_per_second": "每秒 Token"
+        ]
     }
 }
 

@@ -3617,11 +3617,16 @@ final class ChatViewModel {
                     // from the HTTP response body as standard OpenAI SSE.
                     self.logger.info("Using pipe model SSE path for \(modelId)")
                     let acc = ContentAccumulator()
+                    var exactUsage: [String: Any]?
 
                     do {
                         let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
                         for try await event in sseStream {
                             if Task.isCancelled { break }
+
+                            if let usage = event.usage, !usage.isEmpty {
+                                exactUsage = usage
+                            }
 
                             // Content delta tokens
                             if let delta = event.contentDelta, !delta.isEmpty {
@@ -3658,7 +3663,8 @@ final class ChatViewModel {
                         modelId: modelId,
                         socketSessionId: socketSessionId,
                         effectiveChatId: effectiveChatId,
-                        acc: acc
+                        acc: acc,
+                        usage: exactUsage
                     )
                 } else {
                     // ── SOCKET PATH (normal) ──
@@ -3921,11 +3927,15 @@ final class ChatViewModel {
                     // ── PIPE MODEL SSE PATH (regeneration) ──
                     self.logger.info("Regenerate: using pipe model SSE path for \(modelId)")
                     let acc = ContentAccumulator()
+                    var exactUsage: [String: Any]?
 
                     do {
                         let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
                         for try await event in sseStream {
                             if Task.isCancelled { break }
+                            if let usage = event.usage, !usage.isEmpty {
+                                exactUsage = usage
+                            }
                             if let delta = event.contentDelta, !delta.isEmpty {
                                 acc.append(delta)
                                 self.updateAssistantMessage(
@@ -3952,7 +3962,8 @@ final class ChatViewModel {
                         modelId: modelId,
                         socketSessionId: socketSessionId,
                         effectiveChatId: effectiveChatId,
-                        acc: acc
+                        acc: acc,
+                        usage: exactUsage
                     )
                 } else {
                     let json = try await manager.sendMessageHTTP(request: request)
@@ -4326,10 +4337,14 @@ final class ChatViewModel {
 
                 if request.isPipeModel {
                     let acc = ContentAccumulator()
+                    var exactUsage: [String: Any]?
                     do {
                         let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
                         for try await event in sseStream {
                             if Task.isCancelled { break }
+                            if let usage = event.usage, !usage.isEmpty {
+                                exactUsage = usage
+                            }
                             if let delta = event.contentDelta, !delta.isEmpty {
                                 acc.append(delta)
                                 self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
@@ -4346,7 +4361,7 @@ final class ChatViewModel {
                     }
                     if Task.isCancelled { return }
                     self.finishStreamingSuccessfully(assistantMessageId: assistantMessageId, modelId: modelId,
-                        socketSessionId: socketSessionId, effectiveChatId: effectiveChatId, acc: acc)
+                        socketSessionId: socketSessionId, effectiveChatId: effectiveChatId, acc: acc, usage: exactUsage)
                 } else {
                     let json = try await manager.sendMessageHTTP(request: request)
                     if let err = json["error"] as? String, !err.isEmpty {
@@ -4710,12 +4725,14 @@ final class ChatViewModel {
         // Done signal
         if payload["done"] as? Bool == true {
             logger.info("Received done:true – finalizing streaming")
+            let usage = SSEEvent.json(payload).usage
             finishStreamingSuccessfully(
                 assistantMessageId: assistantMessageId,
                 modelId: modelId,
                 socketSessionId: socketSessionId,
                 effectiveChatId: effectiveChatId,
-                acc: acc
+                acc: acc,
+                usage: usage
             )
         }
 
@@ -4751,7 +4768,8 @@ final class ChatViewModel {
         modelId: String,
         socketSessionId: String,
         effectiveChatId: String?,
-        acc: ContentAccumulator
+        acc: ContentAccumulator,
+        usage: [String: Any]? = nil
     ) {
         // If content is empty, poll server for it
         if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -4761,7 +4779,8 @@ final class ChatViewModel {
                     modelId: modelId,
                     socketSessionId: socketSessionId,
                     effectiveChatId: effectiveChatId,
-                    acc: acc
+                    acc: acc,
+                    usage: usage
                 )
             }
             return
@@ -4774,13 +4793,14 @@ final class ChatViewModel {
         normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
         let finalAssistantContent = conversation?.messages
             .first(where: { $0.id == assistantMessageId })?.content ?? acc.content
+        applyUsage(usage, toMessageId: assistantMessageId)
         let lastUser = conversation?.messages.last(where: { $0.role == .user && !Self.isLocalWorkspaceAgentResult($0) })
         recordTokenUsageForCompletedTurn(
             assistantMessageId: assistantMessageId,
             userText: lastUser?.content ?? "",
             assistantText: finalAssistantContent,
             userAttachments: [],
-            usage: nil
+            usage: usage
         )
         hasFinishedStreaming = true
         isStreaming = false
@@ -4918,7 +4938,8 @@ final class ChatViewModel {
         modelId: String,
         socketSessionId: String,
         effectiveChatId: String?,
-        acc: ContentAccumulator
+        acc: ContentAccumulator,
+        usage: [String: Any]? = nil
     ) async {
         guard let chatId = effectiveChatId, let manager else {
             updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
@@ -4957,12 +4978,13 @@ final class ChatViewModel {
             return
         }
         let lastUser = conversation?.messages.last(where: { $0.role == .user && !Self.isLocalWorkspaceAgentResult($0) })
+        applyUsage(usage, toMessageId: assistantMessageId)
         recordTokenUsageForCompletedTurn(
             assistantMessageId: assistantMessageId,
             userText: lastUser?.content ?? "",
             assistantText: finalAssistantContent,
             userAttachments: [],
-            usage: nil
+            usage: usage
         )
 
         // Send background notification if app is not active
