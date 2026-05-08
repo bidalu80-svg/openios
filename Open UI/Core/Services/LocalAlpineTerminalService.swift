@@ -14,6 +14,12 @@ struct LocalAlpineCommandResult: Sendable {
     let exitCode: Int?
 }
 
+private struct AlpinePackageRequirement {
+    let checkCommand: String
+    let packages: [String]
+    let markers: [String]
+}
+
 actor LocalAlpineTerminalService {
     static let shared = LocalAlpineTerminalService()
 
@@ -293,7 +299,153 @@ actor LocalAlpineTerminalService {
             """
         }
 
-        return rewriteApkNodeAlias(in: command)
+        let rewritten = rewriteApkNodeAlias(in: command)
+        if shouldBypassAutoDependencyRepair(rewritten) {
+            return rewritten
+        }
+        return commandWithAutoDependencyRepair(rewritten)
+    }
+
+    private func shouldBypassAutoDependencyRepair(_ command: String) -> Bool {
+        let lowercased = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lowercased.contains("apk add ")
+            || lowercased.contains("apk upgrade")
+            || lowercased.contains("apk fix")
+    }
+
+    private func commandWithAutoDependencyRepair(_ command: String) -> String {
+        let requirements = inferredPackageRequirements(for: command)
+        let shouldRepairPythonModules = shouldRetryMissingPythonModule(for: command)
+        let shouldRepairNodeModules = shouldRetryMissingNodeModule(for: command)
+        guard !requirements.isEmpty || shouldRepairPythonModules || shouldRepairNodeModules else {
+            return command
+        }
+
+        let installLines = requirements.map { requirement in
+            """
+            if ! command -v \(requirement.checkCommand) >/dev/null 2>&1; then
+              IEXA_MISSING="$IEXA_MISSING \(requirement.packages.joined(separator: " "))"
+            fi
+            """
+        }.joined(separator: "\n")
+
+        let executableCommand: String
+        if shouldRepairPythonModules {
+            executableCommand = pythonModuleRepairWrapper(for: command)
+        } else if shouldRepairNodeModules {
+            executableCommand = nodeModuleRepairWrapper(for: command)
+        } else {
+            executableCommand = command
+        }
+
+        return """
+        IEXA_MISSING=""
+        \(installLines)
+        if [ -n "$IEXA_MISSING" ]; then
+          echo "[Iexa] Installing missing Alpine packages:$IEXA_MISSING"
+          apk update
+          apk add --no-cache $IEXA_MISSING
+        fi
+        \(executableCommand)
+        """
+    }
+
+    private func inferredPackageRequirements(for command: String) -> [AlpinePackageRequirement] {
+        let lowercased = command.lowercased()
+        let candidates: [AlpinePackageRequirement] = [
+            .init(checkCommand: "python3", packages: ["python3", "py3-pip"], markers: ["python3", "python ", ".py", "pip "]),
+            .init(checkCommand: "pip3", packages: ["py3-pip"], markers: ["pip3", "pip "]),
+            .init(checkCommand: "node", packages: ["nodejs", "npm"], markers: ["node ", "node\n", "npm ", ".js"]),
+            .init(checkCommand: "npm", packages: ["npm"], markers: ["npm "]),
+            .init(checkCommand: "gcc", packages: ["build-base"], markers: ["gcc", "g++", " cc ", "make ", "cmake", ".c ", ".cpp"]),
+            .init(checkCommand: "vim", packages: ["vim"], markers: ["vim ", "vi "]),
+            .init(checkCommand: "curl", packages: ["curl"], markers: ["curl "]),
+            .init(checkCommand: "git", packages: ["git"], markers: ["git "]),
+            .init(checkCommand: "bash", packages: ["bash"], markers: ["bash "])
+        ]
+
+        var seenChecks: Set<String> = []
+        var result: [AlpinePackageRequirement] = []
+        for candidate in candidates where candidate.markers.contains(where: { lowercased.contains($0) }) {
+            if seenChecks.insert(candidate.checkCommand).inserted {
+                result.append(candidate)
+            }
+        }
+        return result
+    }
+
+    private func shouldRetryMissingPythonModule(for command: String) -> Bool {
+        let lowercased = command.lowercased()
+        return lowercased.contains("python3")
+            || lowercased.contains("python ")
+            || lowercased.contains(".py")
+    }
+
+    private func pythonModuleRepairWrapper(for command: String) -> String {
+        #"""
+        IEXA_PY_ERR="${TMPDIR:-/tmp}/iexa-python-error-$$.log"
+        (
+        \#(command)
+        ) 2>"$IEXA_PY_ERR"
+        IEXA_EXIT=$?
+        cat "$IEXA_PY_ERR" >&2
+        if [ "$IEXA_EXIT" -ne 0 ] && grep -Eq "ModuleNotFoundError: No module named|ImportError: No module named" "$IEXA_PY_ERR"; then
+          IEXA_MODULE="$(sed -n "s/.*No module named ['\\"]\\([^'\\"]*\\)['\\"].*/\\1/p" "$IEXA_PY_ERR" | head -n 1 | cut -d. -f1 | tr '_' '-')"
+          if [ -n "$IEXA_MODULE" ]; then
+            echo "[Iexa] Missing Python module: $IEXA_MODULE"
+            echo "[Iexa] Trying apk package py3-$IEXA_MODULE, then pip fallback"
+            apk update
+            apk add --no-cache "py3-$IEXA_MODULE" || {
+              apk add --no-cache py3-pip
+              python3 -m pip install "$IEXA_MODULE"
+            }
+            (
+        \#(command)
+            )
+            exit $?
+          fi
+        fi
+        exit "$IEXA_EXIT"
+        """#
+    }
+
+    private func shouldRetryMissingNodeModule(for command: String) -> Bool {
+        let lowercased = command.lowercased()
+        return lowercased.contains("node ")
+            || lowercased.contains("node\n")
+            || lowercased.contains("npm ")
+            || lowercased.contains(".js")
+    }
+
+    private func nodeModuleRepairWrapper(for command: String) -> String {
+        #"""
+        IEXA_NODE_ERR="${TMPDIR:-/tmp}/iexa-node-error-$$.log"
+        (
+        \#(command)
+        ) 2>"$IEXA_NODE_ERR"
+        IEXA_EXIT=$?
+        cat "$IEXA_NODE_ERR" >&2
+        if [ "$IEXA_EXIT" -ne 0 ] && grep -Eq "Cannot find module|Cannot find package" "$IEXA_NODE_ERR"; then
+          IEXA_MODULE="$(sed -n "s/.*Cannot find module ['\"]\([^'\"]*\)['\"].*/\1/p; s/.*Cannot find package ['\"]\([^'\"]*\)['\"].*/\1/p" "$IEXA_NODE_ERR" | head -n 1)"
+          case "$IEXA_MODULE" in
+            ""|/*|.*) ;;
+            *)
+              echo "[Iexa] Missing Node module: $IEXA_MODULE"
+              apk update
+              apk add --no-cache nodejs npm
+              if [ ! -f package.json ]; then
+                npm init -y >/dev/null 2>&1 || true
+              fi
+              npm install "$IEXA_MODULE"
+              (
+        \#(command)
+              )
+              exit $?
+              ;;
+          esac
+        fi
+        exit "$IEXA_EXIT"
+        """#
     }
 
     private func rewriteApkNodeAlias(in command: String) -> String {

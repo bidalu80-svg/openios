@@ -135,13 +135,13 @@ actor LocalAlpineAgentService {
             : output
         let exit = result.exitCode.map(String.init) ?? "unknown"
         return """
-        - `$ \(command.replacingOccurrences(of: "\n", with: " && "))`
-          cwd: `\(cwd)`
-          exit: `\(exit)`
+        命令：`\(command.replacingOccurrences(of: "\n", with: " && "))`
+        工作目录：`\(cwd)`
+        退出码：`\(exit)`
 
-        ````text
+        ```text
         \(renderedOutput)
-        ````
+        ```
         """
     }
 
@@ -186,7 +186,7 @@ actor LocalAlpineAgentService {
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return cleaned.isEmpty ? "我已在本地 Alpine 中执行命令，下面是真实输出。" : cleaned
+        return cleaned.isEmpty ? "本地 Alpine 命令已执行。" : cleaned
     }
 }
 

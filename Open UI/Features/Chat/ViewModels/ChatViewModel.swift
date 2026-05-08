@@ -3815,6 +3815,7 @@ final class ChatViewModel {
             conversation?.messages.append(userMessage)
         }
 
+        let initialStatus = localAlpineInitialStatus(for: command)
         conversation?.messages.append(ChatMessage(
             id: assistantMessageId,
             role: .assistant,
@@ -3822,7 +3823,13 @@ final class ChatViewModel {
             timestamp: .now,
             model: "Local Alpine",
             isStreaming: true,
-            metadata: ["iexa_local_alpine_direct": "true"]
+            statusHistory: [initialStatus],
+            metadata: [
+                "iexa_local_alpine_direct": "true",
+                "iexa_local_alpine_result": "true",
+                "iexa_local_alpine_display_command": userMessage.content,
+                "iexa_local_alpine_cwd": "/mnt/iexa"
+            ]
         ))
 
         let userHistoryNode = HistoryNode(
@@ -3842,7 +3849,8 @@ final class ChatViewModel {
             content: "",
             timestamp: userMessage.timestamp,
             model: "Local Alpine",
-            done: false
+            done: false,
+            statusHistory: [initialStatus]
         )
         conversation?.history.nodes[userMessage.id] = userHistoryNode
         conversation?.history.nodes[assistantMessageId] = assistantHistoryNode
@@ -3857,7 +3865,20 @@ final class ChatViewModel {
 
         let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
         let output = formatDirectLocalAlpineOutput(command: userMessage.content, result: result)
-        updateAssistantMessage(id: assistantMessageId, content: output, isStreaming: false)
+        let doneDescription = result.exitCode == 0
+            ? "本地 Alpine 执行完成"
+            : "本地 Alpine 执行结束，退出码 \(result.exitCode.map(String.init) ?? "unknown")"
+        updateAssistantMessage(
+            id: assistantMessageId,
+            content: output,
+            isStreaming: false,
+            statusHistory: [localAlpineStatus(description: doneDescription, done: true)]
+        )
+        conversation?.history.updateNode(id: assistantMessageId) { node in
+            node.content = output
+            node.done = true
+            node.statusHistory = [localAlpineStatus(description: doneDescription, done: true)]
+        }
 
         hasFinishedStreaming = true
         isStreaming = false
@@ -3867,6 +3888,43 @@ final class ChatViewModel {
 
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func localAlpineInitialStatus(for command: String) -> ChatStatusUpdate {
+        localAlpineStatus(description: localAlpineRunningDescription(for: command), done: false)
+    }
+
+    private func localAlpineRunningDescription(for command: String) -> String {
+        let lowercased = command.lowercased()
+        if lowercased.contains("apk add ")
+            || lowercased.contains("apk upgrade")
+            || lowercased.contains("apk fix") {
+            return "正在安装 Alpine 软件包..."
+        }
+        if lowercased.contains("apk update") {
+            return "正在更新 Alpine 软件源..."
+        }
+        if shouldLocalAlpineCheckDependencies(for: lowercased) {
+            return "正在检查并自动安装缺失依赖..."
+        }
+        return "正在执行本地 Alpine 命令..."
+    }
+
+    private func shouldLocalAlpineCheckDependencies(for lowercasedCommand: String) -> Bool {
+        [
+            "python3", "python ", ".py", "pip ",
+            "node ", "node\n", "npm ", ".js",
+            "gcc", "g++", " cc ", "make ", "cmake", ".c ", ".cpp",
+            "vim ", "vi ", "curl ", "git ", "bash "
+        ].contains { lowercasedCommand.contains($0) }
+    }
+
+    private func localAlpineStatus(description: String, done: Bool) -> ChatStatusUpdate {
+        ChatStatusUpdate(
+            action: "local_alpine",
+            description: description,
+            done: done
+        )
     }
 
     private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
@@ -7162,31 +7220,71 @@ final class ChatViewModel {
     }
 
     private func executeLocalAlpineAgent(messageId: String, content: String) async {
-        let result = await LocalAlpineAgentService.shared.executeBlocks(in: content)
-        guard result.didExecute else { return }
         guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
 
-        let resultMessage = ChatMessage(
-            role: .system,
-            content: result.summary,
+        let resultMessageId = UUID().uuidString
+        let initialStatus = localAlpineStatus(description: localAlpineRunningDescription(for: content), done: false)
+        let placeholderMessage = ChatMessage(
+            id: resultMessageId,
+            role: .assistant,
+            content: "",
             timestamp: .now,
-            isStreaming: false,
+            model: "Local Alpine",
+            isStreaming: true,
+            statusHistory: [initialStatus],
             metadata: ["iexa_local_alpine_result": "true"]
         )
-        let resultNode = HistoryNode(
-            id: resultMessage.id,
+        let placeholderNode = HistoryNode(
+            id: resultMessageId,
             parentId: messageId,
             childrenIds: [],
-            role: .system,
-            content: result.summary,
-            timestamp: resultMessage.timestamp,
-            done: true
+            role: .assistant,
+            content: "",
+            timestamp: placeholderMessage.timestamp,
+            model: "Local Alpine",
+            done: false,
+            statusHistory: [initialStatus]
         )
 
-        conversation?.messages.append(resultMessage)
-        conversation?.history.addNode(resultNode)
-        conversation?.history.appendChildId(resultMessage.id, to: messageId)
-        conversation?.history.currentId = resultMessage.id
+        conversation?.messages.append(placeholderMessage)
+        conversation?.history.addNode(placeholderNode)
+        conversation?.history.appendChildId(resultMessageId, to: messageId)
+        conversation?.history.currentId = resultMessageId
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+
+        let result = await LocalAlpineAgentService.shared.executeBlocks(in: content)
+        guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
+
+        if !result.didExecute {
+            let doneStatus = localAlpineStatus(description: "本地 Alpine 没有检测到可执行命令", done: true)
+            updateAssistantMessage(
+                id: resultMessageId,
+                content: result.summary.isEmpty ? "Local Alpine 没有检测到可执行命令。" : result.summary,
+                isStreaming: false,
+                statusHistory: [doneStatus]
+            )
+            conversation?.history.updateNode(id: resultMessageId) { node in
+                node.content = result.summary.isEmpty ? "Local Alpine 没有检测到可执行命令。" : result.summary
+                node.done = true
+                node.statusHistory = [doneStatus]
+            }
+            await persistLocalConversationIfNeeded()
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            return
+        }
+
+        let doneStatus = localAlpineStatus(description: "本地 Alpine 执行完成", done: true)
+        updateAssistantMessage(
+            id: resultMessageId,
+            content: result.summary,
+            isStreaming: false,
+            statusHistory: [doneStatus]
+        )
+        conversation?.history.updateNode(id: resultMessageId) { node in
+            node.content = result.summary
+            node.done = true
+            node.statusHistory = [doneStatus]
+        }
 
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
