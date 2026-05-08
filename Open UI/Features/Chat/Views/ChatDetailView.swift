@@ -3683,7 +3683,11 @@ private struct IsolatedAssistantMessage: View {
         let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
 
         if effectiveIsStreaming && rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            TypingIndicator()
+            if message.metadata?["iexa_local_alpine_result"] == "true" {
+                EmptyView()
+            } else {
+                TypingIndicator()
+            }
         } else {
             // Perf optimisation: when a tool-call block has been fully closed and
             // the frozen boundary is known, split the content so the heavy tool-call
