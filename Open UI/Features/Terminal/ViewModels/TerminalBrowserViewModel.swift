@@ -4,8 +4,8 @@ import os.log
 /// Manages the state for the terminal file browser panel.
 ///
 /// Handles directory navigation, file operations (create, delete, upload, download),
-/// and command execution on the terminal server. All operations are proxied through
-/// the Iexa native server backend.
+/// and command execution. Remote Open Terminal servers still use the Iexa backend;
+/// the built-in Local Alpine slot is routed to the isolated on-device runtime.
 @MainActor @Observable
 final class TerminalBrowserViewModel {
     // MARK: - State
@@ -41,6 +41,7 @@ final class TerminalBrowserViewModel {
 
     private var apiClient: APIClient?
     private var serverId: String = ""
+    private var usesLocalAlpine: Bool = false
     private let logger = Logger(subsystem: "com.openui", category: "TerminalBrowser")
 
     /// Path segments for breadcrumb navigation.
@@ -67,6 +68,13 @@ final class TerminalBrowserViewModel {
     func configure(apiClient: APIClient, serverId: String) {
         self.apiClient = apiClient
         self.serverId = serverId
+        self.usesLocalAlpine = serverId == TerminalServer.localAlpineId
+    }
+
+    func configureLocalAlpine() {
+        self.apiClient = nil
+        self.serverId = TerminalServer.localAlpineId
+        self.usesLocalAlpine = true
     }
 
     /// Resets all state to defaults. Called when switching to a new chat
@@ -83,17 +91,24 @@ final class TerminalBrowserViewModel {
         isTerminalExpanded = false
         showNewFolderAlert = false
         newFolderName = ""
+        apiClient = nil
+        serverId = ""
+        usesLocalAlpine = false
     }
 
     // MARK: - Navigation
 
     /// Loads the contents of the current directory.
     func loadDirectory() async {
-        guard let apiClient, !serverId.isEmpty else { return }
+        guard usesLocalAlpine || (apiClient != nil && !serverId.isEmpty) else { return }
         isLoading = true
         errorMessage = nil
         do {
-            items = try await apiClient.terminalListFiles(serverId: serverId, path: currentPath)
+            if usesLocalAlpine {
+                items = try await LocalAlpineTerminalService.shared.listFiles(path: currentPath)
+            } else if let apiClient {
+                items = try await apiClient.terminalListFiles(serverId: serverId, path: currentPath)
+            }
         } catch {
             logger.error("Failed to list files at \(self.currentPath): \(error.localizedDescription)")
             errorMessage = error.localizedDescription
@@ -133,12 +148,16 @@ final class TerminalBrowserViewModel {
 
     /// Creates a new folder in the current directory.
     func createFolder(name: String) async {
-        guard let apiClient, !serverId.isEmpty else { return }
+        guard usesLocalAlpine || (apiClient != nil && !serverId.isEmpty) else { return }
         let folderPath = currentPath.hasSuffix("/")
             ? "\(currentPath)\(name)"
             : "\(currentPath)/\(name)"
         do {
-            try await apiClient.terminalMkdir(serverId: serverId, path: folderPath)
+            if usesLocalAlpine {
+                try await LocalAlpineTerminalService.shared.createFolder(path: folderPath)
+            } else if let apiClient {
+                try await apiClient.terminalMkdir(serverId: serverId, path: folderPath)
+            }
             await loadDirectory()
         } catch {
             errorMessage = error.localizedDescription
@@ -147,9 +166,13 @@ final class TerminalBrowserViewModel {
 
     /// Deletes a file or directory.
     func deleteItem(_ item: TerminalFileItem) async {
-        guard let apiClient, !serverId.isEmpty else { return }
+        guard usesLocalAlpine || (apiClient != nil && !serverId.isEmpty) else { return }
         do {
-            try await apiClient.terminalDeleteFile(serverId: serverId, path: item.path)
+            if usesLocalAlpine {
+                try await LocalAlpineTerminalService.shared.deleteItem(path: item.path)
+            } else if let apiClient {
+                try await apiClient.terminalDeleteFile(serverId: serverId, path: item.path)
+            }
             // Remove from local list immediately for snappy feel
             items.removeAll { $0.path == item.path }
         } catch {
@@ -160,9 +183,17 @@ final class TerminalBrowserViewModel {
 
     /// Downloads a file and returns the local URL for sharing/preview.
     func downloadFile(_ item: TerminalFileItem) async -> URL? {
-        guard let apiClient, !serverId.isEmpty else { return nil }
+        guard usesLocalAlpine || (apiClient != nil && !serverId.isEmpty) else { return nil }
         do {
-            let (data, _) = try await apiClient.terminalDownloadFile(serverId: serverId, path: item.path)
+            let data: Data
+            if usesLocalAlpine {
+                data = try await LocalAlpineTerminalService.shared.readFile(path: item.path)
+            } else if let apiClient {
+                let downloaded = try await apiClient.terminalDownloadFile(serverId: serverId, path: item.path)
+                data = downloaded.0
+            } else {
+                return nil
+            }
             let tempDir = FileManager.default.temporaryDirectory
                 .appendingPathComponent("terminal_downloads", isDirectory: true)
             try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -177,14 +208,22 @@ final class TerminalBrowserViewModel {
 
     /// Uploads a file to the current directory.
     func uploadFile(data: Data, fileName: String) async {
-        guard let apiClient, !serverId.isEmpty else { return }
+        guard usesLocalAlpine || (apiClient != nil && !serverId.isEmpty) else { return }
         do {
-            try await apiClient.terminalUploadFile(
-                serverId: serverId,
-                fileData: data,
-                fileName: fileName,
-                destinationPath: currentPath
-            )
+            if usesLocalAlpine {
+                try await LocalAlpineTerminalService.shared.writeFile(
+                    data: data,
+                    fileName: fileName,
+                    destinationPath: currentPath
+                )
+            } else if let apiClient {
+                try await apiClient.terminalUploadFile(
+                    serverId: serverId,
+                    fileData: data,
+                    fileName: fileName,
+                    destinationPath: currentPath
+                )
+            }
             await loadDirectory()
         } catch {
             errorMessage = error.localizedDescription
@@ -195,10 +234,10 @@ final class TerminalBrowserViewModel {
 
     /// Executes a command on the terminal server.
     ///
-    /// Uses the Open Terminal API's `wait` parameter for synchronous execution
-    /// of short commands, and offset-based polling for long-running commands.
+    /// Remote Open Terminal uses the server API's synchronous/polling contract.
+    /// Local Alpine is routed to the on-device runtime slot and never reaches the backend.
     func executeCommand(_ command: String) async {
-        guard let apiClient, !serverId.isEmpty else { return }
+        guard usesLocalAlpine || (apiClient != nil && !serverId.isEmpty) else { return }
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -210,6 +249,23 @@ final class TerminalBrowserViewModel {
         let entryIndex = commandHistory.count - 1
 
         do {
+            if usesLocalAlpine {
+                let result = await LocalAlpineTerminalService.shared.execute(command: trimmed, cwd: currentPath)
+                commandHistory[entryIndex].output = result.output
+                commandHistory[entryIndex].isRunning = false
+                commandHistory[entryIndex].exitCode = result.exitCode
+                isExecutingCommand = false
+                return
+            }
+
+            guard let apiClient else {
+                commandHistory[entryIndex].output = "Error: Terminal API client unavailable"
+                commandHistory[entryIndex].isRunning = false
+                commandHistory[entryIndex].exitCode = -1
+                isExecutingCommand = false
+                return
+            }
+
             // Execute with wait=10 — short commands will complete inline
             let result = try await apiClient.terminalExecute(
                 serverId: serverId, command: trimmed, cwd: currentPath

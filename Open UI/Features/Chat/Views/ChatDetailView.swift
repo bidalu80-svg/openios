@@ -403,6 +403,11 @@ struct ChatDetailView: View {
                 }
             }
 
+            if isDownloadableMediaURL(url) {
+                Task { await downloadAndShareRemoteFile(url: url, suggestedName: suggestedFileName(from: url)) }
+                return
+            }
+
             // All other URLs → open in Safari normally
             UIApplication.shared.open(url)
         }
@@ -2364,7 +2369,7 @@ struct ChatDetailView: View {
             if let fileId = file.url, !fileId.isEmpty {
                 if let remoteURL = URL(string: fileId),
                    ["http", "https"].contains(remoteURL.scheme?.lowercased()) {
-                    UIApplication.shared.open(remoteURL)
+                    Task { await downloadAndShareRemoteFile(url: remoteURL, suggestedName: fileName) }
                 } else {
                     Task { await previewFileReference(fileId: fileId, fileName: fileName) }
                 }
@@ -3402,6 +3407,116 @@ for item in items {
             showDownloadError = true
         }
     }
+
+    private func downloadAndShareRemoteFile(url: URL, suggestedName: String? = nil) async {
+        withAnimation { isDownloadingFile = true }
+
+        do {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 300
+            request.setValue(Self.mediaDownloadUserAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue("*/*", forHTTPHeaderField: "Accept")
+            request.setValue(url.host.map { "https://\($0)" } ?? "https://www.iesdouyin.com", forHTTPHeaderField: "Referer")
+
+            let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+            let contentType = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? ""
+            let fileName = resolvedDownloadFileName(
+                suggestedName: suggestedName,
+                response: response,
+                contentType: contentType,
+                url: url
+            )
+            let destination = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+
+            withAnimation { isDownloadingFile = false }
+            downloadedFileURL = destination
+        } catch {
+            withAnimation { isDownloadingFile = false }
+            downloadErrorMessage = "下载失败：\(error.localizedDescription)"
+            showDownloadError = true
+        }
+    }
+
+    private func isDownloadableMediaURL(_ url: URL) -> Bool {
+        let lower = url.absoluteString.lowercased()
+        let pathExt = url.pathExtension.lowercased()
+        if ["mp4", "mov", "m4v", "webm", "avi", "mkv", "mp3", "wav", "m4a", "flac"].contains(pathExt) {
+            return true
+        }
+        return lower.contains("aweme.snssdk.com/aweme/v1/play")
+            || lower.contains("mime_type=video")
+            || lower.contains("video_id=")
+    }
+
+    private func suggestedFileName(from url: URL) -> String {
+        let decoded = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+        if !decoded.isEmpty, decoded != "/" {
+            return decoded
+        }
+        return isDownloadableMediaURL(url) ? "download.mp4" : "download"
+    }
+
+    private func resolvedDownloadFileName(
+        suggestedName: String?,
+        response: URLResponse,
+        contentType: String,
+        url: URL
+    ) -> String {
+        if let httpResponse = response as? HTTPURLResponse,
+           let disposition = httpResponse.value(forHTTPHeaderField: "Content-Disposition"),
+           let name = filenameFromContentDisposition(disposition),
+           !name.isEmpty {
+            return name
+        }
+
+        let trimmed = suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let baseName = trimmed.isEmpty ? suggestedFileName(from: url) : trimmed
+        if !(baseName as NSString).pathExtension.isEmpty {
+            return baseName
+        }
+
+        let ext: String
+        let lowerContentType = contentType.lowercased()
+        if lowerContentType.contains("video/mp4") {
+            ext = "mp4"
+        } else if lowerContentType.contains("quicktime") {
+            ext = "mov"
+        } else if lowerContentType.contains("webm") {
+            ext = "webm"
+        } else if lowerContentType.contains("mpeg") {
+            ext = "mp3"
+        } else if lowerContentType.contains("audio") {
+            ext = "m4a"
+        } else if isDownloadableMediaURL(url) {
+            ext = "mp4"
+        } else {
+            ext = "bin"
+        }
+        return "\(baseName).\(ext)"
+    }
+
+    private func filenameFromContentDisposition(_ disposition: String) -> String? {
+        let patterns = [
+            #"filename\*=UTF-8''([^;]+)"#,
+            #"filename="([^"]+)""#,
+            #"filename=([^;]+)"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                  let match = regex.firstMatch(in: disposition, range: NSRange(disposition.startIndex..., in: disposition)),
+                  match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: disposition) else { continue }
+            return String(disposition[range])
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"' ;"))
+                .removingPercentEncoding
+        }
+        return nil
+    }
+
+    private static let mediaDownloadUserAgent =
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
 
     // MARK: - #URL Suggestion Pill
 

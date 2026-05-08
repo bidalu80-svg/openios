@@ -207,6 +207,35 @@ jobs:
           p.write_text(s)
           PY
 
+      - name: Prepare bundled Local Alpine rootfs
+        run: |
+          if [ ! -f "Open UI/Resources/iexa-alpine-rootfs.tar.gz" ]; then
+            bash scripts/prepare-local-alpine-rootfs.sh
+          fi
+          test -s "Open UI/Resources/iexa-alpine-rootfs.tar.gz"
+
+      - name: Prepare Local Alpine iSH runtime
+        run: |
+          brew list pkg-config >/dev/null 2>&1 || brew install pkg-config
+          brew list meson >/dev/null 2>&1 || brew install meson
+          brew list ninja >/dev/null 2>&1 || brew install ninja
+          brew list libarchive >/dev/null 2>&1 || brew install libarchive
+          echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+          export PKG_CONFIG_PATH="$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+          bash scripts/prepare-ish-source.sh External/ish
+          bash scripts/prepare-local-alpine-fakefs.sh \
+            External/ish \
+            "Open UI/Resources/iexa-alpine-rootfs.tar.gz" \
+            "Open UI/Resources/iexa-alpine-rootfs.fakefs"
+          test -d "Open UI/Resources/iexa-alpine-rootfs.fakefs/data"
+          test -s "Open UI/Resources/iexa-alpine-rootfs.fakefs/meta.db"
+          bash scripts/build-local-alpine-ish-ci.sh External/ish "$RUNNER_TEMP/ish-products"
+          bash scripts/enable-local-alpine-ish-ci.sh \
+            "Open UI.xcodeproj/project.pbxproj" \
+            "$RUNNER_TEMP/ish-products" \
+            "External/ish"
+
       - name: Archive app
         id: archive_signed
         if: env.HAS_SIGNING_SECRETS == 'true'
