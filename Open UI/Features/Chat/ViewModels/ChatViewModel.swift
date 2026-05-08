@@ -2937,13 +2937,14 @@ final class ChatViewModel {
         let currentAttachments = processedAttachments
         errorMessage = nil
 
-        let shouldAutoUseLocalAlpine = shouldAutoRouteExplicitLocalAlpineCommand(currentText)
+        let normalizedLocalAlpineText = Self.normalizedLocalAlpineCommand(currentText)
+        let shouldAutoUseLocalAlpine = shouldAutoRouteExplicitLocalAlpineCommand(normalizedLocalAlpineText)
         if processedAttachments.isEmpty,
-           shouldSendTextDirectlyToLocalAlpine(currentText),
+           shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText),
            (terminalEnabled && selectedTerminalIsLocalAlpine || shouldAutoUseLocalAlpine) {
             selectedTerminalServer = .localAlpine
             terminalEnabled = true
-            await sendDirectLocalAlpineCommand(currentText, modelId: modelId)
+            await sendDirectLocalAlpineCommand(normalizedLocalAlpineText, modelId: modelId)
             return
         }
 
@@ -3754,7 +3755,7 @@ final class ChatViewModel {
         let command = trimmed.split(separator: " ", maxSplits: 1).first.map(String.init) ?? trimmed
         let knownCommands: Set<String> = [
             "apk", "ash", "sh", "bash", "cat", "cd", "chmod", "chown", "cp", "date",
-            "df", "du", "echo", "env", "find", "free", "gcc", "grep", "head", "id", "ls",
+            "curl", "df", "du", "echo", "env", "find", "free", "gcc", "grep", "head", "id", "ls",
             "mkdir", "mv", "node", "npm", "ps", "pwd", "python", "python3", "rm", "rmdir",
             "sed", "sleep", "tail", "tar", "top", "touch", "uname", "vi", "vim", "wget",
             "which", "whoami"
@@ -3767,15 +3768,13 @@ final class ChatViewModel {
         guard !lowercased.isEmpty else { return false }
         let alpineTerms = [
             "alpine", "apk ", "/etc/alpine-release", "python3", "gcc", "vim", "node",
-            "uname", "whoami", "ls /", "pwd", "/mnt/iexa"
+            "curl ", "uname", "whoami", "ls /", "pwd", "/mnt/iexa"
         ]
         return alpineTerms.contains { lowercased.contains($0) }
     }
 
     private func sendDirectLocalAlpineCommand(_ rawCommand: String, modelId: String) async {
-        let command = rawCommand
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: #"^\$\s+"#, with: "", options: .regularExpression)
+        let command = Self.normalizedLocalAlpineCommand(rawCommand)
         guard !command.isEmpty else { return }
 
         inputText = ""
@@ -3879,6 +3878,18 @@ final class ChatViewModel {
 
         exit: `\(exit)`
         """
+    }
+
+    private static func normalizedLocalAlpineCommand(_ rawCommand: String) -> String {
+        var command = rawCommand
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"^\$\s+"#, with: "", options: .regularExpression)
+        let lowercased = command.lowercased()
+        for prefix in ["执行#", "执行：", "执行:", "运行#", "运行：", "运行:"] where lowercased.hasPrefix(prefix) {
+            command = String(command.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            break
+        }
+        return command
     }
 
     /// Stops the current streaming response by cancelling the server-side task

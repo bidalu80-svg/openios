@@ -258,6 +258,12 @@ jobs:
             -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
             PRODUCT_BUNDLE_IDENTIFIER="$APP_BUNDLE_ID" \
             archive
+          APP_BINARY="$RUNNER_TEMP/Iexa.xcarchive/Products/Applications/Iexa.app/Iexa"
+          if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
+            echo "::error::Local Alpine iSH runtime was not linked into the signed archive"
+            exit 1
+          fi
+          strings "$APP_BINARY" | grep -q 'mount_root failed'
 
       - name: Export IPA
         if: env.HAS_SIGNING_SECRETS == 'true' && steps.archive_signed.outcome == 'success'
@@ -313,6 +319,12 @@ jobs:
 
           rm -rf "$APP_PATH/PlugIns"
           rm -rf "$APP_PATH/Extensions"
+          APP_BINARY="$APP_PATH/Iexa"
+          if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
+            echo "::error::Local Alpine iSH runtime was not linked into the unsigned app"
+            exit 1
+          fi
+          strings "$APP_BINARY" | grep -q 'mount_root failed'
 
           cp -R "$APP_PATH" "$RUNNER_TEMP/unsigned-ipa/Payload/"
           cd "$RUNNER_TEMP/unsigned-ipa"
