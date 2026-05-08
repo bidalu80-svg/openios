@@ -220,6 +220,9 @@ jobs:
           brew list meson >/dev/null 2>&1 || brew install meson
           brew list ninja >/dev/null 2>&1 || brew install ninja
           brew list libarchive >/dev/null 2>&1 || brew install libarchive
+          brew list llvm >/dev/null 2>&1 || brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          export PATH="$(brew --prefix llvm)/bin:$PATH"
           echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
           export PKG_CONFIG_PATH="$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
