@@ -24,6 +24,7 @@ static char *iexa_dup_output(const char *message) {
 #include <sqlite3.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -110,6 +111,27 @@ static void capture_append(const void *bytes, size_t length) {
     pthread_mutex_unlock(&capture_lock);
 }
 
+static void capture_append_locked(const void *bytes, size_t length) {
+    if (length == 0) {
+        return;
+    }
+    if (capture_length + length + 1 > capture_capacity) {
+        size_t next_capacity = capture_capacity == 0 ? 4096 : capture_capacity;
+        while (next_capacity < capture_length + length + 1) {
+            next_capacity *= 2;
+        }
+        char *next = realloc(capture_buffer, next_capacity);
+        if (next == NULL) {
+            return;
+        }
+        capture_buffer = next;
+        capture_capacity = next_capacity;
+    }
+    memcpy(capture_buffer + capture_length, bytes, length);
+    capture_length += length;
+    capture_buffer[capture_length] = '\0';
+}
+
 static int headless_tty_init(struct tty *tty) {
     tty->winsize.col = 120;
     tty->winsize.row = 40;
@@ -148,7 +170,7 @@ static struct tty_driver_ops headless_tty_ops = {
     .cleanup = headless_tty_cleanup,
 };
 
-DEFINE_TTY_DRIVER(iexa_headless_tty_driver, &headless_tty_ops, TTY_CONSOLE_MAJOR, 1);
+DEFINE_TTY_DRIVER(iexa_headless_tty_driver, &headless_tty_ops, TTY_CONSOLE_MAJOR, 64);
 
 static void capture_exit_hook(struct task *task, int code) {
     if (task->pid != capture_pid) {
@@ -285,12 +307,14 @@ char *iexa_local_alpine_execute(
         }
         exit_hook = NULL;
         pthread_mutex_unlock(&runtime_lock);
-        return iexa_dup_output("create_stdio failed");
+        char message[128];
+        snprintf(message, sizeof(message), "create_stdio failed: %d", err);
+        return iexa_dup_output(message);
     }
 
     const char *shell = "/bin/sh";
     char argv[8192];
-    snprintf(argv, sizeof(argv), "%s%c-lc%c%s%c%c", shell, '\0', '\0', command != NULL ? command : "", '\0', '\0');
+    snprintf(argv, sizeof(argv), "%s%c-c%c%s%c%c", shell, '\0', '\0', command != NULL ? command : "", '\0', '\0');
     const char *envp = "TERM=xterm-256color\0PATH=/bin:/sbin:/usr/bin:/usr/sbin\0HOME=/root\0USER=root\0";
 
     err = do_execve(shell, 3, argv, envp);
@@ -300,7 +324,9 @@ char *iexa_local_alpine_execute(
         }
         exit_hook = NULL;
         pthread_mutex_unlock(&runtime_lock);
-        return iexa_dup_output("do_execve failed");
+        char message[256];
+        snprintf(message, sizeof(message), "do_execve failed for %s: %d", shell, err);
+        return iexa_dup_output(message);
     }
 
     capture_pid = current->pid;
@@ -308,7 +334,24 @@ char *iexa_local_alpine_execute(
 
     pthread_mutex_lock(&capture_lock);
     while (!capture_finished) {
-        pthread_cond_wait(&capture_done, &capture_lock);
+        struct timespec timeout;
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        timeout.tv_sec = now.tv_sec + 30;
+        timeout.tv_nsec = now.tv_usec * 1000;
+        int wait_result = pthread_cond_timedwait(&capture_done, &capture_lock, &timeout);
+        if (wait_result == ETIMEDOUT) {
+            capture_exit_code = 124;
+            const char *message = "Local Alpine command timed out after 30 seconds\n";
+            capture_append_locked(message, strlen(message));
+            capture_finished = true;
+            break;
+        }
+    }
+    if (capture_buffer == NULL || capture_length == 0) {
+        char message[256];
+        snprintf(message, sizeof(message), "Local Alpine command exited without output. pid=%d shell=%s cwd=%s", capture_pid, shell, cwd != NULL ? cwd : "");
+        capture_append_locked(message, strlen(message));
     }
     char *output = iexa_dup_output(capture_buffer != NULL ? capture_buffer : "");
     int completed_exit_code = capture_exit_code;

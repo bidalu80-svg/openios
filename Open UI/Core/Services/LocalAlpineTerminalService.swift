@@ -139,14 +139,19 @@ actor LocalAlpineTerminalService {
         }
 
         let runtimeCWD = normalizedRuntimePath(cwd)
-        return await LocalAlpineNativeRuntime.shared.execute(
+        let runtimeCommand = compatibilityCommand(for: trimmed)
+        let result = await LocalAlpineNativeRuntime.shared.execute(
             LocalAlpineNativeCommand(
-                command: trimmed,
+                command: runtimeCommand,
                 cwd: runtimeCWD,
                 rootArchiveURL: runtimeRootFSURL,
                 workspaceURL: workspaceURL
             )
         )
+        if runtimeCommand == trimmed {
+            return result
+        }
+        return LocalAlpineCommandResult(command: trimmed, output: result.output, exitCode: result.exitCode)
     }
 
     private func bundledRootFSURL() -> URL? {
@@ -237,6 +242,36 @@ actor LocalAlpineTerminalService {
     private func normalizedRuntimePath(_ rawPath: String) -> String {
         let hostPath = normalizedTerminalPath(rawPath)
         return hostPath == "/" ? "/mnt/iexa" : "/mnt/iexa\(hostPath)"
+    }
+
+    private func compatibilityCommand(for command: String) -> String {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = trimmed.lowercased()
+        guard lowercased.hasPrefix("curl ") else { return command }
+
+        let rest = trimmed.dropFirst("curl ".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rest.isEmpty,
+              rest.range(of: #"[;&|`$<>(){}]"#, options: .regularExpression) == nil else {
+            return command
+        }
+
+        let passthroughOptions: Set<String> = ["-s", "-S", "-sS", "-L"]
+        let parts = rest.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        let unsupportedOption = parts.dropLast().contains { $0.hasPrefix("-") && !passthroughOptions.contains($0) }
+        guard !unsupportedOption, let url = parts.last, !url.hasPrefix("-") else { return command }
+
+        let escapedURL = shellSingleQuoted(url)
+        return """
+        if command -v curl >/dev/null 2>&1; then
+          \(command)
+        else
+          wget -qO- \(escapedURL)
+        fi
+        """
+    }
+
+    private func shellSingleQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func sanitizedFileName(_ rawName: String) throws -> String {
