@@ -3766,6 +3766,7 @@ final class ChatViewModel {
     private func shouldAutoRouteExplicitLocalAlpineCommand(_ text: String) -> Bool {
         let lowercased = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !lowercased.isEmpty else { return false }
+        if Self.localAlpineDiagnosticCommand(for: lowercased) != nil { return true }
         let alpineTerms = [
             "alpine", "apk ", "/etc/alpine-release", "python3", "gcc", "vim", "node",
             "curl ", "uname", "whoami", "ls /", "pwd", "/mnt/iexa"
@@ -3884,12 +3885,33 @@ final class ChatViewModel {
         var command = rawCommand
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: #"^\$\s+"#, with: "", options: .regularExpression)
+        if let diagnosticCommand = localAlpineDiagnosticCommand(for: command.lowercased()) {
+            return diagnosticCommand
+        }
         let lowercased = command.lowercased()
-        for prefix in ["执行#", "执行：", "执行:", "运行#", "运行：", "运行:"] where lowercased.hasPrefix(prefix) {
+        for prefix in [
+            "帮我执行一下", "帮我运行一下", "帮我执行", "帮我运行",
+            "执行命令：", "执行命令:", "运行命令：", "运行命令:",
+            "执行命令 ", "运行命令 ", "执行#", "执行：", "执行:", "执行 ",
+            "运行#", "运行：", "运行:", "运行 "
+        ] where lowercased.hasPrefix(prefix) {
             command = String(command.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
             break
         }
         return command
+    }
+
+    private static func localAlpineDiagnosticCommand(for lowercasedText: String) -> String? {
+        let trimmed = lowercasedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let diagnosticIntents = [
+            "检查当前环境", "检测当前环境", "测试当前环境", "检查环境", "检测环境", "测试环境",
+            "检查沙盒环境", "检测沙盒环境", "测试沙盒环境", "帮我测试一下当前沙盒环境",
+            "帮我测试当前沙盒环境", "当前环境", "沙盒环境", "alpine环境", "alpine 环境"
+        ]
+        guard diagnosticIntents.contains(where: { trimmed.contains($0) }) else { return nil }
+        return """
+        printf '== system ==\\n' && cat /etc/alpine-release 2>/dev/null && uname -a && id && pwd && printf '\\n== workspace ==\\n' && ls -la /mnt/iexa 2>/dev/null && printf '\\n== dns ==\\n' && cat /etc/resolv.conf 2>/dev/null && printf '\\n== tools ==\\n' && for x in sh ash busybox apk wget curl python3 node npm gcc g++ git vim; do printf '%-8s: ' "$x"; command -v "$x" || echo missing; done
+        """
     }
 
     /// Stops the current streaming response by cancelling the server-side task

@@ -45,6 +45,7 @@ static char *iexa_dup_output(const char *message) {
 #include "fs/fd.h"
 #include "fs/fake.h"
 #include "fs/real.h"
+#include "fs/sock.h"
 #include "fs/tty.h"
 
 static pthread_mutex_t runtime_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -222,6 +223,11 @@ static void write_file_in_fakefs(const char *path, const char *contents) {
 }
 
 static void configure_dns(void) {
+    struct task *init = pid_get_task(1);
+    if (init != NULL) {
+        current = init;
+    }
+
     char resolv_conf[2048];
     size_t used = 0;
     resolv_conf[0] = '\0';
@@ -305,6 +311,14 @@ static int boot_runtime(const char *root_archive_path, const char *workspace_pat
     do_mount(&procfs, "proc", "/proc", "", 0);
     do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
     configure_dns();
+
+    char socket_tmp_dir[4096];
+    snprintf(socket_tmp_dir, sizeof(socket_tmp_dir), "%s/sockets", workspace_path);
+    ensure_directory(socket_tmp_dir);
+    char socket_tmp_prefix[4096];
+    snprintf(socket_tmp_prefix, sizeof(socket_tmp_prefix), "%s/ishsock", socket_tmp_dir);
+    sock_tmp_prefix = strdup(socket_tmp_prefix);
+
     tty_drivers[TTY_CONSOLE_MAJOR] = &iexa_headless_tty_driver;
     set_console_device(TTY_CONSOLE_MAJOR, 1);
 
@@ -350,6 +364,8 @@ char *iexa_local_alpine_execute(
         pthread_mutex_unlock(&runtime_lock);
         return error != NULL ? error : iexa_dup_output("Local Alpine boot failed");
     }
+
+    configure_dns();
 
     err = become_new_init_child();
     if (err < 0) {
