@@ -17,7 +17,7 @@ xcodebuild \
   CODE_SIGNING_REQUIRED=NO \
   build
 
-"$PWD/scripts/local-alpine-ish-compile-probe.sh" "$ish_dir"
+bash "$PWD/scripts/local-alpine-ish-compile-probe.sh" "$ish_dir"
 
 meson_dir="$products_dir/meson"
 for lib in libish.a libish_emu.a libfakefs.a; do
