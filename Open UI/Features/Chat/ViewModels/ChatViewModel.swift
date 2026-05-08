@@ -143,6 +143,9 @@ final class ChatViewModel {
     var terminalEnabled: Bool = false
     /// The currently selected terminal server (auto-selects first if only one).
     var selectedTerminalServer: TerminalServer?
+    var selectedTerminalIsLocalAlpine: Bool {
+        selectedTerminalServer?.isLocalAlpine == true
+    }
     var isLoadingKnowledge: Bool = false
     var isShowingKnowledgePicker: Bool = false
     var knowledgeSearchQuery: String = ""
@@ -1933,20 +1936,37 @@ final class ChatViewModel {
     /// Called once at chat load time. If any terminals are available, the
     /// user can toggle them on via the terminal pill in the input field.
     func loadTerminalServers() async {
-        guard !isOpenAICompatibleProvider else {
-            availableTerminalServers = []
-            selectedTerminalServer = nil
-            terminalEnabled = false
+        if isOpenAICompatibleProvider {
+            availableTerminalServers = [TerminalServer.localAlpine]
+            if selectedTerminalServer == nil || selectedTerminalServer?.isLocalAlpine != true {
+                selectedTerminalServer = TerminalServer.localAlpine
+            }
             return
         }
-        guard let manager else { return }
+        guard let manager else {
+            availableTerminalServers = [TerminalServer.localAlpine]
+            if selectedTerminalServer == nil {
+                selectedTerminalServer = TerminalServer.localAlpine
+            }
+            return
+        }
         do {
-            availableTerminalServers = try await manager.fetchTerminalServers()
-            // Auto-select first terminal if only one available
+            let remoteServers = try await manager.fetchTerminalServers()
+            availableTerminalServers = remoteServers + [TerminalServer.localAlpine]
+            if selectedTerminalServer?.isLocalAlpine != true,
+               let selected = selectedTerminalServer,
+               !remoteServers.contains(where: { $0.id == selected.id }) {
+                selectedTerminalServer = nil
+            }
+            // Auto-select first remote terminal when available; otherwise fall back to Local Alpine.
             if selectedTerminalServer == nil, let first = availableTerminalServers.first {
                 selectedTerminalServer = first
             }
         } catch {
+            availableTerminalServers = [TerminalServer.localAlpine]
+            if selectedTerminalServer == nil {
+                selectedTerminalServer = TerminalServer.localAlpine
+            }
             logger.debug("Terminal servers fetch failed: \(error.localizedDescription)")
         }
     }
@@ -5723,7 +5743,7 @@ final class ChatViewModel {
         if !allToolIds.isEmpty { request.toolIds = allToolIds }
 
         // Terminal ID if enabled
-        if terminalEnabled, let terminalServer = selectedTerminalServer {
+        if terminalEnabled, let terminalServer = selectedTerminalServer, !terminalServer.isLocalAlpine {
             request.terminalId = terminalServer.id
         }
 
@@ -5821,7 +5841,7 @@ final class ChatViewModel {
         let positives = [
             "image", "img", "dall-e", "dalle", "gpt-image", "imagen",
             "flux", "sdxl", "stable-diffusion", "midjourney", "mj-",
-            "banana", "nano-banana"
+            "banana", "nano-banana", "grok-imagine", "grok imagine"
         ]
         let negatives = [
             "vision", "ocr", "vl", "video", "videos", "veo", "sora",
@@ -5841,7 +5861,7 @@ final class ChatViewModel {
         let directEndpointModels = [
             "gpt-image", "dall-e", "dalle", "flux", "sdxl",
             "stable-diffusion", "midjourney", "mj-",
-            "grok-imagine", "minimax-image"
+            "minimax-image"
         ]
         if directEndpointModels.contains(where: { haystack.contains($0) }) {
             return false
