@@ -3614,6 +3614,85 @@ private struct IsolatedStreamingStatus: View {
     }
 }
 
+// MARK: - Image Generation Placeholder
+
+private struct ImageGenerationPlaceholderView: View {
+    @Environment(\.theme) private var theme
+    @State private var isAnimating = false
+
+    private var baseColors: [Color] {
+        if isAnimating {
+            return [
+                Color(red: 0.91, green: 0.96, blue: 1.00),
+                Color(red: 0.99, green: 0.90, blue: 0.96),
+                Color(red: 1.00, green: 0.95, blue: 0.86),
+                Color(red: 0.90, green: 0.88, blue: 1.00)
+            ]
+        }
+        return [
+            Color(red: 1.00, green: 0.92, blue: 0.88),
+            Color(red: 0.96, green: 0.88, blue: 1.00),
+            Color(red: 0.90, green: 0.95, blue: 1.00),
+            Color(red: 1.00, green: 0.90, blue: 0.95)
+        ]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("正在创建图片")
+                .scaledFont(size: 22, weight: .semibold)
+                .foregroundStyle(theme.textSecondary)
+
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: baseColors.map { $0.opacity(theme.isDark ? 0.86 : 0.78) },
+                        startPoint: isAnimating ? .topTrailing : .bottomLeading,
+                        endPoint: isAnimating ? .bottomLeading : .topTrailing
+                    )
+                )
+                .overlay {
+                    ZStack {
+                        RadialGradient(
+                            colors: [
+                                Color.white.opacity(theme.isDark ? 0.28 : 0.52),
+                                Color.white.opacity(0.02)
+                            ],
+                            center: isAnimating ? .topTrailing : .bottomLeading,
+                            startRadius: 20,
+                            endRadius: 260
+                        )
+                        LinearGradient(
+                            colors: [
+                                .clear,
+                                Color.white.opacity(theme.isDark ? 0.22 : 0.42),
+                                .clear
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        .rotationEffect(.degrees(isAnimating ? 10 : -12))
+                        .offset(x: isAnimating ? 190 : -190, y: isAnimating ? 34 : -34)
+                        .blur(radius: 22)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(Color.white.opacity(theme.isDark ? 0.10 : 0.46), lineWidth: 0.8)
+                }
+                .aspectRatio(1, contentMode: .fit)
+                .frame(maxWidth: 340)
+                .shadow(color: Color.black.opacity(theme.isDark ? 0.18 : 0.06), radius: 16, y: 8)
+                .accessibilityHidden(true)
+        }
+        .padding(.top, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { isAnimating = true }
+        .animation(.easeInOut(duration: 3.2).repeatForever(autoreverses: true), value: isAnimating)
+    }
+}
+
 // MARK: - Isolated Assistant Message (Observation Isolation)
 
 /// Isolates ALL streaming store reads for assistant message content into
@@ -3685,6 +3764,8 @@ private struct IsolatedAssistantMessage: View {
         if effectiveIsStreaming && rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if message.metadata?["iexa_local_alpine_result"] == "true" {
                 EmptyView()
+            } else if message.metadata?["iexa_image_generation_placeholder"] == "true" {
+                ImageGenerationPlaceholderView()
             } else {
                 TypingIndicator()
             }

@@ -3191,9 +3191,15 @@ final class ChatViewModel {
 
         // Assistant placeholder
         let assistantMessageId = UUID().uuidString
+        let isDirectImageGenerationPlaceholder = isOpenAICompatibleProvider
+            && shouldUseDirectImageGeneration(modelId: modelId)
+            && !shouldPreferChatNativeImageGeneration(modelId: modelId)
         conversation?.messages.append(ChatMessage(
             id: assistantMessageId, role: .assistant, content: "",
-            timestamp: .now, model: modelId, isStreaming: true))
+            timestamp: .now, model: modelId, isStreaming: true,
+            metadata: isDirectImageGenerationPlaceholder
+                ? ["iexa_image_generation_placeholder": "true"]
+                : nil))
 
         // ── Build / update the history tree ─────────────────────────────────
         // This ensures the tree is always populated with correct parentId /
