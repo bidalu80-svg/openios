@@ -967,6 +967,23 @@ struct MainChatView: View {
                     NotificationCenter.default.post(name: .navigateToChannel, object: channelId)
                 }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .conversationDidResolveId)) { notification in
+                guard activeChannelId == nil,
+                      activeConversationId == nil,
+                      let conversationId = notification.userInfo?["conversationId"] as? String else { return }
+                activeConversationId = conversationId
+                activeFolderWorkspaceId = nil
+                SharedDataService.shared.saveLastActiveConversationId(conversationId)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openConversationRequested)) { notification in
+                guard let conversationId = notification.userInfo?["conversationId"] as? String else { return }
+                activeConversationId = conversationId
+                activeChannelId = nil
+                activeFolderWorkspaceId = nil
+                closeDrawer()
+                SharedDataService.shared.saveLastActiveConversationId(conversationId)
+                Task { await listViewModel.refreshConversations() }
+            }
             .onChange(of: scenePhase) { oldPhase, newPhase in
                 if newPhase == .active && oldPhase != .active {
                     Task { await refreshAllDataOnForeground() }
@@ -1058,7 +1075,12 @@ struct MainChatView: View {
                 }
                 router.presentVoiceCall(viewModel: voiceCallVM)
             }
-            .onReceive(NotificationCenter.default.publisher(for: .conversationListNeedsRefresh)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .conversationListNeedsRefresh)) { notification in
+                if let conversation = notification.userInfo?["conversation"] as? Conversation {
+                    listViewModel.upsertLiveSnapshot(conversation)
+                    dependencies.updateWidgetData(conversations: listViewModel.conversations)
+                    return
+                }
                 Task {
                     if dependencies.conversationManager?.usesLocalConversationStore == true {
                         await listViewModel.refreshConversations()

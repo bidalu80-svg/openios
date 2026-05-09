@@ -172,6 +172,11 @@ struct Open_UIApp: App {
 
                     // Wire notification tap to router
                     NotificationService.shared.onOpenChat = { conversationId in
+                        NotificationCenter.default.post(
+                            name: .openConversationRequested,
+                            object: nil,
+                            userInfo: ["conversationId": conversationId]
+                        )
                         router.navigate(to: .chatDetail(conversationId: conversationId))
                     }
                 }
@@ -237,6 +242,11 @@ struct Open_UIApp: App {
 
         case "continue":
             if let conversationId = SharedDataService.shared.lastActiveConversationId {
+                NotificationCenter.default.post(
+                    name: .openConversationRequested,
+                    object: nil,
+                    userInfo: ["conversationId": conversationId]
+                )
                 router.navigate(to: .chatDetail(conversationId: conversationId))
             }
 
@@ -278,6 +288,11 @@ struct Open_UIApp: App {
             if !conversationId.isEmpty && conversationId != "/"
                 && conversationId.count >= 8 && conversationId.count <= 128
                 && conversationId.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) {
+                NotificationCenter.default.post(
+                    name: .openConversationRequested,
+                    object: nil,
+                    userInfo: ["conversationId": conversationId]
+                )
                 router.navigate(to: .chatDetail(conversationId: conversationId))
             }
 

@@ -7,6 +7,8 @@ extension Notification.Name {
     static let conversationTitleUpdated = Notification.Name("conversationTitleUpdated")
     static let navigateToChannel = Notification.Name("navigateToChannel")
     static let conversationListNeedsRefresh = Notification.Name("conversationListNeedsRefresh")
+    static let conversationDidResolveId = Notification.Name("conversationDidResolveId")
+    static let openConversationRequested = Notification.Name("openConversationRequested")
     /// Posted by MemoriesView when the user toggles the Enable Memory switch.
     /// `object` is the new Bool value so ChatViewModel updates immediately.
     static let memorySettingChanged = Notification.Name("memorySettingChanged")
@@ -223,6 +225,7 @@ final class ChatViewModel {
     /// True when this VM initiated the current streaming session (sendMessage/regenerate).
     /// The passive listener skips processing when this is true to avoid conflicts.
     private var selfInitiatedStream: Bool = false
+    private var lastConversationSnapshotNotificationAt: Date = .distantPast
     /// Guards against flooding syncForExternalStream with duplicate fetch tasks
     /// when many socket tokens arrive before the first fetch completes.
     private var isSyncingExternalStream: Bool = false
@@ -3300,8 +3303,13 @@ final class ChatViewModel {
                 pendingChatParams = nil
             }
             conversation = newConv
-            if isOpenAICompatibleProvider {
+            if !isTemporaryChat {
                 activeChatStore?.promoteNewChat(to: localId)
+                NotificationCenter.default.post(
+                    name: .conversationDidResolveId,
+                    object: nil,
+                    userInfo: ["conversationId": localId]
+                )
             }
             // Update active conversation ID so notifications are suppressed
             // while the user is viewing this newly created chat
@@ -3356,6 +3364,7 @@ final class ChatViewModel {
         }
         conversation?.history.currentId = assistantMessageId
         // ────────────────────────────────────────────────────────────────────
+        notifyConversationSnapshotChanged(force: true)
 
         await resolveWebLinkContextIfNeeded(
             userMessageId: userMessage.id,
@@ -3955,6 +3964,11 @@ final class ChatViewModel {
             }
             if isOpenAICompatibleProvider, let id = conversation?.id {
                 activeChatStore?.promoteNewChat(to: id)
+                NotificationCenter.default.post(
+                    name: .conversationDidResolveId,
+                    object: nil,
+                    userInfo: ["conversationId": id]
+                )
             }
             NotificationService.shared.activeConversationId = conversation?.id
         } else {
@@ -4004,6 +4018,7 @@ final class ChatViewModel {
             conversation?.history.appendChildId(userMessage.id, to: pid)
         }
         conversation?.history.currentId = assistantMessageId
+        notifyConversationSnapshotChanged(force: true)
 
         isStreaming = true
         hasFinishedStreaming = false
@@ -7594,6 +7609,22 @@ final class ChatViewModel {
             scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
             scheduleLocalWorkspaceAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
         }
+        notifyConversationSnapshotChanged(force: !isStreaming)
+    }
+
+    private func notifyConversationSnapshotChanged(force: Bool = false) {
+        guard !isTemporaryChat, var snapshot = conversation else { return }
+        let now = Date()
+        if !force, now.timeIntervalSince(lastConversationSnapshotNotificationAt) < 1.0 {
+            return
+        }
+        lastConversationSnapshotNotificationAt = now
+        snapshot.updatedAt = now
+        NotificationCenter.default.post(
+            name: .conversationListNeedsRefresh,
+            object: nil,
+            userInfo: ["conversation": snapshot]
+        )
     }
 
     /// Fires a subtle haptic pulse during token streaming, throttled via

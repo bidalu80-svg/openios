@@ -2188,6 +2188,22 @@ private extension View {
                     }
                 }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .conversationDidResolveId)) { notification in
+                guard activeChannelId.wrappedValue == nil,
+                      activeConversationId.wrappedValue == nil,
+                      let conversationId = notification.userInfo?["conversationId"] as? String else { return }
+                activeConversationId.wrappedValue = conversationId
+                activeFolderWorkspaceId.wrappedValue = nil
+                SharedDataService.shared.saveLastActiveConversationId(conversationId)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openConversationRequested)) { notification in
+                guard let conversationId = notification.userInfo?["conversationId"] as? String else { return }
+                activeConversationId.wrappedValue = conversationId
+                activeChannelId.wrappedValue = nil
+                activeFolderWorkspaceId.wrappedValue = nil
+                SharedDataService.shared.saveLastActiveConversationId(conversationId)
+                Task { await listViewModel.refreshConversations() }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .conversationTitleUpdated)) { notification in
                 guard let userInfo = notification.userInfo,
                       let conversationId = userInfo["conversationId"] as? String,
@@ -2200,7 +2216,12 @@ private extension View {
                     }
                 }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .conversationListNeedsRefresh)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .conversationListNeedsRefresh)) { notification in
+                if let conversation = notification.userInfo?["conversation"] as? Conversation {
+                    listViewModel.upsertLiveSnapshot(conversation)
+                    dependencies.updateWidgetData(conversations: listViewModel.conversations)
+                    return
+                }
                 Task {
                     if dependencies.conversationManager?.usesLocalConversationStore == true {
                         await listViewModel.refreshConversations()

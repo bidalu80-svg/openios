@@ -83,6 +83,8 @@ final class ChatListViewModel {
     /// Minimum interval between auto-refreshes (in seconds).
     private let autoRefreshInterval: TimeInterval = 5
 
+    private var liveSnapshotUpdatedAt: [String: Date] = [:]
+
     /// Number of pages to fetch in parallel per batch.
     private let batchSize = 5
 
@@ -264,7 +266,7 @@ final class ChatListViewModel {
 
         do {
             if manager.usesLocalConversationStore {
-                conversations = try await manager.fetchConversationsPage(page: 1)
+                conversations = preserveRecentLiveSnapshots(in: try await manager.fetchConversationsPage(page: 1))
                 isLoading = false
                 return
             }
@@ -277,7 +279,7 @@ final class ChatListViewModel {
 
             // Apply pinned flags to page 1
             let page1WithPins = applyPinnedIds(pinnedIds, to: page1)
-            conversations = page1WithPins
+            conversations = preserveRecentLiveSnapshots(in: page1WithPins)
             isLoading = false
 
             // If page 1 was empty, we're done
@@ -315,7 +317,7 @@ final class ChatListViewModel {
 
         do {
             if manager.usesLocalConversationStore {
-                conversations = try await manager.fetchConversationsPage(page: 1)
+                conversations = preserveRecentLiveSnapshots(in: try await manager.fetchConversationsPage(page: 1))
                 errorMessage = nil
                 lastRefreshDate = Date()
                 isRefreshing = false
@@ -329,7 +331,7 @@ final class ChatListViewModel {
             let (page1, pinnedIds) = try await (page1Request, pinnedRequest)
 
             let page1WithPins = applyPinnedIds(pinnedIds, to: page1)
-            conversations = page1WithPins
+            conversations = preserveRecentLiveSnapshots(in: page1WithPins)
             errorMessage = nil
             lastRefreshDate = Date()
             isRefreshing = false
@@ -381,8 +383,16 @@ final class ChatListViewModel {
 
         do {
             if manager.usesLocalConversationStore {
-                let local = try await manager.fetchConversationsPage(page: 1)
-                if local.map(\.id) != conversations.map(\.id) {
+                let local = preserveRecentLiveSnapshots(in: try await manager.fetchConversationsPage(page: 1))
+                let changed = local.map(\.id) != conversations.map(\.id)
+                    || local.contains { newConv in
+                        guard let oldConv = conversations.first(where: { $0.id == newConv.id }) else { return true }
+                        return oldConv.title != newConv.title
+                            || oldConv.messages != newConv.messages
+                            || oldConv.updatedAt != newConv.updatedAt
+                            || oldConv.tasks != newConv.tasks
+                    }
+                if changed {
                     conversations = local
                 }
                 errorMessage = nil
@@ -406,6 +416,12 @@ final class ChatListViewModel {
                 }
                 || page1WithPins.contains { newConv in
                     conversations.first(where: { $0.id == newConv.id })?.pinned != newConv.pinned
+                }
+                || page1WithPins.contains { newConv in
+                    guard let oldConv = conversations.first(where: { $0.id == newConv.id }) else { return true }
+                    return oldConv.messages != newConv.messages
+                        || oldConv.updatedAt != newConv.updatedAt
+                        || oldConv.tasks != newConv.tasks
                 }
 
             if changed {
@@ -522,7 +538,12 @@ final class ChatListViewModel {
 
         // Fresh page first (newest items)
         for conv in fresh {
-            merged.append(conv)
+            if let live = conversations.first(where: { $0.id == conv.id }),
+               shouldPreserveLiveSnapshot(live, over: conv) {
+                merged.append(live)
+            } else {
+                merged.append(conv)
+            }
             seen.insert(conv.id)
         }
         // Existing items not in the fresh page (older paginated data)
@@ -530,6 +551,50 @@ final class ChatListViewModel {
             merged.append(conv)
         }
         return merged
+    }
+
+    /// Applies a live conversation snapshot from an active ChatViewModel.
+    /// This keeps the drawer/sidebar in sync immediately after send and during
+    /// foreground recovery instead of waiting for a full app restart.
+    func upsertLiveSnapshot(_ conversation: Conversation) {
+        var snapshot = conversation
+        if snapshot.history.isPopulated {
+            snapshot.rederiveMessages()
+        }
+        liveSnapshotUpdatedAt[snapshot.id] = Date()
+        if let index = conversations.firstIndex(where: { $0.id == snapshot.id }) {
+            conversations[index] = snapshot
+        } else {
+            conversations.insert(snapshot, at: 0)
+        }
+        conversations.sort { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func preserveRecentLiveSnapshots(in fresh: [Conversation]) -> [Conversation] {
+        let now = Date()
+        liveSnapshotUpdatedAt = liveSnapshotUpdatedAt.filter { now.timeIntervalSince($0.value) < 120 }
+        var merged = fresh
+        let freshIds = Set(fresh.map(\.id))
+        for index in merged.indices {
+            if let live = conversations.first(where: { $0.id == merged[index].id }),
+               shouldPreserveLiveSnapshot(live, over: merged[index]) {
+                merged[index] = live
+            }
+        }
+        for conversation in conversations
+            where liveSnapshotUpdatedAt[conversation.id] != nil
+                && !freshIds.contains(conversation.id) {
+            merged.append(conversation)
+        }
+        return merged.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func shouldPreserveLiveSnapshot(_ live: Conversation, over incoming: Conversation) -> Bool {
+        guard liveSnapshotUpdatedAt[live.id] != nil else { return false }
+        let liveVisibleMessages = live.messages.filter { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let incomingVisibleMessages = incoming.messages.filter { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return live.messages.count > incoming.messages.count
+            || liveVisibleMessages.count > incomingVisibleMessages.count
     }
 
     // MARK: - Search
