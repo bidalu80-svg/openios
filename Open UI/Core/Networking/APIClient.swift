@@ -702,30 +702,136 @@ final class APIClient: @unchecked Sendable {
         fileName: String = "image.png",
         size: String = "1024x1024"
     ) async throws -> String {
-        let json = try await network.uploadMultipart(
-            path: "/images/edits",
-            fileData: imageData,
-            fileName: fileName,
-            mimeType: mimeType(for: fileName),
-            fieldName: "image",
-            additionalFields: [
+        let dataURL = "data:\(mimeType(for: fileName));base64,\(imageData.base64EncodedString())"
+        let multipartPaths = [
+            "/images/edits",
+            "/image/edits",
+            "/images/edit",
+            "/image/edit"
+        ]
+        var lastError: Error?
+
+        for path in multipartPaths {
+            do {
+                let json = try await network.uploadMultipart(
+                    path: path,
+                    fileData: imageData,
+                    fileName: fileName,
+                    mimeType: mimeType(for: fileName),
+                    fieldName: "image",
+                    additionalFields: [
+                        "model": model,
+                        "prompt": prompt,
+                        "n": "1",
+                        "size": size
+                    ],
+                    timeout: 300
+                )
+
+                if let imageReference = firstImageReference(in: json) {
+                    return imageReference
+                }
+                lastError = APIError.responseDecoding(
+                    underlying: NSError(
+                        domain: "APIClient",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
+                    ),
+                    data: nil
+                )
+            } catch {
+                lastError = error
+                let apiError = APIError.from(error)
+                if case .httpError(let statusCode, _, _) = apiError,
+                   [400, 404, 405, 422].contains(statusCode) {
+                    continue
+                }
+                throw error
+            }
+        }
+
+        let chatEditBody: [String: Any] = [
+            "model": model,
+            "stream": false,
+            "messages": [[
+                "role": "user",
+                "content": [
+                    ["type": "text", "text": prompt],
+                    ["type": "image_url", "image_url": ["url": dataURL]]
+                ]
+            ]],
+            "modalities": ["text", "image"]
+        ]
+        let jsonEditBodyVariants: [[String: Any]] = [
+            [
                 "model": model,
                 "prompt": prompt,
-                "n": "1",
+                "image": dataURL,
+                "n": 1,
                 "size": size
             ],
-            timeout: 300
-        )
-
-        if let imageReference = firstImageReference(in: json) {
-            return imageReference
+            [
+                "model": model,
+                "prompt": prompt,
+                "image_url": dataURL,
+                "n": 1,
+                "size": size
+            ],
+            [
+                "model": model,
+                "input": prompt,
+                "image": dataURL,
+                "n": 1,
+                "size": size
+            ]
+        ]
+        let jsonPaths = [
+            "/images/edits",
+            "/image/edits",
+            "/images/edit",
+            "/image/edit",
+            chatCompletionsPath
+        ]
+        for path in jsonPaths {
+            let variants = path == chatCompletionsPath
+                ? [chatEditBody]
+                : jsonEditBodyVariants
+            for body in variants {
+                do {
+                    let payload = try await requestAnyJSON(
+                        path: path,
+                        method: .post,
+                        body: body,
+                        timeout: 300
+                    )
+                    if let imageReference = firstImageReference(in: payload) {
+                        return imageReference
+                    }
+                    lastError = APIError.responseDecoding(
+                        underlying: NSError(
+                            domain: "APIClient",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
+                        ),
+                        data: nil
+                    )
+                } catch {
+                    lastError = error
+                    let apiError = APIError.from(error)
+                    if case .httpError(let statusCode, _, _) = apiError,
+                       [400, 404, 405, 422].contains(statusCode) {
+                        continue
+                    }
+                    throw error
+                }
+            }
         }
 
         throw APIError.responseDecoding(
             underlying: NSError(
                 domain: "APIClient",
                 code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
+                userInfo: [NSLocalizedDescriptionKey: lastError?.localizedDescription ?? "改图接口没有返回图片地址。"]
             ),
             data: Data()
         )

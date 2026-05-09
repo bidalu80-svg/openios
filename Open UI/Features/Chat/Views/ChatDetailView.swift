@@ -2360,6 +2360,28 @@ struct ChatDetailView: View {
         }
     }
 
+    private func generatedImageCard(file: ChatMessageFile, fileId: String) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            chatImageView(fileId: fileId)
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+
+            Button {
+                viewModel.prepareGeneratedImageForEditing(file)
+                Haptics.play(.light)
+            } label: {
+                Label("编辑", systemImage: "pencil")
+                    .labelStyle(.iconOnly)
+                    .scaledFont(size: 14, weight: .semibold)
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(.black.opacity(0.64), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("编辑图片")
+            .padding(8)
+        }
+    }
+
     private func fileAttachmentCard(file: ChatMessageFile) -> some View {
         let fileName = file.name ?? file.url ?? "File"
         let fileExt = (fileName as NSString).pathExtension.lowercased()
@@ -2502,8 +2524,7 @@ struct ChatDetailView: View {
                             }
                             return fileUrl
                         }()
-                        chatImageView(fileId: fileId)
-                            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                        generatedImageCard(file: file, fileId: fileId)
                     }
                 }
             }
@@ -3617,6 +3638,8 @@ private struct IsolatedStreamingStatus: View {
 // MARK: - Image Generation Placeholder
 
 private struct ImageGenerationPlaceholderView: View {
+    var aspectRatio: CGFloat = 1
+
     @Environment(\.theme) private var theme
     @State private var isAnimating = false
 
@@ -3680,7 +3703,7 @@ private struct ImageGenerationPlaceholderView: View {
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .strokeBorder(Color.white.opacity(theme.isDark ? 0.10 : 0.46), lineWidth: 0.8)
                 }
-                .aspectRatio(1, contentMode: .fit)
+                .aspectRatio(max(0.35, min(aspectRatio, 3.0)), contentMode: .fit)
                 .frame(maxWidth: 340)
                 .shadow(color: Color.black.opacity(theme.isDark ? 0.18 : 0.06), radius: 16, y: 8)
                 .accessibilityHidden(true)
@@ -3817,7 +3840,9 @@ private struct IsolatedAssistantMessage: View {
             if message.metadata?["iexa_local_alpine_result"] == "true" {
                 EmptyView()
             } else if message.metadata?["iexa_image_generation_placeholder"] == "true" {
-                ImageGenerationPlaceholderView()
+                ImageGenerationPlaceholderView(
+                    aspectRatio: Self.metadataAspectRatio(message.metadata?["iexa_image_generation_aspect_ratio"])
+                )
             } else {
                 TypingIndicator()
             }
@@ -3974,6 +3999,20 @@ private struct IsolatedAssistantMessage: View {
             || lower.contains("<|end_of_thought|>")
             || text.contains("◁think▷")
             || text.contains("◁/think▷")
+    }
+
+    private static func metadataAspectRatio(_ rawValue: String?) -> CGFloat {
+        guard let rawValue, !rawValue.isEmpty else { return 1 }
+        if rawValue.contains("/") {
+            let parts = rawValue.split(separator: "/")
+            guard parts.count == 2,
+                  let width = Double(parts[0]),
+                  let height = Double(parts[1]),
+                  width > 0,
+                  height > 0 else { return 1 }
+            return CGFloat(width / height)
+        }
+        return CGFloat(Double(rawValue) ?? 1)
     }
 
     // MARK: - Static Preprocessing (no ChatDetailView dependency)

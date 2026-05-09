@@ -2,6 +2,7 @@ import Foundation
 import CoreFoundation
 import os.log
 import SwiftUI
+import UIKit
 
 extension Notification.Name {
     static let conversationTitleUpdated = Notification.Name("conversationTitleUpdated")
@@ -231,6 +232,8 @@ final class ChatViewModel {
     private var isSyncingExternalStream: Bool = false
     private(set) var sessionId: String = UUID().uuidString
     private let logger = Logger(subsystem: "com.openui", category: "ChatViewModel")
+    private static let mediaDownloadUserAgent =
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
     private let webLinkContextResolver = WebLinkContextResolver()
     private var webLinkContextsByMessageId: [String: String] = [:]
     private var hasFinishedStreaming = false
@@ -875,6 +878,37 @@ final class ChatViewModel {
         }
     }
 
+    func prepareGeneratedImageForEditing(_ file: ChatMessageFile) {
+        Task {
+            do {
+                let data = try await imageDataForEditing(file)
+                guard let image = UIImage(data: data) else {
+                    errorMessage = "无法读取这张图片。"
+                    return
+                }
+                let downsampled = FileAttachmentService.downsampleForUpload(data: data, image: image)
+                let finalData = downsampled.isEmpty ? data : downsampled
+                var attachment = ChatAttachment(
+                    type: .image,
+                    name: Self.editableImageFileName(for: file),
+                    thumbnail: Image(uiImage: image),
+                    data: finalData
+                )
+                attachment.displayDataURL = inlineImageDataURL(data: finalData, fileName: attachment.name)
+                attachment.uploadStatus = .completed
+                attachment.uploadError = nil
+                attachments.append(attachment)
+
+                if inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    inputText = "按这张图继续修改："
+                }
+                NotificationCenter.default.post(name: .chatInputFieldRequestFocus, object: nil)
+            } catch {
+                errorMessage = "图片编辑准备失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
     private func canSendAttachmentInline(_ attachment: ChatAttachment) -> Bool {
         guard attachment.data != nil else { return false }
         if attachment.type == .image { return true }
@@ -897,6 +931,49 @@ final class ChatViewModel {
             "hpp", "cs", "go", "rs", "rb", "php", "sh", "bash", "zsh", "ps1",
             "bat", "cmd", "sql", "toml", "ini", "cfg", "conf", "env", "log"
         ].contains(ext)
+    }
+
+    private func imageDataForEditing(_ file: ChatMessageFile) async throws -> Data {
+        let reference = file.displayURL ?? file.url ?? ""
+        if let data = Self.imageData(fromDataURL: reference) {
+            return data
+        }
+        if let url = URL(string: reference),
+           ["http", "https"].contains(url.scheme?.lowercased()) {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 300
+            request.setValue(Self.mediaDownloadUserAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue("*/*", forHTTPHeaderField: "Accept")
+            if let host = url.host {
+                request.setValue("https://\(host)", forHTTPHeaderField: "Referer")
+            }
+            let (data, _) = try await URLSession.shared.data(for: request)
+            return data
+        }
+        guard let fileId = file.url, !fileId.isEmpty, let apiClient = manager?.apiClient else {
+            throw APIError.responseDecoding(
+                underlying: NSError(
+                    domain: "ChatViewModel",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "缺少图片引用。"]
+                ),
+                data: nil
+            )
+        }
+        let (data, _) = try await apiClient.getFileContent(id: fileId)
+        return data
+    }
+
+    private static func editableImageFileName(for file: ChatMessageFile) -> String {
+        let contentType = file.contentType ?? imageContentType(for: file.displayURL ?? file.url ?? "")
+        let baseName = ((file.name ?? "") as NSString).deletingPathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeBase = baseName.isEmpty ? "generated-image" : baseName
+        switch contentType {
+        case "image/png": return "\(safeBase).png"
+        case "image/webp": return "\(safeBase).webp"
+        default: return "\(safeBase).jpg"
+        }
     }
 
     private static func shouldUploadWithoutServerProcessing(_ name: String) -> Bool {
@@ -3327,7 +3404,10 @@ final class ChatViewModel {
             id: assistantMessageId, role: .assistant, content: "",
             timestamp: .now, model: modelId, isStreaming: true,
             metadata: isDirectImageGenerationPlaceholder
-                ? ["iexa_image_generation_placeholder": "true"]
+                ? [
+                    "iexa_image_generation_placeholder": "true",
+                    "iexa_image_generation_aspect_ratio": Self.imageAspectRatioString(from: messageText)
+                ]
                 : nil))
 
         // ── Build / update the history tree ─────────────────────────────────
@@ -3477,9 +3557,10 @@ final class ChatViewModel {
                             }
                             let imagePrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
                             let requestedImageSize = Self.requestedImageSize(from: imagePrompt)
+                            let requestedPixelSize = Self.exactRequestedImagePixelSize(from: imagePrompt)
                             let imagePromptForAPI = Self.promptWithImageSizeInstruction(
                                 imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
-                                size: requestedImageSize
+                                size: requestedPixelSize.map { "\($0.width)x\($0.height)" } ?? requestedImageSize
                             )
                             await RunLiveActivityService.shared.update(
                                 id: assistantMessageId,
@@ -3519,7 +3600,10 @@ final class ChatViewModel {
                                     )
                                 }
                             }
-                            let displayReference = await self.localDisplayImageReference(from: imageReference) ?? imageReference
+                            let displayReference = await self.localDisplayImageReference(
+                                from: imageReference,
+                                targetPixelSize: requestedPixelSize
+                            ) ?? imageReference
                             self.updateAssistantMessage(
                                 id: assistantMessageId,
                                 content: "已生成图片",
@@ -6357,7 +6441,7 @@ final class ChatViewModel {
         guard !text.isEmpty else { return defaultSize }
 
         if let exactSize = firstExactImageSize(in: text) {
-            return exactSize
+            return supportedImageSize(forRequestedSize: exactSize)
         }
 
         if let aspectSize = firstAspectRatioSize(in: text) {
@@ -6371,12 +6455,12 @@ final class ChatViewModel {
             || lowercased.contains("壁纸")
             || lowercased.contains("海报")
             || lowercased.contains("portrait") {
-            return "1024x1792"
+            return "864x1536"
         }
         if lowercased.contains("横屏")
             || lowercased.contains("宽屏")
             || lowercased.contains("landscape") {
-            return "1792x1024"
+            return "1536x864"
         }
         if lowercased.contains("方图")
             || lowercased.contains("正方形")
@@ -6385,6 +6469,31 @@ final class ChatViewModel {
         }
 
         return defaultSize
+    }
+
+    private static func imageAspectRatioString(from prompt: String) -> String {
+        let size = exactRequestedImagePixelSize(from: prompt).map { "\($0.width)x\($0.height)" }
+            ?? requestedImageSize(from: prompt)
+        guard let dimensions = imageDimensions(from: size) else { return "1" }
+        return "\(dimensions.width)/\(dimensions.height)"
+    }
+
+    private static func imageDimensions(from size: String) -> (width: Int, height: Int)? {
+        let parts = size.lowercased().split(separator: "x")
+        guard parts.count == 2,
+              let width = Int(parts[0]),
+              let height = Int(parts[1]),
+              width > 0,
+              height > 0 else { return nil }
+        return (width, height)
+    }
+
+    private static func supportedImageSize(forRequestedSize size: String) -> String {
+        guard let dimensions = imageDimensions(from: size) else { return "1024x1024" }
+        if abs(Double(dimensions.width) / Double(dimensions.height) - 1.0) < 0.08 {
+            return "1024x1024"
+        }
+        return dimensions.width > dimensions.height ? "1536x864" : "864x1536"
     }
 
     private static func firstExactImageSize(in text: String) -> String? {
@@ -6401,6 +6510,12 @@ final class ChatViewModel {
               (64...4096).contains(height)
         else { return nil }
         return "\(width)x\(height)"
+    }
+
+    private static func exactRequestedImagePixelSize(from prompt: String) -> (width: Int, height: Int)? {
+        guard let size = firstExactImageSize(in: prompt),
+              let dimensions = imageDimensions(from: size) else { return nil }
+        return dimensions
     }
 
     private static func firstAspectRatioSize(in text: String) -> String? {
@@ -6421,7 +6536,7 @@ final class ChatViewModel {
         if abs(ratio - 1.0) < 0.08 {
             return "1024x1024"
         }
-        return ratio > 1.0 ? "1792x1024" : "1024x1792"
+        return ratio > 1.0 ? "1536x864" : "864x1536"
     }
 
     private static func promptWithImageSizeInstruction(_ prompt: String, size: String) -> String {
@@ -6492,11 +6607,68 @@ final class ChatViewModel {
         return false
     }
 
-    private func localDisplayImageReference(from imageReference: String) async -> String? {
+    private func localDisplayImageReference(
+        from imageReference: String,
+        targetPixelSize: (width: Int, height: Int)? = nil
+    ) async -> String? {
+        let originalData: Data?
         if imageReference.hasPrefix("data:image/") {
-            return imageReference
+            originalData = Self.imageData(fromDataURL: imageReference)
+        } else if let url = URL(string: imageReference),
+                  ["http", "https"].contains(url.scheme?.lowercased()) {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 300
+            request.setValue(Self.mediaDownloadUserAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue("image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            if let host = url.host {
+                request.setValue("https://\(host)", forHTTPHeaderField: "Referer")
+            }
+            if let (data, _) = try? await URLSession.shared.data(for: request) {
+                originalData = data
+            } else {
+                originalData = nil
+            }
+        } else if !imageReference.isEmpty,
+                  let apiClient = manager?.apiClient,
+                  let (data, _) = try? await apiClient.getFileContent(id: imageReference) {
+            originalData = data
+        } else {
+            originalData = nil
         }
-        return nil
+
+        guard let data = originalData else {
+            return imageReference.hasPrefix("data:image/") ? imageReference : nil
+        }
+        guard let targetPixelSize else {
+            return imageReference.hasPrefix("data:image/") ? imageReference : inlineImageDataURL(data: data, fileName: "generated-image.jpg")
+        }
+        guard let resizedData = Self.resizedJPEGData(
+            from: data,
+            width: targetPixelSize.width,
+            height: targetPixelSize.height
+        ) else {
+            return imageReference.hasPrefix("data:image/") ? imageReference : inlineImageDataURL(data: data, fileName: "generated-image.jpg")
+        }
+        return "data:image/jpeg;base64,\(resizedData.base64EncodedString())"
+    }
+
+    private static func resizedJPEGData(from data: Data, width: Int, height: Int) -> Data? {
+        guard let image = UIImage(data: data),
+              width > 0,
+              height > 0 else { return nil }
+        let clampedWidth = min(max(width, 64), 4096)
+        let clampedHeight = min(max(height, 64), 4096)
+        let targetSize = CGSize(width: clampedWidth, height: clampedHeight)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        let resizedImage = renderer.image { context in
+            UIColor.white.setFill()
+            context.cgContext.fill(CGRect(origin: .zero, size: targetSize))
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return resizedImage.jpegData(compressionQuality: 0.95)
     }
 
     private func attachGeneratedImageFile(

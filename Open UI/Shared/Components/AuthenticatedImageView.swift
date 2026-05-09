@@ -38,16 +38,13 @@ struct AuthenticatedImageView: View {
     }
 
     var body: some View {
-        // Use a fixed-height container for ALL states (loading, loaded, error)
-        // to prevent layout shifts that cause scroll position jumps.
-        // The image is constrained to the same height as the placeholder
-        // so the scroll view never needs to re-layout when images finish loading.
         ZStack(alignment: .topTrailing) {
             Group {
                 if let image = loadedImage {
                     Image(uiImage: image)
                         .resizable()
-                        .aspectRatio(contentMode: .fit)
+                        .aspectRatio(imageAspectRatio(for: image), contentMode: .fit)
+                        .frame(maxWidth: .infinity)
                         .onTapGesture {
                             showFullScreen = true
                         }
@@ -153,10 +150,16 @@ struct AuthenticatedImageView: View {
         }
     }
 
-    /// Consistent placeholder height used for loading and error states.
-    /// Prevents the view from jumping between 0 → 200 → actual image height
-    /// which causes scroll position shifts (bouncing).
+    /// A stable loading/error height. Once the image decodes, the rendered card
+    /// switches to the real image aspect ratio so wide/portrait outputs do not
+    /// look cropped or square.
     private var placeholderHeight: CGFloat { 200 }
+
+    private func imageAspectRatio(for image: UIImage) -> CGFloat {
+        let width = max(image.size.width, 1)
+        let height = max(image.size.height, 1)
+        return width / height
+    }
 
     /// Maximum number of automatic retry attempts before showing the error state.
     /// Each attempt uses exponential backoff (1s, 2s, 4s) to avoid hammering

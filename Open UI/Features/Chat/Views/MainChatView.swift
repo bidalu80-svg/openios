@@ -240,13 +240,15 @@ struct MainChatView: View {
     // each modifier group independently (fixes "unable to type-check" error).
 
     private func mainContent(voiceCallBinding: Binding<Bool>) -> some View {
-        applyAccountSwitchHandler(
-            content: applyOverlays(
-                content: applyLifecycleHandlers(
-                    content: applyDialogsAndAlerts(
-                        content: applySheets(
-                            content: mainZStack(voiceCallBinding: voiceCallBinding),
-                            voiceCallBinding: voiceCallBinding
+        applyLifecycleNotificationHandlers(
+            content: applyAccountSwitchHandler(
+                content: applyOverlays(
+                    content: applyLifecycleHandlers(
+                        content: applyDialogsAndAlerts(
+                            content: applySheets(
+                                content: mainZStack(voiceCallBinding: voiceCallBinding),
+                                voiceCallBinding: voiceCallBinding
+                            )
                         )
                     )
                 )
@@ -967,23 +969,6 @@ struct MainChatView: View {
                     NotificationCenter.default.post(name: .navigateToChannel, object: channelId)
                 }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .conversationDidResolveId)) { notification in
-                guard activeChannelId == nil,
-                      activeConversationId == nil,
-                      let conversationId = notification.userInfo?["conversationId"] as? String else { return }
-                activeConversationId = conversationId
-                activeFolderWorkspaceId = nil
-                SharedDataService.shared.saveLastActiveConversationId(conversationId)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .openConversationRequested)) { notification in
-                guard let conversationId = notification.userInfo?["conversationId"] as? String else { return }
-                activeConversationId = conversationId
-                activeChannelId = nil
-                activeFolderWorkspaceId = nil
-                closeDrawer()
-                SharedDataService.shared.saveLastActiveConversationId(conversationId)
-                Task { await listViewModel.refreshConversations() }
-            }
             .onChange(of: scenePhase) { oldPhase, newPhase in
                 if newPhase == .active && oldPhase != .active {
                     Task { await refreshAllDataOnForeground() }
@@ -1075,23 +1060,56 @@ struct MainChatView: View {
                 }
                 router.presentVoiceCall(viewModel: voiceCallVM)
             }
+    }
+
+    private func applyLifecycleNotificationHandlers<Content: View>(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .conversationDidResolveId)) { notification in
+                handleConversationDidResolveId(notification)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openConversationRequested)) { notification in
+                handleOpenConversationRequested(notification)
+            }
             .onReceive(NotificationCenter.default.publisher(for: .conversationListNeedsRefresh)) { notification in
-                if let conversation = notification.userInfo?["conversation"] as? Conversation {
-                    listViewModel.upsertLiveSnapshot(conversation)
-                    dependencies.updateWidgetData(conversations: listViewModel.conversations)
-                    return
-                }
-                Task {
-                    if dependencies.conversationManager?.usesLocalConversationStore == true {
-                        await listViewModel.refreshConversations()
-                    } else {
-                        await withTaskGroup(of: Void.self) { group in
-                            group.addTask { await listViewModel.refreshConversations() }
-                            group.addTask { await listViewModel.folderViewModel.refreshFolders() }
-                        }
-                    }
+                handleConversationListNeedsRefresh(notification)
+            }
+    }
+
+    private func handleConversationDidResolveId(_ notification: Notification) {
+        guard activeChannelId == nil,
+              activeConversationId == nil,
+              let conversationId = notification.userInfo?["conversationId"] as? String else { return }
+        activeConversationId = conversationId
+        activeFolderWorkspaceId = nil
+        SharedDataService.shared.saveLastActiveConversationId(conversationId)
+    }
+
+    private func handleOpenConversationRequested(_ notification: Notification) {
+        guard let conversationId = notification.userInfo?["conversationId"] as? String else { return }
+        activeConversationId = conversationId
+        activeChannelId = nil
+        activeFolderWorkspaceId = nil
+        closeDrawer()
+        SharedDataService.shared.saveLastActiveConversationId(conversationId)
+        Task { await listViewModel.refreshConversations() }
+    }
+
+    private func handleConversationListNeedsRefresh(_ notification: Notification) {
+        if let conversation = notification.userInfo?["conversation"] as? Conversation {
+            listViewModel.upsertLiveSnapshot(conversation)
+            dependencies.updateWidgetData(conversations: listViewModel.conversations)
+            return
+        }
+        Task {
+            if dependencies.conversationManager?.usesLocalConversationStore == true {
+                await listViewModel.refreshConversations()
+            } else {
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { await listViewModel.refreshConversations() }
+                    group.addTask { await listViewModel.folderViewModel.refreshFolders() }
                 }
             }
+        }
     }
 
     /// Watches auth identity changes via `.onChange` and performs a
