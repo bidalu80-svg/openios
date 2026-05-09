@@ -3787,7 +3787,7 @@ private struct IsolatedAssistantMessage: View {
             // full routing (InlineVisualizerView, tool-call renderer, embed injection).
             // When those are present, fall through to the normal full-content path below.
             let liveTail = isActivelyStreaming ? streamingStore.liveTextTail : ""
-            let liveTailHasSpecialContent = liveTail.contains("@@@VIZ-START") || liveTail.contains("<details")
+            let liveTailHasSpecialContent = Self.requiresFullAssistantRouting(liveTail)
             if frozenBoundary > 0 && !liveTailHasSpecialContent {
                 let dc = streamingStore.displayContent
                 let frozenContent: String = {
@@ -3863,7 +3863,9 @@ private struct IsolatedAssistantMessage: View {
                     ? streamingStore.frozenProseBoundaryOffset
                     : 0
 
-                if proseFreezeOffset > 0 && displayContent.count >= proseFreezeOffset {
+                if proseFreezeOffset > 0,
+                   displayContent.count >= proseFreezeOffset,
+                   !Self.requiresFullAssistantRouting(displayContent) {
                     let dc = displayContent
                     let splitIdx = dc.index(dc.startIndex, offsetBy: proseFreezeOffset)
                     let frozenProse = String(dc[..<splitIdx])
@@ -3899,6 +3901,27 @@ private struct IsolatedAssistantMessage: View {
                 }
             }
         }
+    }
+
+    private static func requiresFullAssistantRouting(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        let lower = text.lowercased()
+        return lower.contains("@@@viz-start")
+            || lower.contains("<details")
+            || lower.contains("<think")
+            || lower.contains("</think")
+            || lower.contains("<thinking")
+            || lower.contains("</thinking")
+            || lower.contains("<reasoning")
+            || lower.contains("</reasoning")
+            || lower.contains("<reason")
+            || lower.contains("</reason")
+            || lower.contains("<thought")
+            || lower.contains("</thought")
+            || lower.contains("<|begin_of_thought|>")
+            || lower.contains("<|end_of_thought|>")
+            || text.contains("◁think▷")
+            || text.contains("◁/think▷")
     }
 
     // MARK: - Static Preprocessing (no ChatDetailView dependency)
