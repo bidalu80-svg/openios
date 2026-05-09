@@ -590,7 +590,23 @@ final class StorageManager: @unchecked Sendable {
 
     /// Returns the on-disk size of the ASR model files (Qwen3-ASR + legacy Parakeet).
     func asrModelSize() -> Int64 {
-        modelSize(patterns: ["Qwen3-ASR", "parakeet-tdt"])
+        modelSize(patterns: ["Qwen3-ASR", "parakeet-tdt"], includeHubCache: false)
+    }
+
+    /// Returns all ASR-related bytes, including HuggingFace's internal blob cache.
+    /// Useful for spotting interrupted downloads that left large partial caches.
+    func totalASRModelCacheSize() -> Int64 {
+        modelSize(patterns: ["Qwen3-ASR", "parakeet-tdt"], includeHubCache: true)
+    }
+
+    /// Returns whether a usable ASR working copy exists.
+    ///
+    /// HuggingFace may leave `models--*` blob caches behind when a download is
+    /// interrupted. Those folders can be large enough to look "downloaded", but
+    /// the app loads from the `mlx-audio/` working-copy directory, so only count
+    /// directories that contain the actual model payload.
+    func hasUsableASRModelFiles() -> Bool {
+        hasUsableModelDir(patterns: ["Qwen3-ASR", "parakeet-tdt"])
     }
 
     /// Returns the on-disk size of the Kokoro TTS model files.
@@ -670,7 +686,7 @@ final class StorageManager: @unchecked Sendable {
     /// This is needed because mlx-audio-swift stores downloaded model weights inside the
     /// `mlx-audio/` subdirectory, e.g.:
     ///   Documents/Models/mlx-audio/Marvis-AI_marvis-tts-250m-v0.2-MLX-8bit/
-    private func modelSize(patterns: [String]) -> Int64 {
+    private func modelSize(patterns: [String], includeHubCache: Bool = true) -> Int64 {
         let root = StorageManager.modelCacheDirectory
         guard fileManager.fileExists(atPath: root.path) else { return 0 }
 
@@ -686,12 +702,42 @@ final class StorageManager: @unchecked Sendable {
             ) else { continue }
             for item in contents {
                 let name = item.lastPathComponent.lowercased()
+                if !includeHubCache && name.hasPrefix("models--") { continue }
                 if patterns.contains(where: { name.contains($0.lowercased()) }) {
                     total += Int64(diskSize(of: item))
                 }
             }
         }
         return total
+    }
+
+    private func hasUsableModelDir(patterns: [String]) -> Bool {
+        let root = StorageManager.modelCacheDirectory
+        guard fileManager.fileExists(atPath: root.path) else { return false }
+
+        var scanDirs: [URL] = [root]
+        let mlxAudio = root.appendingPathComponent("mlx-audio", isDirectory: true)
+        if fileManager.fileExists(atPath: mlxAudio.path) { scanDirs.append(mlxAudio) }
+
+        for dir in scanDirs {
+            guard let contents = try? fileManager.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
+            ) else { continue }
+            for item in contents {
+                let name = item.lastPathComponent.lowercased()
+                if name.hasPrefix("models--") { continue }
+                guard patterns.contains(where: { name.contains($0.lowercased()) }) else { continue }
+
+                let modelFile = item.appendingPathComponent("model.safetensors")
+                let configFile = item.appendingPathComponent("config.json")
+                if fileManager.fileExists(atPath: modelFile.path),
+                   fileManager.fileExists(atPath: configFile.path) {
+                    return true
+                }
+            }
+        }
+
+        return false
     }
 
     /// Deletes directories matching any of the given patterns from both
