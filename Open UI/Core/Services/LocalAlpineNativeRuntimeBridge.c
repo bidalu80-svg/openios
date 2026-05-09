@@ -18,6 +18,20 @@ static char *iexa_dup_output(const char *message) {
     return buffer;
 }
 
+static bool append_env_entry(char *buffer, size_t buffer_size, size_t *offset, const char *entry) {
+    if (buffer == NULL || offset == NULL || entry == NULL) {
+        return false;
+    }
+    size_t length = strlen(entry) + 1;
+    if (*offset + length + 1 > buffer_size) {
+        return false;
+    }
+    memcpy(buffer + *offset, entry, length);
+    *offset += length;
+    buffer[*offset] = '\0';
+    return true;
+}
+
 #if IEXA_LOCAL_ALPINE_ISH
 
 #include <arpa/inet.h>
@@ -377,6 +391,7 @@ char *iexa_local_alpine_execute(
     const char *cwd,
     const char *root_archive_path,
     const char *workspace_path,
+    const char *time_zone,
     int32_t *exit_code
 ) {
     pthread_mutex_lock(&runtime_lock);
@@ -436,7 +451,18 @@ char *iexa_local_alpine_execute(
     const char *shell = "/bin/sh";
     char argv[8192];
     snprintf(argv, sizeof(argv), "%s%c-c%c%s%c%c", shell, '\0', '\0', command != NULL ? command : "", '\0', '\0');
-    const char *envp = "TERM=xterm-256color\0PATH=/bin:/sbin:/usr/bin:/usr/sbin\0HOME=/root\0USER=root\0";
+    char envp[1024];
+    envp[0] = '\0';
+    size_t envp_offset = 0;
+    append_env_entry(envp, sizeof(envp), &envp_offset, "TERM=xterm-256color");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "PATH=/bin:/sbin:/usr/bin:/usr/sbin");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "HOME=/root");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "USER=root");
+    if (time_zone != NULL && time_zone[0] != '\0') {
+        char tz_env[128];
+        snprintf(tz_env, sizeof(tz_env), "TZ=%s", time_zone);
+        append_env_entry(envp, sizeof(envp), &envp_offset, tz_env);
+    }
 
     err = do_execve(shell, 3, argv, envp);
     if (err < 0) {
@@ -499,12 +525,14 @@ char *iexa_local_alpine_execute(
     const char *cwd,
     const char *root_archive_path,
     const char *workspace_path,
+    const char *time_zone,
     int32_t *exit_code
 ) {
     (void) command;
     (void) cwd;
     (void) root_archive_path;
     (void) workspace_path;
+    (void) time_zone;
     if (exit_code != NULL) {
         *exit_code = 126;
     }
