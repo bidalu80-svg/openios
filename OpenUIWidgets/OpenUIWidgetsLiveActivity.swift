@@ -60,6 +60,7 @@ struct IexaRunLiveActivityWidget: Widget {
             } minimal: {
                 IexaRunIslandIcon(kind: context.attributes.kind, size: 16)
             }
+            .keylineTint(.white.opacity(0.75))
         }
     }
 
@@ -112,6 +113,7 @@ private struct IexaRunIslandIcon: View {
                 .fill(.primary.opacity(0.08))
             Image("AppIconImage")
                 .resizable()
+                .widgetAccentedRenderingMode(.fullColor)
                 .scaledToFit()
                 .padding(size * 0.18)
         }
