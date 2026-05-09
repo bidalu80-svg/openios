@@ -289,6 +289,127 @@ final class ChatViewModel {
         }
     }
 
+    private func startRunLiveActivity(id: String, modelId: String, prompt: String) async {
+        let kind = runLiveActivityKind(modelId: modelId, prompt: prompt)
+        await RunLiveActivityService.shared.start(
+            id: id,
+            kind: kind,
+            model: modelId,
+            title: runLiveActivityTitle(kind: kind),
+            detail: runLiveActivityDetail(prompt),
+            phase: "准备",
+            progress: 0.08,
+            isIndeterminate: true
+        )
+    }
+
+    private func startLocalAlpineLiveActivity(id: String, command: String, detail: String) async {
+        await RunLiveActivityService.shared.start(
+            id: id,
+            kind: localAlpineLiveActivityKind(for: command),
+            model: "Local Alpine",
+            title: "本地 Alpine",
+            detail: detail,
+            phase: "执行",
+            progress: 0.18,
+            isIndeterminate: true
+        )
+    }
+
+    private func runLiveActivityKind(modelId: String, prompt: String) -> String {
+        if shouldUseDirectVideoGeneration(modelId: modelId) { return "video" }
+        if shouldUseDirectImageGeneration(modelId: modelId),
+           !shouldPreferChatNativeImageGeneration(modelId: modelId) {
+            return "image"
+        }
+        return "chat"
+    }
+
+    private func runLiveActivityTitle(kind: String) -> String {
+        switch kind {
+        case "image": return "正在创建图片"
+        case "video": return "正在生成视频"
+        case "terminal", "install": return "本地 Alpine"
+        default: return "Iexa 正在回复"
+        }
+    }
+
+    private func localAlpineLiveActivityKind(for command: String) -> String {
+        let lowercased = command.lowercased()
+        if lowercased.contains("apk add ")
+            || lowercased.contains("apk upgrade")
+            || lowercased.contains("apk fix")
+            || lowercased.contains("npm i")
+            || lowercased.contains("npm install")
+            || lowercased.contains("pip install") {
+            return "install"
+        }
+        return "terminal"
+    }
+
+    private func runLiveActivityDetail(_ text: String) -> String {
+        let cleaned = text
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "任务进行中" : cleaned
+    }
+
+    private func updateRunLiveActivity(
+        id: String,
+        content: String,
+        isStreaming: Bool,
+        statusHistory: [ChatStatusUpdate]?,
+        error: ChatMessageError?
+    ) {
+        let latestStatus = statusHistory?.last
+        if isStreaming && error == nil {
+            let detail = latestStatus?.description ?? liveActivityStreamingDetail(for: content)
+            let progress = liveActivityProgress(for: content)
+            Task {
+                await RunLiveActivityService.shared.update(
+                    id: id,
+                    detail: detail,
+                    phase: "运行中",
+                    progress: progress,
+                    isIndeterminate: progress < 0.85
+                )
+            }
+        } else {
+            let success = error == nil
+            let detail = latestStatus?.description
+                ?? error?.content
+                ?? liveActivityFinishedDetail(for: content, success: success)
+            Task {
+                await RunLiveActivityService.shared.finish(
+                    id: id,
+                    success: success,
+                    detail: detail
+                )
+            }
+        }
+    }
+
+    private func liveActivityStreamingDetail(for content: String) -> String {
+        let count = content.trimmingCharacters(in: .whitespacesAndNewlines).count
+        if count == 0 { return "正在连接模型" }
+        return "已接收 \(count) 字"
+    }
+
+    private func liveActivityFinishedDetail(for content: String, success: Bool) -> String {
+        if !success { return "运行失败" }
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains("已生成图片") { return "图片已生成" }
+        if trimmed.contains("已生成视频") { return "视频已生成" }
+        if trimmed.contains("Local Alpine") || trimmed.contains("exit:") { return "本地命令已完成" }
+        return "回复已完成"
+    }
+
+    private func liveActivityProgress(for content: String) -> Double {
+        let count = Double(content.trimmingCharacters(in: .whitespacesAndNewlines).count)
+        guard count > 0 else { return 0.18 }
+        return min(0.9, 0.2 + count / 4_000)
+    }
+
     /// Pending transcriptions that were interrupted when the app moved to the background
     /// (iOS < 26 only — no GPU access in background). Keyed by attachment ID.
     /// Re-started automatically when the app returns to foreground.
@@ -3263,6 +3384,7 @@ final class ChatViewModel {
         // Activate the isolated streaming store so token updates bypass
         // conversation.messages and only invalidate the streaming message view.
         streamingStore.beginStreaming(messageId: assistantMessageId, modelId: modelId)
+        await startRunLiveActivity(id: assistantMessageId, modelId: modelId, prompt: messageText)
 
         if isOpenAICompatibleProvider {
             streamingTask = Task { [weak self] in
@@ -3284,6 +3406,15 @@ final class ChatViewModel {
                         }
                         let requestedVideoSize = Self.requestedImageSize(from: videoPrompt)
                         let videoSeedImage = self.firstEditableImage(from: currentAttachments)
+                        await RunLiveActivityService.shared.update(
+                            id: assistantMessageId,
+                            title: "正在生成视频",
+                            detail: videoPrompt,
+                            phase: "生成",
+                            progress: 0.35,
+                            isIndeterminate: true,
+                            force: true
+                        )
                         let videoReference = try await self.runMediaRequestWithRetry {
                             try await manager.generateVideo(
                                 prompt: videoPrompt,
@@ -3340,6 +3471,15 @@ final class ChatViewModel {
                             let imagePromptForAPI = Self.promptWithImageSizeInstruction(
                                 imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
                                 size: requestedImageSize
+                            )
+                            await RunLiveActivityService.shared.update(
+                                id: assistantMessageId,
+                                title: "正在创建图片",
+                                detail: imagePrompt.isEmpty ? "正在编辑图片" : imagePrompt,
+                                phase: "生成",
+                                progress: 0.35,
+                                isIndeterminate: true,
+                                force: true
                             )
                             let imageReference: String
                             if let editImage = self.firstEditableImage(from: currentAttachments) {
@@ -3868,6 +4008,12 @@ final class ChatViewModel {
         isStreaming = true
         hasFinishedStreaming = false
         selfInitiatedStream = true
+        beginStreamingBackgroundTaskIfNeeded()
+        await startLocalAlpineLiveActivity(
+            id: assistantMessageId,
+            command: command,
+            detail: initialStatus.description ?? localAlpineRunningDescription(for: command)
+        )
 
         let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
         let output = formatDirectLocalAlpineOutput(command: userMessage.content, result: result)
@@ -3893,6 +4039,7 @@ final class ChatViewModel {
         lastTaskExtractionLength = 0
 
         await persistLocalConversationIfNeeded()
+        endBackgroundTask()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
     }
 
@@ -5450,6 +5597,9 @@ final class ChatViewModel {
 
     private func cleanupStreaming() {
         guard !hasFinishedStreaming else { return }
+        Task {
+            await RunLiveActivityService.shared.finishCurrent(success: false, detail: "运行已结束")
+        }
         hasFinishedStreaming = true
         isStreaming = false
         isExternallyStreaming = false
@@ -7258,6 +7408,14 @@ final class ChatViewModel {
         conversation?.history.currentId = resultMessageId
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
+        beginStreamingBackgroundTaskIfNeeded()
+        await startLocalAlpineLiveActivity(
+            id: resultMessageId,
+            command: content,
+            detail: initialStatus.description ?? "正在执行本地 Alpine 命令..."
+        )
+        defer { endBackgroundTask() }
+
         let result = await LocalAlpineAgentService.shared.executeBlocks(in: content)
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
 
@@ -7410,6 +7568,13 @@ final class ChatViewModel {
         if isStreaming && error == nil {
             triggerStreamingHaptic()
         }
+        updateRunLiveActivity(
+            id: id,
+            content: content,
+            isStreaming: isStreaming,
+            statusHistory: statusHistory,
+            error: error
+        )
 
         if let completedAssistantContentForAgent {
             scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
@@ -7449,6 +7614,18 @@ final class ChatViewModel {
         // not conversation.messages, during active streaming).
         if streamingStore.streamingMessageId == id && streamingStore.isActive {
             streamingStore.appendStatus(status)
+        }
+        if let description = status.description {
+            Task {
+                await RunLiveActivityService.shared.update(
+                    id: id,
+                    detail: description,
+                    phase: status.done == true ? "完成" : "运行中",
+                    progress: status.done == true ? 0.92 : nil,
+                    isIndeterminate: status.done != true,
+                    force: true
+                )
+            }
         }
     }
 

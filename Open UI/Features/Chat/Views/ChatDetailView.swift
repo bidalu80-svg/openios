@@ -3640,8 +3640,11 @@ private struct ImageGenerationPlaceholderView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("正在创建图片")
-                .scaledFont(size: 22, weight: .semibold)
-                .foregroundStyle(theme.textSecondary)
+                .scaledFont(size: 18, weight: .semibold, context: .content)
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+                .accessibilityAddTraits(.updatesFrequently)
 
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(
