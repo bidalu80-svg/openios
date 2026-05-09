@@ -4058,7 +4058,7 @@ final class ChatViewModel {
             return "正在更新 Alpine 软件源..."
         }
         if shouldLocalAlpineCheckDependencies(for: lowercased) {
-            return "正在检查依赖并执行命令..."
+            return "正在确认 Alpine 环境并执行命令..."
         }
         return "正在执行本地 Alpine 命令..."
     }
@@ -7549,6 +7549,20 @@ final class ChatViewModel {
                 conversation?.messages[index].content = visibleAlpineContent
                 conversation?.history.updateNode(id: id) { node in
                     node.content = visibleAlpineContent
+                    node.done = true
+                }
+            }
+        }
+
+        if let workspaceContent = completedAssistantContentForAgent,
+           workspaceContent.localizedCaseInsensitiveContains("iexa_workspace"),
+           shouldExecuteLocalWorkspaceAgentForCurrentRequest() {
+            let visibleWorkspaceContent = LocalWorkspaceAgentService.visibleContent(from: workspaceContent)
+            if visibleWorkspaceContent != workspaceContent,
+               let index = conversation?.messages.firstIndex(where: { $0.id == id }) {
+                conversation?.messages[index].content = visibleWorkspaceContent
+                conversation?.history.updateNode(id: id) { node in
+                    node.content = visibleWorkspaceContent
                     node.done = true
                 }
             }

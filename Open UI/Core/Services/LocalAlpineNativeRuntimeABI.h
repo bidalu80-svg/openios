@@ -15,6 +15,7 @@ char *iexa_local_alpine_execute(
     const char *cwd,
     const char *root_archive_path,
     const char *workspace_path,
+    const char *time_zone,
     int32_t *exit_code
 );
 
