@@ -240,17 +240,11 @@ struct MainChatView: View {
     // each modifier group independently (fixes "unable to type-check" error).
 
     private func mainContent(voiceCallBinding: Binding<Bool>) -> some View {
-        applyLifecycleNotificationHandlers(
-            content: applyAccountSwitchHandler(
-                content: applyOverlays(
-                    content: applyLifecycleHandlers(
-                        content: applyDialogsAndAlerts(
-                            content: applySheets(
-                                content: mainZStack(voiceCallBinding: voiceCallBinding),
-                                voiceCallBinding: voiceCallBinding
-                            )
-                        )
-                    )
+        applyOverlays(
+            content: applyDialogsAndAlerts(
+                content: applySheets(
+                    content: mainZStack(voiceCallBinding: voiceCallBinding),
+                    voiceCallBinding: voiceCallBinding
                 )
             )
         )
@@ -488,6 +482,7 @@ struct MainChatView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            lifecycleObserver
         }
     }
 
@@ -936,53 +931,48 @@ struct MainChatView: View {
 
     private func applyLifecycleHandlers<Content: View>(content: Content) -> some View {
         content
+    }
+
+    private var lifecycleObserver: some View {
+        Group {
+            lifecycleBootstrapObserver
+            lifecycleSceneObserver
+            lifecycleConversationObserver
+            lifecycleNotificationObserver
+            lifecycleQuickActionObserver
+            lifecycleAccountObserver
+        }
+    }
+
+    private var lifecycleBaseObserver: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+    }
+
+    private var lifecycleBootstrapObserver: some View {
+        lifecycleBaseObserver
             .task {
-                if let manager = dependencies.conversationManager {
-                    listViewModel.configure(with: manager)
-                }
-                if let folderManager = dependencies.folderManager {
-                    listViewModel.folderViewModel.configure(with: folderManager)
-                }
-                // Configure and load channels only for Iexa native server servers.
-                if !usesDirectProvider, let apiClient = dependencies.apiClient {
-                    var userId = dependencies.authViewModel.currentUser?.id
-                    if userId == nil || userId?.isEmpty == true {
-                        userId = try? await apiClient.getCurrentUser().id
-                    }
-                    channelListVM.configure(apiClient: apiClient, socket: dependencies.socketService, currentUserId: userId)
-                }
-                await withTaskGroup(of: Void.self) { group in
-                    group.addTask { await listViewModel.loadConversations() }
-                    if dependencies.conversationManager?.usesLocalConversationStore != true {
-                        group.addTask { await listViewModel.folderViewModel.loadFolders() }
-                    }
-                    if !usesDirectProvider {
-                        group.addTask { await dependencies.fetchTaskConfig() }
-                        group.addTask { await channelListVM.loadChannels() }
-                    }
-                }
-                if !usesDirectProvider {
-                    registerSocketReconnectHandler()
-                }
-                // Wire up channel notification tap → navigate to that channel
-                NotificationService.shared.onOpenChannel = { channelId in
-                    NotificationCenter.default.post(name: .navigateToChannel, object: channelId)
-                }
+                await bootstrapLifecycleData()
             }
+    }
+
+    private var lifecycleSceneObserver: some View {
+        lifecycleBaseObserver
             .onChange(of: scenePhase) { oldPhase, newPhase in
                 if newPhase == .active && oldPhase != .active {
                     Task { await refreshAllDataOnForeground() }
                 }
             }
+    }
+
+    private var lifecycleConversationObserver: some View {
+        lifecycleBaseObserver
             .onChange(of: activeConversationId) { _, _ in
-                // Reset terminal file browser when switching conversations
-                // so it doesn't show stale state from the previous chat
                 if showFileBrowser { closeFileBrowserAnimated() }
                 terminalBrowserVM.reset()
             }
             .onChange(of: activeChannelId) { _, newId in
-                // When entering a channel, the server marks it as read via GET /channels/{id}.
-                // Refresh the channel list after a short delay to clear the unread badge.
                 if newId != nil && !usesDirectProvider {
                     Task {
                         try? await Task.sleep(for: .seconds(1.5))
@@ -990,80 +980,19 @@ struct MainChatView: View {
                     }
                 }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .conversationTitleUpdated)) { notification in
-                guard let userInfo = notification.userInfo,
-                      let conversationId = userInfo["conversationId"] as? String,
-                      let title = userInfo["title"] as? String
-                else { return }
-                listViewModel.updateTitle(for: conversationId, title: title)
-                let folderVM = listViewModel.folderViewModel
-                for idx in folderVM.folders.indices {
-                    if let chatIdx = folderVM.folders[idx].chats.firstIndex(where: { $0.id == conversationId }) {
-                        folderVM.folders[idx].chats[chatIdx].title = title
-                    }
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .adminClonedChat)) { notification in
-                if let conversationId = notification.object as? String {
-                    showSettings = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        activeConversationId = conversationId
-                        SharedDataService.shared.saveLastActiveConversationId(conversationId)
-                    }
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .navigateToChannel)) { notification in
-                if let channelId = notification.object as? String {
-                    activeChannelId = channelId
-                    activeConversationId = nil
-                    Haptics.play(.light)
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .openUIDismissOverlays)) { _ in
-                // Quick action requested — dismiss any active sheet/cover so
-                // the new action doesn't stack on top of the old one.
-                showSettings = false
-                showNotes = false
-                showChannels = false
-                showCreateChannel = false
-                showCreateFolderSheet = false
-                showExportShareSheet = false
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .openUINewChannel)) { _ in
-                // Widget "Channel" button — open the create-channel sheet
-                if !usesDirectProvider {
-                    showCreateChannel = true
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .openUINewChatWithFocus)) { _ in
-                // Widget "Ask Iexa" bar — start new chat and auto-focus keyboard
-                startNewChat()
-                // Give the view time to settle before requesting keyboard focus
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    NotificationCenter.default.post(name: .chatInputFieldRequestFocus, object: nil)
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .openUIWidgetVoiceCall)) { _ in
-                // Widget mic button — start a voice call with full configuration
-                // (mirrors ChatDetailView's startVoiceCall pattern)
-                let voiceCallVM = dependencies.makeVoiceCallViewModel()
-                let chatVM = dependencies.activeChatStore.viewModel(for: nil)
-                if let manager = dependencies.conversationManager {
-                    let modelName = dependencies.activeChatStore.cachedModels
-                        .first(where: { $0.id == dependencies.activeChatStore.cachedSelectedModelId })?.name
-                        ?? "AI Assistant"
-                    voiceCallVM.configure(
-                        conversationManager: manager,
-                        chatViewModel: chatVM,
-                        modelName: modelName
-                    )
-                }
-                router.presentVoiceCall(viewModel: voiceCallVM)
-            }
     }
 
-    private func applyLifecycleNotificationHandlers<Content: View>(content: Content) -> some View {
-        content
+    private var lifecycleNotificationObserver: some View {
+        lifecycleBaseObserver
+            .onReceive(NotificationCenter.default.publisher(for: .conversationTitleUpdated)) { notification in
+                handleConversationTitleUpdated(notification)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .adminClonedChat)) { notification in
+                handleAdminClonedChat(notification)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .navigateToChannel)) { notification in
+                handleNavigateToChannel(notification)
+            }
             .onReceive(NotificationCenter.default.publisher(for: .conversationDidResolveId)) { notification in
                 handleConversationDidResolveId(notification)
             }
@@ -1073,6 +1002,128 @@ struct MainChatView: View {
             .onReceive(NotificationCenter.default.publisher(for: .conversationListNeedsRefresh)) { notification in
                 handleConversationListNeedsRefresh(notification)
             }
+    }
+
+    private var lifecycleQuickActionObserver: some View {
+        lifecycleBaseObserver
+            .onReceive(NotificationCenter.default.publisher(for: .openUIDismissOverlays)) { _ in
+                dismissQuickActionOverlays()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openUINewChannel)) { _ in
+                if !usesDirectProvider {
+                    showCreateChannel = true
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openUINewChatWithFocus)) { _ in
+                startNewChatAndFocus()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openUIWidgetVoiceCall)) { _ in
+                presentWidgetVoiceCall()
+            }
+    }
+
+    private var lifecycleAccountObserver: some View {
+        lifecycleBaseObserver
+            .onChange(of: dependencies.authViewModel.accountSwitchCount) {
+                resetChatStateAfterIdentityChange()
+            }
+            .onChange(of: dependencies.authViewModel.serverSwitchCount) {
+                resetChatStateAfterIdentityChange()
+            }
+    }
+
+    private func bootstrapLifecycleData() async {
+        if let manager = dependencies.conversationManager {
+            listViewModel.configure(with: manager)
+        }
+        if let folderManager = dependencies.folderManager {
+            listViewModel.folderViewModel.configure(with: folderManager)
+        }
+        if !usesDirectProvider, let apiClient = dependencies.apiClient {
+            var userId = dependencies.authViewModel.currentUser?.id
+            if userId == nil || userId?.isEmpty == true {
+                userId = try? await apiClient.getCurrentUser().id
+            }
+            channelListVM.configure(apiClient: apiClient, socket: dependencies.socketService, currentUserId: userId)
+        }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await listViewModel.loadConversations() }
+            if dependencies.conversationManager?.usesLocalConversationStore != true {
+                group.addTask { await listViewModel.folderViewModel.loadFolders() }
+            }
+            if !usesDirectProvider {
+                group.addTask { await dependencies.fetchTaskConfig() }
+                group.addTask { await channelListVM.loadChannels() }
+            }
+        }
+        if !usesDirectProvider {
+            registerSocketReconnectHandler()
+        }
+        NotificationService.shared.onOpenChannel = { channelId in
+            NotificationCenter.default.post(name: .navigateToChannel, object: channelId)
+        }
+    }
+
+    private func handleConversationTitleUpdated(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let conversationId = userInfo["conversationId"] as? String,
+              let title = userInfo["title"] as? String
+        else { return }
+        listViewModel.updateTitle(for: conversationId, title: title)
+        let folderVM = listViewModel.folderViewModel
+        for idx in folderVM.folders.indices {
+            if let chatIdx = folderVM.folders[idx].chats.firstIndex(where: { $0.id == conversationId }) {
+                folderVM.folders[idx].chats[chatIdx].title = title
+            }
+        }
+    }
+
+    private func handleAdminClonedChat(_ notification: Notification) {
+        guard let conversationId = notification.object as? String else { return }
+        showSettings = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            activeConversationId = conversationId
+            SharedDataService.shared.saveLastActiveConversationId(conversationId)
+        }
+    }
+
+    private func handleNavigateToChannel(_ notification: Notification) {
+        guard let channelId = notification.object as? String else { return }
+        activeChannelId = channelId
+        activeConversationId = nil
+        Haptics.play(.light)
+    }
+
+    private func dismissQuickActionOverlays() {
+        showSettings = false
+        showNotes = false
+        showChannels = false
+        showCreateChannel = false
+        showCreateFolderSheet = false
+        showExportShareSheet = false
+    }
+
+    private func startNewChatAndFocus() {
+        startNewChat()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NotificationCenter.default.post(name: .chatInputFieldRequestFocus, object: nil)
+        }
+    }
+
+    private func presentWidgetVoiceCall() {
+        let voiceCallVM = dependencies.makeVoiceCallViewModel()
+        let chatVM = dependencies.activeChatStore.viewModel(for: nil)
+        if let manager = dependencies.conversationManager {
+            let modelName = dependencies.activeChatStore.cachedModels
+                .first(where: { $0.id == dependencies.activeChatStore.cachedSelectedModelId })?.name
+                ?? "AI Assistant"
+            voiceCallVM.configure(
+                conversationManager: manager,
+                chatViewModel: chatVM,
+                modelName: modelName
+            )
+        }
+        router.presentVoiceCall(viewModel: voiceCallVM)
     }
 
     private func handleConversationDidResolveId(_ notification: Notification) {
@@ -1110,22 +1161,6 @@ struct MainChatView: View {
                 }
             }
         }
-    }
-
-    /// Watches auth identity changes via `.onChange` and performs a
-    /// full app state reset when the user switches accounts/sites. This is intentionally a
-    /// separate function from `applyLifecycleHandlers` — the Swift type-checker
-    /// has a complexity limit that `applyLifecycleHandlers` already approaches,
-    /// and adding another modifier there causes a "unable to type-check" build
-    /// error. Keeping it here in its own tiny function sidesteps that limit.
-    private func applyAccountSwitchHandler<Content: View>(content: Content) -> some View {
-        content
-            .onChange(of: dependencies.authViewModel.accountSwitchCount) {
-                resetChatStateAfterIdentityChange()
-            }
-            .onChange(of: dependencies.authViewModel.serverSwitchCount) {
-                resetChatStateAfterIdentityChange()
-            }
     }
 
     private func resetChatStateAfterIdentityChange() {
