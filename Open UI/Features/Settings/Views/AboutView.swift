@@ -39,7 +39,8 @@ struct AboutView: View {
                 SettingsSection(header: "应用") {
                     detailRow(label: "版本", value: appVersion)
                     detailRow(label: "构建", value: buildNumber)
-                    detailRow(label: "平台", value: "iOS \(UIDevice.current.systemVersion)", showDivider: false)
+                    detailRow(label: "平台", value: "iOS \(UIDevice.current.systemVersion)")
+                    detailRow(label: "作者版权", value: "Blank", showDivider: false)
                 }
 
                 // Site info
