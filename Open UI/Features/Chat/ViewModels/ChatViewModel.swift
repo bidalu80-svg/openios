@@ -237,6 +237,8 @@ final class ChatViewModel {
     private let webLinkContextResolver = WebLinkContextResolver()
     private var webLinkContextsByMessageId: [String: String] = [:]
     private var hasFinishedStreaming = false
+    var isPreparingGeneratedImageForEditing = false
+    private var editingImageReferenceBeingPrepared: String?
     /// Tracks the content length at the last `extractAndApplyTasksFromContent` call.
     /// Prevents the O(n) task-extraction scan from running on every single token;
     /// it only fires when the content has grown by ≥ 100 chars since the last scan.
@@ -879,22 +881,28 @@ final class ChatViewModel {
     }
 
     func prepareGeneratedImageForEditing(_ file: ChatMessageFile) {
+        let reference = file.displayURL ?? file.url ?? file.name ?? UUID().uuidString
+        guard editingImageReferenceBeingPrepared != reference else { return }
+        editingImageReferenceBeingPrepared = reference
+        isPreparingGeneratedImageForEditing = true
         Task {
+            defer {
+                editingImageReferenceBeingPrepared = nil
+                isPreparingGeneratedImageForEditing = false
+            }
             do {
                 let data = try await imageDataForEditing(file)
-                guard let image = UIImage(data: data) else {
-                    errorMessage = "无法读取这张图片。"
-                    return
-                }
-                let downsampled = FileAttachmentService.downsampleForUpload(data: data, image: image)
-                let finalData = downsampled.isEmpty ? data : downsampled
+                let prepared = try await Self.prepareEditableImagePayload(
+                    data: data,
+                    fileName: Self.editableImageFileName(for: file)
+                )
                 var attachment = ChatAttachment(
                     type: .image,
-                    name: Self.editableImageFileName(for: file),
-                    thumbnail: Image(uiImage: image),
-                    data: finalData
+                    name: prepared.fileName,
+                    thumbnail: prepared.thumbnailData.flatMap { UIImage(data: $0) }.map { Image(uiImage: $0) },
+                    data: prepared.data
                 )
-                attachment.displayDataURL = inlineImageDataURL(data: finalData, fileName: attachment.name)
+                attachment.displayDataURL = prepared.displayDataURL
                 attachment.uploadStatus = .completed
                 attachment.uploadError = nil
                 attachments.append(attachment)
@@ -907,6 +915,44 @@ final class ChatViewModel {
                 errorMessage = "图片编辑准备失败：\(error.localizedDescription)"
             }
         }
+    }
+
+    nonisolated private static func prepareEditableImagePayload(
+        data: Data,
+        fileName: String
+    ) async throws -> (fileName: String, data: Data, thumbnailData: Data?, displayDataURL: String) {
+        try await Task.detached(priority: .utility) {
+            guard let image = UIImage(data: data) else {
+                throw APIError.responseDecoding(
+                    underlying: NSError(
+                        domain: "ChatViewModel",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "无法读取这张图片。"]
+                    ),
+                    data: data
+                )
+            }
+            let downsampled = FileAttachmentService.downsampleForUpload(data: data, image: image)
+            let finalData = downsampled.isEmpty ? data : downsampled
+            let thumbnailData = Self.thumbnailImageData(from: image)
+            let displayDataURL = Self.imageDataURL(from: data, fallbackReference: fileName)
+            return (fileName, finalData, thumbnailData, displayDataURL)
+        }.value
+    }
+
+    nonisolated private static func thumbnailImageData(from image: UIImage) -> Data? {
+        let maxSide: CGFloat = 160
+        let width = max(image.size.width, 1)
+        let height = max(image.size.height, 1)
+        let scale = min(1, maxSide / max(width, height))
+        let targetSize = scale < 1
+            ? CGSize(width: width * scale, height: height * scale)
+            : CGSize(width: width, height: height)
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        let thumbnail = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return thumbnail.jpegData(compressionQuality: 0.72)
     }
 
     private func canSendAttachmentInline(_ attachment: ChatAttachment) -> Bool {
@@ -935,8 +981,8 @@ final class ChatViewModel {
 
     private func imageDataForEditing(_ file: ChatMessageFile) async throws -> Data {
         let reference = file.displayURL ?? file.url ?? ""
-        if let data = Self.imageData(fromDataURL: reference) {
-            return data
+        if reference.hasPrefix("data:image/") {
+            return try await Self.decodedImageData(fromDataURL: reference)
         }
         if let url = URL(string: reference),
            ["http", "https"].contains(url.scheme?.lowercased()) {
@@ -962,6 +1008,22 @@ final class ChatViewModel {
         }
         let (data, _) = try await apiClient.getFileContent(id: fileId)
         return data
+    }
+
+    nonisolated private static func decodedImageData(fromDataURL dataURL: String) async throws -> Data {
+        try await Task.detached(priority: .utility) {
+            guard let data = imageData(fromDataURL: dataURL) else {
+                throw APIError.responseDecoding(
+                    underlying: NSError(
+                        domain: "ChatViewModel",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "无法读取这张图片。"]
+                    ),
+                    data: nil
+                )
+            }
+            return data
+        }.value
     }
 
     private static func editableImageFileName(for file: ChatMessageFile) -> String {
@@ -6429,7 +6491,7 @@ final class ChatViewModel {
         return safeBase + ".jpg"
     }
 
-    private static func imageData(fromDataURL dataURL: String) -> Data? {
+    nonisolated private static func imageData(fromDataURL dataURL: String) -> Data? {
         guard dataURL.hasPrefix("data:image/"),
               let comma = dataURL.firstIndex(of: ",") else { return nil }
         return Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...]))
@@ -6639,36 +6701,79 @@ final class ChatViewModel {
         guard let data = originalData else {
             return imageReference.hasPrefix("data:image/") ? imageReference : nil
         }
-        guard let targetPixelSize else {
-            return imageReference.hasPrefix("data:image/") ? imageReference : inlineImageDataURL(data: data, fileName: "generated-image.jpg")
-        }
-        guard let resizedData = Self.resizedJPEGData(
+        if let pngData = Self.generatedPNGData(
             from: data,
-            width: targetPixelSize.width,
-            height: targetPixelSize.height
-        ) else {
-            return imageReference.hasPrefix("data:image/") ? imageReference : inlineImageDataURL(data: data, fileName: "generated-image.jpg")
+            targetPixelSize: targetPixelSize
+        ) {
+            return "data:image/png;base64,\(pngData.base64EncodedString())"
         }
-        return "data:image/jpeg;base64,\(resizedData.base64EncodedString())"
+        return imageReference.hasPrefix("data:image/")
+            ? imageReference
+            : Self.imageDataURL(from: data, fallbackReference: imageReference)
     }
 
-    private static func resizedJPEGData(from data: Data, width: Int, height: Int) -> Data? {
-        guard let image = UIImage(data: data),
-              width > 0,
-              height > 0 else { return nil }
-        let clampedWidth = min(max(width, 64), 4096)
-        let clampedHeight = min(max(height, 64), 4096)
-        let targetSize = CGSize(width: clampedWidth, height: clampedHeight)
+    nonisolated private static func generatedPNGData(
+        from data: Data,
+        targetPixelSize: (width: Int, height: Int)? = nil
+    ) -> Data? {
+        guard let image = UIImage(data: data) else { return nil }
+        let targetSize: CGSize
+        if let targetPixelSize {
+            let clampedWidth = min(max(targetPixelSize.width, 64), 4096)
+            let clampedHeight = min(max(targetPixelSize.height, 64), 4096)
+            targetSize = CGSize(width: clampedWidth, height: clampedHeight)
+        } else {
+            targetSize = CGSize(width: max(image.size.width, 1), height: max(image.size.height, 1))
+        }
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = 1
-        format.opaque = true
+        format.opaque = false
         let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
         let resizedImage = renderer.image { context in
-            UIColor.white.setFill()
-            context.cgContext.fill(CGRect(origin: .zero, size: targetSize))
+            context.cgContext.clear(CGRect(origin: .zero, size: targetSize))
             image.draw(in: CGRect(origin: .zero, size: targetSize))
         }
-        return resizedImage.jpegData(compressionQuality: 0.95)
+        return resizedImage.pngData()
+    }
+
+    nonisolated private static func imageDataURL(from data: Data, fallbackReference: String) -> String {
+        let contentType = imageContentType(for: data, fallbackReference: fallbackReference)
+        return "data:\(contentType);base64,\(data.base64EncodedString())"
+    }
+
+    nonisolated private static func imageContentType(for data: Data, fallbackReference: String) -> String {
+        let bytes = [UInt8](data.prefix(12))
+        if bytes.count >= 8,
+           bytes[0] == 0x89,
+           bytes[1] == 0x50,
+           bytes[2] == 0x4E,
+           bytes[3] == 0x47,
+           bytes[4] == 0x0D,
+           bytes[5] == 0x0A,
+           bytes[6] == 0x1A,
+           bytes[7] == 0x0A {
+            return "image/png"
+        }
+        if bytes.count >= 3,
+           bytes[0] == 0xFF,
+           bytes[1] == 0xD8,
+           bytes[2] == 0xFF {
+            return "image/jpeg"
+        }
+        if bytes.count >= 6 {
+            let gifPrefix = String(decoding: bytes.prefix(6), as: UTF8.self)
+            if gifPrefix == "GIF87a" || gifPrefix == "GIF89a" {
+                return "image/gif"
+            }
+        }
+        if bytes.count >= 12 {
+            let riff = String(decoding: bytes[0..<4], as: UTF8.self)
+            let webp = String(decoding: bytes[8..<12], as: UTF8.self)
+            if riff == "RIFF" && webp == "WEBP" {
+                return "image/webp"
+            }
+        }
+        return imageContentType(for: fallbackReference)
     }
 
     private func attachGeneratedImageFile(
@@ -6711,7 +6816,7 @@ final class ChatViewModel {
             || message.contains("not support")
     }
 
-    private static func imageContentType(for reference: String) -> String {
+    nonisolated private static func imageContentType(for reference: String) -> String {
         let lower = reference.lowercased()
         if lower.hasPrefix("data:image/") {
             let afterPrefix = lower.dropFirst("data:".count)
@@ -6727,7 +6832,7 @@ final class ChatViewModel {
         return "image/jpeg"
     }
 
-    private static func imageFileName(for reference: String, contentType: String) -> String {
+    nonisolated private static func imageFileName(for reference: String, contentType: String) -> String {
         if let url = URL(string: reference),
            let last = url.pathComponents.last,
            !last.isEmpty,

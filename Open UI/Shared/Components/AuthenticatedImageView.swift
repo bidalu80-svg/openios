@@ -10,6 +10,8 @@ struct AuthenticatedImageView: View {
     let apiClient: APIClient?
 
     @State private var loadedImage: UIImage?
+    @State private var loadedImageData: Data?
+    @State private var loadedImageContentType: String?
     @State private var isLoading = true
     @State private var hasError = false
     @State private var showFullScreen = false
@@ -187,6 +189,8 @@ struct AuthenticatedImageView: View {
         if let inlineImage = Self.inlineDataImage(from: fileId) {
             Self.imageCache.setObject(inlineImage, forKey: fileId as NSString)
             loadedImage = inlineImage
+            loadedImageData = Self.imageData(fromDataURL: fileId)
+            loadedImageContentType = Self.imageContentType(fromDataURL: fileId)
             isLoading = false
             hasError = false
             return
@@ -202,6 +206,8 @@ struct AuthenticatedImageView: View {
             )
             if let image {
                 loadedImage = image
+                loadedImageData = nil
+                loadedImageContentType = nil
                 hasError = false
                 isLoading = false
             } else {
@@ -252,6 +258,8 @@ struct AuthenticatedImageView: View {
                     let cost = data.count
                     Self.imageCache.setObject(uiImage, forKey: fileId as NSString, cost: cost)
                     loadedImage = uiImage
+                    loadedImageData = data
+                    loadedImageContentType = Self.imageContentType(from: data)
                     hasError = false
                     isLoading = false
                     return
@@ -272,13 +280,44 @@ struct AuthenticatedImageView: View {
     }
 
     private static func inlineDataImage(from dataURL: String) -> UIImage? {
+        guard let data = imageData(fromDataURL: dataURL) else { return nil }
+        return UIImage(data: data)
+    }
+
+    private static func imageData(fromDataURL dataURL: String) -> Data? {
         guard dataURL.hasPrefix("data:image/"),
               let comma = dataURL.firstIndex(of: ",") else { return nil }
         let base64 = String(dataURL[dataURL.index(after: comma)...])
-        guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else {
-            return nil
+        return Data(base64Encoded: base64, options: .ignoreUnknownCharacters)
+    }
+
+    private static func imageContentType(fromDataURL dataURL: String) -> String? {
+        guard dataURL.hasPrefix("data:image/") else { return nil }
+        let lower = dataURL.lowercased()
+        guard let semicolon = lower.firstIndex(of: ";") else { return nil }
+        return String(lower[lower.startIndex..<semicolon].dropFirst("data:".count))
+    }
+
+    private static func imageContentType(from data: Data) -> String? {
+        let bytes = [UInt8](data.prefix(12))
+        if bytes.count >= 8,
+           bytes[0] == 0x89,
+           bytes[1] == 0x50,
+           bytes[2] == 0x4E,
+           bytes[3] == 0x47,
+           bytes[4] == 0x0D,
+           bytes[5] == 0x0A,
+           bytes[6] == 0x1A,
+           bytes[7] == 0x0A {
+            return "image/png"
         }
-        return UIImage(data: data)
+        if bytes.count >= 3,
+           bytes[0] == 0xFF,
+           bytes[1] == 0xD8,
+           bytes[2] == 0xFF {
+            return "image/jpeg"
+        }
+        return nil
     }
 
     private static func remoteImageURL(from value: String) -> URL? {
@@ -311,8 +350,19 @@ struct AuthenticatedImageView: View {
         }
 
         do {
-            try await PHPhotoLibrary.shared().performChanges {
-                PHAssetChangeRequest.creationRequestForAsset(from: image)
+            if let data = loadedImageData,
+               loadedImageContentType == "image/png" {
+                let tempURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("iexa-generated-\(UUID().uuidString).png")
+                try data.write(to: tempURL, options: .atomic)
+                try await PHPhotoLibrary.shared().performChanges {
+                    _ = PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: tempURL)
+                }
+                try? FileManager.default.removeItem(at: tempURL)
+            } else {
+                try await PHPhotoLibrary.shared().performChanges {
+                    PHAssetChangeRequest.creationRequestForAsset(from: image)
+                }
             }
             saveState = .saved
         } catch {

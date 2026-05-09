@@ -2369,14 +2369,23 @@ struct ChatDetailView: View {
                 viewModel.prepareGeneratedImageForEditing(file)
                 Haptics.play(.light)
             } label: {
-                Label("编辑", systemImage: "pencil")
-                    .labelStyle(.iconOnly)
-                    .scaledFont(size: 14, weight: .semibold)
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(.black.opacity(0.64), in: Circle())
+                Group {
+                    if viewModel.isPreparingGeneratedImageForEditing {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .tint(.white)
+                    } else {
+                        Label("编辑", systemImage: "pencil")
+                            .labelStyle(.iconOnly)
+                            .scaledFont(size: 14, weight: .semibold)
+                    }
+                }
+                .foregroundStyle(.white)
+                .frame(width: 36, height: 36)
+                .background(.black.opacity(0.64), in: Circle())
             }
             .buttonStyle(.plain)
+            .disabled(viewModel.isPreparingGeneratedImageForEditing)
             .accessibilityLabel("编辑图片")
             .padding(8)
         }
