@@ -1,8 +1,10 @@
 import Foundation
 import CoreFoundation
+import ImageIO
 import os.log
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 extension Notification.Name {
     static let conversationTitleUpdated = Notification.Name("conversationTitleUpdated")
@@ -31,6 +33,13 @@ extension Notification.Name {
 /// Instances are held by `ActiveChatStore` so they survive navigation transitions.
 @MainActor @Observable
 final class ChatViewModel {
+    private struct EditableImagePayload: Sendable {
+        let fileName: String
+        let data: Data
+        let thumbnailData: Data?
+        let displayDataURL: String
+    }
+
     // MARK: - Published State
 
     /// Isolated store for streaming content. Only the actively streaming
@@ -920,39 +929,55 @@ final class ChatViewModel {
     nonisolated private static func prepareEditableImagePayload(
         data: Data,
         fileName: String
-    ) async throws -> (fileName: String, data: Data, thumbnailData: Data?, displayDataURL: String) {
-        try await Task.detached(priority: .utility) {
-            guard let image = UIImage(data: data) else {
-                throw APIError.responseDecoding(
-                    underlying: NSError(
-                        domain: "ChatViewModel",
-                        code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "无法读取这张图片。"]
-                    ),
-                    data: data
-                )
-            }
-            let downsampled = FileAttachmentService.downsampleForUpload(data: data, image: image)
-            let finalData = downsampled.isEmpty ? data : downsampled
-            let thumbnailData = Self.thumbnailImageData(from: image)
+    ) async throws -> EditableImagePayload {
+        let payload = await Task.detached(priority: .utility) { () -> EditableImagePayload? in
+            guard let uploadData = Self.editableJPEGData(from: data) else { return nil }
+            let thumbnailData = Self.thumbnailImageData(from: data)
             let displayDataURL = Self.imageDataURL(from: data, fallbackReference: fileName)
-            return (fileName, finalData, thumbnailData, displayDataURL)
+            return EditableImagePayload(
+                fileName: Self.jpegFileName(for: fileName),
+                data: uploadData.isEmpty ? data : uploadData,
+                thumbnailData: thumbnailData,
+                displayDataURL: displayDataURL
+            )
         }.value
+        guard let payload else {
+            throw APIError.responseDecoding(
+                underlying: NSError(
+                    domain: "ChatViewModel",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "无法读取这张图片。"]
+                ),
+                data: data
+            )
+        }
+        return payload
     }
 
-    nonisolated private static func thumbnailImageData(from image: UIImage) -> Data? {
-        let maxSide: CGFloat = 160
-        let width = max(image.size.width, 1)
-        let height = max(image.size.height, 1)
-        let scale = min(1, maxSide / max(width, height))
-        let targetSize = scale < 1
-            ? CGSize(width: width * scale, height: height * scale)
-            : CGSize(width: width, height: height)
-        let renderer = UIGraphicsImageRenderer(size: targetSize)
-        let thumbnail = renderer.image { _ in
-            image.draw(in: CGRect(origin: .zero, size: targetSize))
+    nonisolated private static func editableJPEGData(from data: Data) -> Data? {
+        let maxPixels: CGFloat = 2_000_000
+        guard let source = imageSource(from: data),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let rawWidth = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let rawHeight = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue else {
+            return nil
         }
-        return thumbnail.jpegData(compressionQuality: 0.72)
+        let width = max(CGFloat(rawWidth), 1)
+        let height = max(CGFloat(rawHeight), 1)
+        let scale = min(1, sqrt(maxPixels / max(width * height, 1)))
+        let maxPixelSize = max(1, Int(ceil(max(width, height) * scale)))
+        guard let cgImage = thumbnailCGImage(from: source, maxPixelSize: maxPixelSize) else {
+            return nil
+        }
+        return encodedImageData(from: cgImage, contentType: "image/jpeg", quality: 0.85)
+    }
+
+    nonisolated private static func thumbnailImageData(from data: Data) -> Data? {
+        guard let source = imageSource(from: data),
+              let cgImage = thumbnailCGImage(from: source, maxPixelSize: 160) else {
+            return nil
+        }
+        return encodedImageData(from: cgImage, contentType: "image/jpeg", quality: 0.72)
     }
 
     private func canSendAttachmentInline(_ attachment: ChatAttachment) -> Bool {
@@ -6485,7 +6510,7 @@ final class ChatViewModel {
         return nil
     }
 
-    private static func jpegFileName(for originalName: String) -> String {
+    nonisolated private static func jpegFileName(for originalName: String) -> String {
         let base = (originalName as NSString).deletingPathExtension
         let safeBase = base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "image" : base
         return safeBase + ".jpg"
@@ -6701,7 +6726,7 @@ final class ChatViewModel {
         guard let data = originalData else {
             return imageReference.hasPrefix("data:image/") ? imageReference : nil
         }
-        if let pngData = Self.generatedPNGData(
+        if let pngData = await Self.generatedPNGData(
             from: data,
             targetPixelSize: targetPixelSize
         ) {
@@ -6715,25 +6740,90 @@ final class ChatViewModel {
     nonisolated private static func generatedPNGData(
         from data: Data,
         targetPixelSize: (width: Int, height: Int)? = nil
+    ) async -> Data? {
+        await Task.detached(priority: .utility) {
+            Self.generatedPNGDataSync(from: data, targetPixelSize: targetPixelSize)
+        }.value
+    }
+
+    nonisolated private static func generatedPNGDataSync(
+        from data: Data,
+        targetPixelSize: (width: Int, height: Int)? = nil
     ) -> Data? {
-        guard let image = UIImage(data: data) else { return nil }
-        let targetSize: CGSize
+        guard let source = imageSource(from: data) else { return nil }
         if let targetPixelSize {
             let clampedWidth = min(max(targetPixelSize.width, 64), 4096)
             let clampedHeight = min(max(targetPixelSize.height, 64), 4096)
-            targetSize = CGSize(width: clampedWidth, height: clampedHeight)
-        } else {
-            targetSize = CGSize(width: max(image.size.width, 1), height: max(image.size.height, 1))
+            guard let cgImage = thumbnailCGImage(from: source, maxPixelSize: max(clampedWidth, clampedHeight)),
+                  let rendered = renderedCGImage(from: cgImage, width: clampedWidth, height: clampedHeight) else {
+                return nil
+            }
+            return encodedImageData(from: rendered, contentType: "image/png")
         }
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = 1
-        format.opaque = false
-        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
-        let resizedImage = renderer.image { context in
-            context.cgContext.clear(CGRect(origin: .zero, size: targetSize))
-            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let width = (properties?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let height = (properties?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        let maxPixelSize = max(width, height, 1)
+        guard let cgImage = thumbnailCGImage(from: source, maxPixelSize: maxPixelSize) else {
+            return nil
         }
-        return resizedImage.pngData()
+        return encodedImageData(from: cgImage, contentType: "image/png")
+    }
+
+    nonisolated private static func imageSource(from data: Data) -> CGImageSource? {
+        CGImageSourceCreateWithData(
+            data as CFData,
+            [kCGImageSourceShouldCache: false] as CFDictionary
+        )
+    }
+
+    nonisolated private static func thumbnailCGImage(from source: CGImageSource, maxPixelSize: Int) -> CGImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize)
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
+
+    nonisolated private static func renderedCGImage(from image: CGImage, width: Int, height: Int) -> CGImage? {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            return nil
+        }
+        context.interpolationQuality = .high
+        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
+    }
+
+    nonisolated private static func encodedImageData(
+        from image: CGImage,
+        contentType: String,
+        quality: CGFloat? = nil
+    ) -> Data? {
+        let mutableData = NSMutableData()
+        guard let typeIdentifier = UTType(mimeType: contentType)?.identifier,
+              let destination = CGImageDestinationCreateWithData(mutableData, typeIdentifier as CFString, 1, nil) else {
+            return nil
+        }
+        var properties: [CFString: Any] = [:]
+        if let quality {
+            properties[kCGImageDestinationLossyCompressionQuality] = quality
+        }
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return mutableData as Data
     }
 
     nonisolated private static func imageDataURL(from data: Data, fallbackReference: String) -> String {

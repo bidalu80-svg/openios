@@ -2353,11 +2353,7 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func chatImageView(fileId: String) -> some View {
-        if inlineDataImage(from: fileId) != nil {
-            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
-        } else {
-            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
-        }
+        AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
     }
 
     private func generatedImageCard(file: ChatMessageFile, fileId: String) -> some View {
@@ -2454,14 +2450,6 @@ struct ChatDetailView: View {
         case "mp4", "mov", "avi", "mkv": return "film"
         default: return "doc"
         }
-    }
-
-    private func inlineDataImage(from dataURL: String) -> UIImage? {
-        guard dataURL.hasPrefix("data:image/"),
-              let comma = dataURL.firstIndex(of: ",") else { return nil }
-        let base64 = String(dataURL[dataURL.index(after: comma)...])
-        guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else { return nil }
-        return UIImage(data: data)
     }
 
     private func localFileURL(fromDataURL dataURL: String, fallbackName: String) throws -> URL? {
