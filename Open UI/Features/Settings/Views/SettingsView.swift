@@ -1497,7 +1497,12 @@ struct STTSettingsView: View {
 
     /// True when ASR model files are already cached on disk (but not necessarily loaded into memory).
     private var asrFilesOnDisk: Bool {
-        asrModelSize != "–" && asrModelSize != "未下载"
+        asr.hasUsableModelFiles(for: .qwen3ASR)
+    }
+
+    /// True when some ASR bytes exist, but the complete loadable working copy is not present.
+    private var asrHasPartialCache: Bool {
+        asrModelSize != "–" && asrModelSize != "未下载" && !asrFilesOnDisk
     }
 
     private var asr: OnDeviceASRService { dependencies.asrService }
@@ -1649,16 +1654,22 @@ struct STTSettingsView: View {
                         Button {
                             Task {
                                 do {
+                                    if asrHasPartialCache {
+                                        asr.unloadAndDeleteVariant(activeVariant)
+                                        refreshModelSizes()
+                                    }
                                     try await asr.loadModel()
+                                    refreshModelSizes()
                                 } catch {
                                     asrModelErrorMessage = error.localizedDescription
+                                    refreshModelSizes()
                                 }
                             }
                         } label: {
                             HStack(spacing: Spacing.sm) {
                                 Image(systemName: asrFilesOnDisk ? "bolt.circle" : "arrow.down.circle")
                                     .scaledFont(size: 16, weight: .medium)
-                                Text(asrFilesOnDisk ? "加载模型" : "下载并加载模型")
+                                Text(asrFilesOnDisk ? "加载模型" : "重新下载并加载模型")
                                     .scaledFont(size: 16)
                                     .fontWeight(.medium)
                             }
@@ -1702,9 +1713,15 @@ struct STTSettingsView: View {
                             asr.unloadModel()
                             Task {
                                 do {
+                                    if asrHasPartialCache {
+                                        asr.unloadAndDeleteVariant(.qwen3ASR)
+                                        refreshModelSizes()
+                                    }
                                     try await asr.loadModel()
+                                    refreshModelSizes()
                                 } catch {
                                     asrModelErrorMessage = error.localizedDescription
+                                    refreshModelSizes()
                                 }
                             }
                         } label: {
@@ -1721,7 +1738,7 @@ struct STTSettingsView: View {
                 } header: {
                     Text("\(modelLabel)")
                 } footer: {
-                    Text("模型首次使用会从 HuggingFace 下载并缓存在本地。卸载可释放内存，删除会移除下载文件。")
+                    Text("模型首次使用会从 HuggingFace 下载并缓存在本地。重启 App 后会释放内存并显示为“已下载，未加载”；点击加载或首次转写时会重新载入。")
                 }
             }
 
@@ -1884,7 +1901,13 @@ struct STTSettingsView: View {
     private var asrStatusBadge: some View {
         switch asr.state {
         case .unloaded:
-            statusPill(asrFilesOnDisk ? "未加载" : "未下载", color: theme.textTertiary)
+            if asrFilesOnDisk {
+                statusPill("已下载，未加载", color: theme.warning)
+            } else if asrHasPartialCache {
+                statusPill("下载不完整", color: theme.error)
+            } else {
+                statusPill("未下载", color: theme.textTertiary)
+            }
         case .loading:
             HStack(spacing: 4) {
                 ProgressView().controlSize(.mini)
@@ -1899,9 +1922,27 @@ struct STTSettingsView: View {
         case .paused:
             statusPill("已暂停", color: theme.textTertiary)
         case .error(let msg):
-            statusPill("错误", color: theme.error)
+            statusPill("错误：\(shortASRErrorMessage(msg))", color: theme.error)
                 .help(msg)
         }
+    }
+
+    private func shortASRErrorMessage(_ message: String) -> String {
+        let lower = message.lowercased()
+        if lower.contains("space") || lower.contains("disk") || lower.contains("no space") {
+            return "空间不足"
+        }
+        if lower.contains("network") || lower.contains("timed out") || lower.contains("offline")
+            || lower.contains("could not connect") || lower.contains("internet") {
+            return "网络失败"
+        }
+        if lower.contains("cancel") {
+            return "已取消"
+        }
+        if lower.contains("memory") || lower.contains("metal") || lower.contains("gpu") {
+            return "加载失败"
+        }
+        return "加载失败"
     }
 
     private func engineRow(value: String, label: String, description: String, selected: Bool) -> some View {
@@ -1933,8 +1974,10 @@ struct STTSettingsView: View {
     }
 
     private func refreshModelSizes() {
-        let p = asr.modelSize(for: .qwen3ASR)
-        asrModelSize = p > 0 ? ByteCountFormatter.string(fromByteCount: p, countStyle: .file) : "未下载"
+        let usable = asr.modelSize(for: .qwen3ASR)
+        let total = asr.totalCacheSize(for: .qwen3ASR)
+        let shown = max(usable, total)
+        asrModelSize = shown > 0 ? ByteCountFormatter.string(fromByteCount: shown, countStyle: .file) : "未下载"
     }
 
 }

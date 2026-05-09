@@ -137,7 +137,7 @@ final class OnDeviceASRService {
     // MARK: - Init
 
     init() {
-        let raw = UserDefaults.standard.string(forKey: "sttEngine") ?? "qwen3asr"
+        let raw = UserDefaults.standard.string(forKey: "asrModelVariant") ?? "qwen3asr"
         activeVariant = ASRModelVariant(rawValue: raw) ?? .qwen3ASR
         registerBackgroundTaskHandlerIfNeeded()
     }
@@ -193,7 +193,7 @@ final class OnDeviceASRService {
         guard variant != activeVariant else { return }
         if state != .unloaded { unloadModel() }
         activeVariant = variant
-        UserDefaults.standard.set(variant.rawValue, forKey: "sttEngine")
+        UserDefaults.standard.set(variant.rawValue, forKey: "asrModelVariant")
         logger.info("Switched ASR variant to \(variant.displayName)")
     }
 
@@ -262,6 +262,20 @@ final class OnDeviceASRService {
     /// Returns the on-disk size (bytes) of the cached model files.
     func modelSize(for variant: ASRModelVariant) -> Int64 {
         StorageManager.shared.asrModelSize()
+    }
+
+    /// Returns ASR-related cached bytes, including incomplete HuggingFace blob caches.
+    func totalCacheSize(for variant: ASRModelVariant) -> Int64 {
+        StorageManager.shared.totalASRModelCacheSize()
+    }
+
+    /// Whether the downloaded ASR working copy is present.
+    ///
+    /// This intentionally ignores HuggingFace's `models--*` blob cache. A partial
+    /// interrupted download can leave that cache behind, but it is not enough for
+    /// `fromPretrained` to load the model offline.
+    func hasUsableModelFiles(for variant: ASRModelVariant) -> Bool {
+        StorageManager.shared.hasUsableASRModelFiles()
     }
 
     /// Unloads (if active) and deletes the model files from disk.
