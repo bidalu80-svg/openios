@@ -3639,11 +3639,7 @@ private struct ImageGenerationPlaceholderView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("正在创建图片")
-                .scaledFont(size: 18, weight: .semibold, context: .content)
-                .foregroundStyle(theme.textPrimary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.82)
+            ImageGenerationTitleShimmer(text: "正在创建图片")
                 .accessibilityAddTraits(.updatesFrequently)
 
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -3693,6 +3689,59 @@ private struct ImageGenerationPlaceholderView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { isAnimating = true }
         .animation(.easeInOut(duration: 3.2).repeatForever(autoreverses: true), value: isAnimating)
+    }
+}
+
+private struct ImageGenerationTitleShimmer: View {
+    let text: String
+
+    @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var shimmerPhase: CGFloat = -1
+
+    var body: some View {
+        titleText
+            .foregroundStyle(theme.textPrimary.opacity(theme.isDark ? 0.82 : 0.72))
+            .overlay {
+                if reduceMotion {
+                    titleText.foregroundStyle(theme.textPrimary)
+                } else {
+                    GeometryReader { geometry in
+                        let width = max(geometry.size.width, 1)
+                        let sweepWidth = max(width * 0.72, 86)
+
+                        LinearGradient(
+                            colors: [
+                                .clear,
+                                theme.textPrimary.opacity(theme.isDark ? 0.42 : 0.30),
+                                Color.white.opacity(theme.isDark ? 0.86 : 0.95),
+                                theme.textPrimary.opacity(theme.isDark ? 0.36 : 0.24),
+                                .clear
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                        .frame(width: sweepWidth)
+                        .offset(x: -sweepWidth + shimmerPhase * (width + sweepWidth * 2))
+                    }
+                    .mask(titleText)
+                }
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.82)
+            .accessibilityLabel(Text(text))
+            .onAppear {
+                guard !reduceMotion else { return }
+                shimmerPhase = -1
+                withAnimation(.linear(duration: 1.85).repeatForever(autoreverses: false)) {
+                    shimmerPhase = 1
+                }
+            }
+    }
+
+    private var titleText: some View {
+        Text(text)
+            .scaledFont(size: 18, weight: .semibold, context: .content)
     }
 }
 
