@@ -2842,7 +2842,7 @@ struct AssistantMessageContent: View {
     static func splitInlineImages(_ text: String) -> [InlineImageSegment] {
         // Match ![alt text](url) where url contains /api/v1/files/{uuid}/content
         // The URL may be relative (/api/...) or absolute (https://host/api/...)
-        let pattern = #"!\[([^\]]*)\]\(((?:https?://[^\s\)]+)?/api/(?:v1/)?files/([^/\)\s]+)/content|https?://[^\s\)]+|data:image/[^)\s]+)\)"#
+        let pattern = #"!\[([^\]]*)\]\(((?:https?://[^\s\)]+)?/api/(?:v1/)?files/([^/\)\s]+)/content|https?://[^\s\)]+|data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\r\n]{128,})\)"#
         guard let regex = ToolCallParser.cachedRegex(pattern, options: []) else {
             return [.text(text)]
         }
