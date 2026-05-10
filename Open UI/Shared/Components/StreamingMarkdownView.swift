@@ -96,8 +96,11 @@ struct StreamingMarkdownView: View {
                 EmptyView()
             } else if segments.count == 1, case .markdown(let text) = segments[0] {
                 // Fast path: plain markdown only — no viz, no ForEach overhead.
-                MarkdownView(text, theme: scaledTheme)
-                    .codeAutoScroll(true)
+                let safeText = Self.sanitizedMarkdownTextForDisplay(text)
+                if !safeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    MarkdownView(safeText, theme: scaledTheme)
+                        .codeAutoScroll(true)
+                }
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
@@ -194,7 +197,7 @@ struct StreamingMarkdownView: View {
 
             // If the closing fence is already present, this is a complete block —
             // parseSpecialBlocks (non-streaming path) handles it. Skip here.
-            if afterOpen.range(of: "\n```") != nil { continue }
+            if findClosingFence(in: text[contentStart...], from: contentStart) != nil { continue }
 
             // Incomplete block — extract partial content
             let partialContent = String(afterOpen)
@@ -213,7 +216,7 @@ struct StreamingMarkdownView: View {
 
         guard let openRange = text.range(of: "```", options: .backwards) else { return nil }
         let afterOpen = text[openRange.upperBound...]
-        guard afterOpen.range(of: "\n```") == nil,
+        guard findClosingFence(in: text[openRange.upperBound...], from: openRange.upperBound) == nil,
               let newlineIdx = afterOpen.firstIndex(of: "\n") else { return nil }
 
         let lang = afterOpen[afterOpen.startIndex..<newlineIdx]
@@ -275,8 +278,9 @@ struct StreamingMarkdownView: View {
     private func segmentView(for segment: ContentSegment) -> some View {
         switch segment {
         case .markdown(let text):
-            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownView(text, theme: scaledTheme)
+            let safeText = Self.sanitizedMarkdownTextForDisplay(text)
+            if !safeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                MarkdownView(safeText, theme: scaledTheme)
                     .codeAutoScroll(true)
             }
         case .chart(let code):
@@ -295,6 +299,8 @@ struct StreamingMarkdownView: View {
             PythonCodeBlockView(code: code)
         case .codeModule(let language, let code):
             CompactCodeModuleView(code: code, language: language)
+        case .codeBlock(let language, let code):
+            StandardCodeBlockView(code: code, language: language)
         case .markdownImage(let imageURL, let altText, let linkURL):
             MarkdownInlineImageView(
                 imageURL: imageURL,
@@ -335,6 +341,7 @@ struct StreamingMarkdownView: View {
         case svg(String, isStreaming: Bool)
         case python(String)
         case codeModule(language: String, code: String)
+        case codeBlock(language: String, code: String)
         case markdownImage(imageURL: URL, altText: String, linkURL: URL?)
         case visualization(String)
     }
@@ -369,6 +376,27 @@ struct StreamingMarkdownView: View {
         try? NSRegularExpression(
             pattern: #"(?<!\[)!\[([^\]]*)\]\(([^)]+)\)"#,
             options: []
+        )
+    }()
+
+    private static let directDataImagePattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\r\n]{128,})"#,
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static let dataImageMarkdownPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"!\[[^\]]*\]\(\s*data:image/[^)\s]+(?:\s+[^)]*)?\)"#,
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static let partialDataImageMarkdownPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\r\n]{48,}"#,
+            options: [.caseInsensitive]
         )
     }()
 
@@ -436,6 +464,23 @@ struct StreamingMarkdownView: View {
 
         // Sort by position in the string (earliest first)
         results.sort { $0.range.lowerBound < $1.range.lowerBound }
+        if let pattern = Self.directDataImagePattern {
+            let matches = pattern.matches(in: text, options: [], range: fullRange)
+            for match in matches {
+                guard match.numberOfRanges >= 2,
+                      let swiftRange = Range(match.range(at: 1), in: text) else { continue }
+                let ref = Self.normalizedDataImageReference(String(text[swiftRange]))
+                guard let imgURL = Self.makeImageURL(from: ref) else { continue }
+                if results.contains(where: { $0.range.overlaps(swiftRange) }) { continue }
+                results.append(ParsedImage(
+                    range: swiftRange,
+                    imageURL: imgURL,
+                    altText: "",
+                    linkURL: nil
+                ))
+            }
+            results.sort { $0.range.lowerBound < $1.range.lowerBound }
+        }
         return results
     }
 
@@ -445,9 +490,43 @@ struct StreamingMarkdownView: View {
             return URL(string: trimmed)
         }
         if trimmed.hasPrefix("data:image/") {
-            return URL(string: trimmed)
+            return URL(string: normalizedDataImageReference(trimmed))
         }
         return nil
+    }
+
+    private static func normalizedDataImageReference(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+    }
+
+    private static func sanitizedMarkdownTextForDisplay(_ text: String) -> String {
+        var cleaned = text
+        if let pattern = dataImageMarkdownPattern {
+            cleaned = pattern.stringByReplacingMatches(
+                in: cleaned,
+                options: [],
+                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                withTemplate: ""
+            )
+        }
+        if let pattern = partialDataImageMarkdownPattern {
+            cleaned = pattern.stringByReplacingMatches(
+                in: cleaned,
+                options: [],
+                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                withTemplate: ""
+            )
+        }
+        if let pattern = directDataImagePattern {
+            cleaned = pattern.stringByReplacingMatches(
+                in: cleaned,
+                options: [],
+                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                withTemplate: ""
+            )
+        }
+        return cleaned
     }
 
     /// Detects a bare image URL in plain text so providers that return
@@ -567,11 +646,12 @@ struct StreamingMarkdownView: View {
                 .trimmingCharacters(in: .whitespaces).lowercased()
             let contentStart = afterOpen.index(after: newlineIdx)
             let searchArea = remaining[contentStart...]
-            guard let closeRange = searchArea.range(of: "\n```") else {
+            guard let closeRange = findClosingFence(in: searchArea, from: contentStart) else {
                 units.append(.markdown(String(remaining)))
                 return collapseParsedUnits(units, fallback: text)
             }
             let codeContent = String(remaining[contentStart..<closeRange.lowerBound])
+            let normalizedBlock = normalizedCodeBlock(language: lang, content: codeContent)
             let isChart = chartLanguageTags.contains(lang) && looksLikeChartJSON(codeContent)
             let isHTML = lang == "html" && codeContent.contains("<") && codeContent.contains(">") && codeContent.count >= 10
             let isLinkedWebAsset = lang == "css" || lang == "js" || lang == "javascript"
@@ -579,8 +659,9 @@ struct StreamingMarkdownView: View {
             let isSVG = lang == "svg" && looksLikeSVG(codeContent)
             let isPython = pythonLanguageTags.contains(lang) && codeContent.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
             let isCompactModule = shouldRenderCompactCodeModule(language: lang, code: codeContent)
+            let isStandardCodeBlock = normalizedBlock != nil
 
-            if isChart || isHTML || isLinkedWebAsset || isMermaid || isSVG || isPython || isCompactModule {
+            if isChart || isHTML || isLinkedWebAsset || isMermaid || isSVG || isPython || isCompactModule || isStandardCodeBlock {
                 let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
                 if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     units.append(.markdown(preceding))
@@ -590,6 +671,10 @@ struct StreamingMarkdownView: View {
                 else if isMermaid { units.append(.segment(.mermaid(codeContent))) }
                 else if isSVG { units.append(.segment(.svg(codeContent, isStreaming: false))) }
                 else if isPython { units.append(.segment(.python(codeContent))) }
+                else if isHTML || isLinkedWebAsset { units.append(.block(ParsedBlock(language: lang, content: codeContent))) }
+                else if let normalizedBlock {
+                    units.append(.segment(.codeBlock(language: normalizedBlock.language, code: normalizedBlock.content)))
+                }
                 else { units.append(.block(ParsedBlock(language: lang, content: codeContent))) }
                 remaining = remaining[closeRange.upperBound...]
             } else {
@@ -609,6 +694,26 @@ struct StreamingMarkdownView: View {
         return collapseParsedUnits(units, fallback: text)
     }
 
+    private func findClosingFence(
+        in searchArea: Substring,
+        from searchStart: String.Index
+    ) -> Range<String.Index>? {
+        var cursor = searchArea.startIndex
+        while let fence = searchArea.range(of: "```", range: cursor..<searchArea.endIndex) {
+            let isAtLineStart = fence.lowerBound == searchStart
+                || searchArea[searchArea.index(before: fence.lowerBound)] == "\n"
+                || searchArea[searchArea.index(before: fence.lowerBound)] == "\r"
+            let afterFence = searchArea[fence.upperBound...]
+            let suffixBeforeNewline = afterFence.prefix { $0 != "\n" && $0 != "\r" }
+            let isFenceOnlyLine = suffixBeforeNewline.trimmingCharacters(in: .whitespaces).isEmpty
+            if isAtLineStart && isFenceOnlyLine {
+                return fence
+            }
+            cursor = fence.upperBound
+        }
+        return nil
+    }
+
     private func collapseParsedUnits(_ units: [EitherContent], fallback text: String) -> [ContentSegment] {
         guard !units.isEmpty else { return [.markdown(text)] }
 
@@ -623,7 +728,7 @@ struct StreamingMarkdownView: View {
         }
 
         func markdownBlock(_ block: ParsedBlock) -> ContentSegment {
-            .markdown("```\(block.language)\n\(block.content)\n```")
+            .codeBlock(language: block.language, code: block.content)
         }
 
         func nextNonMarkdownWebBlockIndex(after start: Int) -> Int? {
@@ -695,6 +800,56 @@ struct StreamingMarkdownView: View {
         return segments.isEmpty ? [.markdown(text)] : segments
     }
 
+    private func normalizedCodeBlock(language: String, content: String) -> ParsedBlock? {
+        let trimmedLanguage = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !trimmedContent.isEmpty, !trimmedLanguage.isEmpty {
+            return ParsedBlock(language: trimmedLanguage, content: content)
+        }
+
+        // Some providers stream malformed fences as:
+        // ```
+        // bash
+        // command...
+        // ```
+        // Recover that into one real code block instead of leaving "bash" and the
+        // commands as loose Markdown text.
+        guard trimmedLanguage.isEmpty else { return nil }
+        var lines = content.components(separatedBy: .newlines)
+        while let first = lines.first, first.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.removeFirst()
+        }
+        if let marker = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           isRecognizedCodeLanguage(marker) {
+            lines.removeFirst()
+            let recoveredContent = lines.joined(separator: "\n")
+            if !recoveredContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return ParsedBlock(language: marker, content: recoveredContent)
+            }
+        }
+
+        if !trimmedContent.isEmpty, trimmedLanguage.isEmpty, content.contains("\n") {
+            return ParsedBlock(language: "text", content: content)
+        }
+        return nil
+    }
+
+    private func isRecognizedCodeLanguage(_ language: String) -> Bool {
+        let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        let languages: Set<String> = [
+            "bash", "sh", "shell", "zsh", "fish", "powershell", "ps1",
+            "nginx", "conf", "ini", "toml", "yaml", "yml", "xml",
+            "swift", "kotlin", "java", "javascript", "js", "typescript", "ts",
+            "tsx", "jsx", "html", "css", "scss", "python", "py", "ruby", "rb",
+            "go", "rust", "rs", "c", "cpp", "c++", "objc", "objective-c",
+            "php", "sql", "dockerfile", "makefile", "json", "jsonc",
+            "markdown", "md", "text", "txt"
+        ]
+        return languages.contains(normalized)
+    }
+
     private func injectCSS(_ css: String, into html: String) -> String {
         let styleTag = "<style>\n\(css)\n</style>"
         if let headRange = html.range(of: "</head>", options: .caseInsensitive) {
@@ -758,6 +913,91 @@ struct StreamingMarkdownView: View {
     private func tryParseChart(code: String) -> USpec? {
         guard let data = code.data(using: .utf8) else { return nil }
         return try? parseUSpec(from: data)
+    }
+}
+
+// MARK: - Standard Code Block
+
+private struct StandardCodeBlockView: View {
+    let code: String
+    let language: String
+
+    @Environment(\.theme) private var theme
+    @State private var didCopy = false
+    @State private var showFullCode = false
+
+    private var displayLanguage: String {
+        let value = language.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? "text" : value
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .scaledFont(size: 15, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+
+                Text(displayLanguage)
+                    .scaledFont(size: 12, weight: .semibold, design: .monospaced)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
+
+                Button {
+                    showFullCode = true
+                    Haptics.play(.light)
+                } label: {
+                    Image(systemName: "eye")
+                        .scaledFont(size: 14, weight: .semibold)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    UIPasteboard.general.string = code
+                    Haptics.notify(.success)
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                        didCopy = true
+                    }
+                    Task {
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        await MainActor.run {
+                            withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                                didCopy = false
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                        .scaledFont(size: 14, weight: .semibold)
+                        .foregroundStyle(didCopy ? theme.success : theme.textSecondary)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(theme.surfaceContainer.opacity(theme.isDark ? 0.72 : 0.90))
+
+            HighlightedSourceView(
+                code: code.trimmingCharacters(in: .newlines),
+                language: displayLanguage,
+                truncate: true,
+                maxHeight: 360
+            )
+            .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.22 : 0.42))
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.50 : 0.65), lineWidth: 0.8)
+        )
+        .sheet(isPresented: $showFullCode) {
+            FullCodeView(code: code, language: displayLanguage)
+        }
     }
 }
 
