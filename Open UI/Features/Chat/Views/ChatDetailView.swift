@@ -288,11 +288,18 @@ struct ChatDetailView: View {
         // Stop TTS when app enters background to prevent Metal GPU crashes
         // and keep the speakingMessageId state in sync with actual playback.
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            viewModel.persistLifecycleConversationSnapshot()
             if speakingMessageId != nil || ttsGeneratingMessageId != nil {
                 dependencies.textToSpeechService.stop()
                 speakingMessageId = nil
                 ttsGeneratingMessageId = nil
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            viewModel.persistLifecycleConversationSnapshot()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            viewModel.restoreLifecycleConversationSnapshot()
         }
         .onReceive(NotificationCenter.default.publisher(for: .chatTokenUsageDidAccumulate)) { notification in
             tokenUsageInputTotal += notification.userInfo?["input"] as? Int ?? 0

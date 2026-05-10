@@ -248,7 +248,7 @@ actor LocalWorkspaceAgentService {
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return cleaned.isEmpty ? "本地工作区操作已执行。" : cleaned
+        return cleaned.isEmpty ? "正在执行本地工作区操作..." : cleaned
     }
 
     private func ensureWorkspaceDirectory() throws -> URL {

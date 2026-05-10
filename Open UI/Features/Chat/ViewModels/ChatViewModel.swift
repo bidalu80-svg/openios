@@ -431,6 +431,10 @@ final class ChatViewModel {
     /// sync when the background duration was trivially short.
     @ObservationIgnored nonisolated(unsafe) private var backgroundEnteredAt: Date?
 
+    /// Debounces lifecycle snapshot persistence because UIKit can emit
+    /// will-resign and did-enter-background back to back.
+    @ObservationIgnored nonisolated(unsafe) private var lastLifecycleSnapshotPersistAt: Date = .distantPast
+
     /// The current auth token for authenticated image requests (model avatars).
     var serverAuthToken: String? {
         manager?.apiClient.network.authToken
@@ -496,6 +500,118 @@ final class ChatViewModel {
         }
 
         try? await manager.syncConversationHistory(conv)
+    }
+
+    /// Saves a best-effort snapshot before iOS suspends the app.
+    ///
+    /// During streaming, token content lives in `StreamingContentStore` instead of
+    /// `conversation.messages` for performance. If the app backgrounds before a
+    /// normal completion event, the conversation list/history can miss the latest
+    /// user turn or partial assistant text. This mirrors the live stream into the
+    /// conversation and persists it once at the lifecycle boundary.
+    func persistLifecycleConversationSnapshot() {
+        let hasStreamingMessage = conversation?.messages.contains(where: { $0.isStreaming }) == true
+        let wasStreaming = isStreaming || streamingStore.isActive || hasStreamingMessage
+        let didSnapshot = snapshotActiveStreamingMessageToConversation()
+        guard conversation != nil else { return }
+        guard wasStreaming || didSnapshot else { return }
+
+        let now = Date()
+        guard now.timeIntervalSince(lastLifecycleSnapshotPersistAt) >= 0.8 else { return }
+        lastLifecycleSnapshotPersistAt = now
+
+        Task { [weak self] in
+            await self?.persistConversationSnapshotForLifecycle()
+        }
+    }
+
+    /// Rehydrates the stream display after returning from the background.
+    func restoreLifecycleConversationSnapshot() {
+        guard streamingStore.isActive,
+              let messageId = streamingStore.streamingMessageId,
+              let message = conversation?.messages.first(where: { $0.id == messageId }),
+              !message.content.isEmpty
+        else { return }
+
+        streamingStore.restoreSnapshotContent(message.content)
+    }
+
+    @discardableResult
+    private func snapshotActiveStreamingMessageToConversation() -> Bool {
+        guard streamingStore.isActive,
+              let messageId = streamingStore.streamingMessageId,
+              let index = conversation?.messages.firstIndex(where: { $0.id == messageId })
+        else { return false }
+
+        var didChange = false
+        let snapshot = streamingStore.snapshotContent
+
+        if !snapshot.isEmpty,
+           snapshot.count >= (conversation?.messages[index].content.count ?? 0) {
+            conversation?.messages[index].content = snapshot
+            didChange = true
+
+            conversation?.history.updateNode(id: messageId) { node in
+                node.content = snapshot
+                node.done = false
+            }
+        }
+
+        if !streamingStore.streamingStatusHistory.isEmpty {
+            conversation?.messages[index].statusHistory = streamingStore.streamingStatusHistory
+            didChange = true
+
+            conversation?.history.updateNode(id: messageId) { node in
+                node.statusHistory = streamingStore.streamingStatusHistory
+            }
+        }
+
+        if !streamingStore.streamingSources.isEmpty {
+            for source in streamingStore.streamingSources {
+                if conversation?.messages[index].sources.contains(where: {
+                    ($0.url != nil && $0.url == source.url) || ($0.id != nil && $0.id == source.id)
+                }) != true {
+                    conversation?.messages[index].sources.append(source)
+                    didChange = true
+                }
+            }
+
+            let sources = conversation?.messages[index].sources ?? []
+            conversation?.history.updateNode(id: messageId) { node in
+                node.sources = sources
+            }
+        }
+
+        if let error = streamingStore.streamingError {
+            conversation?.messages[index].error = error
+            conversation?.history.updateNode(id: messageId) { node in
+                node.error = error
+            }
+            didChange = true
+        }
+
+        return didChange
+    }
+
+    private func persistConversationSnapshotForLifecycle() async {
+        conversation?.updatedAt = Date()
+        syncFlatMessagesToTreeNodes()
+
+        guard let manager, let conversation else { return }
+        guard !isTemporaryChat else { return }
+
+        do {
+            if manager.usesLocalConversationStore {
+                try await manager.saveConversation(conversation)
+            } else if conversation.history.isPopulated {
+                try await manager.syncConversationHistory(conversation)
+            } else {
+                try await manager.saveConversation(conversation)
+            }
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        } catch {
+            logger.error("Failed to persist lifecycle conversation snapshot: \(error.localizedDescription)")
+        }
     }
 
     var selectedModel: AIModel? {
@@ -1820,6 +1936,8 @@ final class ChatViewModel {
                     self.logger.debug("Foreground sync skipped — background duration \(bgDuration)s < 10s")
                 }
 
+                self.restoreLifecycleConversationSnapshot()
+
                 // Auto-resume any transcriptions that were paused when the app
                 // went to background on iOS < 26 (where GPU access is forbidden
                 // in the background). The audio data was saved in
@@ -1847,6 +1965,7 @@ final class ChatViewModel {
             guard let self else { return }
             Task { @MainActor in
                 self.backgroundEnteredAt = Date()
+                self.persistLifecycleConversationSnapshot()
                 guard self.isStreaming else { return }
                 if !self.isOpenAICompatibleProvider {
                     self.startBackgroundCompletionPolling()
@@ -3061,6 +3180,7 @@ final class ChatViewModel {
 
         let normalizedLocalAlpineText = Self.normalizedLocalAlpineCommand(currentText)
         let shouldAutoUseLocalAlpine = shouldAutoRouteExplicitLocalAlpineCommand(normalizedLocalAlpineText)
+            || Self.isExplicitLocalAlpineRequest(currentText)
         if processedAttachments.isEmpty,
            shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText),
            (terminalEnabled && selectedTerminalIsLocalAlpine || shouldAutoUseLocalAlpine) {
@@ -3912,6 +4032,59 @@ final class ChatViewModel {
     }
 
     private func shouldSendTextDirectlyToLocalAlpine(_ text: String) -> Bool {
+        Self.shouldSendRawTextDirectlyToLocalAlpine(text)
+    }
+
+    private func shouldAutoRouteExplicitLocalAlpineCommand(_ text: String) -> Bool {
+        let lowercased = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lowercased.isEmpty else { return false }
+        if Self.localAlpineDiagnosticCommand(for: lowercased) != nil { return true }
+        let alpineTerms = [
+            "alpine", "apk ", "/etc/alpine-release", "python3", "gcc", "vim", "node",
+            "curl ", "uname", "whoami", "ls /", "pwd", "/mnt/iexa"
+        ]
+        return alpineTerms.contains { lowercased.contains($0) }
+    }
+
+    private static func isExplicitLocalAlpineRequest(_ text: String) -> Bool {
+        let normalized = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+        let terms = [
+            "在终端执行", "在终端运行", "用终端执行", "用终端运行",
+            "执行命令", "运行命令", "帮我执行", "帮我运行",
+            "local alpine", "alpine 执行", "alpine运行",
+            "run command", "execute command"
+        ]
+        return terms.contains { normalized.contains($0) }
+    }
+
+    private static func fallbackLocalAlpineBlock(for text: String) -> String? {
+        let command = normalizedLocalAlpineCommand(text)
+        guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        guard isExplicitLocalAlpineRequest(text)
+            || shouldSendRawTextDirectlyToLocalAlpine(command)
+        else { return nil }
+
+        let object: [String: Any] = [
+            "iexa_alpine": [
+                [
+                    "command": command,
+                    "cwd": "/mnt/iexa"
+                ]
+            ]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return """
+        ```iexa_alpine
+        \(json)
+        ```
+        """
+    }
+
+    private static func shouldSendRawTextDirectlyToLocalAlpine(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         if trimmed.contains("\n") { return true }
@@ -3928,17 +4101,6 @@ final class ChatViewModel {
             "which", "whoami"
         ]
         return knownCommands.contains(command)
-    }
-
-    private func shouldAutoRouteExplicitLocalAlpineCommand(_ text: String) -> Bool {
-        let lowercased = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !lowercased.isEmpty else { return false }
-        if Self.localAlpineDiagnosticCommand(for: lowercased) != nil { return true }
-        let alpineTerms = [
-            "alpine", "apk ", "/etc/alpine-release", "python3", "gcc", "vim", "node",
-            "curl ", "uname", "whoami", "ls /", "pwd", "/mnt/iexa"
-        ]
-        return alpineTerms.contains { lowercased.contains($0) }
     }
 
     private func sendDirectLocalAlpineCommand(_ rawCommand: String, modelId: String) async {
@@ -4126,9 +4288,13 @@ final class ChatViewModel {
         let lowercased = command.lowercased()
         for prefix in [
             "帮我执行一下", "帮我运行一下", "帮我执行", "帮我运行",
+            "帮我在终端执行", "帮我在终端运行", "在终端执行", "在终端运行",
+            "用终端执行", "用终端运行", "在alpine执行", "在 alpine 执行",
             "执行命令：", "执行命令:", "运行命令：", "运行命令:",
             "执行命令 ", "运行命令 ", "执行#", "执行：", "执行:", "执行 ",
-            "运行#", "运行：", "运行:", "运行 "
+            "运行#", "运行：", "运行:", "运行 ",
+            "run command:", "run command ", "execute command:", "execute command ",
+            "run:", "execute:"
         ] where lowercased.hasPrefix(prefix) {
             command = String(command.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
             break
@@ -6777,6 +6943,7 @@ final class ChatViewModel {
         - If the user only asks to "show", "preview", "write a page", or wants a single-file demo, return normal code blocks with an inline preview-friendly HTML file. Do not create workspace operations unless the user explicitly asks to save/create/modify/read/search/list/delete local files or folders.
 
         Iexa has a local workspace agent. When the user asks you to create, modify, read, search, list, or delete local project files, include exactly one fenced block with language `iexa_workspace` containing JSON. Paths are relative to the app's Documents/Iexa Workspace folder and must never be absolute or use `..`.
+        Do not claim that a local file operation has been completed unless you emit the `iexa_workspace` block for the app to execute. The app will append the real execution result; treat that appended result as the source of truth.
         Supported operations:
         ```iexa_workspace
         {
@@ -6792,6 +6959,7 @@ final class ChatViewModel {
         }
         ```
         For multi-file projects, write all connected files in the same workspace block so the UI, styles, scripts, imports, and dependencies stay linked.
+        If the user asks to run/check/verify the project after writing files and Local Alpine terminal mode is available, also emit a bounded `iexa_alpine` block in the same answer for the concrete verification command.
         """
     }
 
@@ -6808,6 +6976,7 @@ final class ChatViewModel {
         Use it for concrete shell work such as checking Alpine status, listing files, installing packages with apk, running python3/node/gcc/vim checks, creating files under /mnt/iexa, or diagnosing command output.
         To execute commands, include exactly one fenced block with language `iexa_alpine` containing JSON. The app will run those commands locally on the device and append the real output.
         Prefer safe, bounded commands. Do not ask the user to run commands manually when you can run them through this tool. Do not output this block unless command execution is actually needed.
+        Do not say a command was executed, tested, installed, or fixed unless you emit the `iexa_alpine` block. The real output appended by the app is the only execution result.
 
         Example:
         ```iexa_alpine
@@ -6907,7 +7076,6 @@ final class ChatViewModel {
         modelId: String,
         hasAttachments: Bool
     ) async {
-        guard webSearchEnabled else { return }
         guard !hasAttachments else { return }
         guard !WebLinkContextResolver.containsHTTPURL(text) else { return }
         guard !shouldUseDirectImageGeneration(modelId: modelId),
@@ -6919,9 +7087,26 @@ final class ChatViewModel {
               apiClient.providerType == .iexa else {
             return
         }
+        guard shouldResolveWebSearchContext(for: text) else { return }
 
         let query = webSearchQuery(from: text)
         guard !query.isEmpty else { return }
+
+        if isWebSearchCapabilityQuestion(text) {
+            webSearchContextsByMessageId[userMessageId] = modelWebSearchAvailabilityPrompt()
+            appendStatusUpdate(
+                id: assistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "web_search",
+                    description: "联网搜索已可用",
+                    done: true,
+                    count: 0,
+                    query: query,
+                    queries: [query]
+                )
+            )
+            return
+        }
 
         appendStatusUpdate(
             id: assistantMessageId,
@@ -7059,6 +7244,58 @@ final class ChatViewModel {
         text
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func shouldResolveWebSearchContext(for text: String) -> Bool {
+        if webSearchEnabled { return true }
+
+        let normalized = text
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+
+        let explicitSearchTerms = [
+            "联网搜索", "联网查", "上网搜索", "上网查", "网络搜索", "搜索一下", "搜一下",
+            "帮我搜", "帮我查", "查一下", "查查看", "实时搜索", "实时查询",
+            "最新", "今天", "今日", "现在", "目前", "刚刚", "新闻", "热搜",
+            "能联网", "可以联网", "能搜索", "可以搜索", "联网吗", "搜索吗",
+            "web search", "search the web", "internet search", "browse", "browser",
+            "google", "bing", "latest", "today", "current", "news"
+        ]
+        return explicitSearchTerms.contains { normalized.contains($0) }
+    }
+
+    private func isWebSearchCapabilityQuestion(_ text: String) -> Bool {
+        let normalized = text
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+
+        let asksCapability = [
+            "你能联网", "你可以联网", "能联网吗", "可以联网吗", "能上网吗", "可以上网吗",
+            "你能搜索", "你可以搜索", "能搜索吗", "可以搜索吗", "能联网搜索吗", "可以联网搜索吗",
+            "canyousearch", "canyoubrowse", "websearchavailable"
+        ].contains { normalized.contains($0) }
+
+        guard asksCapability else { return false }
+
+        let concreteTaskTerms = [
+            "帮我", "替我", "给我", "查一下", "查查看", "搜一下", "搜索一下",
+            "最新", "今天", "今日", "新闻", "价格", "天气", "股价", "现在的",
+            "searchfor", "lookup", "latest", "today", "news", "price", "weather"
+        ]
+        return !concreteTaskTerms.contains { normalized.contains($0) }
+    }
+
+    private func modelWebSearchAvailabilityPrompt() -> String {
+        """
+
+        [客户端联网搜索能力]
+        Iexa 客户端已接入联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以。当用户要求“搜索、联网查、最新、今天、实时、新闻”等内容时，客户端会先搜索网页，并把搜索结果附加到本轮消息里给你使用。不要声称你无法联网或无法实时搜索。
+        [/客户端联网搜索能力]
+        """
     }
 
     private func modelWebSearchContextPrompt(
@@ -7618,29 +7855,50 @@ final class ChatViewModel {
 
     private func scheduleLocalWorkspaceAgentIfNeeded(messageId: String, content: String, error: ChatMessageError?) {
         guard error == nil else { return }
-        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        guard content.localizedCaseInsensitiveContains("iexa_workspace") else { return }
         guard let role = conversation?.messages.first(where: { $0.id == messageId })?.role, role == .assistant else { return }
         guard shouldExecuteLocalWorkspaceAgentForCurrentRequest() else { return }
         guard !localWorkspaceAgentExecutedMessageIds.contains(messageId) else { return }
 
+        let executableContent: String
+        if content.localizedCaseInsensitiveContains("iexa_workspace") {
+            executableContent = content
+        } else if let fallback = fallbackWorkspaceAgentBlockForCurrentRequest() {
+            executableContent = fallback
+        } else {
+            return
+        }
+
         localWorkspaceAgentExecutedMessageIds.insert(messageId)
         Task { [weak self] in
-            await self?.executeLocalWorkspaceAgent(messageId: messageId, content: content)
+            await self?.executeLocalWorkspaceAgent(messageId: messageId, content: executableContent)
         }
     }
 
     private func scheduleLocalAlpineAgentIfNeeded(messageId: String, content: String, error: ChatMessageError?) {
         guard error == nil else { return }
         guard terminalEnabled, selectedTerminalIsLocalAlpine else { return }
-        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        guard content.localizedCaseInsensitiveContains("iexa_alpine") else { return }
         guard let role = conversation?.messages.first(where: { $0.id == messageId })?.role, role == .assistant else { return }
         guard !localAlpineAgentExecutedMessageIds.contains(messageId) else { return }
+        let userRequestedExecution = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        }).map { Self.isExplicitLocalAlpineRequest($0.content) } ?? false
+
+        let executableContent: String
+        if content.localizedCaseInsensitiveContains("iexa_alpine") {
+            executableContent = content
+        } else if userRequestedExecution,
+                  let userText = conversation?.messages.last(where: {
+                      $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+                  })?.content,
+                  let fallback = Self.fallbackLocalAlpineBlock(for: userText) {
+            executableContent = fallback
+        } else {
+            return
+        }
 
         localAlpineAgentExecutedMessageIds.insert(messageId)
         Task { [weak self] in
-            await self?.executeLocalAlpineAgent(messageId: messageId, content: content)
+            await self?.executeLocalAlpineAgent(messageId: messageId, content: executableContent)
         }
     }
 
@@ -7671,14 +7929,97 @@ final class ChatViewModel {
         return strongWorkspaceIntent && !previewOnlyIntent
     }
 
+    private func fallbackWorkspaceAgentBlockForCurrentRequest() -> String? {
+        guard let userText = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalWorkspaceAgentResult($0)
+        })?.content else { return nil }
+
+        let lowercased = userText.lowercased()
+        let operation: String
+        if ["列出", "列表", "目录", "文件列表", "ls ", "list"].contains(where: { lowercased.contains($0) }) {
+            operation = "list"
+        } else if ["读取", "打开文件", "查看文件", "cat ", "read"].contains(where: { lowercased.contains($0) }) {
+            operation = "read"
+        } else if ["搜索", "查找", "grep", "find in files", "search"].contains(where: { lowercased.contains($0) }) {
+            operation = "search"
+        } else if ["删除文件", "删除文件夹", "删除目录", "delete", "remove", "rm "].contains(where: { lowercased.contains($0) }) {
+            operation = "delete"
+        } else {
+            return nil
+        }
+
+        let path = Self.extractWorkspacePath(from: userText) ?? "."
+        var object: [String: Any] = [
+            "action": operation,
+            "path": path
+        ]
+        if operation == "search" {
+            guard let query = Self.extractWorkspaceSearchQuery(from: userText) else { return nil }
+            object["query"] = query
+        }
+
+        guard let data = try? JSONSerialization.data(withJSONObject: ["iexa_workspace": [object]], options: [.prettyPrinted]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return """
+        ```iexa_workspace
+        \(json)
+        ```
+        """
+    }
+
+    private static func extractWorkspacePath(from text: String) -> String? {
+        let patterns = [
+            #"`([^`]+)`"#,
+            #""([^"]+)""#,
+            #"['“”‘’]([^'“”‘’]+)['“”‘’]"#,
+            #"((?:[\w.-]+/)+[\w.-]+)"#,
+            #"([\w.-]+\.(?:swift|json|md|txt|html|css|js|ts|tsx|py|rs|go|java|kt|xml|yml|yaml|toml))"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+            if let match = regex.firstMatch(in: text, range: nsRange),
+               match.numberOfRanges >= 2,
+               let range = Range(match.range(at: 1), in: text) {
+                let candidate = String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !candidate.isEmpty { return candidate }
+            }
+        }
+        return nil
+    }
+
+    private static func extractWorkspaceSearchQuery(from text: String) -> String? {
+        let patterns = [
+            #"搜索(?:内容|文本)?[：:\s]+(.+?)(?:\s+(?:在|from|in)\s+.+)?$"#,
+            #"查找(?:内容|文本)?[：:\s]+(.+?)(?:\s+(?:在|from|in)\s+.+)?$"#,
+            #"grep\s+["']?([^"'\s]+)["']?"#,
+            #"search\s+["']?([^"']+)["']?"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+            if let match = regex.firstMatch(in: text, range: nsRange),
+               match.numberOfRanges >= 2,
+               let range = Range(match.range(at: 1), in: text) {
+                let candidate = String(text[range])
+                    .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "`\"'“”‘’")))
+                if !candidate.isEmpty { return candidate }
+            }
+        }
+        return nil
+    }
+
     private func executeLocalWorkspaceAgent(messageId: String, content: String) async {
         let result = await LocalWorkspaceAgentService.shared.executeBlocks(in: content)
-        guard result.didExecute else { return }
         guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
+
+        let finalSummary = result.didExecute
+            ? result.summary
+            : "本地工作区没有检测到可执行操作。"
 
         let resultMessage = ChatMessage(
             role: .system,
-            content: result.summary,
+            content: finalSummary,
             timestamp: .now,
             isStreaming: false,
             metadata: ["iexa_local_workspace_result": "true"]
@@ -7688,7 +8029,7 @@ final class ChatViewModel {
             parentId: messageId,
             childrenIds: [],
             role: .system,
-            content: result.summary,
+            content: finalSummary,
             timestamp: resultMessage.timestamp,
             done: true
         )

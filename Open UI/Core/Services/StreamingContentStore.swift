@@ -174,6 +174,25 @@ final class StreamingContentStore {
         streamingContent = content
     }
 
+    /// Best-effort content to persist when the app is about to be suspended.
+    /// `streamingContent` is authoritative, but `displayContent` can be longer
+    /// while a previous snapshot is being restored.
+    var snapshotContent: String {
+        streamingContent.count >= displayContent.count ? streamingContent : displayContent
+    }
+
+    /// Rehydrates the display layer after the app returns from the background.
+    func restoreSnapshotContent(_ content: String) {
+        guard !content.isEmpty else { return }
+        if content.count > streamingContent.count {
+            streamingContent = content
+        }
+        if content.count > displayContent.count {
+            displayContent = content
+        }
+        lastKnownTotal = max(lastKnownTotal, streamingContent.count)
+    }
+
     /// Appends a status update (tool calls, search progress, etc.)
     func appendStatus(_ status: ChatStatusUpdate) {
         if let idx = streamingStatusHistory.firstIndex(
