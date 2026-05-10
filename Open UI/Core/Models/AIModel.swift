@@ -147,6 +147,43 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
         return name
     }
 
+    /// Returns true when this model is likely to be an image generation model.
+    /// Uses admin-provided capability metadata first, then name/tool heuristics
+    /// as a fallback for models whose identifiers do not literally contain
+    /// `gpt-image-2` or another single hardcoded name.
+    var supportsImageGeneration: Bool {
+        if defaultFeatureIds.contains("image_generation") { return true }
+        if builtinTools["image_generation"] == true { return true }
+        if let value = capabilities?["image_generation"]?.lowercased() {
+            if ["1", "true", "yes", "enabled"].contains(value) {
+                return true
+            }
+            if ["0", "false", "no", "disabled"].contains(value) {
+                return false
+            }
+        }
+
+        let haystack = ([id, name] + toolIds + actionIds + actions.map(\.id))
+            .joined(separator: " ")
+            .lowercased()
+        return Self.imageGenerationHintTokens.contains(where: { haystack.contains($0) })
+            && !Self.imageGenerationNegativeTokens.contains(where: { haystack.contains($0) })
+    }
+
+    private static let imageGenerationHintTokens: [String] = [
+        "image", "img", "dall-e", "dalle", "gpt-image", "imagen",
+        "flux", "sdxl", "stable-diffusion", "midjourney", "mj-",
+        "banana", "nano-banana", "grok-imagine", "grok imagine",
+        "seedream", "qwen-image", "jimeng", "kolors", "minimax-image"
+    ]
+
+    private static let imageGenerationNegativeTokens: [String] = [
+        "vision", "ocr", "vl", "video", "videos", "veo", "sora",
+        "wan", "kling", "hailuo", "runway", "luma", "pika", "vidu",
+        "seedance", "text-to-video", "image-to-video", "i2v", "t2v",
+        "生视频", "视频生成"
+    ]
+
     // MARK: - Hashable & Equatable (rawModelItem excluded — [String: Any] is not Hashable)
 
     static func == (lhs: AIModel, rhs: AIModel) -> Bool {

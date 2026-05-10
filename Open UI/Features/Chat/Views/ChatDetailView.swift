@@ -960,22 +960,11 @@ struct ChatDetailView: View {
         guard let model = viewModel.selectedModel else {
             return serverEnabled == true
         }
-        if model.defaultFeatureIds.contains(capabilityKey) || model.builtinTools[capabilityKey] == true {
+        if capabilityKey == "image_generation" && model.supportsImageGeneration {
             return true
         }
-        if capabilityKey == "image_generation" {
-            let haystack = ([model.id, model.name] + model.toolIds + model.actionIds + model.actions.map(\.id))
-                .joined(separator: " ")
-                .lowercased()
-            if haystack.contains("image_generation")
-                || haystack.contains("image-gen")
-                || haystack.contains("generate_image")
-                || haystack.contains("text_to_image")
-                || haystack.contains("dall")
-                || haystack.contains("flux")
-                || haystack.contains("midjourney") {
-                return true
-            }
+        if model.defaultFeatureIds.contains(capabilityKey) || model.builtinTools[capabilityKey] == true {
+            return true
         }
         guard let caps = model.capabilities,
               let value = caps[capabilityKey] else {

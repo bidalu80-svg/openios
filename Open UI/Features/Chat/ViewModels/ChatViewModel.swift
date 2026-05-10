@@ -3467,10 +3467,12 @@ final class ChatViewModel {
                                 )
                             }
                             let imagePrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
-                            let requestedImageSize = Self.requestedImageSize(from: imagePrompt)
+                            let requestedCanvasSize = Self.requestedImageCanvasSize(from: imagePrompt)
+                            let requestedImageSize = Self.imageEndpointSize(for: requestedCanvasSize)
                             let imagePromptForAPI = Self.promptWithImageSizeInstruction(
                                 imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
-                                size: requestedImageSize
+                                canvasSize: requestedCanvasSize,
+                                endpointSize: requestedImageSize
                             )
                             await RunLiveActivityService.shared.update(
                                 id: assistantMessageId,
@@ -3510,7 +3512,10 @@ final class ChatViewModel {
                                     )
                                 }
                             }
-                            let displayReference = await self.localDisplayImageReference(from: imageReference) ?? imageReference
+                            let displayReference = await self.localDisplayImageReference(
+                                from: imageReference,
+                                canvasSize: requestedCanvasSize
+                            ) ?? imageReference
                             self.updateAssistantMessage(
                                 id: assistantMessageId,
                                 content: "已生成图片",
@@ -6217,48 +6222,23 @@ final class ChatViewModel {
     }
 
     private static func modelSupportsBuiltinFeature(_ model: AIModel, key: String) -> Bool {
-        if model.defaultFeatureIds.contains(key) { return true }
-        if model.builtinTools[key] == true { return true }
-        if let value = model.capabilities?[key]?.lowercased(),
-           ["1", "true", "yes", "enabled"].contains(value) {
-            return true
+        guard key == "image_generation" else {
+            if model.defaultFeatureIds.contains(key) { return true }
+            if model.builtinTools[key] == true { return true }
+            if let value = model.capabilities?[key]?.lowercased(),
+               ["1", "true", "yes", "enabled"].contains(value) {
+                return true
+            }
+            return false
         }
-
-        let haystack = ([model.id, model.name] + model.toolIds + model.actionIds + model.actions.map(\.id))
-            .joined(separator: " ")
-            .lowercased()
-        guard key == "image_generation" else { return false }
-        return haystack.contains("image_generation")
-            || haystack.contains("image-gen")
-            || haystack.contains("image gen")
-            || haystack.contains("generate_image")
-            || haystack.contains("text_to_image")
-            || haystack.contains("dall")
-            || haystack.contains("flux")
-            || haystack.contains("midjourney")
+        return model.supportsImageGeneration
     }
 
     private func shouldUseDirectImageGeneration(modelId: String) -> Bool {
-        guard currentProviderType != .iexa else { return false }
-        if let selectedModel,
-           Self.modelSupportsBuiltinFeature(selectedModel, key: "image_generation") {
-            return true
+        if let selectedModel {
+            return selectedModel.supportsImageGeneration
         }
-        let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
-            .lowercased()
-        let positives = [
-            "image", "img", "dall-e", "dalle", "gpt-image", "imagen",
-            "flux", "sdxl", "stable-diffusion", "midjourney", "mj-",
-            "banana", "nano-banana", "grok-imagine", "grok imagine"
-        ]
-        let negatives = [
-            "vision", "ocr", "vl", "video", "videos", "veo", "sora",
-            "wan", "kling", "hailuo", "runway", "luma", "pika", "vidu",
-            "seedance", "text-to-video", "image-to-video", "i2v", "t2v",
-            "生视频", "视频生成"
-        ]
-        return positives.contains(where: { haystack.contains($0) })
-            && !negatives.contains(where: { haystack.contains($0) })
+        return AIModel(id: modelId, name: modelId).supportsImageGeneration
     }
 
     private func shouldPreferChatNativeImageGeneration(modelId: String) -> Bool {
@@ -6293,7 +6273,6 @@ final class ChatViewModel {
     }
 
     private func shouldUseDirectVideoGeneration(modelId: String) -> Bool {
-        guard currentProviderType != .iexa else { return false }
         let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
             .lowercased()
         let positives = [
@@ -6337,6 +6316,10 @@ final class ChatViewModel {
     }
 
     private static func requestedImageSize(from prompt: String) -> String {
+        imageEndpointSize(for: requestedImageCanvasSize(from: prompt))
+    }
+
+    private static func requestedImageCanvasSize(from prompt: String) -> String {
         let defaultSize = "1024x1024"
         let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return defaultSize }
@@ -6370,6 +6353,19 @@ final class ChatViewModel {
         }
 
         return defaultSize
+    }
+
+    private static func imageEndpointSize(for canvasSize: String) -> String {
+        let parts = canvasSize.split(separator: "x", maxSplits: 1).compactMap { Double(String($0)) }
+        guard parts.count == 2, parts[0] > 0, parts[1] > 0 else {
+            return "1024x1024"
+        }
+
+        let ratio = parts[0] / parts[1]
+        if abs(ratio - 1.0) < 0.08 {
+            return "1024x1024"
+        }
+        return ratio > 1.0 ? "1792x1024" : "1024x1792"
     }
 
     private static func firstExactImageSize(in text: String) -> String? {
@@ -6409,12 +6405,15 @@ final class ChatViewModel {
         return ratio > 1.0 ? "1792x1024" : "1024x1792"
     }
 
-    private static func promptWithImageSizeInstruction(_ prompt: String, size: String) -> String {
+    private static func promptWithImageSizeInstruction(_ prompt: String, canvasSize: String, endpointSize: String) -> String {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let exactRequirement = canvasSize == endpointSize
+            ? "exactly \(canvasSize) pixels"
+            : "\(canvasSize) pixels, preserving that aspect ratio"
         return """
         \(trimmed)
 
-        Canvas requirement: generate the image at exactly \(size) pixels and preserve that aspect ratio. Do not crop into a square unless the requested size is square.
+        Canvas requirement: generate the image at \(exactRequirement). Do not crop into a square unless the requested size is square.
         """
     }
 
@@ -6477,11 +6476,40 @@ final class ChatViewModel {
         return false
     }
 
-    private func localDisplayImageReference(from imageReference: String) async -> String? {
+    private func localDisplayImageReference(from imageReference: String, canvasSize: String? = nil) async -> String? {
         if imageReference.hasPrefix("data:image/") {
-            return imageReference
+            return Self.resizedImageDataURL(from: imageReference, canvasSize: canvasSize) ?? imageReference
         }
         return nil
+    }
+
+    private static func resizedImageDataURL(from dataURL: String, canvasSize: String?) -> String? {
+        guard let canvasSize,
+              let size = imagePixelSize(from: canvasSize),
+              let data = imageData(fromDataURL: dataURL),
+              let image = UIImage(data: data),
+              size.width > 0,
+              size.height > 0
+        else { return nil }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        let resized = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        guard let pngData = resized.pngData() else { return nil }
+        return "data:image/png;base64,\(pngData.base64EncodedString())"
+    }
+
+    private static func imagePixelSize(from size: String) -> CGSize? {
+        let parts = size.split(separator: "x", maxSplits: 1).compactMap { Double(String($0)) }
+        guard parts.count == 2,
+              (64...4096).contains(parts[0]),
+              (64...4096).contains(parts[1])
+        else { return nil }
+        return CGSize(width: CGFloat(parts[0]), height: CGFloat(parts[1]))
     }
 
     private func attachGeneratedImageFile(

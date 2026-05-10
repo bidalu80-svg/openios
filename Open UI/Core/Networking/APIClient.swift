@@ -3890,11 +3890,6 @@ final class APIClient: @unchecked Sendable {
                     isMultimodal = true
                 }
             }
-            if Self.looksLikeImageGenerationModel(id: id, name: name) {
-                defaultFeatureIds.append("image_generation")
-                builtinTools["image_generation"] = true
-            }
-
             if let info = raw["info"] as? [String: Any] {
                 if let meta = info["meta"] as? [String: Any] {
                     profileImageURL = meta["profile_image_url"] as? String
@@ -3984,6 +3979,26 @@ final class APIClient: @unchecked Sendable {
                 return []
             }()
 
+            let imageCapabilityProbe = AIModel(
+                id: id,
+                name: name,
+                description: raw["description"] as? String,
+                isMultimodal: isMultimodal,
+                capabilities: capabilities,
+                toolIds: toolIds,
+                defaultFeatureIds: defaultFeatureIds,
+                builtinTools: builtinTools,
+                tags: tags,
+                actionIds: actionIds,
+                actions: actions
+            )
+            if imageCapabilityProbe.supportsImageGeneration {
+                if !defaultFeatureIds.contains("image_generation") {
+                    defaultFeatureIds.append("image_generation")
+                }
+                builtinTools["image_generation"] = true
+            }
+
             return AIModel(
                 id: id,
                 name: name,
@@ -4008,17 +4023,6 @@ final class APIClient: @unchecked Sendable {
                 rawModelItem: raw
             )
         }
-    }
-
-    private static func looksLikeImageGenerationModel(id: String, name: String) -> Bool {
-        let haystack = "\(id) \(name)".lowercased()
-        let positive = [
-            "image", "img", "dall-e", "dalle", "gpt-image", "imagen",
-            "flux", "sdxl", "stable-diffusion", "midjourney", "mj-"
-        ]
-        let negative = ["vision", "ocr", "vl", "video"]
-        return positive.contains(where: { haystack.contains($0) })
-            && !negative.contains(where: { haystack.contains($0) })
     }
 
     private func parseConversationSummary(_ json: [String: Any]) -> Conversation? {

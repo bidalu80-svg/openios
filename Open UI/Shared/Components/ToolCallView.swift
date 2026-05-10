@@ -2689,44 +2689,48 @@ struct AssistantMessageContent: View {
                         // MarkdownView renders images as plain text links — we need
                         // to intercept server file URLs and render them as actual images.
                         let imageSegments = Self.splitInlineImages(effectiveStr)
+                        let hasInlineImage = imageSegments.contains {
+                            if case .image = $0 { return true }
+                            return false
+                        }
                         if !effectiveStr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        if imageSegments.count <= 1 {
-                            // No inline images — render normally
-                            MarkdownWithLoading(
-                                content: effectiveStr,
-                                isLoading: isLastText,
-                                authToken: authToken,
-                                serverBaseURL: serverBaseURL
-                            )
-                        } else {
-                            // Interleave text and images
-                            ForEach(Array(imageSegments.enumerated()), id: \.offset) { segIdx, seg in
-                                switch seg {
-                                case .text(let text):
-                                    let isLast = isLastText && segIdx == imageSegments.count - 1
-                                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                        MarkdownWithLoading(
-                                            content: text,
-                                            isLoading: isLast,
-                                            authToken: authToken,
-                                            serverBaseURL: serverBaseURL
-                                        )
-                                    }
-                                case .image(let fileId, let altText):
-                                    if let apiClient {
-                                        AuthenticatedImageView(fileId: fileId, apiClient: apiClient)
-                                            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
-                                    } else {
-                                        MarkdownWithLoading(
-                                            content: "![\(altText)](\(fileId))",
-                                            isLoading: false,
-                                            authToken: authToken,
-                                            serverBaseURL: serverBaseURL
-                                        )
+                            if !hasInlineImage {
+                                // No inline images — render normally
+                                MarkdownWithLoading(
+                                    content: effectiveStr,
+                                    isLoading: isLastText,
+                                    authToken: authToken,
+                                    serverBaseURL: serverBaseURL
+                                )
+                            } else {
+                                // Interleave text and images
+                                ForEach(Array(imageSegments.enumerated()), id: \.offset) { segIdx, seg in
+                                    switch seg {
+                                    case .text(let text):
+                                        let isLast = isLastText && segIdx == imageSegments.count - 1
+                                        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                            MarkdownWithLoading(
+                                                content: text,
+                                                isLoading: isLast,
+                                                authToken: authToken,
+                                                serverBaseURL: serverBaseURL
+                                            )
+                                        }
+                                    case .image(let fileId, let altText):
+                                        if let apiClient {
+                                            AuthenticatedImageView(fileId: fileId, apiClient: apiClient)
+                                                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                                        } else {
+                                            MarkdownWithLoading(
+                                                content: "![\(altText)](\(fileId))",
+                                                isLoading: false,
+                                                authToken: authToken,
+                                                serverBaseURL: serverBaseURL
+                                            )
+                                        }
                                     }
                                 }
                             }
-                        }
                         } // end if !effectiveStr.isEmpty
 
                     case .toolCalls(let calls):
