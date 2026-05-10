@@ -228,10 +228,31 @@ struct ChatAdvancedParams: Codable, Sendable, Equatable {
 
         // think: 4-state
         switch thinkMode {
-        case .default: break
-        case .on:       p["think"] = true
-        case .off:      p["think"] = false
-        case .custom(let s): if !s.isEmpty { p["think"] = s }
+        case .default:
+            break
+        case .on:
+            p["think"] = true
+            p["thinking"] = true
+            p["include_reasoning"] = true
+            p["reasoning"] = ["enabled": true]
+            if p["reasoning_effort"] == nil {
+                p["reasoning_effort"] = "medium"
+            }
+        case .off:
+            p["think"] = false
+            p["thinking"] = false
+            p["include_reasoning"] = false
+            p["reasoning"] = ["enabled": false]
+        case .custom(let s):
+            if !s.isEmpty {
+                p["think"] = s
+                p["thinking"] = s
+                p["include_reasoning"] = true
+                p["reasoning"] = ["enabled": true, "effort": s]
+                if p["reasoning_effort"] == nil {
+                    p["reasoning_effort"] = s
+                }
+            }
         }
 
         return p
