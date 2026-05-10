@@ -230,6 +230,7 @@ final class ChatViewModel {
     private let logger = Logger(subsystem: "com.openui", category: "ChatViewModel")
     private let webLinkContextResolver = WebLinkContextResolver()
     private var webLinkContextsByMessageId: [String: String] = [:]
+    private var webSearchContextsByMessageId: [String: String] = [:]
     private var hasFinishedStreaming = false
     /// Tracks the content length at the last `extractAndApplyTasksFromContent` call.
     /// Prevents the O(n) task-extraction scan from running on every single token;
@@ -3363,6 +3364,14 @@ final class ChatViewModel {
             text: messageText
         )
 
+        await resolveWebSearchContextIfNeeded(
+            userMessageId: userMessage.id,
+            assistantMessageId: assistantMessageId,
+            text: messageText,
+            modelId: modelId,
+            hasAttachments: !currentAttachments.isEmpty
+        )
+
         // Build API messages with image content fetched from server
         let apiMessages = await buildAPIMessagesAsync()
         let parentId = userMessage.id
@@ -3383,7 +3392,14 @@ final class ChatViewModel {
 
         // Activate the isolated streaming store so token updates bypass
         // conversation.messages and only invalidate the streaming message view.
-        streamingStore.beginStreaming(messageId: assistantMessageId, modelId: modelId)
+        let initialStatusHistory = conversation?.messages.first(where: { $0.id == assistantMessageId })?.statusHistory ?? []
+        let initialSources = conversation?.messages.first(where: { $0.id == assistantMessageId })?.sources ?? []
+        streamingStore.beginStreaming(
+            messageId: assistantMessageId,
+            modelId: modelId,
+            initialStatusHistory: initialStatusHistory,
+            initialSources: initialSources
+        )
         await startRunLiveActivity(id: assistantMessageId, modelId: modelId, prompt: messageText)
 
         if isOpenAICompatibleProvider {
@@ -6758,9 +6774,9 @@ final class ChatViewModel {
         - Use exact relative file names and matching imports, links, entrypoints, and package/config files.
         - For HTML/CSS/JavaScript projects split across index.html, style.css, and script.js, the HTML must link ./style.css and ./script.js, and the CSS/JS must be written for that same UI.
         - For other languages, include the folder tree, entry file, dependency/config files, and imports so the project can run as a coherent whole instead of unrelated snippets.
-        - If the user only asks to "show", "preview", "write a page", or wants a single-file demo, return normal code blocks with an inline preview-friendly HTML file. Do not create workspace operations unless the user explicitly asks to save/create/modify/read/list/delete local files or folders.
+        - If the user only asks to "show", "preview", "write a page", or wants a single-file demo, return normal code blocks with an inline preview-friendly HTML file. Do not create workspace operations unless the user explicitly asks to save/create/modify/read/search/list/delete local files or folders.
 
-        Iexa has a local workspace agent. When the user asks you to create, modify, read, list, or delete local project files, include exactly one fenced block with language `iexa_workspace` containing JSON. Paths are relative to the app's Documents/Iexa Workspace folder and must never be absolute or use `..`.
+        Iexa has a local workspace agent. When the user asks you to create, modify, read, search, list, or delete local project files, include exactly one fenced block with language `iexa_workspace` containing JSON. Paths are relative to the app's Documents/Iexa Workspace folder and must never be absolute or use `..`.
         Supported operations:
         ```iexa_workspace
         {
@@ -6769,6 +6785,7 @@ final class ChatViewModel {
             {"action": "write", "path": "demo/index.html", "content": "<!doctype html>..."},
             {"action": "append", "path": "demo/README.md", "content": "\\nMore notes"},
             {"action": "read", "path": "demo/index.html"},
+            {"action": "search", "path": "demo", "query": "button"},
             {"action": "list", "path": "demo"},
             {"action": "delete", "path": "demo/old.txt"}
           ]
@@ -6780,7 +6797,7 @@ final class ChatViewModel {
 
     private static func workspaceGuardSystemContext() -> String {
         """
-        Iexa can execute local workspace file operations, but only when the user explicitly asks to save/create/modify/read/list/delete files or folders in the local workspace.
+        Iexa can execute local workspace file operations, but only when the user explicitly asks to save/create/modify/read/search/list/delete files or folders in the local workspace.
         If the user asks to write, show, preview, or demonstrate a webpage/app/component/code without explicitly asking to save it into local files, return normal Markdown code blocks and any preview-friendly single-file code. Do not output an `iexa_workspace` block in that case.
         """
     }
@@ -6883,16 +6900,296 @@ final class ChatViewModel {
         """
     }
 
+    private func resolveWebSearchContextIfNeeded(
+        userMessageId: String,
+        assistantMessageId: String,
+        text: String,
+        modelId: String,
+        hasAttachments: Bool
+    ) async {
+        guard webSearchEnabled else { return }
+        guard !hasAttachments else { return }
+        guard !WebLinkContextResolver.containsHTTPURL(text) else { return }
+        guard !shouldUseDirectImageGeneration(modelId: modelId),
+              !shouldPreferChatNativeImageGeneration(modelId: modelId),
+              !shouldUseDirectVideoGeneration(modelId: modelId) else {
+            return
+        }
+        guard let apiClient = manager?.apiClient,
+              apiClient.providerType == .iexa else {
+            return
+        }
+
+        let query = webSearchQuery(from: text)
+        guard !query.isEmpty else { return }
+
+        appendStatusUpdate(
+            id: assistantMessageId,
+            status: ChatStatusUpdate(
+                action: "web_search",
+                description: "正在规划搜索...",
+                done: false,
+                query: query,
+                queries: [query]
+            )
+        )
+
+        do {
+            let queries = await webSearchQueries(for: query, apiClient: apiClient, modelId: modelId)
+            appendStatusUpdate(
+                id: assistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "web_search",
+                    description: queries.count > 1 ? "正在搜索 \(queries.count) 个关键词..." : "正在联网搜索...",
+                    done: false,
+                    query: query,
+                    queries: queries
+                )
+            )
+
+            let result = try await apiClient.processWebSearch(queries: queries, originalQuery: query)
+            let context = modelWebSearchContextPrompt(result: result, query: query, queries: queries)
+            let sources = webSearchSources(from: result)
+
+            if !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                webSearchContextsByMessageId[userMessageId] = context
+            }
+            if !sources.isEmpty {
+                appendSources(id: assistantMessageId, sources: sources)
+                if streamingStore.streamingMessageId == assistantMessageId && streamingStore.isActive {
+                    streamingStore.appendSources(sources)
+                }
+            }
+
+            let urls = Array(Set(result.filenames + result.items.compactMap(\.link))).prefix(8)
+            appendStatusUpdate(
+                id: assistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "web_search",
+                    description: result.loadedCount > 0
+                        ? "已搜索 \(result.loadedCount) 个网页"
+                        : "已完成联网搜索",
+                    done: true,
+                    urls: Array(urls),
+                    items: result.items.prefix(6).map {
+                        ChatStatusItem(title: $0.title, link: $0.link)
+                    },
+                    count: max(result.loadedCount, sources.count),
+                    query: query,
+                    queries: queries
+                )
+            )
+        } catch {
+            logger.warning("Web search failed: \(error.localizedDescription)")
+            appendStatusUpdate(
+                id: assistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "web_search",
+                    description: "联网搜索失败，已按原问题发送",
+                    done: true,
+                    count: 0,
+                    query: query,
+                    queries: [query]
+                )
+            )
+        }
+    }
+
+    private func webSearchQueries(for query: String, apiClient: APIClient, modelId: String) async -> [String] {
+        let serverConfig = activeChatStore?.serverTaskConfig ?? .default
+        guard serverConfig.enableSearchQueryGeneration else { return [query] }
+
+        let taskModel = [
+            serverConfig.taskModelExternal,
+            serverConfig.taskModel,
+            modelId
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty }) ?? modelId
+
+        do {
+            let generated = try await apiClient.generateSearchQueries(
+                model: taskModel,
+                query: query,
+                context: recentUserContextForSearch(excluding: query),
+                maxQueries: 3
+            )
+            return Self.mergeSearchQueries(original: query, generated: generated, limit: 4)
+        } catch {
+            logger.debug("Search query generation failed: \(error.localizedDescription)")
+            return [query]
+        }
+    }
+
+    private func recentUserContextForSearch(excluding query: String) -> String? {
+        guard let conversation else { return nil }
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = conversation.messages
+            .filter { $0.role == .user && !$0.isStreaming }
+            .suffix(4)
+            .map(\.content)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != normalizedQuery }
+            .suffix(3)
+            .joined(separator: "\n")
+        return context.isEmpty ? nil : String(context.prefix(2_000))
+    }
+
+    private static func mergeSearchQueries(original: String, generated: [String], limit: Int) -> [String] {
+        var result: [String] = []
+        var seen = Set<String>()
+
+        func append(_ raw: String) {
+            let trimmed = raw
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            let key = trimmed.lowercased()
+            guard !seen.contains(key) else { return }
+            seen.insert(key)
+            result.append(trimmed)
+        }
+
+        append(original)
+        generated.forEach(append)
+        return Array(result.prefix(limit))
+    }
+
+    private func webSearchQuery(from text: String) -> String {
+        text
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func modelWebSearchContextPrompt(
+        result: WebSearchResponse,
+        query: String,
+        queries: [String] = []
+    ) -> String {
+        var blocks: [String] = []
+        var docsByURL: [String: WebSearchDocument] = [:]
+        for doc in result.docs {
+            guard let url = doc.metadata["source"] ?? doc.metadata["link"],
+                  docsByURL[url] == nil else { continue }
+            docsByURL[url] = doc
+        }
+
+        for (index, item) in result.items.prefix(6).enumerated() {
+            let url = item.link ?? result.filenames.dropFirst(index).first ?? ""
+            var lines = [
+                "### Result \(index + 1)",
+                "Title: \(item.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Untitled")"
+            ]
+            if !url.isEmpty { lines.append("URL: \(url)") }
+            if let snippet = item.snippet?.trimmingCharacters(in: .whitespacesAndNewlines), !snippet.isEmpty {
+                lines.append("Snippet: \(String(snippet.prefix(600)))")
+            }
+            if let doc = docsByURL[url] {
+                let excerpt = doc.content
+                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !excerpt.isEmpty {
+                    lines.append("Page excerpt: \(String(excerpt.prefix(1200)))")
+                }
+            }
+            blocks.append(lines.joined(separator: "\n"))
+        }
+
+        if blocks.isEmpty {
+            for (index, doc) in result.docs.prefix(4).enumerated() {
+                let url = doc.metadata["source"] ?? doc.metadata["link"] ?? ""
+                let title = doc.metadata["title"] ?? doc.metadata["name"] ?? url
+                let excerpt = doc.content
+                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                var lines = [
+                    "### Result \(index + 1)",
+                    "Title: \(title)"
+                ]
+                if !url.isEmpty { lines.append("URL: \(url)") }
+                lines.append("Page excerpt: \(String(excerpt.prefix(1200)))")
+                blocks.append(lines.joined(separator: "\n"))
+            }
+        }
+
+        guard !blocks.isEmpty else { return "" }
+        let queryLines = Self.mergeSearchQueries(original: query, generated: queries, limit: 4)
+            .map { "- \($0)" }
+            .joined(separator: "\n")
+
+        return """
+
+        [客户端联网搜索结果]
+        查询：\(query)
+        实际搜索词：
+        \(queryLines)
+
+        以下结果由 Iexa 在发送本轮消息前通过后端联网搜索取得。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果，并在回答里引用来源链接。不要声称你无法联网。
+
+        \(blocks.joined(separator: "\n\n"))
+        [/客户端联网搜索结果]
+        """
+    }
+
+    private func webSearchSources(from result: WebSearchResponse) -> [ChatSourceReference] {
+        var sources: [ChatSourceReference] = []
+        var seen = Set<String>()
+
+        for item in result.items {
+            let url = item.link
+            let key = url ?? item.title ?? UUID().uuidString
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            sources.append(ChatSourceReference(
+                id: url ?? key,
+                title: item.title,
+                url: url,
+                snippet: item.snippet,
+                type: "web",
+                metadata: nil
+            ))
+        }
+
+        for doc in result.docs {
+            let url = doc.metadata["source"] ?? doc.metadata["link"]
+            let title = doc.metadata["title"] ?? doc.metadata["name"] ?? url
+            let key = url ?? title ?? UUID().uuidString
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            let excerpt = doc.content
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            sources.append(ChatSourceReference(
+                id: url ?? key,
+                title: title,
+                url: url,
+                snippet: excerpt.isEmpty ? nil : String(excerpt.prefix(240)),
+                type: "web",
+                metadata: doc.metadata.isEmpty ? nil : doc.metadata
+            ))
+        }
+
+        return sources
+    }
+
     private func contentForModel(message: ChatMessage) -> String {
-        guard message.role == .user,
-              let linkContext = webLinkContextsByMessageId[message.id],
-              !linkContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard message.role == .user else {
+            return message.content
+        }
+        let extraContexts = [
+            webLinkContextsByMessageId[message.id],
+            webSearchContextsByMessageId[message.id]
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !extraContexts.isEmpty else {
             return message.content
         }
         if message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return linkContext
+            return extraContexts.joined(separator: "\n\n")
         }
-        return message.content + "\n\n" + linkContext
+        return message.content + "\n\n" + extraContexts.joined(separator: "\n\n")
     }
 
     private func attachResolvedVideoFile(messageId: String, video: ResolvedWebVideo) {
@@ -7358,7 +7655,9 @@ final class ChatViewModel {
             "列出文件", "生成项目", "创建项目", "项目文件", "workspace", "save file",
             "write file", "create file", "modify file", "delete file", "mkdir", "append",
             "落地到本地", "落地项目", "直接写到", "帮我保存", "存到工作区", "写入工作区",
-            "保存成文件", "create project", "save to workspace", "write to workspace"
+            "保存成文件", "搜索文件", "搜索内容", "查找文件", "查找内容", "搜文件",
+            "全文搜索", "grep", "find in files", "search files", "search workspace",
+            "create project", "save to workspace", "write to workspace"
         ].contains { userText.contains($0) }
 
         let previewOnlyIntent = [

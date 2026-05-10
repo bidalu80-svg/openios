@@ -2193,6 +2193,170 @@ struct RetrievalConfig: Codable, Sendable {
     }
 }
 
+// MARK: - Web Search Response
+
+struct WebSearchResponse: Sendable {
+    var status: Bool
+    var collectionNames: [String]
+    var filenames: [String]
+    var items: [WebSearchResultItem]
+    var docs: [WebSearchDocument]
+    var loadedCount: Int
+
+    init(
+        status: Bool = false,
+        collectionNames: [String] = [],
+        filenames: [String] = [],
+        items: [WebSearchResultItem] = [],
+        docs: [WebSearchDocument] = [],
+        loadedCount: Int = 0
+    ) {
+        self.status = status
+        self.collectionNames = collectionNames
+        self.filenames = filenames
+        self.items = items
+        self.docs = docs
+        self.loadedCount = loadedCount
+    }
+
+    init(json: [String: Any]) {
+        status = json["status"] as? Bool ?? false
+
+        if let names = json["collection_names"] as? [String] {
+            collectionNames = names
+        } else if let name = json["collection_name"] as? String, !name.isEmpty {
+            collectionNames = [name]
+        } else {
+            collectionNames = []
+        }
+
+        filenames = json["filenames"] as? [String] ?? []
+        items = (json["items"] as? [[String: Any]] ?? []).compactMap(WebSearchResultItem.init(json:))
+        docs = (json["docs"] as? [[String: Any]] ?? []).compactMap(WebSearchDocument.init(json:))
+        loadedCount = json["loaded_count"] as? Int ?? filenames.count
+    }
+}
+
+struct WebSearchResultItem: Sendable, Hashable {
+    var title: String?
+    var link: String?
+    var snippet: String?
+
+    init?(json: [String: Any]) {
+        title = json["title"] as? String
+            ?? json["name"] as? String
+        link = json["link"] as? String
+            ?? json["url"] as? String
+            ?? json["source"] as? String
+        snippet = json["snippet"] as? String
+            ?? json["content"] as? String
+            ?? json["description"] as? String
+
+        if (title?.isEmpty ?? true), (link?.isEmpty ?? true), (snippet?.isEmpty ?? true) {
+            return nil
+        }
+    }
+}
+
+struct WebSearchDocument: Sendable, Hashable {
+    var content: String
+    var metadata: [String: String]
+
+    init(content: String, metadata: [String: String] = [:]) {
+        self.content = content
+        self.metadata = metadata
+    }
+
+    init?(json: [String: Any]) {
+        guard let content = json["content"] as? String,
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        self.content = content
+
+        var parsed: [String: String] = [:]
+        if let raw = json["metadata"] as? [String: Any] {
+            for (key, value) in raw {
+                if let string = value as? String, !string.isEmpty {
+                    parsed[key] = string
+                }
+            }
+        }
+        metadata = parsed
+    }
+
+    static func documents(fromQueryResponse json: [String: Any]) -> [WebSearchDocument] {
+        if let results = json["results"] as? [[String: Any]] {
+            let parsed = results.compactMap { entry -> WebSearchDocument? in
+                let document = entry["document"] as? String
+                    ?? entry["content"] as? String
+                    ?? entry["text"] as? String
+                guard let document,
+                      !document.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                return WebSearchDocument(
+                    content: document,
+                    metadata: stringMetadata(from: entry["metadata"] as? [String: Any])
+                )
+            }
+            if !parsed.isEmpty { return parsed }
+        }
+
+        let documents = flattenStrings(json["documents"])
+        let metadatas = flattenMetadata(json["metadatas"] ?? json["metadata"])
+        guard !documents.isEmpty else { return [] }
+
+        return documents.enumerated().map { index, content in
+            WebSearchDocument(
+                content: content,
+                metadata: index < metadatas.count ? metadatas[index] : [:]
+            )
+        }
+    }
+
+    private static func flattenStrings(_ value: Any?) -> [String] {
+        if let strings = value as? [String] { return strings }
+        if let nested = value as? [[String]] { return nested.flatMap { $0 } }
+        if let anyArray = value as? [Any] {
+            return anyArray.flatMap { item -> [String] in
+                if let string = item as? String { return [string] }
+                if let nested = item as? [String] { return nested }
+                if let nestedAny = item as? [Any] { return flattenStrings(nestedAny) }
+                return []
+            }
+        }
+        return []
+    }
+
+    private static func flattenMetadata(_ value: Any?) -> [[String: String]] {
+        if let metadata = value as? [[String: Any]] {
+            return metadata.map { stringMetadata(from: $0) }
+        }
+        if let nested = value as? [[[String: Any]]] {
+            return nested.flatMap { $0.map { stringMetadata(from: $0) } }
+        }
+        if let anyArray = value as? [Any] {
+            return anyArray.flatMap { item -> [[String: String]] in
+                if let dict = item as? [String: Any] { return [stringMetadata(from: dict)] }
+                if let nested = item as? [[String: Any]] { return nested.map { stringMetadata(from: $0) } }
+                return []
+            }
+        }
+        return []
+    }
+
+    private static func stringMetadata(from raw: [String: Any]?) -> [String: String] {
+        var metadata: [String: String] = [:]
+        for (key, value) in raw ?? [:] {
+            if let string = value as? String, !string.isEmpty {
+                metadata[key] = string
+            }
+        }
+        return metadata
+    }
+}
+
 /// Type-erased Codable wrapper for pass-through JSON values (supports nested arrays/dicts).
 /// Named `JSONAnyCodable` to avoid conflict with the simpler `AnyCodable` in AdminUser.swift.
 struct JSONAnyCodable: Codable, Sendable {

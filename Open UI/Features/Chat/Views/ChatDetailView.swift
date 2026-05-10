@@ -202,13 +202,10 @@ struct ChatDetailView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if editingMessageId != nil {
                 editInputBar
-                    .padding(.bottom, keyboard.height)
             } else {
                 inputFieldArea(vm: vm)
-                    .padding(.bottom, keyboard.height)
             }
         }
-        .ignoresSafeArea(.keyboard)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
         .task {
