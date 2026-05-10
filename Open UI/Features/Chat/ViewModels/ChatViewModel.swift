@@ -292,6 +292,7 @@ final class ChatViewModel {
 
     private func startRunLiveActivity(id: String, modelId: String, prompt: String) async {
         let kind = runLiveActivityKind(modelId: modelId, prompt: prompt)
+        guard kind != "chat" else { return }
         await RunLiveActivityService.shared.start(
             id: id,
             kind: kind,
@@ -319,8 +320,8 @@ final class ChatViewModel {
 
     private func runLiveActivityKind(modelId: String, prompt: String) -> String {
         if shouldUseDirectVideoGeneration(modelId: modelId) { return "video" }
-        if shouldUseDirectImageGeneration(modelId: modelId),
-           !shouldPreferChatNativeImageGeneration(modelId: modelId) {
+        if shouldUseDirectImageGeneration(modelId: modelId)
+            || shouldPreferChatNativeImageGeneration(modelId: modelId) {
             return "image"
         }
         return "chat"
@@ -1036,7 +1037,10 @@ final class ChatViewModel {
 
     private static func isRenderableImageReference(_ value: String?) -> Bool {
         guard let value, !value.isEmpty else { return false }
-        if value.hasPrefix("data:image/") || value.hasPrefix("http://") || value.hasPrefix("https://") {
+        if value.hasPrefix("data:image/")
+            || value.hasPrefix("file://")
+            || value.hasPrefix("http://")
+            || value.hasPrefix("https://") {
             return true
         }
         let lower = value.lowercased()
@@ -1050,6 +1054,7 @@ final class ChatViewModel {
         let localDisplayImages = local.filter { file in
             isImageFile(file)
                 && (file.displayURL?.hasPrefix("data:image/") == true
+                    || file.displayURL?.hasPrefix("file://") == true
                     || file.url?.hasPrefix("data:image/") == true)
         }
         guard !localDisplayImages.isEmpty else { return incoming }
@@ -1078,7 +1083,9 @@ final class ChatViewModel {
 
     private static func serverPersistableFiles(_ files: [ChatMessageFile]) -> [ChatMessageFile] {
         files.compactMap { file in
-            if isImageFile(file) && (file.url?.hasPrefix("data:image/") == true) {
+            if isImageFile(file)
+                && (file.url?.hasPrefix("data:image/") == true
+                    || file.url?.hasPrefix("file://") == true) {
                 return nil
             }
             var persistable = file
@@ -6494,7 +6501,9 @@ final class ChatViewModel {
     private static func imageData(fromDataURL dataURL: String) -> Data? {
         guard dataURL.hasPrefix("data:image/"),
               let comma = dataURL.firstIndex(of: ",") else { return nil }
-        return Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...]))
+        let base64 = String(dataURL[dataURL.index(after: comma)...])
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+        return Data(base64Encoded: base64)
     }
 
     private static func requestedImageSize(from prompt: String) -> String {
@@ -6660,9 +6669,25 @@ final class ChatViewModel {
 
     private func localDisplayImageReference(from imageReference: String, canvasSize: String? = nil) async -> String? {
         if imageReference.hasPrefix("data:image/") {
-            return Self.resizedImageDataURL(from: imageReference, canvasSize: canvasSize) ?? imageReference
+            let resized = Self.resizedImageDataURL(from: imageReference, canvasSize: canvasSize) ?? imageReference
+            return Self.writeGeneratedImageToCache(dataURL: resized)
         }
         return nil
+    }
+
+    private static func writeGeneratedImageToCache(dataURL: String) -> String? {
+        guard let data = imageData(fromDataURL: dataURL) else { return nil }
+        let baseDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let directory = baseDirectory.appendingPathComponent("iexa-generated-images", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let fileURL = directory.appendingPathComponent("\(UUID().uuidString).png")
+            try data.write(to: fileURL, options: [.atomic])
+            return fileURL.absoluteString
+        } catch {
+            return nil
+        }
     }
 
     private static func resizedImageDataURL(from dataURL: String, canvasSize: String?) -> String? {
@@ -6700,10 +6725,11 @@ final class ChatViewModel {
         displayReference: String
     ) {
         let contentType = Self.imageContentType(for: displayReference)
-        let fileName = Self.imageFileName(for: imageReference, contentType: contentType)
+        let safeURL = imageReference.hasPrefix("data:image/") ? displayReference : imageReference
+        let fileName = Self.imageFileName(for: displayReference, contentType: contentType)
         let file = ChatMessageFile(
             type: "image",
-            url: imageReference,
+            url: safeURL,
             name: fileName,
             contentType: contentType,
             displayURL: displayReference
@@ -7083,10 +7109,6 @@ final class ChatViewModel {
               !shouldUseDirectVideoGeneration(modelId: modelId) else {
             return
         }
-        guard let apiClient = manager?.apiClient,
-              apiClient.providerType == .iexa else {
-            return
-        }
         guard shouldResolveWebSearchContext(for: text) else { return }
 
         let query = webSearchQuery(from: text)
@@ -7112,7 +7134,7 @@ final class ChatViewModel {
             id: assistantMessageId,
             status: ChatStatusUpdate(
                 action: "web_search",
-                description: "正在规划搜索...",
+                description: "正在联网搜索...",
                 done: false,
                 query: query,
                 queries: [query]
@@ -7120,19 +7142,33 @@ final class ChatViewModel {
         )
 
         do {
-            let queries = await webSearchQueries(for: query, apiClient: apiClient, modelId: modelId)
+            let queries = [query]
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
                     action: "web_search",
-                    description: queries.count > 1 ? "正在搜索 \(queries.count) 个关键词..." : "正在联网搜索...",
+                    description: "正在联网搜索...",
                     done: false,
                     query: query,
                     queries: queries
                 )
             )
 
-            let result = try await apiClient.processWebSearch(queries: queries, originalQuery: query)
+            let result = try await ClientWebSearchService().search(queries: queries, originalQuery: query)
+            guard result.loadedCount > 0 || !result.items.isEmpty || !result.docs.isEmpty else {
+                appendStatusUpdate(
+                    id: assistantMessageId,
+                    status: ChatStatusUpdate(
+                        action: "web_search",
+                        description: "联网搜索没有返回结果，已按原问题发送",
+                        done: true,
+                        count: 0,
+                        query: query,
+                        queries: queries
+                    )
+                )
+                return
+            }
             let context = modelWebSearchContextPrompt(result: result, query: query, queries: queries)
             let sources = webSearchSources(from: result)
 
@@ -7361,7 +7397,7 @@ final class ChatViewModel {
         实际搜索词：
         \(queryLines)
 
-        以下结果由 Iexa 在发送本轮消息前通过后端联网搜索取得。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果，并在回答里引用来源链接。不要声称你无法联网。
+        以下结果由 Iexa 客户端在发送本轮消息前联网搜索取得。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果，并在回答里引用来源链接。不要声称你无法联网。
 
         \(blocks.joined(separator: "\n\n"))
         [/客户端联网搜索结果]
@@ -8519,15 +8555,17 @@ final class ChatViewModel {
         addMatches(#"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_-]{128,})""#)
 
         return results.compactMap { value -> String? in
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = value
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
             if trimmed.hasPrefix("data:image/") {
-                return trimmed
+                return writeGeneratedImageToCache(dataURL: trimmed)
             }
             if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
                 return (isLikelyImageURL(trimmed) || contextSuggestsImage) ? trimmed : nil
             }
             guard looksLikeBase64Image(trimmed) else { return nil }
-            return "data:image/png;base64,\(trimmed)"
+            return writeGeneratedImageToCache(dataURL: "data:image/png;base64,\(trimmed)")
         }
     }
 
@@ -8570,11 +8608,12 @@ final class ChatViewModel {
     private static func cleanedAssistantContentAfterImageExtraction(_ content: String) -> String {
         var cleaned = content
         let patterns = [
-            #"!\[[^\]]*\]\(\s*data:image/[^)\s]+\s*\)"#,
+            #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
+            #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
             #"!\[[^\]]*\]\(\s*https?://[^)\s]+\s*\)"#,
             #"<img[^>]+src=["']data:image/[^"']+["'][^>]*>"#,
             #"<img[^>]+src=["']https?://[^"']+["'][^>]*>"#,
-            #"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{128,}"#,
+            #"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,}"#,
             #"https?://assets\.grok\.com/[^\s"'<>]+"#,
             #"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"https?://[^"]+""#,
             #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"[A-Za-z0-9+/=_-]{128,}""#

@@ -1061,14 +1061,14 @@ enum ToolCallParser {
 
             // Strategy 2: Extract from JSON fields like "file_id", "id", "url",
             // "path", "src", or "source" that point at a generated file.
-            let jsonURLPattern = #"(?:"file_id"|"id"|"url"|"path"|"src"|"source")\s*:\s*"([^"]*(?:/api/v1/files/[^"/]+/content|/files/[^"/]+/content|data:image/[^"]+|[a-zA-Z0-9_\-]{12,})[^"]*)""#
+            let jsonURLPattern = #"(?:"file_id"|"id"|"url"|"path"|"src"|"source")\s*:\s*"([^"]*(?:/api/v1/files/[^"/]+/content|/files/[^"/]+/content|[a-zA-Z0-9_\-]{12,})[^"]*)""#
             if let jsonRegex = cachedRegex(jsonURLPattern) {
                 let nsResult = result as NSString
                 let matches = jsonRegex.matches(in: result, range: NSRange(location: 0, length: nsResult.length))
                 for match in matches where match.numberOfRanges > 1 {
                     let value = nsResult.substring(with: match.range(at: 1))
+                    if value.hasPrefix("data:image/") { continue }
                     let fileId: String = {
-                        if value.hasPrefix("data:image/") { return value }
                         if let fileId = extractFileId(from: value, pattern: #"/api/v1/files/([^/\s\"')]+)/content"#) {
                             return fileId
                         }
@@ -1083,7 +1083,7 @@ enum ToolCallParser {
                             type: "image",
                             url: fileId,
                             name: nil,
-                            contentType: fileId.hasPrefix("data:image/") ? "image/jpeg" : nil
+                            contentType: nil
                         ))
                     }
                 }
@@ -2840,16 +2840,17 @@ struct AssistantMessageContent: View {
     /// Returns a single `.text` segment if no server images are found, so the
     /// caller can short-circuit and render normally.
     static func splitInlineImages(_ text: String) -> [InlineImageSegment] {
+        let sanitizedText = sanitizedInlineImageText(text)
         // Match ![alt text](url) where url contains /api/v1/files/{uuid}/content
         // The URL may be relative (/api/...) or absolute (https://host/api/...)
-        let pattern = #"!\[([^\]]*)\]\(((?:https?://[^\s\)]+)?/api/(?:v1/)?files/([^/\)\s]+)/content|https?://[^\s\)]+|data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\r\n]{128,})\)"#
+        let pattern = #"!\[([^\]]*)\]\(((?:https?://[^\s\)]+)?/api/(?:v1/)?files/([^/\)\s]+)/content|https?://[^\s\)]+)\)"#
         guard let regex = ToolCallParser.cachedRegex(pattern, options: []) else {
-            return [.text(text)]
+            return [.text(sanitizedText)]
         }
 
-        let nsText = text as NSString
-        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
-        guard !matches.isEmpty else { return [.text(text)] }
+        let nsText = sanitizedText as NSString
+        let matches = regex.matches(in: sanitizedText, range: NSRange(location: 0, length: nsText.length))
+        guard !matches.isEmpty else { return [.text(sanitizedText)] }
 
         var segments: [InlineImageSegment] = []
         var currentIndex = 0
@@ -2872,6 +2873,7 @@ struct AssistantMessageContent: View {
                 let reference = fileIdRange.location != NSNotFound
                     ? nsText.substring(with: fileIdRange)
                     : rawURL
+                guard !reference.hasPrefix("data:image/") else { continue }
                 segments.append(.image(fileId: reference, altText: altText))
             }
 
@@ -2886,6 +2888,23 @@ struct AssistantMessageContent: View {
             }
         }
 
-        return segments.isEmpty ? [.text(text)] : segments
+        return segments.isEmpty ? [.text(sanitizedText)] : segments
+    }
+
+    private static func sanitizedInlineImageText(_ text: String) -> String {
+        var cleaned = text
+        let patterns = [
+            #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
+            #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
+            #"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,}"#
+        ]
+        for pattern in patterns {
+            cleaned = cleaned.replacingOccurrences(
+                of: pattern,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+        return cleaned
     }
 }

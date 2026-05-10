@@ -34,6 +34,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         config.delegateClass = ShortcutSceneDelegate.self
         return config
     }
+
+    func applicationWillTerminate(_ application: UIApplication) {
+        Task { @MainActor in
+            await RunLiveActivityService.shared.endAllActivities(detail: "已退出 Iexa")
+        }
+    }
 }
 
 /// Scene delegate that intercepts shortcut items on both cold and warm launch.
@@ -47,6 +53,12 @@ final class ShortcutSceneDelegate: UIResponder, UIWindowSceneDelegate {
     ) {
         if let shortcutItem = connectionOptions.shortcutItem {
             AppDelegate.pendingShortcutAction = shortcutItem.type
+        }
+    }
+
+    func sceneDidDisconnect(_ scene: UIScene) {
+        Task { @MainActor in
+            await RunLiveActivityService.shared.endAllActivities(detail: "已退出 Iexa")
         }
     }
 
@@ -157,6 +169,12 @@ struct Open_UIApp: App {
                         // Cleans orphaned temp files, prunes upload cache, evicts
                         // oversized image cache. Zero user intervention needed.
                         StorageManager.shared.performRoutineCleanup()
+
+                        if newPhase == .background {
+                            Task { @MainActor in
+                                await RunLiveActivityService.shared.endAllActivities(detail: "已离开 Iexa")
+                            }
+                        }
                     }
                 }
                 .task {

@@ -130,9 +130,12 @@ struct StreamingMarkdownView: View {
     /// placeholder. This fixes the visible flash where the prose text disappeared
     /// during VIZ streaming and only reappeared once the stream finished.
     private func resolveSegments() -> [ContentSegment] {
+        let renderContent = Self.sanitizedMarkdownTextForDisplay(content)
+        guard !renderContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+
         if isStreaming {
             // ── VIZ marker path ───────────────────────────────────────────────
-            let vizState = VizMarkerParser.streamingParse(content)
+            let vizState = VizMarkerParser.streamingParse(renderContent)
             switch vizState {
             case .noMarkers:
                 break   // fall through to streaming code-block detection below
@@ -142,12 +145,12 @@ struct StreamingMarkdownView: View {
                 return [.markdown(proseBeforeMarker), .visualization(vizContent)]
 
             case .complete:
-                let preViz = extractPreVizText(content)
-                let postViz = extractPostVizText(content)
+                let preViz = extractPreVizText(renderContent)
+                let postViz = extractPostVizText(renderContent)
                 let _ = vizLog.debug("StreamingMarkdownView: .complete during streaming — preVizLen=\(preViz.count), postVizLen=\(postViz.count)")
                 var result: [ContentSegment] = []
                 result.append(.markdown(preViz))
-                let vizContent = extractVizContent(content)
+                let vizContent = extractVizContent(renderContent)
                 result.append(.visualization(vizContent))
                 if !postViz.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     result.append(.markdown(postViz))
@@ -162,7 +165,7 @@ struct StreamingMarkdownView: View {
             // parseCodeBlocks — it only fires when isStreaming=true and the block
             // is incomplete. Once the closing ``` arrives, resolveSegments() falls
             // through to parseSpecialBlocks() which handles the complete block.
-            if let streamingSeg = resolveStreamingCodeBlock(content) {
+            if let streamingSeg = resolveStreamingCodeBlock(renderContent) {
                 return streamingSeg
             }
 
@@ -170,10 +173,10 @@ struct StreamingMarkdownView: View {
             // (opening AND closing fence both arrived) while post-block prose is still
             // streaming. Use parseSpecialBlocks so HTML/SVG/chart blocks already closed
             // render as previews instead of flashing to raw code text until streaming ends.
-            return parseSpecialBlocks(content)
+            return parseSpecialBlocks(renderContent)
 
         } else {
-            return parseSpecialBlocks(content)
+            return parseSpecialBlocks(renderContent)
         }
     }
 
@@ -381,21 +384,28 @@ struct StreamingMarkdownView: View {
 
     private static let directDataImagePattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\r\n]{128,})"#,
+            pattern: #"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,})"#,
             options: [.caseInsensitive]
         )
     }()
 
     private static let dataImageMarkdownPattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"!\[[^\]]*\]\(\s*data:image/[^)\s]+(?:\s+[^)]*)?\)"#,
+            pattern: #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
             options: [.caseInsensitive]
         )
     }()
 
     private static let partialDataImageMarkdownPattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\r\n]{48,}"#,
+            pattern: #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static let partialMarkdownImagePattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"!\[[^\]]*\]\([^)]*$"#,
             options: [.caseInsensitive]
         )
     }()
@@ -486,11 +496,14 @@ struct StreamingMarkdownView: View {
 
     private static func makeImageURL(from raw: String) -> URL? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= 20_000,
+              !trimmed.contains("\n"),
+              !trimmed.contains("\r") else { return nil }
         if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
             return URL(string: trimmed)
         }
         if trimmed.hasPrefix("data:image/") {
-            return URL(string: normalizedDataImageReference(trimmed))
+            return nil
         }
         return nil
     }
@@ -511,6 +524,15 @@ struct StreamingMarkdownView: View {
             )
         }
         if let pattern = partialDataImageMarkdownPattern {
+            cleaned = pattern.stringByReplacingMatches(
+                in: cleaned,
+                options: [],
+                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                withTemplate: ""
+            )
+        }
+        if let pattern = partialMarkdownImagePattern,
+           cleaned.lowercased().contains("data:image/") {
             cleaned = pattern.stringByReplacingMatches(
                 in: cleaned,
                 options: [],

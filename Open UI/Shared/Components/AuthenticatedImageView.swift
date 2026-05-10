@@ -189,6 +189,29 @@ struct AuthenticatedImageView: View {
             return
         }
 
+        if let localURL = Self.localImageURL(from: fileId) {
+            if let cached = Self.imageCache.object(forKey: fileId as NSString) {
+                loadedImage = cached
+                isLoading = false
+                hasError = false
+                return
+            }
+            do {
+                let data = try Data(contentsOf: localURL)
+                if let image = UIImage(data: data) {
+                    Self.imageCache.setObject(image, forKey: fileId as NSString, cost: data.count)
+                    loadedImage = image
+                    isLoading = false
+                    hasError = false
+                    return
+                }
+            } catch {
+                hasError = true
+                isLoading = false
+                return
+            }
+        }
+
         if let remoteURL = Self.remoteImageURL(from: fileId) {
             if loadedImage == nil {
                 isLoading = true
@@ -270,12 +293,19 @@ struct AuthenticatedImageView: View {
 
     private static func inlineDataImage(from dataURL: String) -> UIImage? {
         guard dataURL.hasPrefix("data:image/"),
+              dataURL.count <= 220_000,
               let comma = dataURL.firstIndex(of: ",") else { return nil }
         let base64 = String(dataURL[dataURL.index(after: comma)...])
         guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else {
             return nil
         }
+        guard data.count <= 160_000 else { return nil }
         return UIImage(data: data)
+    }
+
+    private static func localImageURL(from value: String) -> URL? {
+        guard value.hasPrefix("file://") else { return nil }
+        return URL(string: value)
     }
 
     private static func remoteImageURL(from value: String) -> URL? {

@@ -150,6 +150,35 @@ final class RunLiveActivityService {
         lastState = nil
     }
 
+    func endAllActivities(detail: String = "已离开 Iexa") async {
+        let state = IexaRunActivityAttributes.ContentState(
+            title: "Iexa",
+            detail: trimmed(detail, max: 46),
+            phase: "结束",
+            progress: 0.98,
+            isIndeterminate: false,
+            startedAt: startedAt
+        )
+
+        if let activity {
+            await activity.end(
+                ActivityContent(state: state, staleDate: nil),
+                dismissalPolicy: .immediate
+            )
+        }
+
+        for existing in Activity<IexaRunActivityAttributes>.activities {
+            await existing.end(
+                ActivityContent(state: state, staleDate: nil),
+                dismissalPolicy: .immediate
+            )
+        }
+
+        activity = nil
+        activeRunId = nil
+        lastState = nil
+    }
+
     private func makeState(
         title: String,
         detail: String,
