@@ -174,8 +174,8 @@ struct StreamingMarkdownView: View {
         }
     }
 
-    /// Detects an incomplete (unclosed) ` ```html ` or ` ```svg ` code block
-    /// in `text` during streaming and returns a segment list with a live preview.
+    /// Detects an incomplete (unclosed) special code block in `text` during
+    /// streaming and returns a segment list with a lightweight native preview.
     ///
     /// Returns `nil` when no incomplete special block is found, letting the caller
     /// fall back to plain markdown rendering.
@@ -210,7 +210,25 @@ struct StreamingMarkdownView: View {
             }
             return result.isEmpty ? nil : result
         }
-        return nil
+
+        guard let openRange = text.range(of: "```", options: .backwards) else { return nil }
+        let afterOpen = text[openRange.upperBound...]
+        guard afterOpen.range(of: "\n```") == nil,
+              let newlineIdx = afterOpen.firstIndex(of: "\n") else { return nil }
+
+        let lang = afterOpen[afterOpen.startIndex..<newlineIdx]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let partialContent = String(afterOpen[afterOpen.index(after: newlineIdx)...])
+        guard shouldRenderCompactCodeModule(language: lang, code: partialContent) else { return nil }
+
+        let before = String(text[text.startIndex..<openRange.lowerBound])
+        var result: [ContentSegment] = []
+        if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            result.append(.markdown(before))
+        }
+        result.append(.codeModule(language: lang, code: partialContent))
+        return result
     }
 
     /// Extracts the text that appears before `@@@VIZ-START` in the content.
@@ -275,6 +293,8 @@ struct StreamingMarkdownView: View {
             SVGPreviewView(code: code, isStreaming: streaming)
         case .python(let code):
             PythonCodeBlockView(code: code)
+        case .codeModule(let language, let code):
+            CompactCodeModuleView(code: code, language: language)
         case .markdownImage(let imageURL, let altText, let linkURL):
             MarkdownInlineImageView(
                 imageURL: imageURL,
@@ -314,6 +334,7 @@ struct StreamingMarkdownView: View {
         /// `isStreaming` — true while the closing ``` fence has not yet arrived.
         case svg(String, isStreaming: Bool)
         case python(String)
+        case codeModule(language: String, code: String)
         case markdownImage(imageURL: URL, altText: String, linkURL: URL?)
         case visualization(String)
     }
@@ -463,6 +484,12 @@ struct StreamingMarkdownView: View {
             return result.isEmpty ? [.markdown(text)] : result
         }
 
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if shouldRenderCompactCodeModule(language: "json", code: trimmed),
+           looksLikeStandaloneJSON(trimmed) {
+            return [.codeModule(language: "json", code: trimmed)]
+        }
+
         // 1) Extract markdown images first, splitting the text around them.
         //    This runs before code-block detection so images inside prose are found.
         var images = findMarkdownImages(in: text)
@@ -551,13 +578,15 @@ struct StreamingMarkdownView: View {
             let isMermaid = lang == "mermaid" && codeContent.trimmingCharacters(in: .whitespacesAndNewlines).count >= 5
             let isSVG = lang == "svg" && looksLikeSVG(codeContent)
             let isPython = pythonLanguageTags.contains(lang) && codeContent.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
+            let isCompactModule = shouldRenderCompactCodeModule(language: lang, code: codeContent)
 
-            if isChart || isHTML || isLinkedWebAsset || isMermaid || isSVG || isPython {
+            if isChart || isHTML || isLinkedWebAsset || isMermaid || isSVG || isPython || isCompactModule {
                 let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
                 if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     units.append(.markdown(preceding))
                 }
                 if isChart { units.append(.segment(.chart(codeContent))) }
+                else if isCompactModule { units.append(.segment(.codeModule(language: lang, code: codeContent))) }
                 else if isMermaid { units.append(.segment(.mermaid(codeContent))) }
                 else if isSVG { units.append(.segment(.svg(codeContent, isStreaming: false))) }
                 else if isPython { units.append(.segment(.python(codeContent))) }
@@ -694,6 +723,32 @@ struct StreamingMarkdownView: View {
                 || t.contains("\"labels\"") || t.contains("\"type\""))
     }
 
+    private func looksLikeStandaloneJSON(_ code: String) -> Bool {
+        let t = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (t.hasPrefix("{") && t.hasSuffix("}"))
+            || (t.hasPrefix("[") && t.hasSuffix("]"))
+    }
+
+    private func shouldRenderCompactCodeModule(language: String, code: String) -> Bool {
+        let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.contains("iexa_workspace")
+            || normalized.contains("iexa_alpine")
+            || code.contains("\"iexa_workspace\"")
+            || code.contains("\"iexa_alpine\"") {
+            return true
+        }
+
+        let compactLanguages: Set<String> = [
+            "json", "jsonc", "text", "txt", "log", "output", "stdout", "stderr"
+        ]
+        guard compactLanguages.contains(normalized) else { return false }
+
+        let lineCount = code.reduce(1) { count, character in
+            character == "\n" ? count + 1 : count
+        }
+        return code.count > 900 || lineCount > 18
+    }
+
     private func looksLikeSVG(_ code: String) -> Bool {
         let t = code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return t.hasPrefix("<svg") || t.contains("<svg ")
@@ -703,6 +758,262 @@ struct StreamingMarkdownView: View {
     private func tryParseChart(code: String) -> USpec? {
         guard let data = code.data(using: .utf8) else { return nil }
         return try? parseUSpec(from: data)
+    }
+}
+
+// MARK: - Compact Code Module
+
+private struct CompactCodeModuleView: View {
+    let code: String
+    let language: String
+
+    @Environment(\.theme) private var theme
+    @State private var isExpanded = false
+    @State private var didCopy = false
+
+    private let collapsedPreviewLineLimit = 6
+    private let expandedLineLimit = 420
+    private let expandedCharacterLimit = 12_000
+
+    private var normalizedLanguage: String {
+        let value = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return value.isEmpty ? "text" : value
+    }
+
+    private var lineCount: Int {
+        code.reduce(1) { count, character in
+            character == "\n" ? count + 1 : count
+        }
+    }
+
+    private var moduleTitle: String {
+        if isWorkspaceModule { return "项目写入模块" }
+        if isAlpineModule { return "本地执行模块" }
+        if normalizedLanguage == "json" || normalizedLanguage == "jsonc" { return "JSON 数据模块" }
+        return "执行输出模块"
+    }
+
+    private var moduleIcon: String {
+        if isWorkspaceModule { return "folder.fill" }
+        if isAlpineModule { return "terminal.fill" }
+        if normalizedLanguage == "json" || normalizedLanguage == "jsonc" { return "curlybraces" }
+        return "doc.text.fill"
+    }
+
+    private var moduleSubtitle: String {
+        let byteCount = code.utf8.count
+        if isWorkspaceModule, !workspacePaths.isEmpty {
+            return "\(workspacePaths.count) 个文件 · \(lineCount) 行 · 默认折叠"
+        }
+        return "\(lineCount) 行 · \(byteCount.formatted()) B · 默认折叠"
+    }
+
+    private var isWorkspaceModule: Bool {
+        normalizedLanguage.contains("iexa_workspace") || code.contains("\"iexa_workspace\"")
+    }
+
+    private var isAlpineModule: Bool {
+        normalizedLanguage.contains("iexa_alpine") || code.contains("\"iexa_alpine\"")
+    }
+
+    private var workspacePaths: [String] {
+        guard let object = parsedJSONObject else { return [] }
+        return Array(collectPaths(from: object).prefix(8))
+    }
+
+    private var commandRows: [String] {
+        guard isAlpineModule, let object = parsedJSONObject else { return [] }
+        return Array(collectCommands(from: object).prefix(6))
+    }
+
+    private var parsedJSONObject: Any? {
+        guard let data = code.data(using: .utf8) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data, options: [])
+    }
+
+    private var previewLines: [String] {
+        let source = isExpanded ? visibleExpandedCode : code
+        let limit = isExpanded ? expandedLineLimit : collapsedPreviewLineLimit
+        return Array(source.components(separatedBy: "\n").prefix(limit))
+    }
+
+    private var visibleExpandedCode: String {
+        guard code.count > expandedCharacterLimit else { return code }
+        return String(code.prefix(expandedCharacterLimit))
+    }
+
+    private var isExpandedCodeTruncated: Bool {
+        code.count > expandedCharacterLimit || lineCount > expandedLineLimit
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(theme.brandPrimary.opacity(theme.isDark ? 0.16 : 0.10))
+                        .frame(width: 34, height: 34)
+
+                    Image(systemName: moduleIcon)
+                        .scaledFont(size: 14, weight: .semibold)
+                        .foregroundStyle(theme.brandPrimary)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(moduleTitle)
+                        .scaledFont(size: 14, weight: .semibold)
+                        .foregroundStyle(theme.textPrimary)
+                    Text(moduleSubtitle)
+                        .scaledFont(size: 11, weight: .medium)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                Button {
+                    UIPasteboard.general.string = code
+                    Haptics.notify(.success)
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                        didCopy = true
+                    }
+                    Task {
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        await MainActor.run {
+                            withAnimation(.spring(response: 0.24, dampingFraction: 0.85)) {
+                                didCopy = false
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                        .scaledFont(size: 13, weight: .semibold)
+                        .foregroundStyle(didCopy ? theme.success : theme.textSecondary)
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    withAnimation(MicroAnimation.snappy) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .scaledFont(size: 12, weight: .semibold)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if !isExpanded, !workspacePaths.isEmpty {
+                moduleRows(workspacePaths, icon: "doc.text")
+            } else if !isExpanded, !commandRows.isEmpty {
+                moduleRows(commandRows, icon: "terminal")
+            } else {
+                codePreview
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.92))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.55 : 0.75), lineWidth: 0.8)
+        )
+        .shadow(color: .black.opacity(theme.isDark ? 0.16 : 0.05), radius: 10, x: 0, y: 5)
+    }
+
+    private var codePreview: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView(.vertical, showsIndicators: isExpanded) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(previewLines.enumerated()), id: \.offset) { _, line in
+                        Text(line.isEmpty ? " " : line)
+                            .scaledFont(size: 12, design: .monospaced)
+                            .foregroundStyle(theme.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                    if isExpanded && isExpandedCodeTruncated {
+                        Text("... 内联预览已截断，复制按钮会复制完整内容")
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                            .padding(.top, 6)
+                    }
+                }
+                .padding(10)
+            }
+            .frame(maxHeight: isExpanded ? 260 : 118)
+        }
+        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.34 : 0.56))
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    private func moduleRows(_ rows: [String], icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: 7) {
+                    Image(systemName: icon)
+                        .scaledFont(size: 11, weight: .semibold)
+                        .foregroundStyle(theme.brandPrimary)
+                        .frame(width: 14)
+                    Text(row)
+                        .scaledFont(size: 12, weight: .medium, design: .monospaced)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+            }
+            if (isWorkspaceModule && workspacePaths.count >= 8) || (isAlpineModule && commandRows.count >= 6) {
+                Text("展开可查看模块源码，复制按钮保留完整内容")
+                    .scaledFont(size: 11, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+            }
+        }
+        .padding(10)
+        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.34 : 0.56))
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    private func collectPaths(from object: Any) -> [String] {
+        if let array = object as? [Any] {
+            return array.flatMap { collectPaths(from: $0) }
+        }
+        guard let dict = object as? [String: Any] else { return [] }
+
+        if let nested = dict["iexa_workspace"] ?? dict["operations"] ?? dict["files"] {
+            return collectPaths(from: nested)
+        }
+        if let path = (dict["path"] as? String)
+            ?? (dict["file"] as? String)
+            ?? (dict["folder"] as? String)
+            ?? (dict["name"] as? String) {
+            return [path]
+        }
+        return []
+    }
+
+    private func collectCommands(from object: Any) -> [String] {
+        if let array = object as? [Any] {
+            return array.flatMap { collectCommands(from: $0) }
+        }
+        if let command = object as? String {
+            return [command.replacingOccurrences(of: "\n", with: " && ")]
+        }
+        guard let dict = object as? [String: Any] else { return [] }
+
+        if let nested = dict["iexa_alpine"] ?? dict["commands"] {
+            return collectCommands(from: nested)
+        }
+        if let command = (dict["command"] as? String) ?? (dict["cmd"] as? String) {
+            return [command.replacingOccurrences(of: "\n", with: " && ")]
+        }
+        return []
     }
 }
 

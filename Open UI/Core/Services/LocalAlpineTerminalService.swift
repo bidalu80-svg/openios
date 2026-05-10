@@ -14,6 +14,12 @@ struct LocalAlpineCommandResult: Sendable {
     let exitCode: Int?
 }
 
+private struct AlpinePackageRequirement {
+    let checkCommand: String
+    let packages: [String]
+    let markers: [String]
+}
+
 actor LocalAlpineTerminalService {
     static let shared = LocalAlpineTerminalService()
 
@@ -130,6 +136,7 @@ actor LocalAlpineTerminalService {
         let runtimeRootFSURL: URL
         do {
             runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
+            try ensureResolverConfiguration(in: runtimeRootFSURL)
         } catch {
             return LocalAlpineCommandResult(
                 command: trimmed,
@@ -139,14 +146,19 @@ actor LocalAlpineTerminalService {
         }
 
         let runtimeCWD = normalizedRuntimePath(cwd)
-        return await LocalAlpineNativeRuntime.shared.execute(
+        let runtimeCommand = compatibilityCommand(for: trimmed)
+        let result = await LocalAlpineNativeRuntime.shared.execute(
             LocalAlpineNativeCommand(
-                command: trimmed,
+                command: runtimeCommand,
                 cwd: runtimeCWD,
                 rootArchiveURL: runtimeRootFSURL,
                 workspaceURL: workspaceURL
             )
         )
+        if runtimeCommand == trimmed {
+            return result
+        }
+        return LocalAlpineCommandResult(command: trimmed, output: result.output, exitCode: result.exitCode)
     }
 
     private func bundledRootFSURL() -> URL? {
@@ -195,6 +207,28 @@ actor LocalAlpineTerminalService {
         return writableURL.standardizedFileURL
     }
 
+    private func ensureResolverConfiguration(in runtimeRootFSURL: URL) throws {
+        guard runtimeRootFSURL.pathExtension == "fakefs" else { return }
+
+        let dataURL = runtimeRootFSURL.appendingPathComponent("data", isDirectory: true)
+        let etcURL = dataURL.appendingPathComponent("etc", isDirectory: true)
+        let resolvURL = etcURL.appendingPathComponent("resolv.conf")
+        let resolver = """
+        nameserver 1.1.1.1
+        nameserver 8.8.8.8
+        options timeout:2 attempts:2
+
+        """
+
+        if let existing = try? String(contentsOf: resolvURL, encoding: .utf8),
+           existing.contains("nameserver") {
+            return
+        }
+
+        try fileManager.createDirectory(at: etcURL, withIntermediateDirectories: true)
+        try resolver.write(to: resolvURL, atomically: true, encoding: .utf8)
+    }
+
     private func resolve(path rawPath: String, root: URL, allowRoot: Bool) throws -> URL {
         let normalized = normalizedTerminalPath(rawPath)
         if normalized == "/" {
@@ -237,6 +271,133 @@ actor LocalAlpineTerminalService {
     private func normalizedRuntimePath(_ rawPath: String) -> String {
         let hostPath = normalizedTerminalPath(rawPath)
         return hostPath == "/" ? "/mnt/iexa" : "/mnt/iexa\(hostPath)"
+    }
+
+    private func compatibilityCommand(for command: String) -> String {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = trimmed.lowercased()
+
+        if lowercased.hasPrefix("curl ") {
+            let rest = trimmed.dropFirst("curl ".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !rest.isEmpty,
+                  rest.range(of: #"[;&|`$<>(){}]"#, options: .regularExpression) == nil else {
+                return command
+            }
+
+            let passthroughOptions: Set<String> = ["-s", "-S", "-sS", "-L"]
+            let parts = rest.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            let unsupportedOption = parts.dropLast().contains { $0.hasPrefix("-") && !passthroughOptions.contains($0) }
+            guard !unsupportedOption, let url = parts.last, !url.hasPrefix("-") else { return command }
+
+            let escapedURL = shellSingleQuoted(url)
+            return """
+            if command -v curl >/dev/null 2>&1; then
+              \(command)
+            else
+              wget -qO- \(escapedURL)
+            fi
+            """
+        }
+
+        let rewritten = rewriteApkNodeAlias(in: command)
+        if shouldBypassAutoDependencyRepair(rewritten) {
+            return rewritten
+        }
+        return commandWithAutoDependencyRepair(rewritten)
+    }
+
+    private func shouldBypassAutoDependencyRepair(_ command: String) -> Bool {
+        let lowercased = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lowercased.contains("apk add ")
+            || lowercased.contains("apk upgrade")
+            || lowercased.contains("apk fix")
+    }
+
+    private func commandWithAutoDependencyRepair(_ command: String) -> String {
+        let requirements = inferredPackageRequirements(for: command)
+        guard !requirements.isEmpty else {
+            return command
+        }
+
+        let installLines = requirements.map { requirement in
+            """
+            if ! command -v \(requirement.checkCommand) >/dev/null 2>&1; then
+              IEXA_MISSING="$IEXA_MISSING \(requirement.packages.joined(separator: " "))"
+            fi
+            """
+        }.joined(separator: "\n")
+
+        return """
+        IEXA_MISSING=""
+        \(installLines)
+        if [ -n "$IEXA_MISSING" ]; then
+          echo "[Iexa] Installing missing Alpine packages:$IEXA_MISSING"
+          apk update
+          apk add --no-cache $IEXA_MISSING
+        fi
+        \(command)
+        """
+    }
+
+    private func inferredPackageRequirements(for command: String) -> [AlpinePackageRequirement] {
+        let lowercased = command.lowercased()
+        let candidates: [AlpinePackageRequirement] = [
+            .init(checkCommand: "python3", packages: ["python3", "py3-pip"], markers: ["python3", "python ", ".py", "pip "]),
+            .init(checkCommand: "pip3", packages: ["py3-pip"], markers: ["pip3", "pip "]),
+            .init(checkCommand: "node", packages: ["nodejs", "npm"], markers: ["node ", "node\n", "npm ", ".js"]),
+            .init(checkCommand: "npm", packages: ["npm"], markers: ["npm "]),
+            .init(checkCommand: "gcc", packages: ["build-base"], markers: ["gcc", "g++", " cc ", "make ", "cmake", ".c ", ".cpp"]),
+            .init(checkCommand: "vim", packages: ["vim"], markers: ["vim ", "vi "]),
+            .init(checkCommand: "curl", packages: ["curl"], markers: ["curl "]),
+            .init(checkCommand: "git", packages: ["git"], markers: ["git "]),
+            .init(checkCommand: "bash", packages: ["bash"], markers: ["bash "])
+        ]
+
+        var seenChecks: Set<String> = []
+        var result: [AlpinePackageRequirement] = []
+        for candidate in candidates where candidate.markers.contains(where: { lowercased.contains($0) }) {
+            if seenChecks.insert(candidate.checkCommand).inserted {
+                result.append(candidate)
+            }
+        }
+        return result
+    }
+
+    private func rewriteApkNodeAlias(in command: String) -> String {
+        let rewrittenLines = command.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+            rewriteApkNodeAliasLine(String(line))
+        }
+        let rewritten = rewrittenLines.joined(separator: "\n")
+        return rewritten == command ? command : rewritten
+    }
+
+    private func rewriteApkNodeAliasLine(_ line: String) -> String {
+        let leadingWhitespace = line.prefix { $0 == " " || $0 == "\t" }
+        let command = line.dropFirst(leadingWhitespace.count)
+        let lowercased = command.lowercased()
+        guard lowercased.hasPrefix("apk add ") else { return line }
+
+        let commandBody = String(command)
+        let tokens = commandBody.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        guard tokens.count >= 3, tokens[0] == "apk", tokens[1] == "add" else { return line }
+
+        var rewritten: [String] = [tokens[0], tokens[1]]
+        var changed = false
+        for token in tokens.dropFirst(2) {
+            if token == "node" {
+                rewritten.append("nodejs")
+                rewritten.append("npm")
+                changed = true
+            } else {
+                rewritten.append(token)
+            }
+        }
+
+        return changed ? String(leadingWhitespace) + rewritten.joined(separator: " ") : line
+    }
+
+    private func shellSingleQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private func sanitizedFileName(_ rawName: String) throws -> String {

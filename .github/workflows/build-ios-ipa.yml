@@ -21,6 +21,8 @@ jobs:
       IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
       IOS_SIGNING_IDENTITY: ${{ secrets.IOS_SIGNING_IDENTITY }}
       IOS_PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.IOS_PROVISIONING_PROFILE_SPECIFIER }}
+      IOS_WIDGET_PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.IOS_WIDGET_PROVISIONING_PROFILE_SPECIFIER }}
+      IOS_WIDGET_MOBILEPROVISION_BASE64: ${{ secrets.IOS_WIDGET_MOBILEPROVISION_BASE64 }}
       IOS_BUNDLE_ID: ${{ secrets.IOS_BUNDLE_ID }}
       IOS_WIDGET_BUNDLE_ID: ${{ secrets.IOS_WIDGET_BUNDLE_ID }}
       IOS_EXPORT_METHOD: ${{ secrets.IOS_EXPORT_METHOD }}
@@ -44,6 +46,8 @@ jobs:
           IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
           IOS_SIGNING_IDENTITY: ${{ secrets.IOS_SIGNING_IDENTITY }}
           IOS_PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.IOS_PROVISIONING_PROFILE_SPECIFIER }}
+          IOS_WIDGET_MOBILEPROVISION_BASE64: ${{ secrets.IOS_WIDGET_MOBILEPROVISION_BASE64 }}
+          IOS_WIDGET_PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.IOS_WIDGET_PROVISIONING_PROFILE_SPECIFIER }}
         run: |
           set -euo pipefail
           missing=0
@@ -60,18 +64,30 @@ jobs:
             echo "Signing secrets incomplete; workflow will build an unsigned IPA artifact instead."
           fi
 
+          if [ -n "${IOS_WIDGET_MOBILEPROVISION_BASE64:-}" ] && [ -n "${IOS_WIDGET_PROVISIONING_PROFILE_SPECIFIER:-}" ]; then
+            echo "HAS_WIDGET_SIGNING=true" >> "$GITHUB_ENV"
+          else
+            echo "HAS_WIDGET_SIGNING=false" >> "$GITHUB_ENV"
+            echo "::warning::Missing widget extension signing profile; Live Activity extension will be omitted from installable CI IPA."
+          fi
+
       - name: Decode signing assets
         if: env.HAS_SIGNING_SECRETS == 'true'
         env:
           IOS_P12_BASE64: ${{ secrets.IOS_P12_BASE64 }}
           IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
           IOS_MOBILEPROVISION_BASE64: ${{ secrets.IOS_MOBILEPROVISION_BASE64 }}
+          IOS_WIDGET_MOBILEPROVISION_BASE64: ${{ secrets.IOS_WIDGET_MOBILEPROVISION_BASE64 }}
         run: |
           mkdir -p "$RUNNER_TEMP/signing"
           echo "$IOS_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/signing/certificate.p12"
           echo "$IOS_MOBILEPROVISION_BASE64" | base64 --decode > "$RUNNER_TEMP/signing/profile.mobileprovision"
           echo "P12_PATH=$RUNNER_TEMP/signing/certificate.p12" >> "$GITHUB_ENV"
           echo "PROFILE_PATH=$RUNNER_TEMP/signing/profile.mobileprovision" >> "$GITHUB_ENV"
+          if [ -n "${IOS_WIDGET_MOBILEPROVISION_BASE64:-}" ]; then
+            echo "$IOS_WIDGET_MOBILEPROVISION_BASE64" | base64 --decode > "$RUNNER_TEMP/signing/widget-profile.mobileprovision"
+            echo "WIDGET_PROFILE_PATH=$RUNNER_TEMP/signing/widget-profile.mobileprovision" >> "$GITHUB_ENV"
+          fi
           echo "P12_PASSWORD=$IOS_P12_PASSWORD" >> "$GITHUB_ENV"
           echo "KEYCHAIN_PASSWORD=$(openssl rand -base64 24)" >> "$GITHUB_ENV"
 
@@ -90,10 +106,23 @@ jobs:
         if: env.HAS_SIGNING_SECRETS == 'true'
         run: |
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          PROFILE_PLIST="$(security cms -D -i "$PROFILE_PATH")"
-          UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$PROFILE_PLIST")
-          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
-          echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
+          install_profile() {
+            local source_path="$1"
+            local env_name="$2"
+            local profile_plist
+            local uuid
+
+            profile_plist="$(security cms -D -i "$source_path")"
+            uuid=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$profile_plist")
+            cp "$source_path" "$HOME/Library/MobileDevice/Provisioning Profiles/$uuid.mobileprovision"
+            echo "$env_name=$uuid" >> "$GITHUB_ENV"
+            printf '%s' "$profile_plist"
+          }
+
+          PROFILE_PLIST="$(install_profile "$PROFILE_PATH" PROFILE_UUID)"
+          if [ -n "${WIDGET_PROFILE_PATH:-}" ]; then
+            install_profile "$WIDGET_PROFILE_PATH" WIDGET_PROFILE_UUID >/dev/null
+          fi
 
           if [ -z "${IOS_EXPORT_METHOD:-}" ]; then
             GET_TASK_ALLOW=$(/usr/libexec/PlistBuddy -c 'Print Entitlements:get-task-allow' /dev/stdin <<< "$PROFILE_PLIST" 2>/dev/null || echo "false")
@@ -123,6 +152,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import os
+          import re
           from pathlib import Path
 
           app_bundle_id = os.environ.get('IOS_BUNDLE_ID') or 'com.openui.openui'
@@ -130,7 +160,9 @@ jobs:
           team_id = os.environ.get('IOS_TEAM_ID', '')
           identity = os.environ.get('IOS_SIGNING_IDENTITY', '')
           profile = os.environ.get('IOS_PROVISIONING_PROFILE_SPECIFIER', '')
+          widget_profile = os.environ.get('IOS_WIDGET_PROVISIONING_PROFILE_SPECIFIER', '')
           has_signing = os.environ.get('HAS_SIGNING_SECRETS') == 'true'
+          has_widget_signing = os.environ.get('HAS_WIDGET_SIGNING') == 'true'
 
           p = Path('Open UI.xcodeproj/project.pbxproj')
           s = p.read_text()
@@ -140,12 +172,18 @@ jobs:
           s = s.replace('CODE_SIGN_ENTITLEMENTS = "Open UI/Open UI.entitlements";', 'CODE_SIGN_ENTITLEMENTS = "";')
           s = s.replace('CODE_SIGN_ENTITLEMENTS = OpenUIWidgets/OpenUIWidgets.entitlements;', 'CODE_SIGN_ENTITLEMENTS = "";')
 
-          # Remove the widget target/embed completely in CI because the supplied
-          # profile does not include the required App Groups capability.
-          s = s.replace('\t\t\t\t\t38A141942F4B9A1A00697C6F /* Embed Foundation Extensions */,\n', '')
-          s = s.replace('\t\t\t\t\t3852C7212F71110900283682 /* PBXTargetDependency */,\n', '')
-          s = s.replace('\t\t\t\t\t3852C70B2F71110800283682 /* OpenUIWidgetsExtension */,\n', '')
-          s = s.replace('\t\t\t\t\t3852C70C2F71110800283682 /* OpenUIWidgetsExtension.appex */,\n', '')
+          # A Live Activity/Dynamic Island widget is a separate extension and
+          # must be signed with a matching extension provisioning profile. If CI
+          # only has the main app profile, omit the extension instead of
+          # producing an IPA that iOS refuses to install.
+          if not has_widget_signing:
+              for object_id, label in [
+                  ('38A141942F4B9A1A00697C6F', 'Embed Foundation Extensions'),
+                  ('3852C7212F71110900283682', 'PBXTargetDependency'),
+                  ('3852C70B2F71110800283682', 'OpenUIWidgetsExtension'),
+                  ('3852C70C2F71110800283682', 'OpenUIWidgetsExtension.appex'),
+              ]:
+                  s = re.sub(rf'\n\t+{object_id} /\* {re.escape(label)} \*/,', '', s)
 
           s = s.replace('PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.OpenUIWidget;', f'PRODUCT_BUNDLE_IDENTIFIER = {widget_bundle_id};')
           s = s.replace('PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui;', f'PRODUCT_BUNDLE_IDENTIFIER = {app_bundle_id};')
@@ -160,6 +198,18 @@ jobs:
                   'CODE_SIGN_STYLE = Manual;\n',
                   f'CODE_SIGN_STYLE = Manual;\n\t\t\t\t\tCODE_SIGN_IDENTITY = "{identity}";\n\t\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "{profile}";\n'
               )
+              if has_widget_signing and widget_profile:
+                  def use_widget_profile(match):
+                      return match.group(0).replace(
+                          f'PROVISIONING_PROFILE_SPECIFIER = "{profile}";',
+                          f'PROVISIONING_PROFILE_SPECIFIER = "{widget_profile}";'
+                      )
+
+                  s = re.sub(
+                      r'CODE_SIGN_STYLE = Manual;\n(?:.*\n){0,12}?\t+INFOPLIST_FILE = OpenUIWidgets/Info.plist;',
+                      use_widget_profile,
+                      s,
+                  )
 
           p.write_text(s)
           PY
@@ -168,6 +218,7 @@ jobs:
         if: env.HAS_SIGNING_SECRETS == 'true'
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
+          WIDGET_BUNDLE_ID="${IOS_WIDGET_BUNDLE_ID:-${APP_BUNDLE_ID}.OpenUIWidget}"
           EFFECTIVE_EXPORT_METHOD="${IOS_EFFECTIVE_EXPORT_METHOD:-release-testing}"
           cat > ExportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -180,6 +231,14 @@ jobs:
             <dict>
               <key>${APP_BUNDLE_ID}</key>
               <string>${IOS_PROVISIONING_PROFILE_SPECIFIER}</string>
+          EOF
+          if [ "${HAS_WIDGET_SIGNING:-false}" = "true" ]; then
+            cat >> ExportOptions.plist <<EOF
+              <key>${WIDGET_BUNDLE_ID}</key>
+              <string>${IOS_WIDGET_PROVISIONING_PROFILE_SPECIFIER}</string>
+          EOF
+          fi
+          cat >> ExportOptions.plist <<EOF
             </dict>
             <key>signingCertificate</key>
             <string>${IOS_SIGNING_IDENTITY}</string>
@@ -256,8 +315,13 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
-            PRODUCT_BUNDLE_IDENTIFIER="$APP_BUNDLE_ID" \
             archive
+          APP_BINARY="$RUNNER_TEMP/Iexa.xcarchive/Products/Applications/Iexa.app/Iexa"
+          if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
+            echo "::error::Local Alpine iSH runtime was not linked into the signed archive"
+            exit 1
+          fi
+          strings "$APP_BINARY" | grep -q 'mount_root failed'
 
       - name: Export IPA
         if: env.HAS_SIGNING_SECRETS == 'true' && steps.archive_signed.outcome == 'success'
@@ -266,26 +330,6 @@ jobs:
             -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
             -exportOptionsPlist ExportOptions.plist \
             -exportPath "$RUNNER_TEMP/exported"
-
-      - name: Strip embedded extensions from IPA
-        if: env.HAS_SIGNING_SECRETS == 'true' && steps.archive_signed.outcome == 'success'
-        run: |
-          python3 - <<'PY'
-          import zipfile
-          from pathlib import Path
-
-          ipa = next(Path('${{ runner.temp }}/exported').glob('*.ipa'))
-          clean = ipa.with_suffix('.clean.ipa')
-
-          with zipfile.ZipFile(ipa, 'r') as src, zipfile.ZipFile(clean, 'w', zipfile.ZIP_DEFLATED) as dst:
-            for item in src.infolist():
-              if '/PlugIns/' in item.filename or item.filename.endswith('/PlugIns') or item.filename.endswith('/PlugIns/'):
-                continue
-              dst.writestr(item, src.read(item.filename))
-
-          ipa.unlink()
-          clean.rename(ipa)
-          PY
 
       - name: Build unsigned fallback app
         if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outcome != 'success'
@@ -299,7 +343,6 @@ jobs:
             -destination 'generic/platform=iOS' \
             TARGET_BUILD_DIR="$RUNNER_TEMP/unsigned-build-app" \
             BUILT_PRODUCTS_DIR="$RUNNER_TEMP/unsigned-build-app" \
-            PRODUCT_BUNDLE_IDENTIFIER="$APP_BUNDLE_ID" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -313,6 +356,12 @@ jobs:
 
           rm -rf "$APP_PATH/PlugIns"
           rm -rf "$APP_PATH/Extensions"
+          APP_BINARY="$APP_PATH/Iexa"
+          if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
+            echo "::error::Local Alpine iSH runtime was not linked into the unsigned app"
+            exit 1
+          fi
+          strings "$APP_BINARY" | grep -q 'mount_root failed'
 
           cp -R "$APP_PATH" "$RUNNER_TEMP/unsigned-ipa/Payload/"
           cd "$RUNNER_TEMP/unsigned-ipa"

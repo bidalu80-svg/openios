@@ -18,12 +18,31 @@ static char *iexa_dup_output(const char *message) {
     return buffer;
 }
 
+static bool append_env_entry(char *buffer, size_t buffer_size, size_t *offset, const char *entry) {
+    if (buffer == NULL || offset == NULL || entry == NULL) {
+        return false;
+    }
+    size_t length = strlen(entry) + 1;
+    if (*offset + length + 1 > buffer_size) {
+        return false;
+    }
+    memcpy(buffer + *offset, entry, length);
+    *offset += length;
+    buffer[*offset] = '\0';
+    return true;
+}
+
 #if IEXA_LOCAL_ALPINE_ISH
 
+#include <arpa/inet.h>
+#include <ctype.h>
+#include <netdb.h>
 #include <pthread.h>
+#include <resolv.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -41,6 +60,7 @@ static char *iexa_dup_output(const char *message) {
 #include "fs/fd.h"
 #include "fs/fake.h"
 #include "fs/real.h"
+#include "fs/sock.h"
 #include "fs/tty.h"
 
 static pthread_mutex_t runtime_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -53,6 +73,40 @@ static size_t capture_capacity = 0;
 static bool capture_finished = false;
 static int capture_exit_code = 126;
 static int capture_pid = 0;
+
+static bool contains_case_insensitive(const char *value, const char *needle) {
+    if (value == NULL || needle == NULL || needle[0] == '\0') {
+        return false;
+    }
+
+    size_t needle_length = strlen(needle);
+    for (const char *cursor = value; *cursor != '\0'; cursor++) {
+        size_t index = 0;
+        while (index < needle_length &&
+               cursor[index] != '\0' &&
+               tolower((unsigned char) cursor[index]) == tolower((unsigned char) needle[index])) {
+            index++;
+        }
+        if (index == needle_length) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int command_timeout_seconds(const char *command) {
+    if (contains_case_insensitive(command, "apk add") ||
+        contains_case_insensitive(command, "apk upgrade") ||
+        contains_case_insensitive(command, "apk fix")) {
+        return 900;
+    }
+    if (contains_case_insensitive(command, "apk update") ||
+        contains_case_insensitive(command, "curl ") ||
+        contains_case_insensitive(command, "wget ")) {
+        return 120;
+    }
+    return 60;
+}
 
 static int ensure_directory(const char *path) {
     if (mkdir(path, 0777) == 0) {
@@ -110,6 +164,27 @@ static void capture_append(const void *bytes, size_t length) {
     pthread_mutex_unlock(&capture_lock);
 }
 
+static void capture_append_locked(const void *bytes, size_t length) {
+    if (length == 0) {
+        return;
+    }
+    if (capture_length + length + 1 > capture_capacity) {
+        size_t next_capacity = capture_capacity == 0 ? 4096 : capture_capacity;
+        while (next_capacity < capture_length + length + 1) {
+            next_capacity *= 2;
+        }
+        char *next = realloc(capture_buffer, next_capacity);
+        if (next == NULL) {
+            return;
+        }
+        capture_buffer = next;
+        capture_capacity = next_capacity;
+    }
+    memcpy(capture_buffer + capture_length, bytes, length);
+    capture_length += length;
+    capture_buffer[capture_length] = '\0';
+}
+
 static int headless_tty_init(struct tty *tty) {
     tty->winsize.col = 120;
     tty->winsize.row = 40;
@@ -148,7 +223,7 @@ static struct tty_driver_ops headless_tty_ops = {
     .cleanup = headless_tty_cleanup,
 };
 
-DEFINE_TTY_DRIVER(iexa_headless_tty_driver, &headless_tty_ops, TTY_CONSOLE_MAJOR, 1);
+DEFINE_TTY_DRIVER(iexa_headless_tty_driver, &headless_tty_ops, TTY_CONSOLE_MAJOR, 64);
 
 static void capture_exit_hook(struct task *task, int code) {
     if (task->pid != capture_pid) {
@@ -187,6 +262,77 @@ static bool resolve_root_data_path(const char *root_archive_path, char *root_dat
     return false;
 }
 
+static void write_file_in_fakefs(const char *path, const char *contents) {
+    struct fd *fd = generic_open(path, O_WRONLY_ | O_CREAT_ | O_TRUNC_, 0666);
+    if (IS_ERR(fd)) {
+        return;
+    }
+    fd->ops->write(fd, contents, strlen(contents));
+    fd_close(fd);
+}
+
+static void configure_dns(void) {
+    struct task *init = pid_get_task(1);
+    if (init != NULL) {
+        current = init;
+    }
+
+    char resolv_conf[2048];
+    size_t used = 0;
+    resolv_conf[0] = '\0';
+
+    struct __res_state res;
+    memset(&res, 0, sizeof(res));
+    if (res_ninit(&res) == EXIT_SUCCESS) {
+        if (res.dnsrch[0] != NULL) {
+            int written = snprintf(resolv_conf + used, sizeof(resolv_conf) - used, "search");
+            if (written > 0) {
+                used += (size_t) written < sizeof(resolv_conf) - used ? (size_t) written : sizeof(resolv_conf) - used - 1;
+            }
+            for (int i = 0; res.dnsrch[i] != NULL && used < sizeof(resolv_conf) - 1; i++) {
+                written = snprintf(resolv_conf + used, sizeof(resolv_conf) - used, " %s", res.dnsrch[i]);
+                if (written > 0) {
+                    used += (size_t) written < sizeof(resolv_conf) - used ? (size_t) written : sizeof(resolv_conf) - used - 1;
+                }
+            }
+            if (used < sizeof(resolv_conf) - 1) {
+                resolv_conf[used++] = '\n';
+                resolv_conf[used] = '\0';
+            }
+        }
+
+        union res_sockaddr_union servers[NI_MAXSERV];
+        int servers_found = res_getservers(&res, servers, NI_MAXSERV);
+        char address[NI_MAXHOST];
+        for (int i = 0; i < servers_found && used < sizeof(resolv_conf) - 1; i++) {
+            union res_sockaddr_union server = servers[i];
+            if (server.sin.sin_len == 0) {
+                continue;
+            }
+            if (getnameinfo((struct sockaddr *) &server.sin, server.sin.sin_len,
+                            address, sizeof(address),
+                            NULL, 0, NI_NUMERICHOST) != 0) {
+                continue;
+            }
+            int written = snprintf(resolv_conf + used, sizeof(resolv_conf) - used, "nameserver %s\n", address);
+            if (written > 0) {
+                used += (size_t) written < sizeof(resolv_conf) - used ? (size_t) written : sizeof(resolv_conf) - used - 1;
+            }
+        }
+    }
+
+    if (strstr(resolv_conf, "nameserver ") == NULL) {
+        snprintf(resolv_conf, sizeof(resolv_conf),
+                 "nameserver 1.1.1.1\n"
+                 "nameserver 8.8.8.8\n"
+                 "nameserver 223.5.5.5\n");
+    }
+
+    strncat(resolv_conf, "options timeout:2 attempts:2\n",
+            sizeof(resolv_conf) - strlen(resolv_conf) - 1);
+    write_file_in_fakefs("/etc/resolv.conf", resolv_conf);
+}
+
 static int boot_runtime(const char *root_archive_path, const char *workspace_path, char **error_out) {
     if (runtime_booted) {
         return 0;
@@ -213,6 +359,15 @@ static int boot_runtime(const char *root_archive_path, const char *workspace_pat
     create_some_device_nodes();
     do_mount(&procfs, "proc", "/proc", "", 0);
     do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
+    configure_dns();
+
+    char socket_tmp_dir[4096];
+    snprintf(socket_tmp_dir, sizeof(socket_tmp_dir), "%s/sockets", workspace_path);
+    ensure_directory(socket_tmp_dir);
+    char socket_tmp_prefix[4096];
+    snprintf(socket_tmp_prefix, sizeof(socket_tmp_prefix), "%s/ishsock", socket_tmp_dir);
+    sock_tmp_prefix = strdup(socket_tmp_prefix);
+
     tty_drivers[TTY_CONSOLE_MAJOR] = &iexa_headless_tty_driver;
     set_console_device(TTY_CONSOLE_MAJOR, 1);
 
@@ -236,6 +391,7 @@ char *iexa_local_alpine_execute(
     const char *cwd,
     const char *root_archive_path,
     const char *workspace_path,
+    const char *time_zone,
     int32_t *exit_code
 ) {
     pthread_mutex_lock(&runtime_lock);
@@ -258,6 +414,8 @@ char *iexa_local_alpine_execute(
         pthread_mutex_unlock(&runtime_lock);
         return error != NULL ? error : iexa_dup_output("Local Alpine boot failed");
     }
+
+    configure_dns();
 
     err = become_new_init_child();
     if (err < 0) {
@@ -285,13 +443,26 @@ char *iexa_local_alpine_execute(
         }
         exit_hook = NULL;
         pthread_mutex_unlock(&runtime_lock);
-        return iexa_dup_output("create_stdio failed");
+        char message[128];
+        snprintf(message, sizeof(message), "create_stdio failed: %d", err);
+        return iexa_dup_output(message);
     }
 
     const char *shell = "/bin/sh";
     char argv[8192];
-    snprintf(argv, sizeof(argv), "%s%c-lc%c%s%c%c", shell, '\0', '\0', command != NULL ? command : "", '\0', '\0');
-    const char *envp = "TERM=xterm-256color\0PATH=/bin:/sbin:/usr/bin:/usr/sbin\0HOME=/root\0USER=root\0";
+    snprintf(argv, sizeof(argv), "%s%c-c%c%s%c%c", shell, '\0', '\0', command != NULL ? command : "", '\0', '\0');
+    char envp[1024];
+    envp[0] = '\0';
+    size_t envp_offset = 0;
+    append_env_entry(envp, sizeof(envp), &envp_offset, "TERM=xterm-256color");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "PATH=/bin:/sbin:/usr/bin:/usr/sbin");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "HOME=/root");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "USER=root");
+    if (time_zone != NULL && time_zone[0] != '\0') {
+        char tz_env[128];
+        snprintf(tz_env, sizeof(tz_env), "TZ=%s", time_zone);
+        append_env_entry(envp, sizeof(envp), &envp_offset, tz_env);
+    }
 
     err = do_execve(shell, 3, argv, envp);
     if (err < 0) {
@@ -300,15 +471,36 @@ char *iexa_local_alpine_execute(
         }
         exit_hook = NULL;
         pthread_mutex_unlock(&runtime_lock);
-        return iexa_dup_output("do_execve failed");
+        char message[256];
+        snprintf(message, sizeof(message), "do_execve failed for %s: %d", shell, err);
+        return iexa_dup_output(message);
     }
 
     capture_pid = current->pid;
     task_start(current);
 
+    int timeout_seconds = command_timeout_seconds(command);
     pthread_mutex_lock(&capture_lock);
     while (!capture_finished) {
-        pthread_cond_wait(&capture_done, &capture_lock);
+        struct timespec timeout;
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        timeout.tv_sec = now.tv_sec + timeout_seconds;
+        timeout.tv_nsec = now.tv_usec * 1000;
+        int wait_result = pthread_cond_timedwait(&capture_done, &capture_lock, &timeout);
+        if (wait_result == ETIMEDOUT) {
+            capture_exit_code = 124;
+            char message[96];
+            snprintf(message, sizeof(message), "Local Alpine command timed out after %d seconds\n", timeout_seconds);
+            capture_append_locked(message, strlen(message));
+            capture_finished = true;
+            break;
+        }
+    }
+    if (capture_buffer == NULL || capture_length == 0) {
+        char message[256];
+        snprintf(message, sizeof(message), "Local Alpine command exited without output. pid=%d shell=%s cwd=%s", capture_pid, shell, cwd != NULL ? cwd : "");
+        capture_append_locked(message, strlen(message));
     }
     char *output = iexa_dup_output(capture_buffer != NULL ? capture_buffer : "");
     int completed_exit_code = capture_exit_code;
@@ -333,12 +525,14 @@ char *iexa_local_alpine_execute(
     const char *cwd,
     const char *root_archive_path,
     const char *workspace_path,
+    const char *time_zone,
     int32_t *exit_code
 ) {
     (void) command;
     (void) cwd;
     (void) root_archive_path;
     (void) workspace_path;
+    (void) time_zone;
     if (exit_code != NULL) {
         *exit_code = 126;
     }

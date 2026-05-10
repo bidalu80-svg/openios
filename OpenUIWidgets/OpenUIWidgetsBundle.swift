@@ -15,6 +15,9 @@ struct OpenUIWidgetsBundle: WidgetBundle {
         // Lock screen accessories
         LockScreenWidget()          // accessoryCircular / accessoryRectangular / accessoryInline
 
+        // Live Activity / Dynamic Island for active Iexa runs
+        IexaRunLiveActivityWidget()
+
         // Control Center (iOS 18+)
         OpenUIWidgetsControl()
     }

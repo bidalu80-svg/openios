@@ -20,50 +20,81 @@ debug_marker = '\t\t38EB668E2F39CE5C00AED774 /* Debug */ = {\n'
 release_marker = '\t\t38EB668F2F39CE5C00AED774 /* Release */ = {\n'
 fakefs_file_ref = '38FAE0012FA9000000000001'
 fakefs_build_file = '38FAE0022FA9000000000002'
+setting_indent = '\t\t\t\t'
+
+def quoted(value: str) -> str:
+    return f'"{value}"'
+
+def format_array_setting(key: str, values: list[str]) -> str:
+    lines = [f'{setting_indent}{key} = (\n']
+    lines.extend(f'{setting_indent}\t{quoted(value)},\n' for value in values)
+    lines.append(f'{setting_indent});\n')
+    return ''.join(lines)
+
+def insert_setting(block: str, setting: str) -> str:
+    for anchor in (
+        f'{setting_indent}INFOPLIST_KEY_CFBundleDisplayName = Iexa;\n',
+        f'{setting_indent}IPHONEOS_DEPLOYMENT_TARGET = 18.1;\n',
+        f'{setting_indent}LD_RUNPATH_SEARCH_PATHS = (\n',
+        f'{setting_indent}MARKETING_VERSION = 3.6;\n',
+    ):
+        if anchor in block:
+            return block.replace(anchor, setting + anchor, 1)
+    build_settings_end = '\t\t\t};\n\t\t\tname ='
+    if build_settings_end not in block:
+        raise RuntimeError('Could not find buildSettings end while enabling Local Alpine iSH runtime')
+    return block.replace(build_settings_end, setting + build_settings_end, 1)
+
+def ensure_array_values(block: str, key: str, values: list[str]) -> str:
+    start_token = f'{setting_indent}{key} = (\n'
+    if start_token not in block:
+        return insert_setting(block, format_array_setting(key, values))
+
+    start = block.index(start_token)
+    end_token = f'{setting_indent});\n'
+    end = block.index(end_token, start)
+    body = block[start:end]
+    additions = []
+    for value in values:
+        if value not in body:
+            additions.append(f'{setting_indent}\t{quoted(value)},\n')
+    if not additions:
+        return block
+    return block[:end] + ''.join(additions) + block[end:]
 
 def patch_build_settings(block: str) -> str:
-    if 'IEXA_LOCAL_ALPINE_ISH=1' not in block:
-        block = block.replace(
-            '\t\t\t\tDEVELOPMENT_TEAM = 6ARX8PF3MT;\n',
-            '\t\t\t\tDEVELOPMENT_TEAM = 6ARX8PF3MT;\n'
-            '\t\t\t\tGCC_PREPROCESSOR_DEFINITIONS = (\n'
-            '\t\t\t\t\t"$(inherited)",\n'
-            '\t\t\t\t\t"ISH_INTERNAL=1",\n'
-            '\t\t\t\t\t"IEXA_LOCAL_ALPINE_ISH=1",\n'
-            '\t\t\t\t);\n'
-        )
-    if 'External/ish' not in block:
-        block = block.replace(
-            '\t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 18.1;\n',
-            '\t\t\t\tHEADER_SEARCH_PATHS = (\n'
-            '\t\t\t\t\t"$(inherited)",\n'
-            f'\t\t\t\t\t"{ish_dir.as_posix()}",\n'
-            f'\t\t\t\t\t"{ish_dir.as_posix()}/deps/libarchive/libarchive",\n'
-            '\t\t\t\t);\n'
-            '\t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 18.1;\n'
-        )
-    if str(ish_products) not in block:
-        block = block.replace(
-            '\t\t\t\tLD_RUNPATH_SEARCH_PATHS = (\n',
-            '\t\t\t\tLIBRARY_SEARCH_PATHS = (\n'
-            '\t\t\t\t\t"$(inherited)",\n'
-            f'\t\t\t\t\t"{ish_products.as_posix()}",\n'
-            '\t\t\t\t);\n'
-            '\t\t\t\tOTHER_LDFLAGS = (\n'
-            '\t\t\t\t\t"$(inherited)",\n'
-            '\t\t\t\t\t"-Wl,-force_load",\n'
-            f'\t\t\t\t\t"{(ish_products / "libish.a").as_posix()}",\n'
-            '\t\t\t\t\t"-Wl,-force_load",\n'
-            f'\t\t\t\t\t"{(ish_products / "libish_emu.a").as_posix()}",\n'
-            '\t\t\t\t\t"-Wl,-force_load",\n'
-            f'\t\t\t\t\t"{(ish_products / "libfakefs.a").as_posix()}",\n'
-            '\t\t\t\t\t"-lsqlite3",\n'
-            '\t\t\t\t\t"-lbz2",\n'
-            '\t\t\t\t\t"-liconv",\n'
-            '\t\t\t\t\t"-lresolv",\n'
-            '\t\t\t\t);\n'
-            '\t\t\t\tLD_RUNPATH_SEARCH_PATHS = (\n'
-        )
+    block = ensure_array_values(block, 'GCC_PREPROCESSOR_DEFINITIONS', [
+        '$(inherited)',
+        'ISH_INTERNAL=1',
+        'IEXA_LOCAL_ALPINE_ISH=1',
+    ])
+    block = ensure_array_values(block, 'OTHER_CFLAGS', [
+        '$(inherited)',
+        '-DISH_INTERNAL=1',
+        '-DIEXA_LOCAL_ALPINE_ISH=1',
+    ])
+    block = ensure_array_values(block, 'HEADER_SEARCH_PATHS', [
+        '$(inherited)',
+        ish_dir.as_posix(),
+        f'{ish_dir.as_posix()}/deps/libarchive/libarchive',
+    ])
+    block = ensure_array_values(block, 'LIBRARY_SEARCH_PATHS', [
+        '$(inherited)',
+        ish_products.as_posix(),
+    ])
+    block = ensure_array_values(block, 'OTHER_LDFLAGS', [
+        '$(inherited)',
+        '-Wl,-force_load',
+        (ish_products / 'libish.a').as_posix(),
+        '-Wl,-force_load',
+        (ish_products / 'libish_emu.a').as_posix(),
+        '-Wl,-force_load',
+        (ish_products / 'libfakefs.a').as_posix(),
+        '-lsqlite3',
+        '-lbz2',
+        '-liconv',
+        '-lresolv',
+    ])
     return block
 
 def patch_config(s: str, marker: str, next_marker: str | None) -> str:
@@ -73,6 +104,10 @@ def patch_config(s: str, marker: str, next_marker: str | None) -> str:
 
 s = patch_config(s, debug_marker, release_marker)
 s = patch_config(s, release_marker, None)
+if 'IEXA_LOCAL_ALPINE_ISH=1' not in s or '-DIEXA_LOCAL_ALPINE_ISH=1' not in s:
+    raise RuntimeError('Failed to enable IEXA_LOCAL_ALPINE_ISH build definitions')
+if (ish_products / 'libish.a').as_posix() not in s:
+    raise RuntimeError('Failed to add iSH static library link settings')
 
 if fakefs_file_ref not in s:
     s = s.replace(

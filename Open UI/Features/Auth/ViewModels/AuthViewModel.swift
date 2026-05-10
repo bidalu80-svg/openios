@@ -646,7 +646,20 @@ final class AuthViewModel {
     }
 
     private static func providerCandidates(for urlString: String) -> [ServerConfig.ProviderType] {
-        let host = URL(string: urlString)?.host?.lowercased() ?? ""
+        guard let url = URL(string: urlString) else {
+            return [.openAICompatible, .gemini, .anthropic]
+        }
+        let host = url.host?.lowercased() ?? ""
+        let path = url.path.lowercased()
+        if path.contains("anthropic") || path.contains("claude") {
+            return [.anthropic, .openAICompatible, .gemini]
+        }
+        if path.contains("openai") {
+            return [.openAICompatible, .anthropic, .gemini]
+        }
+        if path.contains("gemini") || path.contains("generativelanguage") {
+            return [.gemini, .openAICompatible, .anthropic]
+        }
         if host.contains("anthropic.com") || host.contains("claude.com") {
             return [.anthropic, .openAICompatible, .gemini]
         }

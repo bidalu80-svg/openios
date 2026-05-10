@@ -391,11 +391,30 @@ final class APIClient: @unchecked Sendable {
     // MARK: - Models
 
     func getModels() async throws -> [AIModel] {
-        let (data, _) = try await network.requestRaw(path: modelsPath)
+        if providerType == .anthropic {
+            do {
+                let models = try await fetchModels(path: modelsPath)
+                return models.isEmpty ? Self.defaultAnthropicModels() : models
+            } catch {
+                if Self.canUseDefaultAnthropicModels(after: error) {
+                    return Self.defaultAnthropicModels()
+                }
+                throw error
+            }
+        }
 
-        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return try await fetchModels(path: modelsPath)
+    }
+
+    private func fetchModels(path: String) async throws -> [AIModel] {
+        let (data, _) = try await network.requestRaw(path: path)
+        return parseModelsPayload(data)
+    }
+
+    private func parseModelsPayload(_ data: Data) -> [AIModel] {
+        guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            if let array = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            if let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
                 return parseModelArray(array)
             }
             return []
@@ -409,6 +428,71 @@ final class APIClient: @unchecked Sendable {
         }
 
         return []
+    }
+
+    private static func canUseDefaultAnthropicModels(after error: Error) -> Bool {
+        let apiError = APIError.from(error)
+        switch apiError {
+        case .httpError(let statusCode, _, _):
+            return [400, 404, 405, 422, 501].contains(statusCode)
+        case .responseDecoding:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func defaultAnthropicModels() -> [AIModel] {
+        [
+            AIModel(
+                id: "claude-opus-4-1-20250805",
+                name: "Claude Opus 4.1",
+                description: "Anthropic Claude API fallback model",
+                isMultimodal: true,
+                contextLength: 200_000,
+                tags: ["Claude", "Anthropic"]
+            ),
+            AIModel(
+                id: "claude-opus-4-20250514",
+                name: "Claude Opus 4",
+                description: "Anthropic Claude API fallback model",
+                isMultimodal: true,
+                contextLength: 200_000,
+                tags: ["Claude", "Anthropic"]
+            ),
+            AIModel(
+                id: "claude-3-7-sonnet-20250219",
+                name: "Claude Sonnet 3.7",
+                description: "Anthropic Claude API fallback model",
+                isMultimodal: true,
+                contextLength: 200_000,
+                tags: ["Claude", "Anthropic"]
+            ),
+            AIModel(
+                id: "claude-sonnet-4-20250514",
+                name: "Claude Sonnet 4",
+                description: "Anthropic Claude API fallback model",
+                isMultimodal: true,
+                contextLength: 200_000,
+                tags: ["Claude", "Anthropic"]
+            ),
+            AIModel(
+                id: "claude-3-haiku-20240307",
+                name: "Claude Haiku 3",
+                description: "Anthropic Claude API fallback model",
+                isMultimodal: true,
+                contextLength: 200_000,
+                tags: ["Claude", "Anthropic"]
+            ),
+            AIModel(
+                id: "claude-3-5-haiku-20241022",
+                name: "Claude Haiku 3.5",
+                description: "Anthropic Claude API fallback model",
+                isMultimodal: true,
+                contextLength: 200_000,
+                tags: ["Claude", "Anthropic"]
+            )
+        ]
     }
 
     private func requestAnyJSON(

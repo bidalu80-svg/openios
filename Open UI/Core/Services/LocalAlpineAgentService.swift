@@ -135,13 +135,13 @@ actor LocalAlpineAgentService {
             : output
         let exit = result.exitCode.map(String.init) ?? "unknown"
         return """
-        - `$ \(command.replacingOccurrences(of: "\n", with: " && "))`
-          cwd: `\(cwd)`
-          exit: `\(exit)`
+        命令：`\(command.replacingOccurrences(of: "\n", with: " && "))`
+        工作目录：`\(cwd)`
+        退出码：`\(exit)`
 
-        ````text
+        ```text
         \(renderedOutput)
-        ````
+        ```
         """
     }
 
@@ -149,6 +149,44 @@ actor LocalAlpineAgentService {
         guard output.count > maxOutputCharactersPerCommand else { return output }
         let prefix = String(output.prefix(maxOutputCharactersPerCommand))
         return prefix + "\n...（输出过长，已截断）"
+    }
+
+    nonisolated static func visibleContent(from content: String) -> String {
+        let nsContent = content as NSString
+        let fullRange = NSRange(location: 0, length: nsContent.length)
+        var removalRanges: [NSRange] = []
+
+        if let regex = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)```"#, options: [.caseInsensitive]) {
+            let matches = regex.matches(in: content, range: fullRange)
+            for match in matches where match.numberOfRanges >= 3 {
+                let info = nsContent.substring(with: match.range(at: 1)).lowercased()
+                let body = nsContent.substring(with: match.range(at: 2))
+                if info.contains("iexa_alpine")
+                    || (info.trimmingCharacters(in: .whitespacesAndNewlines) == "json"
+                        && body.contains("\"iexa_alpine\"")) {
+                    removalRanges.append(match.range)
+                }
+            }
+        }
+
+        if let tagRegex = try? NSRegularExpression(pattern: #"<iexa_alpine>[\s\S]*?</iexa_alpine>"#, options: [.caseInsensitive]) {
+            removalRanges.append(contentsOf: tagRegex.matches(in: content, range: fullRange).map(\.range))
+        }
+
+        guard !removalRanges.isEmpty else {
+            return content
+        }
+
+        let mutable = NSMutableString(string: content)
+        for range in removalRanges.sorted(by: { $0.location > $1.location }) {
+            mutable.replaceCharacters(in: range, with: "")
+        }
+
+        let cleaned = (mutable as String)
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return cleaned.isEmpty ? "本地 Alpine 命令已执行。" : cleaned
     }
 }
 

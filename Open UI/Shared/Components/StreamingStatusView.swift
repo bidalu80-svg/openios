@@ -32,49 +32,216 @@ struct StreamingStatusView: View {
     }
 
     var body: some View {
-        if visibleStatuses.isEmpty { return AnyView(EmptyView()) }
+        if visibleStatuses.isEmpty {
+            EmptyView()
+        } else if isLocalAlpineStatus {
+            localAlpineCard
+        } else {
+            defaultStatusBody
+        }
+    }
 
-        return AnyView(
-            VStack(alignment: .leading, spacing: Spacing.xs) {
-                // Header row with latest status
-                statusHeader
+    private var defaultStatusBody: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            // Header row with latest status
+            statusHeader
 
-                // Expanded list of all statuses
-                if isExpanded && visibleStatuses.count > 1 {
-                    statusList
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                }
-
-                // Search queries section (shown for the latest status if it has queries)
-                if let latest = latestStatus, !latest.queries.isEmpty {
-                    queriesSection(latest)
-                }
+            // Expanded list of all statuses
+            if isExpanded && visibleStatuses.count > 1 {
+                statusList
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
-            .padding(.horizontal, Spacing.screenPadding)
-            .padding(.vertical, Spacing.xs)
-            .animation(MicroAnimation.snappy, value: isExpanded)
-            .animation(MicroAnimation.gentle, value: visibleStatuses.count)
-            .onAppear {
-                // Collapse immediately if already done when first rendered
-                if allDone && !isStreaming {
+
+            // Search queries section (shown for the latest status if it has queries)
+            if let latest = latestStatus, !latest.queries.isEmpty {
+                queriesSection(latest)
+            }
+        }
+        .padding(.horizontal, Spacing.screenPadding)
+        .padding(.vertical, Spacing.xs)
+        .animation(MicroAnimation.snappy, value: isExpanded)
+        .animation(MicroAnimation.gentle, value: visibleStatuses.count)
+        .onAppear {
+            // Collapse immediately if already done when first rendered
+            if allDone && !isStreaming {
+                isExpanded = false
+            }
+        }
+        .onChange(of: allDone) { _, done in
+            if done && !isStreaming {
+                withAnimation(MicroAnimation.snappy) {
                     isExpanded = false
                 }
             }
-            .onChange(of: allDone) { _, done in
-                if done && !isStreaming {
-                    withAnimation(MicroAnimation.snappy) {
-                        isExpanded = false
-                    }
+        }
+        .onChange(of: isStreaming) { _, streaming in
+            if !streaming && allDone {
+                withAnimation(MicroAnimation.snappy) {
+                    isExpanded = false
                 }
             }
-            .onChange(of: isStreaming) { _, streaming in
-                if !streaming && allDone {
-                    withAnimation(MicroAnimation.snappy) {
-                        isExpanded = false
-                    }
+        }
+    }
+
+    private var isLocalAlpineStatus: Bool {
+        latestStatus?.action?.lowercased() == "local_alpine"
+    }
+
+    private var localAlpineCard: some View {
+        let latest = latestStatus
+        let title = localAlpineTitle(for: latest)
+        let subtitle = latest.flatMap { resolveStatusDescription(for: $0) } ?? "正在执行本地 Alpine 命令..."
+        let isDone = latest?.done == true
+        let activeStage = localAlpineActiveStage(for: subtitle, isDone: isDone)
+        let stages = localAlpineStageTitles(for: subtitle)
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(theme.brandPrimary.opacity(theme.isDark ? 0.16 : 0.10))
+                        .frame(width: 34, height: 34)
+
+                    Image(systemName: "terminal.fill")
+                        .scaledFont(size: 13, weight: .semibold)
+                        .foregroundStyle(isDone ? theme.success : theme.brandPrimary)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .scaledFont(size: 14, weight: .semibold)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+
+                    Text(subtitle)
+                        .scaledFont(size: 12, weight: .regular)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
+
+                localAlpineStatePill(isDone: isDone)
+            }
+
+            ProgressView(value: localAlpineProgress(activeStage: activeStage, total: stages.count, isDone: isDone))
+                .progressViewStyle(.linear)
+                .tint(isDone ? theme.success : theme.brandPrimary)
+
+            HStack(spacing: 6) {
+                ForEach(Array(stages.enumerated()), id: \.offset) { index, stage in
+                    localAlpineStageChip(
+                        title: stage,
+                        isActive: index == activeStage && !isDone,
+                        isDone: isDone || index < activeStage
+                    )
                 }
             }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.92))
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.55 : 0.75), lineWidth: 0.8)
+        )
+        .shadow(color: .black.opacity(theme.isDark ? 0.18 : 0.06), radius: 12, x: 0, y: 6)
+        .padding(.horizontal, Spacing.screenPadding)
+        .padding(.vertical, Spacing.xs)
+    }
+
+    @ViewBuilder
+    private func localAlpineStatePill(isDone: Bool) -> some View {
+        HStack(spacing: 5) {
+            if isDone {
+                Image(systemName: "checkmark.circle.fill")
+                    .scaledFont(size: 11, weight: .semibold)
+                Text("完成")
+                    .scaledFont(size: 11, weight: .semibold)
+            } else {
+                PulsingDot(color: theme.brandPrimary)
+                Text("运行中")
+                    .scaledFont(size: 11, weight: .semibold)
+            }
+        }
+        .foregroundStyle(isDone ? theme.success : theme.brandPrimary)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .fill((isDone ? theme.success : theme.brandPrimary).opacity(theme.isDark ? 0.14 : 0.10))
+        )
+    }
+
+    @ViewBuilder
+    private func localAlpineStageChip(title: String, isActive: Bool, isDone: Bool) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: isDone ? "checkmark" : "circle.fill")
+                .scaledFont(size: isDone ? 9 : 6, weight: .bold)
+            Text(title)
+                .scaledFont(size: 10, weight: .semibold)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+        }
+        .foregroundStyle(isDone ? theme.success : (isActive ? theme.brandPrimary : theme.textTertiary))
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(
+                    isDone
+                    ? theme.success.opacity(theme.isDark ? 0.12 : 0.09)
+                    : (isActive ? theme.brandPrimary.opacity(theme.isDark ? 0.14 : 0.10) : theme.surfaceContainerHighest.opacity(theme.isDark ? 0.35 : 0.55))
+                )
+        )
+    }
+
+    private func localAlpineTitle(for status: ChatStatusUpdate?) -> String {
+        if status?.done == true { return "本地 Alpine 已完成" }
+        let description = status?.description ?? ""
+        if description.contains("依赖") && description.contains("执行") { return "正在执行命令" }
+        if description.contains("依赖") { return "正在检查依赖" }
+        if description.contains("软件包") || description.contains("软件源") { return "正在安装软件包" }
+        return "本地 Alpine 正在执行"
+    }
+
+    private func localAlpineStageTitles(for description: String) -> [String] {
+        if description.contains("软件包") || description.contains("软件源") {
+            return ["准备", "检查", "安装", "执行"]
+        }
+        if description.contains("依赖") {
+            return ["准备", "检查", "执行", "完成"]
+        }
+        return ["准备", "启动", "执行", "完成"]
+    }
+
+    private func localAlpineActiveStage(for description: String, isDone: Bool) -> Int {
+        if isDone { return 3 }
+        if description.contains("软件包") || description.contains("软件源") {
+            return 2
+        }
+        if description.contains("依赖") && description.contains("执行") {
+            return 2
+        }
+        if description.contains("依赖") {
+            return 1
+        }
+        if description.contains("执行") {
+            return 2
+        }
+        return 1
+    }
+
+    private func localAlpineProgress(activeStage: Int, total: Int, isDone: Bool) -> Double {
+        if isDone { return 1 }
+        guard total > 1 else { return 0.3 }
+        return min(0.9, max(0.18, (Double(activeStage) + 0.45) / Double(total)))
     }
 
     // MARK: - Header

@@ -289,6 +289,127 @@ final class ChatViewModel {
         }
     }
 
+    private func startRunLiveActivity(id: String, modelId: String, prompt: String) async {
+        let kind = runLiveActivityKind(modelId: modelId, prompt: prompt)
+        await RunLiveActivityService.shared.start(
+            id: id,
+            kind: kind,
+            model: modelId,
+            title: runLiveActivityTitle(kind: kind),
+            detail: runLiveActivityDetail(prompt),
+            phase: "准备",
+            progress: 0.08,
+            isIndeterminate: true
+        )
+    }
+
+    private func startLocalAlpineLiveActivity(id: String, command: String, detail: String) async {
+        await RunLiveActivityService.shared.start(
+            id: id,
+            kind: localAlpineLiveActivityKind(for: command),
+            model: "Local Alpine",
+            title: "本地 Alpine",
+            detail: detail,
+            phase: "执行",
+            progress: 0.18,
+            isIndeterminate: true
+        )
+    }
+
+    private func runLiveActivityKind(modelId: String, prompt: String) -> String {
+        if shouldUseDirectVideoGeneration(modelId: modelId) { return "video" }
+        if shouldUseDirectImageGeneration(modelId: modelId),
+           !shouldPreferChatNativeImageGeneration(modelId: modelId) {
+            return "image"
+        }
+        return "chat"
+    }
+
+    private func runLiveActivityTitle(kind: String) -> String {
+        switch kind {
+        case "image": return "正在创建图片"
+        case "video": return "正在生成视频"
+        case "terminal", "install": return "本地 Alpine"
+        default: return "Iexa 正在回复"
+        }
+    }
+
+    private func localAlpineLiveActivityKind(for command: String) -> String {
+        let lowercased = command.lowercased()
+        if lowercased.contains("apk add ")
+            || lowercased.contains("apk upgrade")
+            || lowercased.contains("apk fix")
+            || lowercased.contains("npm i")
+            || lowercased.contains("npm install")
+            || lowercased.contains("pip install") {
+            return "install"
+        }
+        return "terminal"
+    }
+
+    private func runLiveActivityDetail(_ text: String) -> String {
+        let cleaned = text
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "任务进行中" : cleaned
+    }
+
+    private func updateRunLiveActivity(
+        id: String,
+        content: String,
+        isStreaming: Bool,
+        statusHistory: [ChatStatusUpdate]?,
+        error: ChatMessageError?
+    ) {
+        let latestStatus = statusHistory?.last
+        if isStreaming && error == nil {
+            let detail = latestStatus?.description ?? liveActivityStreamingDetail(for: content)
+            let progress = liveActivityProgress(for: content)
+            Task {
+                await RunLiveActivityService.shared.update(
+                    id: id,
+                    detail: detail,
+                    phase: "运行中",
+                    progress: progress,
+                    isIndeterminate: progress < 0.85
+                )
+            }
+        } else {
+            let success = error == nil
+            let detail = latestStatus?.description
+                ?? error?.content
+                ?? liveActivityFinishedDetail(for: content, success: success)
+            Task {
+                await RunLiveActivityService.shared.finish(
+                    id: id,
+                    success: success,
+                    detail: detail
+                )
+            }
+        }
+    }
+
+    private func liveActivityStreamingDetail(for content: String) -> String {
+        let count = content.trimmingCharacters(in: .whitespacesAndNewlines).count
+        if count == 0 { return "正在连接模型" }
+        return "已接收 \(count) 字"
+    }
+
+    private func liveActivityFinishedDetail(for content: String, success: Bool) -> String {
+        if !success { return "运行失败" }
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains("已生成图片") { return "图片已生成" }
+        if trimmed.contains("已生成视频") { return "视频已生成" }
+        if trimmed.contains("Local Alpine") || trimmed.contains("exit:") { return "本地命令已完成" }
+        return "回复已完成"
+    }
+
+    private func liveActivityProgress(for content: String) -> Double {
+        let count = Double(content.trimmingCharacters(in: .whitespacesAndNewlines).count)
+        guard count > 0 else { return 0.18 }
+        return min(0.9, 0.2 + count / 4_000)
+    }
+
     /// Pending transcriptions that were interrupted when the app moved to the background
     /// (iOS < 26 only — no GPU access in background). Keyed by attachment ID.
     /// Re-started automatically when the app returns to foreground.
@@ -2937,9 +3058,10 @@ final class ChatViewModel {
         let currentAttachments = processedAttachments
         errorMessage = nil
 
-        let shouldAutoUseLocalAlpine = shouldAutoRouteExplicitLocalAlpineCommand(currentText)
+        let normalizedLocalAlpineText = Self.normalizedLocalAlpineCommand(currentText)
+        let shouldAutoUseLocalAlpine = shouldAutoRouteExplicitLocalAlpineCommand(normalizedLocalAlpineText)
         if processedAttachments.isEmpty,
-           shouldSendTextDirectlyToLocalAlpine(currentText),
+           shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText),
            (terminalEnabled && selectedTerminalIsLocalAlpine || shouldAutoUseLocalAlpine) {
             selectedTerminalServer = .localAlpine
             terminalEnabled = true
@@ -3190,9 +3312,15 @@ final class ChatViewModel {
 
         // Assistant placeholder
         let assistantMessageId = UUID().uuidString
+        let isDirectImageGenerationPlaceholder = isOpenAICompatibleProvider
+            && shouldUseDirectImageGeneration(modelId: modelId)
+            && !shouldPreferChatNativeImageGeneration(modelId: modelId)
         conversation?.messages.append(ChatMessage(
             id: assistantMessageId, role: .assistant, content: "",
-            timestamp: .now, model: modelId, isStreaming: true))
+            timestamp: .now, model: modelId, isStreaming: true,
+            metadata: isDirectImageGenerationPlaceholder
+                ? ["iexa_image_generation_placeholder": "true"]
+                : nil))
 
         // ── Build / update the history tree ─────────────────────────────────
         // This ensures the tree is always populated with correct parentId /
@@ -3256,6 +3384,7 @@ final class ChatViewModel {
         // Activate the isolated streaming store so token updates bypass
         // conversation.messages and only invalidate the streaming message view.
         streamingStore.beginStreaming(messageId: assistantMessageId, modelId: modelId)
+        await startRunLiveActivity(id: assistantMessageId, modelId: modelId, prompt: messageText)
 
         if isOpenAICompatibleProvider {
             streamingTask = Task { [weak self] in
@@ -3277,6 +3406,15 @@ final class ChatViewModel {
                         }
                         let requestedVideoSize = Self.requestedImageSize(from: videoPrompt)
                         let videoSeedImage = self.firstEditableImage(from: currentAttachments)
+                        await RunLiveActivityService.shared.update(
+                            id: assistantMessageId,
+                            title: "正在生成视频",
+                            detail: videoPrompt,
+                            phase: "生成",
+                            progress: 0.35,
+                            isIndeterminate: true,
+                            force: true
+                        )
                         let videoReference = try await self.runMediaRequestWithRetry {
                             try await manager.generateVideo(
                                 prompt: videoPrompt,
@@ -3333,6 +3471,15 @@ final class ChatViewModel {
                             let imagePromptForAPI = Self.promptWithImageSizeInstruction(
                                 imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
                                 size: requestedImageSize
+                            )
+                            await RunLiveActivityService.shared.update(
+                                id: assistantMessageId,
+                                title: "正在创建图片",
+                                detail: imagePrompt.isEmpty ? "正在编辑图片" : imagePrompt,
+                                phase: "生成",
+                                progress: 0.35,
+                                isIndeterminate: true,
+                                force: true
                             )
                             let imageReference: String
                             if let editImage = self.firstEditableImage(from: currentAttachments) {
@@ -3754,7 +3901,7 @@ final class ChatViewModel {
         let command = trimmed.split(separator: " ", maxSplits: 1).first.map(String.init) ?? trimmed
         let knownCommands: Set<String> = [
             "apk", "ash", "sh", "bash", "cat", "cd", "chmod", "chown", "cp", "date",
-            "df", "du", "echo", "env", "find", "free", "gcc", "grep", "head", "id", "ls",
+            "curl", "df", "du", "echo", "env", "find", "free", "gcc", "grep", "head", "id", "ls",
             "mkdir", "mv", "node", "npm", "ps", "pwd", "python", "python3", "rm", "rmdir",
             "sed", "sleep", "tail", "tar", "top", "touch", "uname", "vi", "vim", "wget",
             "which", "whoami"
@@ -3765,18 +3912,20 @@ final class ChatViewModel {
     private func shouldAutoRouteExplicitLocalAlpineCommand(_ text: String) -> Bool {
         let lowercased = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !lowercased.isEmpty else { return false }
+        if Self.localAlpineDiagnosticCommand(for: lowercased) != nil { return true }
         let alpineTerms = [
             "alpine", "apk ", "/etc/alpine-release", "python3", "gcc", "vim", "node",
-            "uname", "whoami", "ls /", "pwd", "/mnt/iexa"
+            "curl ", "uname", "whoami", "ls /", "pwd", "/mnt/iexa"
         ]
         return alpineTerms.contains { lowercased.contains($0) }
     }
 
     private func sendDirectLocalAlpineCommand(_ rawCommand: String, modelId: String) async {
-        let command = rawCommand
+        let command = Self.normalizedLocalAlpineCommand(rawCommand)
+        guard !command.isEmpty else { return }
+        let displayCommand = rawCommand
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: #"^\$\s+"#, with: "", options: .regularExpression)
-        guard !command.isEmpty else { return }
 
         inputText = ""
         attachments = []
@@ -3784,7 +3933,7 @@ final class ChatViewModel {
 
         let userMessage = ChatMessage(
             role: .user,
-            content: command,
+            content: displayCommand.isEmpty ? command : displayCommand,
             timestamp: .now
         )
         let assistantMessageId = UUID().uuidString
@@ -3793,7 +3942,7 @@ final class ChatViewModel {
         })?.id
 
         if conversation == nil {
-            let chatTitle = String(command.prefix(50))
+            let chatTitle = String(userMessage.content.prefix(50))
             conversation = Conversation(
                 id: isTemporaryChat ? "local:\(UUID().uuidString)" : UUID().uuidString,
                 title: chatTitle,
@@ -3812,6 +3961,7 @@ final class ChatViewModel {
             conversation?.messages.append(userMessage)
         }
 
+        let initialStatus = localAlpineInitialStatus(for: command)
         conversation?.messages.append(ChatMessage(
             id: assistantMessageId,
             role: .assistant,
@@ -3819,7 +3969,13 @@ final class ChatViewModel {
             timestamp: .now,
             model: "Local Alpine",
             isStreaming: true,
-            metadata: ["iexa_local_alpine_direct": "true"]
+            statusHistory: [initialStatus],
+            metadata: [
+                "iexa_local_alpine_direct": "true",
+                "iexa_local_alpine_result": "true",
+                "iexa_local_alpine_display_command": userMessage.content,
+                "iexa_local_alpine_cwd": "/mnt/iexa"
+            ]
         ))
 
         let userHistoryNode = HistoryNode(
@@ -3827,7 +3983,7 @@ final class ChatViewModel {
             parentId: userMessageParentId,
             childrenIds: [assistantMessageId],
             role: .user,
-            content: command,
+            content: userMessage.content,
             timestamp: userMessage.timestamp,
             models: [modelId]
         )
@@ -3839,7 +3995,8 @@ final class ChatViewModel {
             content: "",
             timestamp: userMessage.timestamp,
             model: "Local Alpine",
-            done: false
+            done: false,
+            statusHistory: [initialStatus]
         )
         conversation?.history.nodes[userMessage.id] = userHistoryNode
         conversation?.history.nodes[assistantMessageId] = assistantHistoryNode
@@ -3851,10 +4008,29 @@ final class ChatViewModel {
         isStreaming = true
         hasFinishedStreaming = false
         selfInitiatedStream = true
+        beginStreamingBackgroundTaskIfNeeded()
+        await startLocalAlpineLiveActivity(
+            id: assistantMessageId,
+            command: command,
+            detail: initialStatus.description ?? localAlpineRunningDescription(for: command)
+        )
 
         let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
-        let output = formatDirectLocalAlpineOutput(command: command, result: result)
-        updateAssistantMessage(id: assistantMessageId, content: output, isStreaming: false)
+        let output = formatDirectLocalAlpineOutput(command: userMessage.content, result: result)
+        let doneDescription = result.exitCode == 0
+            ? "本地 Alpine 执行完成"
+            : "本地 Alpine 执行结束，退出码 \(result.exitCode.map(String.init) ?? "unknown")"
+        updateAssistantMessage(
+            id: assistantMessageId,
+            content: output,
+            isStreaming: false,
+            statusHistory: [localAlpineStatus(description: doneDescription, done: true)]
+        )
+        conversation?.history.updateNode(id: assistantMessageId) { node in
+            node.content = output
+            node.done = true
+            node.statusHistory = [localAlpineStatus(description: doneDescription, done: true)]
+        }
 
         hasFinishedStreaming = true
         isStreaming = false
@@ -3863,7 +4039,45 @@ final class ChatViewModel {
         lastTaskExtractionLength = 0
 
         await persistLocalConversationIfNeeded()
+        endBackgroundTask()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func localAlpineInitialStatus(for command: String) -> ChatStatusUpdate {
+        localAlpineStatus(description: localAlpineRunningDescription(for: command), done: false)
+    }
+
+    private func localAlpineRunningDescription(for command: String) -> String {
+        let lowercased = command.lowercased()
+        if lowercased.contains("apk add ")
+            || lowercased.contains("apk upgrade")
+            || lowercased.contains("apk fix") {
+            return "正在安装 Alpine 软件包..."
+        }
+        if lowercased.contains("apk update") {
+            return "正在更新 Alpine 软件源..."
+        }
+        if shouldLocalAlpineCheckDependencies(for: lowercased) {
+            return "正在确认 Alpine 环境并执行命令..."
+        }
+        return "正在执行本地 Alpine 命令..."
+    }
+
+    private func shouldLocalAlpineCheckDependencies(for lowercasedCommand: String) -> Bool {
+        [
+            "python3", "python ", ".py", "pip ",
+            "node ", "node\n", "npm ", ".js",
+            "gcc", "g++", " cc ", "make ", "cmake", ".c ", ".cpp",
+            "vim ", "vi ", "curl ", "git ", "bash "
+        ].contains { lowercasedCommand.contains($0) }
+    }
+
+    private func localAlpineStatus(description: String, done: Bool) -> ChatStatusUpdate {
+        ChatStatusUpdate(
+            action: "local_alpine",
+            description: description,
+            done: done
+        )
     }
 
     private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
@@ -3878,6 +4092,39 @@ final class ChatViewModel {
         ```
 
         exit: `\(exit)`
+        """
+    }
+
+    private static func normalizedLocalAlpineCommand(_ rawCommand: String) -> String {
+        var command = rawCommand
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"^\$\s+"#, with: "", options: .regularExpression)
+        if let diagnosticCommand = localAlpineDiagnosticCommand(for: command.lowercased()) {
+            return diagnosticCommand
+        }
+        let lowercased = command.lowercased()
+        for prefix in [
+            "帮我执行一下", "帮我运行一下", "帮我执行", "帮我运行",
+            "执行命令：", "执行命令:", "运行命令：", "运行命令:",
+            "执行命令 ", "运行命令 ", "执行#", "执行：", "执行:", "执行 ",
+            "运行#", "运行：", "运行:", "运行 "
+        ] where lowercased.hasPrefix(prefix) {
+            command = String(command.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            break
+        }
+        return command
+    }
+
+    private static func localAlpineDiagnosticCommand(for lowercasedText: String) -> String? {
+        let trimmed = lowercasedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let diagnosticIntents = [
+            "检查当前环境", "检测当前环境", "测试当前环境", "检查环境", "检测环境", "测试环境",
+            "检查沙盒环境", "检测沙盒环境", "测试沙盒环境", "帮我测试一下当前沙盒环境",
+            "帮我测试当前沙盒环境", "当前环境", "沙盒环境", "alpine环境", "alpine 环境"
+        ]
+        guard diagnosticIntents.contains(where: { trimmed.contains($0) }) else { return nil }
+        return """
+        printf '== system ==\\n' && cat /etc/alpine-release 2>/dev/null && uname -a && id && pwd && printf '\\n== workspace ==\\n' && ls -la /mnt/iexa 2>/dev/null && printf '\\n== dns ==\\n' && cat /etc/resolv.conf 2>/dev/null && printf '\\n== tools ==\\n' && for x in sh ash busybox apk wget curl python3 node npm gcc g++ git vim; do printf '%-8s: ' "$x"; command -v "$x" || echo missing; done
         """
     }
 
@@ -5350,6 +5597,9 @@ final class ChatViewModel {
 
     private func cleanupStreaming() {
         guard !hasFinishedStreaming else { return }
+        Task {
+            await RunLiveActivityService.shared.finishCurrent(success: false, detail: "运行已结束")
+        }
         hasFinishedStreaming = true
         isStreaming = false
         isExternallyStreaming = false
@@ -7126,31 +7376,79 @@ final class ChatViewModel {
     }
 
     private func executeLocalAlpineAgent(messageId: String, content: String) async {
-        let result = await LocalAlpineAgentService.shared.executeBlocks(in: content)
-        guard result.didExecute else { return }
         guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
 
-        let resultMessage = ChatMessage(
-            role: .system,
-            content: result.summary,
+        let resultMessageId = UUID().uuidString
+        let initialStatus = localAlpineStatus(description: localAlpineRunningDescription(for: content), done: false)
+        let placeholderMessage = ChatMessage(
+            id: resultMessageId,
+            role: .assistant,
+            content: "",
             timestamp: .now,
-            isStreaming: false,
+            model: "Local Alpine",
+            isStreaming: true,
+            statusHistory: [initialStatus],
             metadata: ["iexa_local_alpine_result": "true"]
         )
-        let resultNode = HistoryNode(
-            id: resultMessage.id,
+        let placeholderNode = HistoryNode(
+            id: resultMessageId,
             parentId: messageId,
             childrenIds: [],
-            role: .system,
-            content: result.summary,
-            timestamp: resultMessage.timestamp,
-            done: true
+            role: .assistant,
+            content: "",
+            timestamp: placeholderMessage.timestamp,
+            model: "Local Alpine",
+            done: false,
+            statusHistory: [initialStatus]
         )
 
-        conversation?.messages.append(resultMessage)
-        conversation?.history.addNode(resultNode)
-        conversation?.history.appendChildId(resultMessage.id, to: messageId)
-        conversation?.history.currentId = resultMessage.id
+        conversation?.messages.append(placeholderMessage)
+        conversation?.history.addNode(placeholderNode)
+        conversation?.history.appendChildId(resultMessageId, to: messageId)
+        conversation?.history.currentId = resultMessageId
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+
+        beginStreamingBackgroundTaskIfNeeded()
+        await startLocalAlpineLiveActivity(
+            id: resultMessageId,
+            command: content,
+            detail: initialStatus.description ?? "正在执行本地 Alpine 命令..."
+        )
+        defer { endBackgroundTask() }
+
+        let result = await LocalAlpineAgentService.shared.executeBlocks(in: content)
+        guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
+
+        if !result.didExecute {
+            let doneStatus = localAlpineStatus(description: "本地 Alpine 没有检测到可执行命令", done: true)
+            updateAssistantMessage(
+                id: resultMessageId,
+                content: result.summary.isEmpty ? "Local Alpine 没有检测到可执行命令。" : result.summary,
+                isStreaming: false,
+                statusHistory: [doneStatus]
+            )
+            conversation?.history.updateNode(id: resultMessageId) { node in
+                node.content = result.summary.isEmpty ? "Local Alpine 没有检测到可执行命令。" : result.summary
+                node.done = true
+                node.statusHistory = [doneStatus]
+            }
+            await persistLocalConversationIfNeeded()
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            return
+        }
+
+        let doneStatus = localAlpineStatus(description: "本地 Alpine 执行完成", done: true)
+        updateAssistantMessage(
+            id: resultMessageId,
+            content: result.summary,
+            isStreaming: false,
+            statusHistory: [doneStatus]
+        )
+        conversation?.history.updateNode(id: resultMessageId) { node in
+            node.content = result.summary
+            node.done = true
+            node.statusHistory = [doneStatus]
+        }
 
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
@@ -7243,6 +7541,33 @@ final class ChatViewModel {
             if let error { conversation?.messages[index].error = error }
         }
 
+        if terminalEnabled, selectedTerminalIsLocalAlpine,
+           let alpineContent = completedAssistantContentForAgent {
+            let visibleAlpineContent = LocalAlpineAgentService.visibleContent(from: alpineContent)
+            if visibleAlpineContent != alpineContent,
+               let index = conversation?.messages.firstIndex(where: { $0.id == id }) {
+                conversation?.messages[index].content = visibleAlpineContent
+                conversation?.history.updateNode(id: id) { node in
+                    node.content = visibleAlpineContent
+                    node.done = true
+                }
+            }
+        }
+
+        if let workspaceContent = completedAssistantContentForAgent,
+           workspaceContent.localizedCaseInsensitiveContains("iexa_workspace"),
+           shouldExecuteLocalWorkspaceAgentForCurrentRequest() {
+            let visibleWorkspaceContent = LocalWorkspaceAgentService.visibleContent(from: workspaceContent)
+            if visibleWorkspaceContent != workspaceContent,
+               let index = conversation?.messages.firstIndex(where: { $0.id == id }) {
+                conversation?.messages[index].content = visibleWorkspaceContent
+                conversation?.history.updateNode(id: id) { node in
+                    node.content = visibleWorkspaceContent
+                    node.done = true
+                }
+            }
+        }
+
         // Extract and apply task list updates live from the streaming content.
         // Gate on a 100-char delta to avoid the O(n) string scan on every token.
         // The function also guards internally (only fires when the magic keywords are present),
@@ -7257,6 +7582,13 @@ final class ChatViewModel {
         if isStreaming && error == nil {
             triggerStreamingHaptic()
         }
+        updateRunLiveActivity(
+            id: id,
+            content: content,
+            isStreaming: isStreaming,
+            statusHistory: statusHistory,
+            error: error
+        )
 
         if let completedAssistantContentForAgent {
             scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
@@ -7296,6 +7628,18 @@ final class ChatViewModel {
         // not conversation.messages, during active streaming).
         if streamingStore.streamingMessageId == id && streamingStore.isActive {
             streamingStore.appendStatus(status)
+        }
+        if let description = status.description {
+            Task {
+                await RunLiveActivityService.shared.update(
+                    id: id,
+                    detail: description,
+                    phase: status.done == true ? "完成" : "运行中",
+                    progress: status.done == true ? 0.92 : nil,
+                    isIndeterminate: status.done != true,
+                    force: true
+                )
+            }
         }
     }
 

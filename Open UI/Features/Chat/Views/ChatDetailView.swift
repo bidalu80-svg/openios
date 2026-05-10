@@ -3614,6 +3614,137 @@ private struct IsolatedStreamingStatus: View {
     }
 }
 
+// MARK: - Image Generation Placeholder
+
+private struct ImageGenerationPlaceholderView: View {
+    @Environment(\.theme) private var theme
+    @State private var isAnimating = false
+
+    private var baseColors: [Color] {
+        if isAnimating {
+            return [
+                Color(red: 0.91, green: 0.96, blue: 1.00),
+                Color(red: 0.99, green: 0.90, blue: 0.96),
+                Color(red: 1.00, green: 0.95, blue: 0.86),
+                Color(red: 0.90, green: 0.88, blue: 1.00)
+            ]
+        }
+        return [
+            Color(red: 1.00, green: 0.92, blue: 0.88),
+            Color(red: 0.96, green: 0.88, blue: 1.00),
+            Color(red: 0.90, green: 0.95, blue: 1.00),
+            Color(red: 1.00, green: 0.90, blue: 0.95)
+        ]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ImageGenerationTitleShimmer(text: "正在创建图片")
+                .accessibilityAddTraits(.updatesFrequently)
+
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: baseColors.map { $0.opacity(theme.isDark ? 0.86 : 0.78) },
+                        startPoint: isAnimating ? .topTrailing : .bottomLeading,
+                        endPoint: isAnimating ? .bottomLeading : .topTrailing
+                    )
+                )
+                .overlay {
+                    ZStack {
+                        RadialGradient(
+                            colors: [
+                                Color.white.opacity(theme.isDark ? 0.28 : 0.52),
+                                Color.white.opacity(0.02)
+                            ],
+                            center: isAnimating ? .topTrailing : .bottomLeading,
+                            startRadius: 20,
+                            endRadius: 260
+                        )
+                        LinearGradient(
+                            colors: [
+                                .clear,
+                                Color.white.opacity(theme.isDark ? 0.22 : 0.42),
+                                .clear
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        .rotationEffect(.degrees(isAnimating ? 10 : -12))
+                        .offset(x: isAnimating ? 190 : -190, y: isAnimating ? 34 : -34)
+                        .blur(radius: 22)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(Color.white.opacity(theme.isDark ? 0.10 : 0.46), lineWidth: 0.8)
+                }
+                .aspectRatio(1, contentMode: .fit)
+                .frame(maxWidth: 340)
+                .shadow(color: Color.black.opacity(theme.isDark ? 0.18 : 0.06), radius: 16, y: 8)
+                .accessibilityHidden(true)
+        }
+        .padding(.top, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear { isAnimating = true }
+        .animation(.easeInOut(duration: 3.2).repeatForever(autoreverses: true), value: isAnimating)
+    }
+}
+
+private struct ImageGenerationTitleShimmer: View {
+    let text: String
+
+    @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var shimmerPhase: CGFloat = -1
+
+    var body: some View {
+        titleText
+            .foregroundStyle(theme.textPrimary.opacity(theme.isDark ? 0.82 : 0.72))
+            .overlay {
+                if reduceMotion {
+                    titleText.foregroundStyle(theme.textPrimary)
+                } else {
+                    GeometryReader { geometry in
+                        let width = max(geometry.size.width, 1)
+                        let sweepWidth = max(width * 0.72, 86)
+
+                        LinearGradient(
+                            colors: [
+                                .clear,
+                                theme.textPrimary.opacity(theme.isDark ? 0.42 : 0.30),
+                                Color.white.opacity(theme.isDark ? 0.86 : 0.95),
+                                theme.textPrimary.opacity(theme.isDark ? 0.36 : 0.24),
+                                .clear
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                        .frame(width: sweepWidth)
+                        .offset(x: -sweepWidth + shimmerPhase * (width + sweepWidth * 2))
+                    }
+                    .mask(titleText)
+                }
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.82)
+            .accessibilityLabel(Text(text))
+            .onAppear {
+                guard !reduceMotion else { return }
+                shimmerPhase = -1
+                withAnimation(.linear(duration: 1.85).repeatForever(autoreverses: false)) {
+                    shimmerPhase = 1
+                }
+            }
+    }
+
+    private var titleText: some View {
+        Text(text)
+            .scaledFont(size: 18, weight: .semibold, context: .content)
+    }
+}
+
 // MARK: - Isolated Assistant Message (Observation Isolation)
 
 /// Isolates ALL streaming store reads for assistant message content into
@@ -3683,7 +3814,13 @@ private struct IsolatedAssistantMessage: View {
         let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
 
         if effectiveIsStreaming && rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            TypingIndicator()
+            if message.metadata?["iexa_local_alpine_result"] == "true" {
+                EmptyView()
+            } else if message.metadata?["iexa_image_generation_placeholder"] == "true" {
+                ImageGenerationPlaceholderView()
+            } else {
+                TypingIndicator()
+            }
         } else {
             // Perf optimisation: when a tool-call block has been fully closed and
             // the frozen boundary is known, split the content so the heavy tool-call
@@ -3702,7 +3839,7 @@ private struct IsolatedAssistantMessage: View {
             // full routing (InlineVisualizerView, tool-call renderer, embed injection).
             // When those are present, fall through to the normal full-content path below.
             let liveTail = isActivelyStreaming ? streamingStore.liveTextTail : ""
-            let liveTailHasSpecialContent = liveTail.contains("@@@VIZ-START") || liveTail.contains("<details")
+            let liveTailHasSpecialContent = Self.requiresFullAssistantRouting(liveTail)
             if frozenBoundary > 0 && !liveTailHasSpecialContent {
                 let dc = streamingStore.displayContent
                 let frozenContent: String = {
@@ -3778,7 +3915,9 @@ private struct IsolatedAssistantMessage: View {
                     ? streamingStore.frozenProseBoundaryOffset
                     : 0
 
-                if proseFreezeOffset > 0 && displayContent.count >= proseFreezeOffset {
+                if proseFreezeOffset > 0,
+                   displayContent.count >= proseFreezeOffset,
+                   !Self.requiresFullAssistantRouting(displayContent) {
                     let dc = displayContent
                     let splitIdx = dc.index(dc.startIndex, offsetBy: proseFreezeOffset)
                     let frozenProse = String(dc[..<splitIdx])
@@ -3814,6 +3953,27 @@ private struct IsolatedAssistantMessage: View {
                 }
             }
         }
+    }
+
+    private static func requiresFullAssistantRouting(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        let lower = text.lowercased()
+        return lower.contains("@@@viz-start")
+            || lower.contains("<details")
+            || lower.contains("<think")
+            || lower.contains("</think")
+            || lower.contains("<thinking")
+            || lower.contains("</thinking")
+            || lower.contains("<reasoning")
+            || lower.contains("</reasoning")
+            || lower.contains("<reason")
+            || lower.contains("</reason")
+            || lower.contains("<thought")
+            || lower.contains("</thought")
+            || lower.contains("<|begin_of_thought|>")
+            || lower.contains("<|end_of_thought|>")
+            || text.contains("◁think▷")
+            || text.contains("◁/think▷")
     }
 
     // MARK: - Static Preprocessing (no ChatDetailView dependency)
