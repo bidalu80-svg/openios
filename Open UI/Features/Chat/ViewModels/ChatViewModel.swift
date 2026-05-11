@@ -257,6 +257,10 @@ final class ChatViewModel {
     /// Assistant message IDs whose Local Alpine command blocks have already
     /// been executed. Keeps refresh/retry paths from running shell commands twice.
     private var localAlpineAgentExecutedMessageIds: Set<String> = []
+    private var localAlpineAgentTask: Task<Void, Never>?
+    private var localAlpineContinuationTask: Task<Void, Never>?
+    private var localAlpineAgentStopRequested = false
+    private let localAlpineAgentMaxSteps = 10
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     @ObservationIgnored private var localAlpineInputContinuation: CheckedContinuation<String?, Never>?
@@ -1222,7 +1226,7 @@ final class ChatViewModel {
         Rules for this state:
         - If state is running, tell the user the Local Alpine command is still running or ask whether to stop it; do not apologize that no executable block was emitted.
         - If result output is present, answer from that output as the source of truth.
-        - Do not emit a duplicate `iexa_alpine` block for the same request unless the user clearly asks to rerun or run a different command.
+        - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
         [/Local Alpine execution state]
         """
     }
@@ -3188,6 +3192,7 @@ final class ChatViewModel {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else { return }
         guard let manager else { return }
+        resetLocalAlpineAgentLoopForNewTurn()
         if attachments.contains(where: { $0.uploadStatus == .error && !canSendAttachmentWithoutCompletedUpload($0) }) {
             errorMessage = "One or more attachments failed to upload. Retry or remove them before sending."
             return
@@ -4193,6 +4198,8 @@ final class ChatViewModel {
     private func sendDirectLocalAlpineCommand(_ rawCommand: String, modelId: String) async {
         let command = Self.normalizedLocalAlpineCommand(rawCommand)
         guard !command.isEmpty else { return }
+        resetLocalAlpineAgentLoopForNewTurn()
+        localAlpineAgentStopRequested = true
         let displayCommand = rawCommand
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: #"^\$\s+"#, with: "", options: .regularExpression)
@@ -4482,6 +4489,24 @@ final class ChatViewModel {
         continuation.resume(returning: nil)
     }
 
+    private func resetLocalAlpineAgentLoopForNewTurn() {
+        localAlpineAgentTask?.cancel()
+        localAlpineAgentTask = nil
+        localAlpineContinuationTask?.cancel()
+        localAlpineContinuationTask = nil
+        cancelLocalAlpineInput()
+        localAlpineAgentStopRequested = false
+    }
+
+    private func cancelLocalAlpineAgentLoop() {
+        localAlpineAgentStopRequested = true
+        localAlpineAgentTask?.cancel()
+        localAlpineAgentTask = nil
+        localAlpineContinuationTask?.cancel()
+        localAlpineContinuationTask = nil
+        cancelLocalAlpineInput()
+    }
+
     private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
         let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "（无输出）"
@@ -4546,6 +4571,8 @@ final class ChatViewModel {
     /// Stops the current streaming response by cancelling the server-side task
     /// via `/api/tasks/stop/{taskId}` and cleaning up local state.
     func stopStreaming() {
+        cancelLocalAlpineAgentLoop()
+
         // Cancel the local HTTP task
         streamingTask?.cancel()
         streamingTask = nil
@@ -7303,6 +7330,7 @@ final class ChatViewModel {
         - For unattended tests where the user did not ask to type input themselves, avoid interactive prompts by using constants, command-line args, environment variables, or an explicit `printf 'value\n' | python3 script.py`.
         - For Node/Python dependency installs, use bounded commands and print versions/errors. Avoid background daemons unless the user explicitly asks.
         - Keep commands safe and scoped to `/mnt/iexa`; do not use destructive commands outside that workspace.
+        - After the app appends a Local Alpine execution result, continue from that real output: if the task is not done, emit the next bounded `iexa_alpine` block; if an error appears, fix and rerun; if the task is done, give the final answer. Do not stop after one command unless the output proves the task is complete.
 
         To execute commands, include exactly one fenced block with language `iexa_alpine` containing JSON. The app will run those commands locally on the device and append the real output. Do not output this block unless command execution is actually needed.
 
@@ -7945,7 +7973,9 @@ final class ChatViewModel {
         let alpineContext = selectedTerminalIsLocalAlpine && terminalEnabled
             ? Self.localAlpineAgentSystemContext()
             : nil
-        let alpineExecutionStateContext = Self.localAlpineExecutionStateSystemContext(from: conversation.messages)
+        let alpineExecutionStateContext = selectedTerminalIsLocalAlpine && terminalEnabled
+            ? Self.localAlpineExecutionStateSystemContext(from: conversation.messages)
+            : nil
         let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, alpineContext, alpineExecutionStateContext, memoryContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -7959,6 +7989,7 @@ final class ChatViewModel {
                 message: message,
                 includeImageCanvasInstruction: message.id == imageCanvasInstructionMessageId
             )
+            let modelRole = Self.isLocalAlpineAgentResult(message) ? "system" : message.role.rawValue
             let imageFiles = message.files.filter { f in
                 f.type == "image" || (f.contentType ?? "").hasPrefix("image/")
             }
@@ -8016,7 +8047,7 @@ final class ChatViewModel {
                 }
 
                 var msgDict: [String: Any] = [
-                    "role": message.role.rawValue,
+                    "role": modelRole,
                     "content": contentArray
                 ]
 
@@ -8031,7 +8062,7 @@ final class ChatViewModel {
                 apiMessages.append(msgDict)
             } else {
                 var msgDict: [String: Any] = [
-                    "role": message.role.rawValue,
+                    "role": modelRole,
                     "content": modelContent
                 ]
 
@@ -8362,9 +8393,16 @@ final class ChatViewModel {
 
     private func scheduleLocalAlpineAgentIfNeeded(messageId: String, content: String, error: ChatMessageError?) {
         guard error == nil else { return }
+        guard !localAlpineAgentStopRequested else { return }
         guard terminalEnabled, selectedTerminalIsLocalAlpine else { return }
-        guard let role = conversation?.messages.first(where: { $0.id == messageId })?.role, role == .assistant else { return }
+        guard let message = conversation?.messages.first(where: { $0.id == messageId }),
+              message.role == .assistant else { return }
         guard !localAlpineAgentExecutedMessageIds.contains(messageId) else { return }
+        if localAlpineStepsSinceLastUser() >= localAlpineAgentMaxSteps {
+            localAlpineAgentExecutedMessageIds.insert(messageId)
+            appendLocalAlpineAgentLimitMessage(parentId: messageId)
+            return
+        }
         let userRequestedExecution = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         }).map { Self.isExplicitLocalAlpineRequest($0.content) } ?? false
@@ -8372,6 +8410,8 @@ final class ChatViewModel {
         let executableContent: String
         if content.localizedCaseInsensitiveContains("iexa_alpine") {
             executableContent = content
+        } else if message.metadata?["iexa_local_alpine_continuation"] == "true" {
+            return
         } else if userRequestedExecution,
                   let userText = conversation?.messages.last(where: {
                       $0.role == .user && !Self.isLocalAlpineAgentResult($0)
@@ -8383,9 +8423,52 @@ final class ChatViewModel {
         }
 
         localAlpineAgentExecutedMessageIds.insert(messageId)
-        Task { [weak self] in
+        localAlpineAgentTask = Task { [weak self] in
             await self?.executeLocalAlpineAgent(messageId: messageId, content: executableContent)
         }
+    }
+
+    private func localAlpineStepsSinceLastUser() -> Int {
+        guard let messages = conversation?.messages,
+              let lastUserIndex = messages.lastIndex(where: {
+                  $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+              }) else { return 0 }
+        let startIndex = messages.index(after: lastUserIndex)
+        guard startIndex < messages.endIndex else { return 0 }
+        return messages[startIndex...].filter(Self.isLocalAlpineAgentResult).count
+    }
+
+    private func appendLocalAlpineAgentLimitMessage(parentId: String) {
+        let content = """
+        Local Alpine 执行结果
+
+        已达到本轮 Agent 自动执行上限（\(localAlpineAgentMaxSteps) 步）。我先停在这里，避免循环执行拖慢 App。
+        """
+        let message = ChatMessage(
+            role: .assistant,
+            content: content,
+            timestamp: .now,
+            model: "Local Alpine",
+            isStreaming: false,
+            metadata: ["iexa_local_alpine_result": "true"]
+        )
+        let node = HistoryNode(
+            id: message.id,
+            parentId: parentId,
+            childrenIds: [],
+            role: .assistant,
+            content: content,
+            timestamp: message.timestamp,
+            model: "Local Alpine",
+            done: true
+        )
+        conversation?.messages.append(message)
+        conversation?.history.addNode(node)
+        conversation?.history.appendChildId(message.id, to: parentId)
+        conversation?.history.currentId = message.id
+        localAlpineAgentStopRequested = true
+        Task { await persistLocalConversationIfNeeded() }
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
     }
 
     private func shouldExecuteLocalWorkspaceAgentForCurrentRequest() -> Bool {
@@ -8530,6 +8613,7 @@ final class ChatViewModel {
     }
 
     private func executeLocalAlpineAgent(messageId: String, content: String) async {
+        guard !localAlpineAgentStopRequested else { return }
         guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
 
         let hasExecutableBlocks = await LocalAlpineAgentService.shared.hasExecutableBlocks(in: content)
@@ -8586,9 +8670,27 @@ final class ChatViewModel {
         }
 
         let result = await LocalAlpineAgentService.shared.executeBlocks(in: content) { request in
+            guard !Task.isCancelled else { return nil }
             await self.requestLocalAlpineInput(request)
         }
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
+        guard !Task.isCancelled else {
+            let stoppedStatus = localAlpineStatus(description: "本地 Alpine 已停止", done: true)
+            updateAssistantMessage(
+                id: resultMessageId,
+                content: "",
+                isStreaming: false,
+                statusHistory: [stoppedStatus],
+                error: ChatMessageError(content: "已停止本地 Alpine Agent")
+            )
+            conversation?.history.updateNode(id: resultMessageId) { node in
+                node.done = true
+                node.statusHistory = [stoppedStatus]
+            }
+            await persistLocalConversationIfNeeded()
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            return
+        }
         guard result.didExecute else {
             conversation?.messages.removeAll { $0.id == resultMessageId }
             conversation?.history.removeSubtree(rootId: resultMessageId)
@@ -8617,6 +8719,396 @@ final class ChatViewModel {
 
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+
+        let shouldContinueAfterResult = content.localizedCaseInsensitiveContains("iexa_alpine")
+        if result.interactiveRequest == nil, shouldContinueAfterResult, !localAlpineAgentStopRequested {
+            scheduleLocalAlpineContinuationIfNeeded(after: resultMessageId)
+        } else {
+            localAlpineAgentStopRequested = true
+        }
+    }
+
+    private func scheduleLocalAlpineContinuationIfNeeded(after resultMessageId: String) {
+        guard terminalEnabled, selectedTerminalIsLocalAlpine else { return }
+        guard !localAlpineAgentStopRequested else { return }
+        guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
+        if localAlpineStepsSinceLastUser() >= localAlpineAgentMaxSteps {
+            appendLocalAlpineAgentLimitMessage(parentId: resultMessageId)
+            return
+        }
+
+        localAlpineContinuationTask?.cancel()
+        localAlpineContinuationTask = Task { [weak self] in
+            await self?.startLocalAlpineContinuation(parentId: resultMessageId)
+        }
+    }
+
+    private func isLocalAlpineAgentStillNeeded(after resultMessageId: String) -> Bool {
+        guard let messages = conversation?.messages,
+              let resultIndex = messages.firstIndex(where: { $0.id == resultMessageId }) else { return false }
+        if let resultNode = conversation?.history.nodes[resultMessageId],
+           let parentId = resultNode.parentId,
+           let nodes = conversation?.history.nodes,
+           let parentNode = nodes[parentId],
+           parentNode.content.localizedCaseInsensitiveContains("iexa_alpine") {
+            return true
+        }
+        let laterMessages = messages[messages.index(after: resultIndex)...]
+        if laterMessages.contains(where: { $0.role == .assistant && !Self.isLocalAlpineAgentResult($0) }) {
+            return false
+        }
+        let resultText = (messages[resultIndex].content + "\n" + (messages[resultIndex].statusHistory.last?.description ?? ""))
+            .lowercased()
+        let incompleteMarkers = [
+            "退出码：`1`", "退出码：`2`", "退出码：`126`", "退出码：`127`", "退出码：`124`",
+            "not found", "error", "failed", "missing", "no such file", "traceback", "exception",
+            "command not found", "permission denied", "输入已取消", "存在错误输出"
+        ]
+        if incompleteMarkers.contains(where: { resultText.contains($0.lowercased()) }) {
+            return true
+        }
+        if let lastUser = messages.last(where: { $0.role == .user && !Self.isLocalAlpineAgentResult($0) }) {
+            let userText = lastUser.content.lowercased()
+            let actionMarkers = [
+                "修", "改", "写", "创建", "生成", "安装", "编译", "构建", "测试", "运行", "验证",
+                "检查", "查看", "分析", "诊断", "搜索", "抓取", "联网", "依赖",
+                "fix", "write", "create", "build", "compile", "test", "run", "verify", "install",
+                "check", "inspect", "diagnose", "search", "fetch", "dependency"
+            ]
+            return actionMarkers.contains(where: { userText.contains($0) })
+        }
+        return false
+    }
+
+    private func startLocalAlpineContinuation(parentId: String) async {
+        guard !localAlpineAgentStopRequested else { return }
+        guard isLocalAlpineAgentStillNeeded(after: parentId) else { return }
+        guard localAlpineStepsSinceLastUser() < localAlpineAgentMaxSteps else {
+            appendLocalAlpineAgentLimitMessage(parentId: parentId)
+            return
+        }
+        guard let manager else { return }
+        guard let conversation, conversation.messages.contains(where: { $0.id == parentId }) else { return }
+        guard let modelId = selectedModelId ?? conversation.model else { return }
+        guard !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        let assistantMessageId = UUID().uuidString
+        let thinkingStatus = ChatStatusUpdate(
+            action: "local_alpine_agent",
+            description: "正在根据本地 Alpine 输出判断下一步...",
+            done: false
+        )
+        let assistantMessage = ChatMessage(
+            id: assistantMessageId,
+            role: .assistant,
+            content: "",
+            timestamp: .now,
+            model: modelId,
+            isStreaming: true,
+            statusHistory: [thinkingStatus],
+            metadata: ["iexa_local_alpine_continuation": "true"]
+        )
+        let assistantNode = HistoryNode(
+            id: assistantMessageId,
+            parentId: parentId,
+            childrenIds: [],
+            role: .assistant,
+            content: "",
+            timestamp: assistantMessage.timestamp,
+            model: modelId,
+            done: false,
+            statusHistory: [thinkingStatus]
+        )
+
+        self.conversation?.messages.append(assistantMessage)
+        self.conversation?.history.addNode(assistantNode)
+        self.conversation?.history.appendChildId(assistantMessageId, to: parentId)
+        self.conversation?.history.currentId = assistantMessageId
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+
+        var apiMessages = await buildAPIMessagesAsync()
+        Self.appendLocalAlpineContinuationInstruction(to: &apiMessages)
+
+        isStreaming = true
+        hasFinishedStreaming = false
+        selfInitiatedStream = true
+        activeTaskId = nil
+        sessionId = UUID().uuidString
+        beginStreamingBackgroundTaskIfNeeded()
+        streamingStore.beginStreaming(
+            messageId: assistantMessageId,
+            modelId: modelId,
+            initialStatusHistory: [thinkingStatus]
+        )
+
+        let effectiveChatId = conversationId ?? self.conversation?.id
+        let socket = socketService
+        var socketConnected = socket?.isConnected ?? false
+        if !isOpenAICompatibleProvider, let socket, !socketConnected {
+            socketConnected = await socket.ensureConnected(timeout: 8.0)
+        }
+        let socketSessionId = socket?.sid ?? sessionId
+        let usePollingFallback = !isOpenAICompatibleProvider && !socketConnected
+
+        if !isOpenAICompatibleProvider {
+            await syncToServerViaTree()
+            if socketConnected, let socket {
+                registerSocketHandlers(
+                    socket: socket,
+                    assistantMessageId: assistantMessageId,
+                    modelId: modelId,
+                    socketSessionId: socketSessionId,
+                    effectiveChatId: effectiveChatId
+                )
+            }
+        }
+
+        streamingTask = Task { [weak self] in
+            guard let self else { return }
+            let acc = ContentAccumulator()
+            var exactUsage: [String: Any]?
+
+            do {
+                var request = ChatCompletionRequest(
+                    model: modelId,
+                    messages: apiMessages,
+                    stream: true,
+                    chatId: effectiveChatId,
+                    sessionId: socketSessionId,
+                    messageId: assistantMessageId,
+                    parentId: parentId
+                )
+                await self.populateCommonRequestFields(&request)
+
+                if self.isOpenAICompatibleProvider {
+                    let sseStream = try await manager.sendMessageStreaming(request: request)
+                    for try await event in sseStream {
+                        if Task.isCancelled { break }
+                        if let usage = event.usage, !usage.isEmpty {
+                            exactUsage = usage
+                        }
+                        if let delta = event.contentDelta, !delta.isEmpty {
+                            acc.append(delta)
+                            self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                        }
+                        if event.isFinished { break }
+                    }
+                    if Task.isCancelled { return }
+                    await self.finishLocalAlpineContinuation(
+                        assistantMessageId: assistantMessageId,
+                        modelId: modelId,
+                        content: acc.content,
+                        usage: exactUsage
+                    )
+                    return
+                }
+
+                if request.isPipeModel {
+                    let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
+                    for try await event in sseStream {
+                        if Task.isCancelled { break }
+                        if let usage = event.usage, !usage.isEmpty {
+                            exactUsage = usage
+                        }
+                        if let delta = event.contentDelta, !delta.isEmpty {
+                            acc.append(delta)
+                            self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                        }
+                        if event.isFinished { break }
+                    }
+                    if Task.isCancelled { return }
+                    await self.finishLocalAlpineContinuation(
+                        assistantMessageId: assistantMessageId,
+                        modelId: modelId,
+                        content: acc.content,
+                        usage: exactUsage
+                    )
+                    return
+                }
+
+                let json = try await manager.sendMessageHTTP(request: request)
+                if let err = json["error"] as? String, !err.isEmpty {
+                    self.updateAssistantMessage(
+                        id: assistantMessageId,
+                        content: "",
+                        isStreaming: false,
+                        error: ChatMessageError(content: err)
+                    )
+                    self.cleanupStreaming()
+                    return
+                }
+                if let taskId = json["task_id"] as? String {
+                    self.activeTaskId = taskId
+                }
+                if usePollingFallback, let chatId = effectiveChatId {
+                    await self.pollLocalAlpineContinuation(
+                        chatId: chatId,
+                        assistantMessageId: assistantMessageId,
+                        modelId: modelId,
+                        socketSessionId: socketSessionId
+                    )
+                } else if usePollingFallback {
+                    self.updateAssistantMessage(
+                        id: assistantMessageId,
+                        content: "",
+                        isStreaming: false,
+                        error: ChatMessageError(content: "当前会话没有可轮询的 chatId，无法继续 Local Alpine Agent。")
+                    )
+                    self.cleanupStreaming()
+                } else {
+                    self.logger.info("Local Alpine continuation HTTP POST done – waiting for socket events")
+                }
+            } catch {
+                if !Task.isCancelled {
+                    self.updateAssistantMessage(
+                        id: assistantMessageId,
+                        content: acc.content,
+                        isStreaming: false,
+                        error: ChatMessageError(content: error.localizedDescription)
+                    )
+                    self.cleanupStreaming()
+                    await self.persistLocalConversationIfNeeded()
+                    NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                }
+            }
+        }
+    }
+
+    private func finishLocalAlpineContinuation(
+        assistantMessageId: String,
+        modelId: String,
+        content: String,
+        usage: [String: Any]?
+    ) async {
+        guard !localAlpineAgentStopRequested else {
+            cleanupStreaming()
+            return
+        }
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: "",
+                isStreaming: false,
+                error: ChatMessageError(content: "未收到模型下一步，请重试。")
+            )
+            cleanupStreaming()
+            return
+        }
+
+        updateAssistantMessage(id: assistantMessageId, content: content, isStreaming: false)
+        normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+        let finalContent = conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? content
+        applyUsage(usage, toMessageId: assistantMessageId)
+        let lastUser = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })
+        recordTokenUsageForCompletedTurn(
+            assistantMessageId: assistantMessageId,
+            userText: lastUser?.content ?? "",
+            assistantText: finalContent,
+            userAttachments: [],
+            usage: usage
+        )
+        hasFinishedStreaming = true
+        isStreaming = false
+        selfInitiatedStream = false
+        activeTaskId = nil
+        lastTaskExtractionLength = 0
+        await persistLocalConversationIfNeeded()
+        await sendCompletionNotificationIfNeeded(content: finalContent)
+        endBackgroundTask()
+        if finalContent.localizedCaseInsensitiveContains("iexa_alpine") {
+            localAlpineContinuationTask = nil
+        } else {
+            localAlpineAgentStopRequested = true
+            localAlpineContinuationTask = nil
+        }
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func pollLocalAlpineContinuation(
+        chatId: String,
+        assistantMessageId: String,
+        modelId: String,
+        socketSessionId: String
+    ) async {
+        guard let manager else {
+            cleanupStreaming()
+            return
+        }
+        var lastContentLength = 0
+        var staleCount = 0
+        for _ in 0..<40 {
+            if Task.isCancelled || localAlpineAgentStopRequested { return }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if Task.isCancelled || localAlpineAgentStopRequested { return }
+
+            do {
+                let refreshed = try await manager.fetchConversation(id: chatId)
+                guard let serverAssistant = refreshed.messages.first(where: { $0.id == assistantMessageId }) else {
+                    continue
+                }
+                let serverContent = serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !serverContent.isEmpty else { continue }
+                updateAssistantMessage(id: assistantMessageId, content: serverAssistant.content, isStreaming: true)
+                if serverContent.count > lastContentLength {
+                    lastContentLength = serverContent.count
+                    staleCount = 0
+                } else {
+                    staleCount += 1
+                }
+                if staleCount >= 3 {
+                    await finishLocalAlpineContinuation(
+                        assistantMessageId: assistantMessageId,
+                        modelId: modelId,
+                        content: serverAssistant.content,
+                        usage: nil
+                    )
+                    await manager.sendChatCompleted(
+                        chatId: chatId,
+                        messageId: assistantMessageId,
+                        model: modelId,
+                        sessionId: socketSessionId,
+                        messages: buildSimpleAPIMessages()
+                    )
+                    return
+                }
+            } catch {
+                logger.warning("Local Alpine continuation polling failed: \(error.localizedDescription)")
+            }
+        }
+
+        updateAssistantMessage(
+            id: assistantMessageId,
+            content: conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? "",
+            isStreaming: false
+        )
+        localAlpineAgentStopRequested = true
+        localAlpineContinuationTask = nil
+        cleanupStreaming()
+    }
+
+    private static func appendLocalAlpineContinuationInstruction(to messages: inout [[String: Any]]) {
+        let instruction = """
+        [Local Alpine continuation]
+        You are in a continuous Local Alpine agent loop. Read the latest real Local Alpine result above.
+        - If the user's task is complete, answer normally and do not emit `iexa_alpine`.
+        - If more work is needed, emit exactly one next `iexa_alpine` block with bounded non-interactive command(s).
+        - If the last command failed, inspect the error, fix the files/dependencies/command, then rerun a concrete verification.
+        - Do not repeat the same command unless the output shows a clear reason.
+        [/Local Alpine continuation]
+        """
+        if !messages.isEmpty, messages[0]["role"] as? String == "system" {
+            var system = messages[0]
+            let existing = system["content"] as? String ?? ""
+            system["content"] = [existing, instruction]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: "\n\n")
+            messages[0] = system
+        } else {
+            messages.insert(["role": "system", "content": instruction], at: 0)
+        }
     }
 
     private func updateAssistantMessage(
@@ -8703,8 +9195,23 @@ final class ChatViewModel {
                 }
             }
             if let sources { conversation?.messages[index].sources = sources }
-            if let statusHistory { conversation?.messages[index].statusHistory = statusHistory }
-            if let error { conversation?.messages[index].error = error }
+            if let sources {
+                conversation?.history.updateNode(id: id) { node in
+                    node.sources = sources
+                }
+            }
+            if let statusHistory {
+                conversation?.messages[index].statusHistory = statusHistory
+                conversation?.history.updateNode(id: id) { node in
+                    node.statusHistory = statusHistory
+                }
+            }
+            if let error {
+                conversation?.messages[index].error = error
+                conversation?.history.updateNode(id: id) { node in
+                    node.error = error
+                }
+            }
         }
 
         if terminalEnabled, selectedTerminalIsLocalAlpine,

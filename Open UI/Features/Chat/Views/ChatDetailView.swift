@@ -1393,7 +1393,7 @@ struct ChatDetailView: View {
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 0) {
 
             // ── Assistant header (avatar + model name) ──
-            if message.role == .assistant {
+            if message.role == .assistant && !isLocalAlpineResultMessage(message) {
                 assistantHeader(for: message)
             }
 
@@ -1535,27 +1535,46 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func messageBubble(for message: ChatMessage, isLastAssistant: Bool) -> some View {
-        ChatMessageBubble(
-            role: message.role,
-            showTimestamp: activeActionMessageId == message.id,
-            timestamp: message.timestamp
-        ) {
-            messageContent(for: message)
-        }
-        // Only apply tap gesture to user bubbles — assistant content contains
-        // interactive elements (links, text selection) that onTapGesture would block.
-        // Assistant action bar is always visible so no tap-reveal is needed.
-        .if(message.role == .user) { view in
-            view.onTapGesture {
-                withAnimation(MicroAnimation.snappy) {
-                    activeActionMessageId = activeActionMessageId == message.id ? nil : message.id
+        if isLocalAlpineResultMessage(message) {
+            LocalAlpineResultCard(
+                content: message.content,
+                metadata: message.metadata,
+                isStreaming: message.isStreaming,
+                statusHistory: message.statusHistory
+            )
+            .padding(.horizontal, Spacing.screenPadding)
+            .padding(.vertical, Spacing.xs)
+        } else {
+            ChatMessageBubble(
+                role: message.role,
+                showTimestamp: activeActionMessageId == message.id,
+                timestamp: message.timestamp
+            ) {
+                messageContent(for: message)
+            }
+            // Only apply tap gesture to user bubbles — assistant content contains
+            // interactive elements (links, text selection) that onTapGesture would block.
+            // Assistant action bar is always visible so no tap-reveal is needed.
+            .if(message.role == .user) { view in
+                view.onTapGesture {
+                    withAnimation(MicroAnimation.snappy) {
+                        activeActionMessageId = activeActionMessageId == message.id ? nil : message.id
+                    }
+                    Haptics.play(.light)
                 }
-                Haptics.play(.light)
+            }
+            .if(message.role != .assistant) { view in
+                view.contextMenu { messageContextMenu(for: message) }
             }
         }
-        .if(message.role != .assistant) { view in
-            view.contextMenu { messageContextMenu(for: message) }
-        }
+    }
+
+    private func isLocalAlpineResultMessage(_ message: ChatMessage) -> Bool {
+        message.metadata?["iexa_local_alpine_result"] == "true"
+            || message.content.hasPrefix("Local Alpine 执行结果")
+            || (message.model == "Local Alpine" && message.statusHistory.contains {
+                $0.action?.lowercased() == "local_alpine"
+            })
     }
 
     @ViewBuilder
@@ -3851,7 +3870,10 @@ private struct IsolatedAssistantMessage: View {
         let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
 
         if effectiveIsStreaming && rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if message.metadata?["iexa_local_alpine_result"] == "true" {
+            if message.metadata?["iexa_local_alpine_result"] == "true"
+                || (message.model == "Local Alpine" && message.statusHistory.contains(where: {
+                    $0.action?.lowercased() == "local_alpine"
+                })) {
                 EmptyView()
             } else if message.metadata?["iexa_image_generation_placeholder"] == "true" {
                 ImageGenerationPlaceholderView()
@@ -4121,6 +4143,210 @@ private struct IsolatedAssistantMessage: View {
         return result
     }
 
+}
+
+private struct LocalAlpineResultCard: View {
+    let content: String
+    let metadata: [String: String]?
+    let isStreaming: Bool
+    let statusHistory: [ChatStatusUpdate]
+
+    @State private var isExpanded = false
+
+    private var parsed: ParsedLocalAlpineResult {
+        ParsedLocalAlpineResult(content: content, metadata: metadata)
+    }
+
+    private var statusText: String {
+        if isStreaming { return "运行中" }
+        if parsed.hasNonZeroExit { return "完成，有错误" }
+        return "完成"
+    }
+
+    private var statusColor: Color {
+        if isStreaming { return .orange }
+        if parsed.hasNonZeroExit { return .red }
+        return .green
+    }
+
+    private var statusDetail: String {
+        statusHistory.last?.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(MicroAnimation.snappy) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "terminal.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color(.systemBackground))
+                        .frame(width: 30, height: 30)
+                        .background(statusColor)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("本地 Alpine")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.primary)
+                        Text(parsed.summaryText(isStreaming: isStreaming, statusDetail: statusDetail))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Text(statusText)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(statusColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(statusColor.opacity(0.12))
+                        .clipShape(Capsule())
+
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if !isExpanded, !parsed.collapsedPreview.isEmpty {
+                Text(parsed.collapsedPreview)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+
+            if isExpanded {
+                Divider()
+                if !parsed.commandText.isEmpty {
+                    LocalAlpineCodeSection(title: "命令", text: parsed.commandText, maxHeight: 140)
+                }
+                LocalAlpineCodeSection(title: "输出", text: parsed.outputText, maxHeight: 240)
+            }
+        }
+        .padding(12)
+        .background(Color(.secondarySystemBackground))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct LocalAlpineCodeSection: View {
+    let title: String
+    let text: String
+    let maxHeight: CGFloat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+            ScrollView(.vertical) {
+                Text(text.isEmpty ? "（无输出）" : text)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(10)
+            }
+            .frame(maxHeight: maxHeight)
+            .background(Color(.systemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+    }
+}
+
+private struct ParsedLocalAlpineResult {
+    let commandCount: Int
+    let commandText: String
+    let outputText: String
+    let collapsedPreview: String
+    let hasNonZeroExit: Bool
+
+    init(content: String, metadata: [String: String]?) {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let commandFromMetadata = metadata?["iexa_local_alpine_display_command"]
+            ?? metadata?["iexa_local_alpine_command_preview"]
+            ?? ""
+        let commandBlocks = Self.codeBlocks(in: trimmed, preferredLanguage: "bash").joined(separator: "\n\n---\n\n")
+        let textBlocks = Self.codeBlocks(in: trimmed, preferredLanguage: "text").joined(separator: "\n\n---\n\n")
+
+        commandText = Self.clip(
+            commandFromMetadata.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? commandBlocks
+                : commandFromMetadata,
+            limit: 8_000
+        )
+        outputText = Self.clip(textBlocks.isEmpty ? trimmed : textBlocks, limit: 20_000)
+        commandCount = max(1, Self.headingCount(in: trimmed, heading: "命令"))
+        collapsedPreview = Self.clip(
+            textBlocks.isEmpty ? trimmed : textBlocks.trimmingCharacters(in: .whitespacesAndNewlines),
+            limit: 240
+        )
+        hasNonZeroExit = Self.containsNonZeroExit(in: trimmed)
+    }
+
+    func summaryText(isStreaming: Bool, statusDetail: String) -> String {
+        if isStreaming {
+            return statusDetail.isEmpty ? "正在执行命令..." : statusDetail
+        }
+        return "已运行 \(commandCount) 条命令"
+    }
+
+    private static func codeBlocks(in content: String, preferredLanguage: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)```"#) else {
+            return []
+        }
+        let nsContent = content as NSString
+        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
+        var blocks: [String] = []
+        for match in matches where match.numberOfRanges >= 3 {
+            let language = nsContent.substring(with: match.range(at: 1)).lowercased()
+            let body = nsContent.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if language.contains(preferredLanguage) {
+                blocks.append(body)
+            }
+        }
+        return blocks
+    }
+
+    private static func headingCount(in content: String, heading: String) -> Int {
+        let escapedHeading = NSRegularExpression.escapedPattern(for: heading)
+        guard let regex = try? NSRegularExpression(pattern: #"(?m)^\s*"# + escapedHeading + #"\s*$"#) else {
+            return 0
+        }
+        return regex.numberOfMatches(in: content, range: NSRange(content.startIndex..<content.endIndex, in: content))
+    }
+
+    private static func containsNonZeroExit(in content: String) -> Bool {
+        guard let regex = try? NSRegularExpression(pattern: #"退出码：`?([A-Za-z0-9_-]+)`?"#) else {
+            return false
+        }
+        let matches = regex.matches(in: content, range: NSRange(content.startIndex..<content.endIndex, in: content))
+        for match in matches where match.numberOfRanges >= 2 {
+            guard let range = Range(match.range(at: 1), in: content) else { continue }
+            let value = String(content[range]).lowercased()
+            if value != "0" { return true }
+        }
+        return false
+    }
+
+    private static func clip(_ text: String, limit: Int) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > limit else { return trimmed }
+        return String(trimmed.prefix(limit)) + "\n...（内容过长，已折叠）"
+    }
 }
 
 // MARK: - Superscript Number Helper
