@@ -122,49 +122,40 @@ struct AuthenticatedImageView: View {
                 }
             }
 
-            if loadedImage != nil {
-                Button {
-                    Task { await saveImageToPhotos() }
-                } label: {
-                    HStack(spacing: 4) {
-                        if saveState == .saving {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .tint(.white)
-                        } else {
-                            Image(systemName: saveIcon)
-                                .scaledFont(size: 12, weight: .semibold)
+            if let image = loadedImage {
+                HStack(spacing: 7) {
+                    if let onEdit {
+                        Button {
+                            onEdit(image)
+                            Haptics.play(.light)
+                        } label: {
+                            imageActionLabel(icon: "wand.and.stars", text: "编辑")
                         }
-                        Text(saveLabel)
-                            .scaledFont(size: 11, weight: .semibold)
+                        .buttonStyle(.plain)
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 6)
-                    .background(.black.opacity(0.62), in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .padding(8)
-            }
-        }
-        .overlay(alignment: .bottomLeading) {
-            if let image = loadedImage, let onEdit {
-                Button {
-                    onEdit(image)
-                    Haptics.play(.light)
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "wand.and.stars")
-                            .scaledFont(size: 13, weight: .semibold)
-                        Text("编辑")
-                            .scaledFont(size: 13, weight: .semibold)
+
+                    Button {
+                        Task { await saveImageToPhotos() }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if saveState == .saving {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: saveIcon)
+                                    .scaledFont(size: 12, weight: .semibold)
+                            }
+                            Text(saveLabel)
+                                .scaledFont(size: 11, weight: .semibold)
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background(.black.opacity(0.62), in: Capsule())
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(.black.opacity(0.62), in: Capsule())
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
                 .padding(8)
             }
         }
@@ -214,6 +205,19 @@ struct AuthenticatedImageView: View {
         case .saved: return "已保存"
         case .failed: return "失败"
         }
+    }
+
+    private func imageActionLabel(icon: String, text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .scaledFont(size: 12, weight: .semibold)
+            Text(text)
+                .scaledFont(size: 11, weight: .semibold)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(.black.opacity(0.62), in: Capsule())
     }
 
     private func loadImage() async {
