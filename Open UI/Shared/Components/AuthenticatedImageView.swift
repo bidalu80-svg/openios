@@ -181,6 +181,13 @@ struct AuthenticatedImageView: View {
     }
 
     private func loadImage() async {
+        if let cached = Self.imageCache.object(forKey: fileId as NSString) {
+            loadedImage = cached
+            isLoading = false
+            hasError = false
+            return
+        }
+
         if let inlineImage = Self.inlineDataImage(from: fileId) {
             Self.imageCache.setObject(inlineImage, forKey: fileId as NSString)
             loadedImage = inlineImage
@@ -293,13 +300,13 @@ struct AuthenticatedImageView: View {
 
     private static func inlineDataImage(from dataURL: String) -> UIImage? {
         guard dataURL.hasPrefix("data:image/"),
-              dataURL.count <= 220_000,
+              dataURL.count <= 7_000_000,
               let comma = dataURL.firstIndex(of: ",") else { return nil }
         let base64 = String(dataURL[dataURL.index(after: comma)...])
         guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else {
             return nil
         }
-        guard data.count <= 160_000 else { return nil }
+        guard data.count <= 5_000_000 else { return nil }
         return UIImage(data: data)
     }
 

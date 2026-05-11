@@ -14,6 +14,17 @@ actor LocalAlpineAgentService {
 
     private init() {}
 
+    func hasExecutableBlocks(in content: String) -> Bool {
+        let blocks = extractInstructionBlocks(from: content)
+        guard !blocks.isEmpty else { return false }
+        for block in blocks {
+            if let commands = try? parseCommands(from: block), !commands.isEmpty {
+                return true
+            }
+        }
+        return false
+    }
+
     func executeBlocks(in content: String) async -> LocalAlpineAgentResult {
         let blocks = extractInstructionBlocks(from: content)
         guard !blocks.isEmpty else {
@@ -33,8 +44,7 @@ actor LocalAlpineAgentService {
         }
 
         if commands.isEmpty {
-            let summary = (["Local Alpine 没有执行任何命令。"] + lines).joined(separator: "\n")
-            return LocalAlpineAgentResult(didExecute: true, summary: summary)
+            return LocalAlpineAgentResult(didExecute: false, summary: lines.joined(separator: "\n"))
         }
 
         let trimmedCommands = Array(commands.prefix(maxCommandsPerResponse))
@@ -91,6 +101,7 @@ actor LocalAlpineAgentService {
            let object = try? JSONSerialization.jsonObject(with: data, options: []) {
             let commands = parseCommands(from: object)
             if !commands.isEmpty { return commands }
+            throw LocalAlpineAgentError.noCommands
         }
 
         let shellLines = block
@@ -134,10 +145,18 @@ actor LocalAlpineAgentService {
             ? "（无输出）"
             : output
         let exit = result.exitCode.map(String.init) ?? "unknown"
+        let commandBlock = command.trimmingCharacters(in: .whitespacesAndNewlines)
         return """
-        命令：`\(command.replacingOccurrences(of: "\n", with: " && "))`
+        命令
+
+        ```bash
+        \(commandBlock)
+        ```
+
         工作目录：`\(cwd)`
         退出码：`\(exit)`
+
+        输出
 
         ```text
         \(renderedOutput)

@@ -320,9 +320,12 @@ enum SSEEvent: Sendable {
                 "inline_data", "inlineData", "bytesBase64Encoded"
             ]
             for key in directImageKeys {
-                if let raw = dict[key] as? String,
-                   let reference = explicitImageReference(raw) {
-                    return reference
+                if let raw = dict[key] as? String {
+                    let allowsOpaqueImageURL = ["url", "image_url", "imageUrl", "imageURL", "file_url", "download_url", "output_url"]
+                        .contains(key)
+                    if let reference = explicitImageReference(raw, allowsOpaqueImageURL: allowsOpaqueImageURL) {
+                        return reference
+                    }
                 }
                 if let reference = firstImageReference(in: dict[key]) {
                     return reference
@@ -354,14 +357,14 @@ enum SSEEvent: Sendable {
         return nil
     }
 
-    private static func explicitImageReference(_ raw: String) -> String? {
+    private static func explicitImageReference(_ raw: String, allowsOpaqueImageURL: Bool = false) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if trimmed.hasPrefix("data:image/") {
             return trimmed
         }
         if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
-            return trimmed
+            return (allowsOpaqueImageURL || isLikelyImageURL(trimmed)) ? trimmed : nil
         }
         if let inText = firstImageReferenceInText(trimmed) {
             return inText
@@ -373,20 +376,14 @@ enum SSEEvent: Sendable {
     }
 
     private static func firstImageReferenceInText(_ text: String) -> String? {
-        let contextSuggestsImage = text.range(
-            of: #"(已生成图片|生成.*图|图片|图像|照片|image|photo|picture|generated)"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) != nil
         let patterns = [
             #"!\[[^\]]*\]\((data:image/[^)\s]+)\)"#,
-            #"!\[[^\]]*\]\((https?://[^)\s]+)\)"#,
             #"<img[^>]+src=["'](data:image/[^"']+)["']"#,
-            #"<img[^>]+src=["'](https?://[^"']+)["']"#,
+            #"<img[^>]+src=["'](https?://[^"']+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^"']*)?)["']"#,
             #"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{128,})"#,
             #"(https?://[^\s"'<>]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^\s"'<>]+)?)"#,
             #"(https?://assets\.grok\.com/[^\s"'<>]+)"#,
-            #"(https?://[^\s"'<>]+)"#,
-            #"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"(https?://[^"]+)""#,
+            #"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"(https?://[^"]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^"]*)?)""#,
             #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_-]{128,})""#
         ]
 
@@ -402,7 +399,7 @@ enum SSEEvent: Sendable {
                 return value
             }
             if value.hasPrefix("http://") || value.hasPrefix("https://") {
-                if contextSuggestsImage || isLikelyImageURL(value) {
+                if isLikelyImageURL(value) {
                     return value
                 }
                 continue

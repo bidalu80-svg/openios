@@ -1606,8 +1606,7 @@ struct ChatDetailView: View {
                 }
                 if !imageFiles.isEmpty {
                     ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
-                        let displayFileId = file.displayURL ?? file.url
-                        if let fileId = displayFileId, !fileId.isEmpty {
+                        if let fileId = imageReference(for: file) {
                             chatImageView(fileId: fileId)
                                 .frame(maxWidth: 220, maxHeight: 220)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -2321,8 +2320,7 @@ struct ChatDetailView: View {
                 HStack(spacing: Spacing.sm) {
                     Spacer()
                     ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
-                        let displayFileId = file.displayURL ?? file.url
-                        if let fileId = displayFileId, !fileId.isEmpty {
+                        if let fileId = imageReference(for: file) {
                             chatImageView(fileId: fileId)
                                 .frame(
                                     maxWidth: imageFiles.count == 1 ? 200 : 100,
@@ -2347,6 +2345,26 @@ struct ChatDetailView: View {
     @ViewBuilder
     private func chatImageView(fileId: String) -> some View {
         AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+    }
+
+    private func imageReference(for file: ChatMessageFile) -> String? {
+        let candidates = [file.displayURL, file.url].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        for candidate in candidates where !candidate.isEmpty {
+            if candidate.hasPrefix("data:image/")
+                || candidate.hasPrefix("file://")
+                || candidate.hasPrefix("http://")
+                || candidate.hasPrefix("https://") {
+                return candidate
+            }
+            if !candidate.contains("/") {
+                return candidate
+            }
+            let parts = candidate.split(separator: "/")
+            if let idx = parts.firstIndex(of: "files"), idx + 1 < parts.count {
+                return String(parts[idx + 1])
+            }
+        }
+        return nil
     }
 
     private func fileAttachmentCard(file: ChatMessageFile) -> some View {
@@ -2468,22 +2486,7 @@ struct ChatDetailView: View {
 
             LazyVGrid(columns: columns, spacing: Spacing.sm) {
                 ForEach(Array(imageFiles.enumerated()), id: \.element) { _, file in
-                    if let fileUrl = file.url, !fileUrl.isEmpty {
-                        let fileId: String = {
-                            if let displayURL = file.displayURL,
-                               displayURL.hasPrefix("data:image/")
-                                || displayURL.hasPrefix("file://")
-                                || displayURL.hasPrefix("http://")
-                                || displayURL.hasPrefix("https://") {
-                                return displayURL
-                            }
-                            if !fileUrl.contains("/") { return fileUrl }
-                            let parts = fileUrl.split(separator: "/")
-                            if let idx = parts.firstIndex(of: "files"), idx + 1 < parts.count {
-                                return String(parts[idx + 1])
-                            }
-                            return fileUrl
-                        }()
+                    if let fileId = imageReference(for: file) {
                         chatImageView(fileId: fileId)
                             .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
                     }
@@ -4041,7 +4044,7 @@ private struct IsolatedAssistantMessage: View {
     static func resolveRelativeURLs(_ content: String, baseURL: String) -> String {
         let base = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !base.isEmpty else { return content }
-        let pattern = #"(\]\()(/api/[^\s\)]+)"#
+        let pattern = #"((?:\]\(|src=["']|href=["']))(/api/[^\s\)"']+)"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return content }
         let nsContent = content as NSString
         let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))

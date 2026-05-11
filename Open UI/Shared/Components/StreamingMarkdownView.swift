@@ -496,14 +496,14 @@ struct StreamingMarkdownView: View {
 
     private static func makeImageURL(from raw: String) -> URL? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count <= 20_000,
+        guard trimmed.count <= 80_000,
               !trimmed.contains("\n"),
               !trimmed.contains("\r") else { return nil }
         if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
             return URL(string: trimmed)
         }
         if trimmed.hasPrefix("data:image/") {
-            return nil
+            return URL(string: trimmed)
         }
         return nil
     }
@@ -554,7 +554,7 @@ struct StreamingMarkdownView: View {
     /// Detects a bare image URL in plain text so providers that return
     /// "done text + image link" still render as an inline image.
     private func findBareImageURLs(in text: String) -> [ParsedImage] {
-        let pattern = #"(?<![\(\["'])((?:https?:)?//[^\s<>"']+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^\s<>"']*)?)(?![\)"'])"#
+        let pattern = #"(?<![\(\["'])((?:https?:)?//[^\s<>"']+\.(?:png|jpg|jpeg|gif|webp|bmp|svg|avif)(?:\?[^\s<>"']*)?|https?://assets\.grok\.com/[^\s<>"']+)(?![\)"'])"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
         let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
         return regex.matches(in: text, options: [], range: nsRange).compactMap { match in
@@ -1433,9 +1433,12 @@ private struct MarkdownInlineImageView: View {
     }
 
     private func dataURIImage(from dataURI: String) -> UIImage? {
-        guard let comma = dataURI.firstIndex(of: ",") else { return nil }
+        guard dataURI.hasPrefix("data:image/"),
+              dataURI.count <= 7_000_000,
+              let comma = dataURI.firstIndex(of: ",") else { return nil }
         let encoded = String(dataURI[dataURI.index(after: comma)...])
         guard let data = Data(base64Encoded: encoded) else { return nil }
+        guard data.count <= 5_000_000 else { return nil }
         return UIImage(data: data)
     }
 

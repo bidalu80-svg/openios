@@ -97,6 +97,9 @@ actor LocalAlpineTerminalService {
         guard !trimmed.isEmpty else {
             return LocalAlpineCommandResult(command: command, output: "", exitCode: 0)
         }
+        if let interactiveWarning = interactiveInputWarning(for: trimmed) {
+            return LocalAlpineCommandResult(command: trimmed, output: interactiveWarning, exitCode: 124)
+        }
 
         let status = status()
         guard let rootArchiveURL = bundledRootFSURL() else {
@@ -304,6 +307,34 @@ actor LocalAlpineTerminalService {
             return rewritten
         }
         return commandWithAutoDependencyRepair(rewritten)
+    }
+
+    private func interactiveInputWarning(for command: String) -> String? {
+        let lowercased = command.lowercased()
+        let markers = [
+            "input(",
+            "raw_input(",
+            "read -p",
+            "read -r",
+            "scanf(",
+            "cin >>",
+            "readline(",
+            "readline.readline",
+            "prompt("
+        ]
+        let hasShellRead = lowercased.range(
+            of: #"(?m)(^|[;&|]\s*)read(\s|$)"#,
+            options: .regularExpression
+        ) != nil
+        guard hasShellRead || markers.contains(where: { lowercased.contains($0) }) else { return nil }
+        return """
+        检测到交互式输入（input/read/scanf 等）。
+
+        当前聊天里的本地 Alpine 执行是非交互模式，不能停在输入框等你手动输入。为避免进度卡死，本次没有继续执行。
+
+        请把输入值改成命令行参数、环境变量、默认值，或把测试输入用管道传入，例如：
+        printf 'value\\n' | python3 script.py
+        """
     }
 
     private func shouldBypassAutoDependencyRepair(_ command: String) -> Bool {

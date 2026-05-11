@@ -4276,12 +4276,21 @@ final class ChatViewModel {
             : result.output
         let exit = result.exitCode.map(String.init) ?? "unknown"
         return """
-        ```text
-        $ \(command)
-        \(output)
+        Local Alpine 执行结果
+
+        命令
+
+        ```bash
+        \(command)
         ```
 
-        exit: `\(exit)`
+        退出码：`\(exit)`
+
+        输出
+
+        ```text
+        \(output)
+        ```
         """
     }
 
@@ -6381,9 +6390,8 @@ final class ChatViewModel {
         let modelNameSuggestsImageGeneration = selectedModelId.map {
             shouldUseDirectImageGeneration(modelId: $0) || shouldPreferChatNativeImageGeneration(modelId: $0)
         } ?? false
-        let shouldEnableImageGeneration = imageGenerationEnabled
-            || modelAllowsImageGeneration
-            || modelNameSuggestsImageGeneration
+        let shouldEnableImageGeneration = modelNameSuggestsImageGeneration
+            && (imageGenerationEnabled || modelAllowsImageGeneration)
 
         // Use ONLY the current toggle state. Server defaults are already applied
         // to these toggles at init time via syncUIWithModelDefaults() — which runs
@@ -6424,10 +6432,31 @@ final class ChatViewModel {
     }
 
     private func shouldUseDirectImageGeneration(modelId: String) -> Bool {
-        if let selectedModel {
-            return selectedModel.supportsImageGeneration
+        let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
+            .lowercased()
+        let directEndpointTokens = [
+            "gpt-image", "dall-e", "dalle", "flux", "sdxl",
+            "stable-diffusion", "midjourney", "mj-", "minimax-image",
+            "qwen-image", "imagen", "seedream", "jimeng", "kolors",
+            "image-01", "image-02", "image-03", "image-generation"
+        ]
+        let chatModelTokens = [
+            "gpt-5", "gpt-4", "gpt-3", "claude", "gemini", "qwen3",
+            "qwen-plus", "qwen-max", "grok-4", "grok-3", "mini",
+            "chat", "reasoning", "vision", "vl", "ocr"
+        ]
+        if directEndpointTokens.contains(where: { haystack.contains($0) }) {
+            return true
         }
-        return AIModel(id: modelId, name: modelId).supportsImageGeneration
+        if chatModelTokens.contains(where: { haystack.contains($0) }) {
+            return false
+        }
+        if let selectedModel,
+           selectedModel.defaultFeatureIds.contains("image_generation")
+            || selectedModel.builtinTools["image_generation"] == true {
+            return false
+        }
+        return false
     }
 
     private func shouldPreferChatNativeImageGeneration(modelId: String) -> Bool {
@@ -6444,18 +6473,18 @@ final class ChatViewModel {
             return false
         }
 
-        // These providers/models often generate images through the normal chat
-        // completion path and return image URLs or inline media in the message.
+        // Some providers expose image generation through chat completions, but
+        // plain chat models (grok/qwen/etc.) must not be treated as image models
+        // just because the user mentions "图片" in the prompt.
         if haystack.contains("gemini") && (haystack.contains("image") || haystack.contains("banana")) {
             return true
         }
-        if haystack.contains("qwen3.6")
-            || haystack.contains("qwen3-")
-            || haystack.contains("qwen-plus")
-            || haystack.contains("qwen-max") {
+        if haystack.contains("qwen")
+            && (haystack.contains("image") || haystack.contains("imagen") || haystack.contains("图像") || haystack.contains("生图")) {
             return true
         }
-        if haystack.contains("grok-4") || haystack.contains("grok-3") {
+        if haystack.contains("grok")
+            && (haystack.contains("imagine") || haystack.contains("image") || haystack.contains("图像") || haystack.contains("生图")) {
             return true
         }
         return false
@@ -7114,6 +7143,22 @@ final class ChatViewModel {
         let query = webSearchQuery(from: text)
         guard !query.isEmpty else { return }
 
+        if let currentTimeContext = modelCurrentTimeContextPrompt(for: text) {
+            webSearchContextsByMessageId[userMessageId] = currentTimeContext
+            appendStatusUpdate(
+                id: assistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "web_search",
+                    description: "已获取当前时间",
+                    done: true,
+                    count: 0,
+                    query: query,
+                    queries: [query]
+                )
+            )
+            return
+        }
+
         if isWebSearchCapabilityQuestion(text) {
             webSearchContextsByMessageId[userMessageId] = modelWebSearchAvailabilityPrompt()
             appendStatusUpdate(
@@ -7277,9 +7322,63 @@ final class ChatViewModel {
     }
 
     private func webSearchQuery(from text: String) -> String {
-        text
+        var query = text
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixes = [
+            "你搜一下", "帮我搜一下", "帮我搜索一下", "帮我搜索", "帮我搜",
+            "替我搜一下", "替我搜索一下", "搜索一下", "搜一下", "联网搜索一下",
+            "联网搜索", "上网搜一下", "上网搜索一下", "查一下", "帮我查一下",
+            "帮我查", "查询一下", "搜搜", "search for", "search", "lookup"
+        ]
+        var changed = true
+        while changed {
+            changed = false
+            let lowered = query.lowercased()
+            for prefix in prefixes where lowered.hasPrefix(prefix.lowercased()) {
+                query = String(query.dropFirst(prefix.count))
+                    .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "：:，,。.?？")))
+                changed = true
+                break
+            }
+        }
+        let suffixes = ["一下", "看看", "给我", "吗", "么", "？", "?"]
+        for suffix in suffixes where query.hasSuffix(suffix) && query.count > suffix.count + 1 {
+            query = String(query.dropLast(suffix.count))
+                .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "：:，,。.?？")))
+        }
+        if query == "当前时间" || query == "现在时间" || query == "现在几点" {
+            return "北京时间 当前时间"
+        }
+        return query
+    }
+
+    private func modelCurrentTimeContextPrompt(for text: String) -> String? {
+        let normalized = text
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let timeTerms = [
+            "当前时间", "现在时间", "现在几点", "几点了", "今天几号",
+            "今天日期", "现在日期", "currenttime", "whatstime", "whattime"
+        ]
+        guard timeTerms.contains(where: { normalized.contains($0) }) else { return nil }
+
+        let now = Date()
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy年M月d日 EEEE HH:mm:ss"
+        let timeText = formatter.string(from: now)
+        let zone = TimeZone.current.identifier
+        return """
+
+        [客户端当前时间]
+        当前设备时间：\(timeText)
+        时区：\(zone)
+        用户在询问当前时间/日期时，请直接使用上面的客户端时间回答，不要再搜索网页，也不要说无法实时获取。
+        [/客户端当前时间]
+        """
     }
 
     private func shouldResolveWebSearchContext(for text: String) -> Bool {
@@ -8082,6 +8181,9 @@ final class ChatViewModel {
     private func executeLocalAlpineAgent(messageId: String, content: String) async {
         guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
 
+        let hasExecutableBlocks = await LocalAlpineAgentService.shared.hasExecutableBlocks(in: content)
+        guard hasExecutableBlocks else { return }
+
         let resultMessageId = UUID().uuidString
         let initialStatus = localAlpineStatus(description: localAlpineRunningDescription(for: content), done: false)
         let placeholderMessage = ChatMessage(
@@ -8122,20 +8224,9 @@ final class ChatViewModel {
 
         let result = await LocalAlpineAgentService.shared.executeBlocks(in: content)
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
-
-        if !result.didExecute {
-            let doneStatus = localAlpineStatus(description: "本地 Alpine 没有检测到可执行命令", done: true)
-            updateAssistantMessage(
-                id: resultMessageId,
-                content: result.summary.isEmpty ? "Local Alpine 没有检测到可执行命令。" : result.summary,
-                isStreaming: false,
-                statusHistory: [doneStatus]
-            )
-            conversation?.history.updateNode(id: resultMessageId) { node in
-                node.content = result.summary.isEmpty ? "Local Alpine 没有检测到可执行命令。" : result.summary
-                node.done = true
-                node.statusHistory = [doneStatus]
-            }
+        guard result.didExecute else {
+            conversation?.messages.removeAll { $0.id == resultMessageId }
+            conversation?.history.removeSubtree(rootId: resultMessageId)
             await persistLocalConversationIfNeeded()
             NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
             return
@@ -8527,11 +8618,6 @@ final class ChatViewModel {
 
     private static func extractImageReferenceStrings(from content: String) -> [String] {
         var results: [String] = []
-        let contextSuggestsImage = content.range(
-            of: #"(已生成图片|生成.*图|图片|图像|照片|image|photo|picture|generated)"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) != nil
-
         func addMatches(_ pattern: String, captureIndex: Int = 1) {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return }
             let nsContent = content as NSString
@@ -8543,15 +8629,8 @@ final class ChatViewModel {
         }
 
         addMatches(#"!\[[^\]]*\]\((data:image/[^)\s]+)\)"#)
-        addMatches(#"!\[[^\]]*\]\((https?://[^)\s]+)\)"#)
-        addMatches(#"!\[[^\]]*\]\((https?://[^)\s]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^)\s]*)?)\)"#)
         addMatches(#"<img[^>]+src=["'](data:image/[^"']+)["']"#)
-        addMatches(#"<img[^>]+src=["'](https?://[^"']+)["']"#)
         addMatches(#"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{128,})"#)
-        addMatches(#"(https?://[^\s"'<>]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^\s"'<>]+)?)"#)
-        addMatches(#"(https?://assets\.grok\.com/[^\s"'<>]+)"#)
-        addMatches(#"(https?://[^\s"'<>]+)"#)
-        addMatches(#"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"(https?://[^"]+)""#)
         addMatches(#"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_-]{128,})""#)
 
         return results.compactMap { value -> String? in
@@ -8562,7 +8641,7 @@ final class ChatViewModel {
                 return writeGeneratedImageToCache(dataURL: trimmed)
             }
             if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
-                return (isLikelyImageURL(trimmed) || contextSuggestsImage) ? trimmed : nil
+                return nil
             }
             guard looksLikeBase64Image(trimmed) else { return nil }
             return writeGeneratedImageToCache(dataURL: "data:image/png;base64,\(trimmed)")
@@ -8610,12 +8689,8 @@ final class ChatViewModel {
         let patterns = [
             #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
             #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
-            #"!\[[^\]]*\]\(\s*https?://[^)\s]+\s*\)"#,
             #"<img[^>]+src=["']data:image/[^"']+["'][^>]*>"#,
-            #"<img[^>]+src=["']https?://[^"']+["'][^>]*>"#,
             #"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,}"#,
-            #"https?://assets\.grok\.com/[^\s"'<>]+"#,
-            #"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"https?://[^"]+""#,
             #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"[A-Za-z0-9+/=_-]{128,}""#
         ]
         for pattern in patterns {
@@ -8624,9 +8699,6 @@ final class ChatViewModel {
                 with: "",
                 options: [.regularExpression, .caseInsensitive]
             )
-        }
-        for imageReference in extractImageReferenceStrings(from: content) where imageReference.hasPrefix("http") {
-            cleaned = cleaned.replacingOccurrences(of: imageReference, with: "")
         }
         cleaned = cleaned.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)

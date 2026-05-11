@@ -271,7 +271,7 @@ struct StreamingStatusView: View {
 
                         // Show count if available (e.g., "Retrieved 17 sources")
                         if let count = latest.count, count > 0, latest.done == true {
-                            Text("Retrieved \(count) source\(count == 1 ? "" : "s")")
+                            Text("获取了 \(count) 个来源")
                                 .scaledFont(size: 11, weight: .regular)
                                 .foregroundStyle(theme.textTertiary)
                                 .lineLimit(1)
@@ -453,17 +453,17 @@ struct StreamingStatusView: View {
         case "web_search", "websearch", "web search":
             if isDone {
                 if let count = status.count, count > 0 {
-                    return "Searched \(count) site\(count == 1 ? "" : "s")"
+                    return "已搜索 \(count) 个网页"
                 }
-                return desc ?? "Searched the web"
+                return desc ?? "已完成联网搜索"
             }
             if let query = status.query, !query.isEmpty {
-                return "Searching for '\(query)'"
+                return "正在搜索：\(query)"
             }
             if !status.queries.isEmpty {
-                return "Searching"
+                return "正在搜索"
             }
-            return desc ?? "Searching the web"
+            return desc ?? "正在联网搜索"
 
         case "generate_image", "image_generation", "generateimage":
             if isDone { return desc ?? "Image generated" }
@@ -483,11 +483,11 @@ struct StreamingStatusView: View {
         case "knowledge", "knowledge_search", "rag":
             if isDone {
                 if let count = status.count, count > 0 {
-                    return "Retrieved \(count) source\(count == 1 ? "" : "s")"
+                    return "获取了 \(count) 个来源"
                 }
-                return desc ?? "Knowledge retrieved"
+                return desc ?? "已查询知识库"
             }
-            return desc ?? "Querying knowledge base…"
+            return desc ?? "正在查询知识库..."
 
         case "reconnecting":
             return desc ?? "Reconnecting…"
