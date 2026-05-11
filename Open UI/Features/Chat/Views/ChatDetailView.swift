@@ -457,34 +457,22 @@ struct ChatDetailView: View {
             actionConfirmRequest: $actionConfirmRequest,
             actionNotificationToast: $actionNotificationToast,
             actionCallContinuation: $actionCallContinuation,
-            actionInputText: $actionInputText
+            actionInputText: $actionInputText,
+            localAlpineInputRequest: Binding(
+                get: { viewModel.localAlpineInputRequest },
+                set: { if $0 == nil, viewModel.localAlpineInputRequest != nil { viewModel.cancelLocalAlpineInput() } }
+            ),
+            localAlpineInputText: Binding(
+                get: { viewModel.localAlpineInputText },
+                set: { viewModel.localAlpineInputText = $0 }
+            ),
+            onLocalAlpineConfirm: {
+                viewModel.submitLocalAlpineInput(viewModel.localAlpineInputText)
+            },
+            onLocalAlpineCancel: {
+                viewModel.cancelLocalAlpineInput()
+            }
         )
-        .sheet(item: Binding(
-            get: { viewModel.localAlpineInputRequest },
-            set: { if $0 == nil, viewModel.localAlpineInputRequest != nil { viewModel.cancelLocalAlpineInput() } }
-        )) { request in
-            ActionInputSheet(
-                request: ActionInputRequest(
-                    title: request.title,
-                    message: request.message,
-                    placeholder: request.placeholder,
-                    defaultValue: request.defaultValue
-                ),
-                text: Binding(
-                    get: { viewModel.localAlpineInputText },
-                    set: { viewModel.localAlpineInputText = $0 }
-                ),
-                onConfirm: {
-                    viewModel.submitLocalAlpineInput(viewModel.localAlpineInputText)
-                },
-                onCancel: {
-                    viewModel.cancelLocalAlpineInput()
-                }
-            )
-            .presentationDetents([.height(300)])
-            .presentationDragIndicator(.visible)
-            .interactiveDismissDisabled()
-        }
         .sheet(item: $downloadedFileURL) { url in
             ShareSheetView(activityItems: [url])
         }
@@ -4458,7 +4446,11 @@ private extension View {
         actionConfirmRequest: Binding<ActionConfirmRequest?>,
         actionNotificationToast: Binding<String?>,
         actionCallContinuation: Binding<CheckedContinuation<ActionCallResponse, Never>?>,
-        actionInputText: Binding<String>
+        actionInputText: Binding<String>,
+        localAlpineInputRequest: Binding<LocalAlpineInteractiveRequest?>,
+        localAlpineInputText: Binding<String>,
+        onLocalAlpineConfirm: @escaping () -> Void,
+        onLocalAlpineCancel: @escaping () -> Void
     ) -> some View {
         self
             // MARK: __event_call__ — input dialog (presented as a sheet for reliability)
@@ -4527,6 +4519,22 @@ private extension View {
                     ))
                     .allowsHitTesting(false)
                 }
+            }
+            .sheet(item: localAlpineInputRequest) { request in
+                ActionInputSheet(
+                    request: ActionInputRequest(
+                        title: request.title,
+                        message: request.message,
+                        placeholder: request.placeholder,
+                        defaultValue: request.defaultValue
+                    ),
+                    text: localAlpineInputText,
+                    onConfirm: onLocalAlpineConfirm,
+                    onCancel: onLocalAlpineCancel
+                )
+                .presentationDetents([.height(300)])
+                .presentationDragIndicator(.visible)
+                .interactiveDismissDisabled()
             }
     }
 }
