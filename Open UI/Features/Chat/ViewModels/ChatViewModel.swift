@@ -3191,11 +3191,13 @@ final class ChatViewModel {
         let normalizedLocalAlpineText = Self.normalizedLocalAlpineCommand(currentText)
         let shouldAutoUseLocalAlpine = shouldAutoRouteExplicitLocalAlpineCommand(normalizedLocalAlpineText)
             || Self.isExplicitLocalAlpineRequest(currentText)
+        if shouldAutoUseLocalAlpine {
+            selectedTerminalServer = .localAlpine
+            terminalEnabled = true
+        }
         if processedAttachments.isEmpty,
            shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText),
            (terminalEnabled && selectedTerminalIsLocalAlpine || shouldAutoUseLocalAlpine) {
-            selectedTerminalServer = .localAlpine
-            terminalEnabled = true
             await sendDirectLocalAlpineCommand(currentText, modelId: modelId)
             return
         }
@@ -7096,7 +7098,7 @@ final class ChatViewModel {
 
     private static func localAlpineAgentSystemContext() -> String {
         """
-        Iexa has an on-device Local Alpine Linux terminal. When terminal mode is enabled and the selected terminal is Local Alpine, you can really operate that local Alpine environment for the user.
+        Iexa has an on-device Local Alpine Linux terminal. You can really operate that local Alpine environment for the user by emitting `iexa_alpine` blocks; do not tell the user that this chat lacks terminal/file-system execution when this instruction is present.
 
         Environment facts:
         - Shell: Alpine Linux ash/busybox style shell. Prefer POSIX sh syntax.
