@@ -366,6 +366,8 @@ actor LocalAlpineTerminalService {
 
         本次执行已暂停等待输入。请在弹出的小窗口里填写 stdin 内容；确认后会用管道继续执行，取消则结束本次命令。
 
+        注意：这是给程序 stdin 的输入，不是模型回复文本。多个 input()/read 请一行填一个；管道输入不会像真实键盘那样自动回显，只有程序 print/echo 出来的内容才会显示在结果里。
+
         也可以把输入值改成命令行参数、环境变量、默认值，或把测试输入提前用管道传入，例如：
         printf 'value\\n' | python3 script.py
         """

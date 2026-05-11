@@ -7113,7 +7113,8 @@ final class ChatViewModel {
         - Do not merely explain commands when the user wants action. Emit the block so the app executes it.
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - For a project/script, write files with `cat > file <<'EOF' ... EOF`, then run a bounded verification command.
-        - For Python scripts that need input, replace `input()` with constants, command-line args, environment variables, or feed input with `printf 'value\n' | python3 script.py`.
+        - If the user wants to test Python `input()` / shell `read` with their own text, do not invent sample stdin and do not pipe a fixed `printf` value. Leave the input/read command unpiped; the app will pause, ask the user for stdin, feed that exact text to the program, and append the real output.
+        - For unattended tests where the user did not ask to type input themselves, avoid interactive prompts by using constants, command-line args, environment variables, or an explicit `printf 'value\n' | python3 script.py`.
         - For Node/Python dependency installs, use bounded commands and print versions/errors. Avoid background daemons unless the user explicitly asks.
         - Keep commands safe and scoped to `/mnt/iexa`; do not use destructive commands outside that workspace.
 
