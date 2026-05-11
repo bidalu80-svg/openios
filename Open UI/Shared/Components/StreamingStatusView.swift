@@ -326,6 +326,8 @@ struct StreamingStatusView: View {
         let progress = localAlpineProgress(activeStage: activeStage, total: stages.count, isDone: isDone)
         let percentText = "\(Int((progress * 100).rounded()))%"
         let elapsedText = localAlpineElapsedText(for: latest, now: localAlpineNow)
+        let didFail = localAlpineDidFail(subtitle)
+        let statusColor = didFail ? Color.orange : (isDone ? theme.success : theme.brandPrimary)
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 12) {
@@ -336,7 +338,7 @@ struct StreamingStatusView: View {
 
                     Image(systemName: "terminal.fill")
                         .scaledFont(size: 13, weight: .semibold)
-                        .foregroundStyle(isDone ? theme.success : theme.brandPrimary)
+                        .foregroundStyle(statusColor)
                 }
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -355,7 +357,7 @@ struct StreamingStatusView: View {
                 Spacer(minLength: 0)
 
                 VStack(alignment: .trailing, spacing: 5) {
-                    localAlpineStatePill(isDone: isDone, percentText: percentText)
+                    localAlpineStatePill(isDone: isDone, didFail: didFail, percentText: percentText)
                     if let elapsedText {
                         Text(elapsedText)
                             .scaledFont(size: 10, weight: .medium)
@@ -368,7 +370,7 @@ struct StreamingStatusView: View {
             VStack(alignment: .leading, spacing: 5) {
                 ProgressView(value: progress)
                     .progressViewStyle(.linear)
-                    .tint(isDone ? theme.success : theme.brandPrimary)
+                    .tint(statusColor)
 
                 if !isDone, localAlpineLooksLongRunning(subtitle) {
                     Text("安装依赖或首次启动可能较慢，卡片会持续刷新耗时。")
@@ -383,7 +385,8 @@ struct StreamingStatusView: View {
                     localAlpineStageChip(
                         title: stage,
                         isActive: index == activeStage && !isDone,
-                        isDone: isDone || index < activeStage
+                        isDone: isDone || index < activeStage,
+                        didFail: didFail
                     )
                 }
             }
@@ -402,22 +405,24 @@ struct StreamingStatusView: View {
         .shadow(color: .black.opacity(theme.isDark ? 0.18 : 0.06), radius: 12, x: 0, y: 6)
         .padding(.horizontal, Spacing.screenPadding)
         .padding(.vertical, Spacing.xs)
-        .task {
+        .task(id: isDone) {
+            guard !isDone else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .seconds(3))
                 if Task.isCancelled { break }
-                localAlpineNow = Date()
+                localAlpineNow = .now
             }
         }
     }
 
     @ViewBuilder
-    private func localAlpineStatePill(isDone: Bool, percentText: String) -> some View {
+    private func localAlpineStatePill(isDone: Bool, didFail: Bool, percentText: String) -> some View {
+        let color: Color = didFail ? .orange : (isDone ? theme.success : theme.brandPrimary)
         HStack(spacing: 5) {
             if isDone {
-                Image(systemName: "checkmark.circle.fill")
+                Image(systemName: didFail ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
                     .scaledFont(size: 11, weight: .semibold)
-                Text("完成")
+                Text(didFail ? "已结束" : "完成")
                     .scaledFont(size: 11, weight: .semibold)
             } else {
                 PulsingDot(color: theme.brandPrimary)
@@ -427,26 +432,27 @@ struct StreamingStatusView: View {
                     .scaledFont(size: 11, weight: .semibold)
             }
         }
-        .foregroundStyle(isDone ? theme.success : theme.brandPrimary)
+        .foregroundStyle(color)
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
         .background(
             Capsule()
-                .fill((isDone ? theme.success : theme.brandPrimary).opacity(theme.isDark ? 0.14 : 0.10))
+                .fill(color.opacity(theme.isDark ? 0.14 : 0.10))
         )
     }
 
     @ViewBuilder
-    private func localAlpineStageChip(title: String, isActive: Bool, isDone: Bool) -> some View {
+    private func localAlpineStageChip(title: String, isActive: Bool, isDone: Bool, didFail: Bool) -> some View {
+        let doneColor: Color = didFail ? .orange : theme.success
         HStack(spacing: 4) {
-            Image(systemName: isDone ? "checkmark" : "circle.fill")
+            Image(systemName: isDone ? (didFail ? "exclamationmark" : "checkmark") : "circle.fill")
                 .scaledFont(size: isDone ? 9 : 6, weight: .bold)
             Text(title)
                 .scaledFont(size: 10, weight: .semibold)
                 .lineLimit(1)
                 .minimumScaleFactor(0.82)
         }
-        .foregroundStyle(isDone ? theme.success : (isActive ? theme.brandPrimary : theme.textTertiary))
+        .foregroundStyle(isDone ? doneColor : (isActive ? theme.brandPrimary : theme.textTertiary))
         .padding(.horizontal, 7)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity)
@@ -454,7 +460,7 @@ struct StreamingStatusView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(
                     isDone
-                    ? theme.success.opacity(theme.isDark ? 0.12 : 0.09)
+                    ? doneColor.opacity(theme.isDark ? 0.12 : 0.09)
                     : (isActive ? theme.brandPrimary.opacity(theme.isDark ? 0.14 : 0.10) : theme.surfaceContainerHighest.opacity(theme.isDark ? 0.35 : 0.55))
                 )
         )
@@ -524,6 +530,15 @@ struct StreamingStatusView: View {
             || description.contains("首次")
             || description.localizedCaseInsensitiveContains("install")
             || description.localizedCaseInsensitiveContains("package")
+    }
+
+    private func localAlpineDidFail(_ description: String) -> Bool {
+        description.contains("错误")
+            || description.contains("失败")
+            || description.contains("取消")
+            || description.contains("退出码")
+            || description.localizedCaseInsensitiveContains("error")
+            || description.localizedCaseInsensitiveContains("failed")
     }
 
     // MARK: - Header

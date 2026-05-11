@@ -4152,9 +4152,7 @@ final class ChatViewModel {
     private static func fallbackLocalAlpineBlock(for text: String) -> String? {
         let command = normalizedLocalAlpineCommand(text)
         guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        guard isExplicitLocalAlpineRequest(text)
-            || shouldSendRawTextDirectlyToLocalAlpine(command)
-        else { return nil }
+        guard shouldSendRawTextDirectlyToLocalAlpine(command) else { return nil }
 
         let object: [String: Any] = [
             "iexa_alpine": [
@@ -4406,9 +4404,12 @@ final class ChatViewModel {
     ) -> Task<Void, Never> {
         Task { [weak self] in
             var tick = 0
+            let maxHeartbeatDuration: TimeInterval = 300
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(8))
                 guard !Task.isCancelled else { break }
+                let elapsed = Date().timeIntervalSince(startedAt)
+                guard elapsed <= maxHeartbeatDuration else { break }
                 await MainActor.run {
                     guard let self,
                           let index = self.conversation?.messages.firstIndex(where: { $0.id == messageId }),
@@ -4416,7 +4417,7 @@ final class ChatViewModel {
                     tick += 1
                     let description = self.localAlpineHeartbeatDescription(
                         command: command,
-                        elapsed: Date().timeIntervalSince(startedAt),
+                        elapsed: elapsed,
                         tick: tick
                     )
                     let status = self.localAlpineStatus(description: description, done: false)
@@ -7278,13 +7279,16 @@ final class ChatViewModel {
         - Default working directory: `/mnt/iexa`.
         - `/mnt/iexa` is the shared writable project directory. Create project files there.
         - Package manager: `apk`. Use `apk update` and `apk add --no-cache ...` when a missing dependency is needed.
-        - Common tools may include or be installable as: python3/py3-pip, nodejs/npm, build-base, curl, wget, git, vim.
+        - Current bundled tool profile normally includes: `sh`/`ash`, `busybox`, `apk`, `wget`, `curl`, `python3`, `node`, `npm`, `gcc`, `g++`, `git`, and `vim`.
+        - Common packages that may still be missing for generated projects: `py3-pip`, `make`, `build-base`, `linux-headers`, `cmake`, `pkgconf`, `zip`, `unzip`, and `openssl-dev`.
         - The execution is non-interactive. Do not rely on prompts, REPLs, `input()`, `read`, `scanf`, `cin`, `npm init` prompts, editors waiting for input, or long-running servers that never exit.
 
         Operational rules:
         - If the user asks you to run, execute, test, verify, inspect the environment, install packages, write a runnable script/project, crawl a website, or diagnose command output, use `iexa_alpine`.
         - Do not merely explain commands when the user wants action. Emit the block so the app executes it.
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
+        - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages.
+        - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
         - For a project/script, write files with `cat > file <<'EOF' ... EOF`, then run a bounded verification command.
         - If the user wants to test Python `input()` / shell `read` with their own text, do not invent sample stdin and do not pipe a fixed `printf` value. Leave the input/read command unpiped; the app will pause, ask the user for stdin, feed that exact text to the program, and append the real output.
         - For unattended tests where the user did not ask to type input themselves, avoid interactive prompts by using constants, command-line args, environment variables, or an explicit `printf 'value\n' | python3 script.py`.
@@ -8585,7 +8589,9 @@ final class ChatViewModel {
         }
 
         let doneStatus = localAlpineStatus(
-            description: result.interactiveRequest == nil ? "本地 Alpine 执行完成" : "本地 Alpine 输入已取消",
+            description: result.interactiveRequest == nil
+                ? (result.summary.contains("退出码：`0`") ? "本地 Alpine 执行完成" : "本地 Alpine 执行结束，存在错误输出")
+                : "本地 Alpine 输入已取消",
             done: true
         )
         updateAssistantMessage(
