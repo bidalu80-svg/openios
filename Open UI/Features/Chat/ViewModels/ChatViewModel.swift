@@ -4061,8 +4061,11 @@ final class ChatViewModel {
         let terms = [
             "在终端执行", "在终端运行", "用终端执行", "用终端运行",
             "执行命令", "运行命令", "帮我执行", "帮我运行",
+            "写个脚本运行", "写一个脚本运行", "写个项目运行", "写一个项目运行",
+            "创建项目并运行", "创建脚本并运行", "测试项目", "运行项目",
+            "跑一下", "跑下", "执行一下", "运行一下",
             "local alpine", "alpine 执行", "alpine运行",
-            "run command", "execute command"
+            "run command", "execute command", "run script", "run project"
         ]
         return terms.contains { normalized.contains($0) }
     }
@@ -7027,18 +7030,33 @@ final class ChatViewModel {
 
     private static func localAlpineAgentSystemContext() -> String {
         """
-        Iexa has an on-device Local Alpine Linux terminal. When terminal mode is enabled and the selected terminal is Local Alpine, you may operate that local Alpine environment for the user.
-        Use it for concrete shell work such as checking Alpine status, listing files, installing packages with apk, running python3/node/gcc/vim checks, creating files under /mnt/iexa, or diagnosing command output.
-        To execute commands, include exactly one fenced block with language `iexa_alpine` containing JSON. The app will run those commands locally on the device and append the real output.
-        Prefer safe, bounded commands. Do not ask the user to run commands manually when you can run them through this tool. Do not output this block unless command execution is actually needed.
-        Do not say a command was executed, tested, installed, or fixed unless you emit the `iexa_alpine` block. The real output appended by the app is the only execution result.
+        Iexa has an on-device Local Alpine Linux terminal. When terminal mode is enabled and the selected terminal is Local Alpine, you can really operate that local Alpine environment for the user.
+
+        Environment facts:
+        - Shell: Alpine Linux ash/busybox style shell. Prefer POSIX sh syntax.
+        - Default working directory: `/mnt/iexa`.
+        - `/mnt/iexa` is the shared writable project directory. Create project files there.
+        - Package manager: `apk`. Use `apk update` and `apk add --no-cache ...` when a missing dependency is needed.
+        - Common tools may include or be installable as: python3/py3-pip, nodejs/npm, build-base, curl, wget, git, vim.
+        - The execution is non-interactive. Do not rely on prompts, REPLs, `input()`, `read`, `scanf`, `cin`, `npm init` prompts, editors waiting for input, or long-running servers that never exit.
+
+        Operational rules:
+        - If the user asks you to run, execute, test, verify, inspect the environment, install packages, write a runnable script/project, crawl a website, or diagnose command output, use `iexa_alpine`.
+        - Do not merely explain commands when the user wants action. Emit the block so the app executes it.
+        - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
+        - For a project/script, write files with `cat > file <<'EOF' ... EOF`, then run a bounded verification command.
+        - For Python scripts that need input, replace `input()` with constants, command-line args, environment variables, or feed input with `printf 'value\n' | python3 script.py`.
+        - For Node/Python dependency installs, use bounded commands and print versions/errors. Avoid background daemons unless the user explicitly asks.
+        - Keep commands safe and scoped to `/mnt/iexa`; do not use destructive commands outside that workspace.
+
+        To execute commands, include exactly one fenced block with language `iexa_alpine` containing JSON. The app will run those commands locally on the device and append the real output. Do not output this block unless command execution is actually needed.
 
         Example:
         ```iexa_alpine
         {
           "iexa_alpine": [
             {"command": "cat /etc/alpine-release && uname -m && pwd", "cwd": "/mnt/iexa"},
-            {"command": "python3 --version || apk add python3 && python3 --version", "cwd": "/mnt/iexa"}
+            {"command": "cat > hello.py <<'EOF'\\nprint('hello from Iexa Alpine')\\nEOF\\npython3 hello.py", "cwd": "/mnt/iexa"}
           ]
         }
         ```
@@ -7233,8 +7251,8 @@ final class ChatViewModel {
                 status: ChatStatusUpdate(
                     action: "web_search",
                     description: result.loadedCount > 0
-                        ? "已搜索 \(result.loadedCount) 个网页"
-                        : "已完成联网搜索",
+                        ? "已读取 \(result.loadedCount) 个网页"
+                        : "已搜索 \(max(sources.count, result.items.count)) 个来源",
                     done: true,
                     urls: Array(urls),
                     items: result.items.prefix(6).map {
