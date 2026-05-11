@@ -6290,7 +6290,11 @@ final class ChatViewModel {
             && !userDisabledBuiltinFeatures.contains("web_search") {
             webSearchEnabled = true
         }
-        if defaults.contains("image_generation") && isTruthy("image_generation")
+        let nameSuggestsImageGeneration = shouldUseDirectImageGeneration(modelId: model.id)
+            || shouldPreferChatNativeImageGeneration(modelId: model.id)
+
+        if (defaults.contains("image_generation") && isTruthy("image_generation")
+            || nameSuggestsImageGeneration)
             && !userDisabledBuiltinFeatures.contains("image_generation") {
             imageGenerationEnabled = true
         }
@@ -6346,7 +6350,10 @@ final class ChatViewModel {
         // Suppress tracking so these internal resets don't pollute userDisabledBuiltinFeatures.
         suppressBuiltinFeatureTracking = true
         webSearchEnabled = defaults.contains("web_search") && isTruthy("web_search")
-        imageGenerationEnabled = defaults.contains("image_generation") && isTruthy("image_generation")
+        let nameSuggestsImageGeneration = shouldUseDirectImageGeneration(modelId: model.id)
+            || shouldPreferChatNativeImageGeneration(modelId: model.id)
+        imageGenerationEnabled = (defaults.contains("image_generation") && isTruthy("image_generation"))
+            || nameSuggestsImageGeneration
         codeInterpreterEnabled = defaults.contains("code_interpreter") && isTruthy("code_interpreter")
         suppressBuiltinFeatureTracking = false
 
@@ -6650,6 +6657,7 @@ final class ChatViewModel {
             "gpt-image", "dall-e", "dalle", "flux", "sdxl",
             "stable-diffusion", "midjourney", "mj-", "minimax-image",
             "qwen-image", "imagen", "seedream", "jimeng", "kolors",
+            "grok-imagine", "imagine-image", "image-lite",
             "image-01", "image-02", "image-03", "image-generation"
         ]
         let chatModelTokens = [
@@ -6679,7 +6687,8 @@ final class ChatViewModel {
         let directEndpointModels = [
             "gpt-image", "dall-e", "dalle", "flux", "sdxl",
             "stable-diffusion", "midjourney", "mj-",
-            "minimax-image"
+            "minimax-image", "qwen-image", "seedream", "jimeng",
+            "kolors", "grok-imagine", "imagine-image", "image-lite"
         ]
         if directEndpointModels.contains(where: { haystack.contains($0) }) {
             return false
