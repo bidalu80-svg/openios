@@ -96,6 +96,30 @@ struct TerminalBrowserView: View {
                 }
             }
         }
+        .sheet(item: Binding(
+            get: { viewModel.pendingInteractiveRequest },
+            set: { if $0 == nil, viewModel.pendingInteractiveRequest != nil { viewModel.cancelPendingInteractiveCommand() } }
+        )) { request in
+            ActionInputSheet(
+                request: ActionInputRequest(
+                    title: request.title,
+                    message: request.message,
+                    placeholder: request.placeholder,
+                    defaultValue: request.defaultValue
+                ),
+                text: $viewModel.pendingInteractiveInput,
+                onConfirm: {
+                    let input = viewModel.pendingInteractiveInput
+                    Task { await viewModel.continuePendingInteractiveCommand(input: input) }
+                },
+                onCancel: {
+                    viewModel.cancelPendingInteractiveCommand()
+                }
+            )
+            .presentationDetents([.height(300)])
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled()
+        }
         .quickLookPreview($previewFileURL)
         .sheet(item: $shareFileURL) { url in
             ShareSheetView(activityItems: [url])

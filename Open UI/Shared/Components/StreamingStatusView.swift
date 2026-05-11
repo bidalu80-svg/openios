@@ -36,6 +36,8 @@ struct StreamingStatusView: View {
             EmptyView()
         } else if isLocalAlpineStatus {
             localAlpineCard
+        } else if isWebSearchStatus {
+            webSearchCard
         } else {
             defaultStatusBody
         }
@@ -85,6 +87,232 @@ struct StreamingStatusView: View {
 
     private var isLocalAlpineStatus: Bool {
         latestStatus?.action?.lowercased() == "local_alpine"
+    }
+
+    private var isWebSearchStatus: Bool {
+        guard let action = latestStatus?.action?.lowercased() else { return false }
+        return ["web_search", "websearch", "web search"].contains(action)
+    }
+
+    private var webSearchCard: some View {
+        let latest = latestStatus
+        let isDone = latest?.done == true
+        let title = webSearchTitle(for: latest)
+        let subtitle = webSearchSubtitle(for: latest)
+        let queries = webSearchQueries(for: latest)
+        let items = webSearchItems(for: latest)
+
+        return VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(MicroAnimation.snappy) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(alignment: .center, spacing: 10) {
+                    ZStack {
+                        Circle()
+                            .fill((isDone ? theme.success : theme.brandPrimary).opacity(theme.isDark ? 0.16 : 0.10))
+                            .frame(width: 30, height: 30)
+
+                        if isDone {
+                            Image(systemName: "checkmark")
+                                .scaledFont(size: 13, weight: .bold)
+                                .foregroundStyle(theme.success)
+                        } else {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .tint(theme.brandPrimary)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .scaledFont(size: 13, weight: .semibold)
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+
+                        Text(subtitle)
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .scaledFont(size: 11, weight: .semibold)
+                        .foregroundStyle(theme.textTertiary)
+                }
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 7) {
+                    if !queries.isEmpty {
+                        VStack(alignment: .leading, spacing: 5) {
+                            ForEach(Array(queries.enumerated()), id: \.offset) { _, query in
+                                webSearchQueryChip(query)
+                            }
+                        }
+                    }
+
+                    if !items.isEmpty {
+                        ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                            webSearchSourceRow(index: index + 1, item: item)
+                        }
+                    } else if let latest, !latest.urls.isEmpty {
+                        ForEach(Array(latest.urls.enumerated()), id: \.offset) { index, url in
+                            webSearchSourceRow(index: index + 1, item: ChatStatusItem(title: hostLabel(from: url) ?? url, link: url))
+                        }
+                    }
+                }
+                .padding(.leading, 40)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(.horizontal, Spacing.screenPadding)
+        .padding(.vertical, Spacing.xs)
+        .animation(MicroAnimation.snappy, value: isExpanded)
+        .onAppear {
+            if !isDone && isStreaming {
+                isExpanded = true
+            }
+        }
+        .onChange(of: latestStatus?.done == true) { _, done in
+            if done {
+                withAnimation(MicroAnimation.snappy) {
+                    isExpanded = false
+                }
+            }
+        }
+    }
+
+    private func webSearchTitle(for status: ChatStatusUpdate?) -> String {
+        guard let status else { return "正在联网搜索" }
+        if status.done == true {
+            if let count = status.count, count > 0 {
+                return "已搜索 \(count) 个网页"
+            }
+            if !status.items.isEmpty {
+                return "已搜索 \(status.items.count) 个来源"
+            }
+            return status.description ?? "已完成联网搜索"
+        }
+        if let query = status.query, !query.isEmpty {
+            return "正在搜索"
+        }
+        return status.description ?? "正在联网搜索"
+    }
+
+    private func webSearchSubtitle(for status: ChatStatusUpdate?) -> String {
+        guard let status else { return "准备搜索" }
+        if status.done == true {
+            let sourceCount = max(status.items.count, status.urls.count)
+            if sourceCount > 0 {
+                return "获取了 \(sourceCount) 个来源"
+            }
+            return "搜索完成"
+        }
+        if let query = status.query, !query.isEmpty {
+            return query
+        }
+        return status.queries.first ?? "正在获取网页"
+    }
+
+    private func webSearchQueries(for status: ChatStatusUpdate?) -> [String] {
+        guard let status else { return [] }
+        var result = status.queries
+        if let query = status.query, !query.isEmpty, !result.contains(query) {
+            result.insert(query, at: 0)
+        }
+        return Array(result.prefix(3))
+    }
+
+    private func webSearchItems(for status: ChatStatusUpdate?) -> [ChatStatusItem] {
+        guard let status else { return [] }
+        if !status.items.isEmpty { return Array(status.items.prefix(6)) }
+        return status.urls.prefix(6).map { url in
+            ChatStatusItem(title: hostLabel(from: url) ?? url, link: url)
+        }
+    }
+
+    private func webSearchQueryChip(_ query: String) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .scaledFont(size: 11, weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
+            Text(query)
+                .scaledFont(size: 12, weight: .semibold)
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.62 : 0.86))
+        )
+    }
+
+    private func webSearchSourceRow(index: Int, item: ChatStatusItem) -> some View {
+        let title = item.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let urlString = item.link?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = title?.isEmpty == false ? title! : (urlString.flatMap(hostLabel(from:)) ?? "来源 \(index)")
+
+        return Group {
+            if let urlString, let url = URL(string: urlString) {
+                Link(destination: url) {
+                    webSearchSourceRowContent(index: index, title: label, url: urlString, hasLink: true)
+                }
+                .buttonStyle(.plain)
+            } else {
+                webSearchSourceRowContent(index: index, title: label, url: urlString, hasLink: false)
+            }
+        }
+    }
+
+    private func webSearchSourceRowContent(index: Int, title: String, url: String?, hasLink: Bool) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("\(index)")
+                .scaledFont(size: 10, weight: .bold)
+                .foregroundStyle(theme.textTertiary)
+                .frame(width: 18, height: 18)
+                .background(Circle().fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.55 : 0.8)))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .scaledFont(size: 12, weight: .semibold)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(2)
+                if let url, let host = hostLabel(from: url) {
+                    Text(host)
+                        .scaledFont(size: 11, weight: .regular)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            if hasLink {
+                Image(systemName: "arrow.up.right")
+                    .scaledFont(size: 10, weight: .semibold)
+                    .foregroundStyle(theme.brandPrimary.opacity(0.75))
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.45 : 0.72))
+        )
+    }
+
+    private func hostLabel(from urlString: String) -> String? {
+        guard let url = URL(string: urlString), var host = url.host, !host.isEmpty else { return nil }
+        if host.hasPrefix("www.") { host.removeFirst(4) }
+        return host
     }
 
     private var localAlpineCard: some View {

@@ -83,7 +83,8 @@ nonisolated struct LocalAlpineNativeRuntime: Sendable {
                     returning: LocalAlpineCommandResult(
                         command: command.command,
                         output: output,
-                        exitCode: Int(exitCode)
+                        exitCode: Int(exitCode),
+                        interactiveRequest: nil
                     )
                 )
             }
@@ -102,7 +103,8 @@ nonisolated struct LocalAlpineNativeRuntime: Sendable {
 
             Link the iSH core adapter symbols to run apk/gcc/vim/node locally without touching Open Terminal.
             """,
-            exitCode: 126
+            exitCode: 126,
+            interactiveRequest: nil
         )
     }
 

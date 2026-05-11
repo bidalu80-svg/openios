@@ -12,6 +12,23 @@ struct LocalAlpineCommandResult: Sendable {
     let command: String
     let output: String
     let exitCode: Int?
+    let interactiveRequest: LocalAlpineInteractiveRequest?
+}
+
+struct LocalAlpineInteractiveRequest: Identifiable, Sendable {
+    enum Kind: String, Sendable {
+        case command
+        case agentBlocks
+    }
+
+    let id = UUID()
+    let kind: Kind
+    let title: String
+    let message: String
+    let placeholder: String
+    let defaultValue: String
+    let command: String
+    let cwd: String
 }
 
 private struct AlpinePackageRequirement {
@@ -92,13 +109,26 @@ actor LocalAlpineTerminalService {
         try data.write(to: directory.appendingPathComponent(safeName), options: .atomic)
     }
 
-    func execute(command: String, cwd: String) async -> LocalAlpineCommandResult {
+    func execute(command: String, cwd: String, stdinInput: String? = nil) async -> LocalAlpineCommandResult {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return LocalAlpineCommandResult(command: command, output: "", exitCode: 0)
+            return LocalAlpineCommandResult(command: command, output: "", exitCode: 0, interactiveRequest: nil)
         }
-        if let interactiveWarning = interactiveInputWarning(for: trimmed) {
-            return LocalAlpineCommandResult(command: trimmed, output: interactiveWarning, exitCode: 124)
+        if stdinInput == nil, let interactiveWarning = interactiveInputWarning(for: trimmed) {
+            return LocalAlpineCommandResult(
+                command: trimmed,
+                output: interactiveWarning,
+                exitCode: 124,
+                interactiveRequest: LocalAlpineInteractiveRequest(
+                    kind: .command,
+                    title: "需要输入",
+                    message: "这个命令需要交互式输入。我已经帮你弹出一个小窗口，填完会自动继续跑。",
+                    placeholder: "把要输入的内容按顺序粘贴到这里，一行一个也可以",
+                    defaultValue: "",
+                    command: trimmed,
+                    cwd: cwd
+                )
+            )
         }
 
         let status = status()
@@ -106,7 +136,8 @@ actor LocalAlpineTerminalService {
             return LocalAlpineCommandResult(
                 command: trimmed,
                 output: "Local Alpine rootfs is missing from the app bundle: \(rootArchiveName)",
-                exitCode: 127
+                exitCode: 127,
+                interactiveRequest: nil
             )
         }
 
@@ -118,7 +149,8 @@ actor LocalAlpineTerminalService {
             return LocalAlpineCommandResult(
                 command: trimmed,
                 output: "Local Alpine workspace is unavailable: \(error.localizedDescription)",
-                exitCode: 127
+                exitCode: 127,
+                interactiveRequest: nil
             )
         }
 
@@ -133,7 +165,7 @@ actor LocalAlpineTerminalService {
             This local slot is isolated from Open Terminal, so existing server terminals continue to work.
             """
             logger.warning("Local Alpine command requested before native runtime is linked: \(trimmed, privacy: .public)")
-            return LocalAlpineCommandResult(command: trimmed, output: output, exitCode: 126)
+            return LocalAlpineCommandResult(command: trimmed, output: output, exitCode: 126, interactiveRequest: nil)
         }
 
         let runtimeRootFSURL: URL
@@ -144,12 +176,16 @@ actor LocalAlpineTerminalService {
             return LocalAlpineCommandResult(
                 command: trimmed,
                 output: "Local Alpine rootfs could not be prepared for writable local execution: \(error.localizedDescription)",
-                exitCode: 127
+                exitCode: 127,
+                interactiveRequest: nil
             )
         }
 
         let runtimeCWD = normalizedRuntimePath(cwd)
-        let runtimeCommand = compatibilityCommand(for: trimmed)
+        let compatibleCommand = compatibilityCommand(for: trimmed)
+        let runtimeCommand = stdinInput.map {
+            wrappedCommandForInteractiveInput(command: compatibleCommand, stdinInput: $0)
+        } ?? compatibleCommand
         let result = await LocalAlpineNativeRuntime.shared.execute(
             LocalAlpineNativeCommand(
                 command: runtimeCommand,
@@ -158,10 +194,7 @@ actor LocalAlpineTerminalService {
                 workspaceURL: workspaceURL
             )
         )
-        if runtimeCommand == trimmed {
-            return result
-        }
-        return LocalAlpineCommandResult(command: trimmed, output: result.output, exitCode: result.exitCode)
+        return LocalAlpineCommandResult(command: trimmed, output: result.output, exitCode: result.exitCode, interactiveRequest: nil)
     }
 
     private func bundledRootFSURL() -> URL? {
@@ -327,14 +360,31 @@ actor LocalAlpineTerminalService {
             options: .regularExpression
         ) != nil
         guard hasShellRead || markers.contains(where: { lowercased.contains($0) }) else { return nil }
+        guard !hasExplicitStdinFeed(in: lowercased) else { return nil }
         return """
         检测到交互式输入（input/read/scanf 等）。
 
-        当前聊天里的本地 Alpine 执行是非交互模式，不能停在输入框等你手动输入。为避免进度卡死，本次没有继续执行。
+        本次执行已暂停等待输入。请在弹出的小窗口里填写 stdin 内容；确认后会用管道继续执行，取消则结束本次命令。
 
-        请把输入值改成命令行参数、环境变量、默认值，或把测试输入用管道传入，例如：
+        也可以把输入值改成命令行参数、环境变量、默认值，或把测试输入提前用管道传入，例如：
         printf 'value\\n' | python3 script.py
         """
+    }
+
+    private func hasExplicitStdinFeed(in command: String) -> Bool {
+        let patterns = [
+            #"(?:printf|echo|cat|yes)\b[\s\S]{0,240}\|\s*(?:/bin/)?(?:sh|bash|python3?|node|ruby|perl|php|lua|deno|java)\b"#,
+            #"\|\s*(?:/bin/)?(?:sh|bash|python3?|node|ruby|perl|php|lua|deno|java)\b"#
+        ]
+        return patterns.contains { pattern in
+            command.range(of: pattern, options: .regularExpression) != nil
+        }
+    }
+
+    private func wrappedCommandForInteractiveInput(command: String, stdinInput: String) -> String {
+        let input = shellSingleQuoted(stdinInput)
+        let script = shellSingleQuoted(command)
+        return "printf '%s\\n' \(input) | /bin/sh -lc \(script)"
     }
 
     private func shouldBypassAutoDependencyRepair(_ command: String) -> Bool {

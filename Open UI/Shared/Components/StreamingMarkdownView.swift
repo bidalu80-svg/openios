@@ -515,6 +515,7 @@ struct StreamingMarkdownView: View {
 
     private static func sanitizedMarkdownTextForDisplay(_ text: String) -> String {
         var cleaned = text
+        cleaned = removeProviderCitationArtifacts(from: cleaned)
         if let pattern = dataImageMarkdownPattern {
             cleaned = pattern.stringByReplacingMatches(
                 in: cleaned,
@@ -549,6 +550,38 @@ struct StreamingMarkdownView: View {
             )
         }
         return cleaned
+    }
+
+    static func removeProviderCitationArtifacts(from text: String) -> String {
+        var cleaned = text
+        cleaned = removePrivateUseCharacters(from: cleaned)
+        let patterns = [
+            #"(?is)\b(?:cite|citation)\s*turn\d+(?:search|news|source)\d+\b"#,
+            #"(?is)\bturn\d+(?:search|news|source)\d+\b"#,
+            #"\[\s*cite\s+turn\d+(?:search|news|source)\d+\s*\]"#
+        ]
+        for pattern in patterns {
+            cleaned = cleaned.replacingOccurrences(
+                of: pattern,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+        cleaned = cleaned
+            .replacingOccurrences(of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\n[ \t]+\n"#, with: "\n\n", options: .regularExpression)
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+        return cleaned
+    }
+
+    private static func removePrivateUseCharacters(from text: String) -> String {
+        let filteredScalars = text.unicodeScalars.filter { scalar in
+            let value = scalar.value
+            return !((0xE000...0xF8FF).contains(value)
+                || (0xF0000...0xFFFFD).contains(value)
+                || (0x100000...0x10FFFD).contains(value))
+        }
+        return String(String.UnicodeScalarView(filteredScalars))
     }
 
     /// Detects a bare image URL in plain text so providers that return

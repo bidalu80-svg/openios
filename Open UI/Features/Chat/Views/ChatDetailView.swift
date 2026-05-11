@@ -459,6 +459,32 @@ struct ChatDetailView: View {
             actionCallContinuation: $actionCallContinuation,
             actionInputText: $actionInputText
         )
+        .sheet(item: Binding(
+            get: { viewModel.localAlpineInputRequest },
+            set: { if $0 == nil, viewModel.localAlpineInputRequest != nil { viewModel.cancelLocalAlpineInput() } }
+        )) { request in
+            ActionInputSheet(
+                request: ActionInputRequest(
+                    title: request.title,
+                    message: request.message,
+                    placeholder: request.placeholder,
+                    defaultValue: request.defaultValue
+                ),
+                text: Binding(
+                    get: { viewModel.localAlpineInputText },
+                    set: { viewModel.localAlpineInputText = $0 }
+                ),
+                onConfirm: {
+                    viewModel.submitLocalAlpineInput(viewModel.localAlpineInputText)
+                },
+                onCancel: {
+                    viewModel.cancelLocalAlpineInput()
+                }
+            )
+            .presentationDetents([.height(300)])
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled()
+        }
         .sheet(item: $downloadedFileURL) { url in
             ShareSheetView(activityItems: [url])
         }
@@ -4456,7 +4482,7 @@ private extension View {
                         actionInputText.wrappedValue = ""
                     }
                 )
-                .presentationDetents([.height(240)])
+                .presentationDetents([.height(300)])
                 .presentationDragIndicator(.visible)
                 .interactiveDismissDisabled()
             }
@@ -4609,13 +4635,23 @@ struct ActionInputSheet: View {
                     .foregroundStyle(.secondary)
             }
 
-            TextField(request.placeholder, text: $text)
-                .textFieldStyle(.plain)
-                .font(.system(size: 15))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(Color(.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+            ZStack(alignment: .topLeading) {
+                if text.isEmpty, !request.placeholder.isEmpty {
+                    Text(request.placeholder)
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                }
+                TextEditor(text: $text)
+                    .font(.system(size: 15))
+                    .scrollContentBackground(.hidden)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+            }
+            .frame(minHeight: 74, maxHeight: 92)
+            .background(Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
 
             HStack(spacing: 12) {
                 Button(action: onCancel) {

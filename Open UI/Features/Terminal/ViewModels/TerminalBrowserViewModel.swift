@@ -31,6 +31,9 @@ final class TerminalBrowserViewModel {
     var isExecutingCommand: Bool = false
     /// Whether the terminal section is expanded.
     var isTerminalExpanded: Bool = false
+    /// Pending stdin prompt for an interactive Local Alpine command.
+    var pendingInteractiveRequest: LocalAlpineInteractiveRequest?
+    var pendingInteractiveInput: String = ""
 
     /// Whether the new folder alert is showing.
     var showNewFolderAlert: Bool = false
@@ -42,6 +45,7 @@ final class TerminalBrowserViewModel {
     private var apiClient: APIClient?
     private var serverId: String = ""
     private var usesLocalAlpine: Bool = false
+    private var pendingInteractiveEntryIndex: Int?
     private let logger = Logger(subsystem: "com.openui", category: "TerminalBrowser")
 
     /// Path segments for breadcrumb navigation.
@@ -89,6 +93,9 @@ final class TerminalBrowserViewModel {
         commandHistory = []
         isExecutingCommand = false
         isTerminalExpanded = false
+        pendingInteractiveRequest = nil
+        pendingInteractiveInput = ""
+        pendingInteractiveEntryIndex = nil
         showNewFolderAlert = false
         newFolderName = ""
         apiClient = nil
@@ -252,6 +259,13 @@ final class TerminalBrowserViewModel {
             if usesLocalAlpine {
                 let result = await LocalAlpineTerminalService.shared.execute(command: trimmed, cwd: currentPath)
                 commandHistory[entryIndex].output = result.output
+                if let request = result.interactiveRequest {
+                    pendingInteractiveInput = request.defaultValue
+                    pendingInteractiveRequest = request
+                    pendingInteractiveEntryIndex = entryIndex
+                    isExecutingCommand = false
+                    return
+                }
                 commandHistory[entryIndex].isRunning = false
                 commandHistory[entryIndex].exitCode = result.exitCode
                 isExecutingCommand = false
@@ -320,6 +334,54 @@ final class TerminalBrowserViewModel {
             commandHistory[entryIndex].isRunning = false
         }
 
+        isExecutingCommand = false
+    }
+
+    func continuePendingInteractiveCommand(input: String) async {
+        guard usesLocalAlpine,
+              let request = pendingInteractiveRequest,
+              let entryIndex = pendingInteractiveEntryIndex,
+              commandHistory.indices.contains(entryIndex) else {
+            cancelPendingInteractiveCommand()
+            return
+        }
+
+        pendingInteractiveRequest = nil
+        pendingInteractiveInput = ""
+        isExecutingCommand = true
+        commandHistory[entryIndex].isRunning = true
+        commandHistory[entryIndex].output += "\n\n[已收到输入，继续执行...]\n"
+
+        let result = await LocalAlpineTerminalService.shared.execute(
+            command: request.command,
+            cwd: request.cwd,
+            stdinInput: input
+        )
+        commandHistory[entryIndex].output = result.output
+        if let nextRequest = result.interactiveRequest {
+            pendingInteractiveInput = nextRequest.defaultValue
+            pendingInteractiveRequest = nextRequest
+            pendingInteractiveEntryIndex = entryIndex
+            isExecutingCommand = false
+            return
+        }
+
+        commandHistory[entryIndex].isRunning = false
+        commandHistory[entryIndex].exitCode = result.exitCode
+        pendingInteractiveEntryIndex = nil
+        isExecutingCommand = false
+    }
+
+    func cancelPendingInteractiveCommand() {
+        if let entryIndex = pendingInteractiveEntryIndex,
+           commandHistory.indices.contains(entryIndex) {
+            commandHistory[entryIndex].output += "\n\n[已取消输入]"
+            commandHistory[entryIndex].isRunning = false
+            commandHistory[entryIndex].exitCode = 124
+        }
+        pendingInteractiveRequest = nil
+        pendingInteractiveInput = ""
+        pendingInteractiveEntryIndex = nil
         isExecutingCommand = false
     }
 }

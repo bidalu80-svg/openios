@@ -3,6 +3,7 @@ import Foundation
 struct LocalAlpineAgentResult: Sendable {
     let didExecute: Bool
     let summary: String
+    let interactiveRequest: LocalAlpineInteractiveRequest?
 }
 
 actor LocalAlpineAgentService {
@@ -25,10 +26,13 @@ actor LocalAlpineAgentService {
         return false
     }
 
-    func executeBlocks(in content: String) async -> LocalAlpineAgentResult {
+    func executeBlocks(
+        in content: String,
+        inputProvider: (@MainActor (LocalAlpineInteractiveRequest) async -> String?)? = nil
+    ) async -> LocalAlpineAgentResult {
         let blocks = extractInstructionBlocks(from: content)
         guard !blocks.isEmpty else {
-            return LocalAlpineAgentResult(didExecute: false, summary: "")
+            return LocalAlpineAgentResult(didExecute: false, summary: "", interactiveRequest: nil)
         }
 
         var commands: [LocalAlpineAgentCommand] = []
@@ -44,7 +48,7 @@ actor LocalAlpineAgentService {
         }
 
         if commands.isEmpty {
-            return LocalAlpineAgentResult(didExecute: false, summary: lines.joined(separator: "\n"))
+            return LocalAlpineAgentResult(didExecute: false, summary: lines.joined(separator: "\n"), interactiveRequest: nil)
         }
 
         let trimmedCommands = Array(commands.prefix(maxCommandsPerResponse))
@@ -56,10 +60,27 @@ actor LocalAlpineAgentService {
         for command in trimmedCommands {
             let cwd = command.cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
             let effectiveCWD = (cwd?.isEmpty == false) ? cwd! : defaultCWD
-            let result = await LocalAlpineTerminalService.shared.execute(
+            var result = await LocalAlpineTerminalService.shared.execute(
                 command: command.command,
                 cwd: effectiveCWD
             )
+            while let request = result.interactiveRequest {
+                if let inputProvider,
+                   let stdinInput = await inputProvider(request) {
+                    result = await LocalAlpineTerminalService.shared.execute(
+                        command: request.command,
+                        cwd: request.cwd,
+                        stdinInput: stdinInput
+                    )
+                } else {
+                    lines.append(format(command: command.command, cwd: effectiveCWD, result: result))
+                    return LocalAlpineAgentResult(
+                        didExecute: true,
+                        summary: lines.joined(separator: "\n\n"),
+                        interactiveRequest: request
+                    )
+                }
+            }
             lines.append(format(command: command.command, cwd: effectiveCWD, result: result))
         }
 
@@ -67,7 +88,7 @@ actor LocalAlpineAgentService {
             lines.append("- 已跳过 \(skippedCount) 条多余命令，避免一次执行过多。")
         }
 
-        return LocalAlpineAgentResult(didExecute: true, summary: lines.joined(separator: "\n\n"))
+        return LocalAlpineAgentResult(didExecute: true, summary: lines.joined(separator: "\n\n"), interactiveRequest: nil)
     }
 
     private func extractInstructionBlocks(from content: String) -> [String] {

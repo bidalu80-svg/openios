@@ -257,6 +257,9 @@ final class ChatViewModel {
     /// Assistant message IDs whose Local Alpine command blocks have already
     /// been executed. Keeps refresh/retry paths from running shell commands twice.
     private var localAlpineAgentExecutedMessageIds: Set<String> = []
+    var localAlpineInputRequest: LocalAlpineInteractiveRequest?
+    var localAlpineInputText: String = ""
+    @ObservationIgnored private var localAlpineInputContinuation: CheckedContinuation<String?, Never>?
     private(set) var serverBaseURL: String = ""
     @ObservationIgnored nonisolated(unsafe) private var foregroundObserver: NSObjectProtocol?
     @ObservationIgnored nonisolated(unsafe) private var backgroundObserver: NSObjectProtocol?
@@ -4208,11 +4211,40 @@ final class ChatViewModel {
             detail: initialStatus.description ?? localAlpineRunningDescription(for: command)
         )
 
-        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
+        var result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
+        while let request = result.interactiveRequest {
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: formatDirectLocalAlpineOutput(command: userMessage.content, result: result),
+                isStreaming: true,
+                statusHistory: [localAlpineStatus(description: "等待输入以继续执行...", done: false)]
+            )
+
+            guard let stdinInput = await requestLocalAlpineInput(request) else {
+                break
+            }
+
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: "已收到输入，正在继续执行...",
+                isStreaming: true,
+                statusHistory: [localAlpineStatus(description: "已收到输入，继续执行...", done: false)]
+            )
+            result = await LocalAlpineTerminalService.shared.execute(
+                command: request.command,
+                cwd: request.cwd,
+                stdinInput: stdinInput
+            )
+        }
         let output = formatDirectLocalAlpineOutput(command: userMessage.content, result: result)
-        let doneDescription = result.exitCode == 0
-            ? "本地 Alpine 执行完成"
-            : "本地 Alpine 执行结束，退出码 \(result.exitCode.map(String.init) ?? "unknown")"
+        let doneDescription: String
+        if result.interactiveRequest != nil {
+            doneDescription = "本地 Alpine 输入已取消"
+        } else if result.exitCode == 0 {
+            doneDescription = "本地 Alpine 执行完成"
+        } else {
+            doneDescription = "本地 Alpine 执行结束，退出码 \(result.exitCode.map(String.init) ?? "unknown")"
+        }
         updateAssistantMessage(
             id: assistantMessageId,
             content: output,
@@ -4271,6 +4303,40 @@ final class ChatViewModel {
             description: description,
             done: done
         )
+    }
+
+    private func requestLocalAlpineInput(_ request: LocalAlpineInteractiveRequest) async -> String? {
+        localAlpineInputContinuation?.resume(returning: nil)
+        localAlpineInputContinuation = nil
+        localAlpineInputText = request.defaultValue
+        localAlpineInputRequest = request
+        return await withCheckedContinuation { continuation in
+            localAlpineInputContinuation = continuation
+        }
+    }
+
+    func submitLocalAlpineInput(_ input: String) {
+        guard let continuation = localAlpineInputContinuation else {
+            localAlpineInputRequest = nil
+            localAlpineInputText = ""
+            return
+        }
+        localAlpineInputContinuation = nil
+        localAlpineInputRequest = nil
+        localAlpineInputText = ""
+        continuation.resume(returning: input)
+    }
+
+    func cancelLocalAlpineInput() {
+        guard let continuation = localAlpineInputContinuation else {
+            localAlpineInputRequest = nil
+            localAlpineInputText = ""
+            return
+        }
+        localAlpineInputContinuation = nil
+        localAlpineInputRequest = nil
+        localAlpineInputText = ""
+        continuation.resume(returning: nil)
     }
 
     private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
@@ -7205,7 +7271,16 @@ final class ChatViewModel {
         )
 
         do {
-            let queries = [query]
+            let queries: [String]
+            if let apiClient = manager?.apiClient {
+                queries = await webSearchQueries(for: query, userText: text, apiClient: apiClient, modelId: modelId)
+            } else {
+                queries = Self.mergeSearchQueries(
+                    original: query,
+                    generated: Self.fallbackWebSearchQueries(for: text, originalQuery: query),
+                    limit: 4
+                )
+            }
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
@@ -7279,9 +7354,12 @@ final class ChatViewModel {
         }
     }
 
-    private func webSearchQueries(for query: String, apiClient: APIClient, modelId: String) async -> [String] {
+    private func webSearchQueries(for query: String, userText: String, apiClient: APIClient, modelId: String) async -> [String] {
         let serverConfig = activeChatStore?.serverTaskConfig ?? .default
-        guard serverConfig.enableSearchQueryGeneration else { return [query] }
+        let fallbackQueries = Self.fallbackWebSearchQueries(for: userText, originalQuery: query)
+        guard serverConfig.enableSearchQueryGeneration else {
+            return Self.mergeSearchQueries(original: query, generated: fallbackQueries, limit: 4)
+        }
 
         let taskModel = [
             serverConfig.taskModelExternal,
@@ -7298,10 +7376,10 @@ final class ChatViewModel {
                 context: recentUserContextForSearch(excluding: query),
                 maxQueries: 3
             )
-            return Self.mergeSearchQueries(original: query, generated: generated, limit: 4)
+            return Self.mergeSearchQueries(original: query, generated: generated + fallbackQueries, limit: 4)
         } catch {
             logger.debug("Search query generation failed: \(error.localizedDescription)")
-            return [query]
+            return Self.mergeSearchQueries(original: query, generated: fallbackQueries, limit: 4)
         }
     }
 
@@ -7337,6 +7415,51 @@ final class ChatViewModel {
         append(original)
         generated.forEach(append)
         return Array(result.prefix(limit))
+    }
+
+    private static func fallbackWebSearchQueries(for userText: String, originalQuery: String) -> [String] {
+        let normalized = userText
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let today = DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)
+        var generated: [String] = []
+
+        func add(_ query: String) {
+            let trimmed = query
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            generated.append(trimmed)
+        }
+
+        let asksWeather = ["天气", "气温", "降雨", "下雨", "weather", "temperature"].contains(where: { normalized.contains($0) })
+        let asksFuelPrice = ["油价", "汽油", "柴油", "92", "95", "98", "gas price", "fuel price"].contains(where: { normalized.contains($0) })
+        let asksNews = ["新闻", "热搜", "最新消息", "刚刚", "latest", "news", "breaking"].contains(where: { normalized.contains($0) })
+            || (normalized.contains("最新") && !asksWeather && !asksFuelPrice)
+
+        if asksWeather {
+            add("\(originalQuery) 实时天气")
+            add("\(originalQuery) 今天 温度 降雨 风力")
+            add("中国天气 \(originalQuery)")
+        }
+
+        if asksFuelPrice {
+            add("\(originalQuery) 今日油价 92 95 98 柴油")
+            add("\(originalQuery) 最新油价 \(today)")
+        }
+
+        if asksNews {
+            add("\(originalQuery) 最新消息 \(today)")
+            add("\(originalQuery) 今天 新闻 24小时")
+        }
+
+        if ["价格", "股价", "汇率", "版本", "发布", "release", "version", "price", "stock"].contains(where: { normalized.contains($0) }) {
+            add("\(originalQuery) 最新 \(today)")
+            add("\(originalQuery) 官方 最新")
+        }
+
+        return generated
     }
 
     private func webSearchQuery(from text: String) -> String {
@@ -7514,7 +7637,11 @@ final class ChatViewModel {
         实际搜索词：
         \(queryLines)
 
-        以下结果由 Iexa 客户端在发送本轮消息前联网搜索取得。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果，并在回答里引用来源链接。不要声称你无法联网。
+        以下结果由 Iexa 客户端在发送本轮消息前联网搜索取得。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果。回答要求：
+        - 先直接给结论，再补充必要来源和时间。
+        - 天气、油价、新闻、价格、版本等实时问题，必须说清楚信息日期/发布时间；资料不够精确就明确说“未在搜索结果中找到精确值”，不要编。
+        - 引用来源时使用普通链接或来源标题，不要输出 cite turn0search 之类隐藏引用标记，也不要输出无法显示的方框字符。
+        - 不要声称你无法联网。
 
         \(blocks.joined(separator: "\n\n"))
         [/客户端联网搜索结果]
@@ -8240,7 +8367,9 @@ final class ChatViewModel {
         )
         defer { endBackgroundTask() }
 
-        let result = await LocalAlpineAgentService.shared.executeBlocks(in: content)
+        let result = await LocalAlpineAgentService.shared.executeBlocks(in: content) { request in
+            await self.requestLocalAlpineInput(request)
+        }
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
         guard result.didExecute else {
             conversation?.messages.removeAll { $0.id == resultMessageId }
@@ -8250,7 +8379,10 @@ final class ChatViewModel {
             return
         }
 
-        let doneStatus = localAlpineStatus(description: "本地 Alpine 执行完成", done: true)
+        let doneStatus = localAlpineStatus(
+            description: result.interactiveRequest == nil ? "本地 Alpine 执行完成" : "本地 Alpine 输入已取消",
+            done: true
+        )
         updateAssistantMessage(
             id: resultMessageId,
             content: result.summary,
@@ -8273,6 +8405,7 @@ final class ChatViewModel {
         statusHistory: [ChatStatusUpdate]? = nil,
         error: ChatMessageError? = nil
     ) {
+        let displayContent = Self.cleanedProviderCitationArtifacts(content)
         var completedAssistantContentForAgent: String?
 
         if isStreaming && streamingStore.streamingMessageId == id {
@@ -8280,7 +8413,7 @@ final class ChatViewModel {
             // Route content to the isolated StreamingContentStore.
             // This avoids mutating conversation.messages on every token,
             // which would invalidate ALL message views via @Observable.
-            streamingStore.updateContent(content)
+            streamingStore.updateContent(displayContent)
             if let sources { streamingStore.appendSources(sources) }
             if let statusHistory {
                 for s in statusHistory { streamingStore.appendStatus(s) }
@@ -8295,7 +8428,7 @@ final class ChatViewModel {
             if !isStreaming && streamingStore.streamingMessageId == id {
                 // Streaming just ended — flush store to conversation
                 let result = streamingStore.endStreaming()
-                let finalContent = content.isEmpty ? result.content : content
+                let finalContent = displayContent.isEmpty ? result.content : displayContent
                 conversation?.messages[index].content = finalContent
                 conversation?.messages[index].isStreaming = false
                 // Merge sources from store into message
@@ -8336,17 +8469,17 @@ final class ChatViewModel {
                 completedAssistantContentForAgent = finalContent
             } else {
                 // Normal non-streaming update (e.g., error before streaming started)
-                conversation?.messages[index].content = content
+                conversation?.messages[index].content = displayContent
                 conversation?.messages[index].isStreaming = isStreaming
                 // Also update tree node for non-streaming completions (e.g., error paths)
-                if !isStreaming && !content.isEmpty {
+                if !isStreaming && !displayContent.isEmpty {
                     conversation?.history.updateNode(id: id) { node in
-                        node.content = content
+                        node.content = displayContent
                         node.done = true
                     }
                 }
                 if !isStreaming {
-                    completedAssistantContentForAgent = content
+                    completedAssistantContentForAgent = displayContent
                 }
             }
             if let sources { conversation?.messages[index].sources = sources }
@@ -8385,9 +8518,9 @@ final class ChatViewModel {
         // Gate on a 100-char delta to avoid the O(n) string scan on every token.
         // The function also guards internally (only fires when the magic keywords are present),
         // so normal messages pay only the cheap length comparison.
-        if content.count - lastTaskExtractionLength >= 100 {
-            lastTaskExtractionLength = content.count
-            extractAndApplyTasksFromContent(content)
+        if displayContent.count - lastTaskExtractionLength >= 100 {
+            lastTaskExtractionLength = displayContent.count
+            extractAndApplyTasksFromContent(displayContent)
         }
 
         // Trigger streaming haptic feedback (throttled to ~10 Hz to avoid
@@ -8397,7 +8530,7 @@ final class ChatViewModel {
         }
         updateRunLiveActivity(
             id: id,
-            content: content,
+            content: displayContent,
             isStreaming: isStreaming,
             statusHistory: statusHistory,
             error: error
@@ -8407,6 +8540,10 @@ final class ChatViewModel {
             scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
             scheduleLocalWorkspaceAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
         }
+    }
+
+    private static func cleanedProviderCitationArtifacts(_ text: String) -> String {
+        StreamingMarkdownView.removeProviderCitationArtifacts(from: text)
     }
 
     /// Fires a subtle haptic pulse during token streaming, throttled via
