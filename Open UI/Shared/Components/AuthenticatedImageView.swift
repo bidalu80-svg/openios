@@ -8,6 +8,7 @@ import Photos
 struct AuthenticatedImageView: View {
     let fileId: String
     let apiClient: APIClient?
+    let onEdit: ((UIImage) -> Void)?
 
     @State private var loadedImage: UIImage?
     @State private var isLoading = true
@@ -26,6 +27,12 @@ struct AuthenticatedImageView: View {
         case saving
         case saved
         case failed
+    }
+
+    init(fileId: String, apiClient: APIClient?, onEdit: ((UIImage) -> Void)? = nil) {
+        self.fileId = fileId
+        self.apiClient = apiClient
+        self.onEdit = onEdit
     }
 
     /// In-memory cache for file-based images. Prevents re-fetching when
@@ -69,6 +76,14 @@ struct AuthenticatedImageView: View {
                                 shareImage(image)
                             } label: {
                                 Label("分享", systemImage: "square.and.arrow.up")
+                            }
+
+                            if let onEdit {
+                                Button {
+                                    onEdit(image)
+                                } label: {
+                                    Label("编辑", systemImage: "wand.and.stars")
+                                }
                             }
 
                             Button {
@@ -126,6 +141,27 @@ struct AuthenticatedImageView: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 6)
+                    .background(.black.opacity(0.62), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .padding(8)
+            }
+        }
+        .overlay(alignment: .bottomLeading) {
+            if let image = loadedImage, let onEdit {
+                Button {
+                    onEdit(image)
+                    Haptics.play(.light)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "wand.and.stars")
+                            .scaledFont(size: 13, weight: .semibold)
+                        Text("编辑")
+                            .scaledFont(size: 13, weight: .semibold)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
                     .background(.black.opacity(0.62), in: Capsule())
                 }
                 .buttonStyle(.plain)

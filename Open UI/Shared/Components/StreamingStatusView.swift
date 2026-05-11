@@ -8,6 +8,7 @@ struct StreamingStatusView: View {
 
     @Environment(\.theme) private var theme
     @State private var isExpanded: Bool
+    @State private var localAlpineNow = Date()
 
     init(statusHistory: [ChatStatusUpdate], isStreaming: Bool = true) {
         self.statusHistory = statusHistory
@@ -322,6 +323,9 @@ struct StreamingStatusView: View {
         let isDone = latest?.done == true
         let activeStage = localAlpineActiveStage(for: subtitle, isDone: isDone)
         let stages = localAlpineStageTitles(for: subtitle)
+        let progress = localAlpineProgress(activeStage: activeStage, total: stages.count, isDone: isDone)
+        let percentText = "\(Int((progress * 100).rounded()))%"
+        let elapsedText = localAlpineElapsedText(for: latest, now: localAlpineNow)
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 12) {
@@ -350,12 +354,29 @@ struct StreamingStatusView: View {
 
                 Spacer(minLength: 0)
 
-                localAlpineStatePill(isDone: isDone)
+                VStack(alignment: .trailing, spacing: 5) {
+                    localAlpineStatePill(isDone: isDone, percentText: percentText)
+                    if let elapsedText {
+                        Text(elapsedText)
+                            .scaledFont(size: 10, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                            .lineLimit(1)
+                    }
+                }
             }
 
-            ProgressView(value: localAlpineProgress(activeStage: activeStage, total: stages.count, isDone: isDone))
-                .progressViewStyle(.linear)
-                .tint(isDone ? theme.success : theme.brandPrimary)
+            VStack(alignment: .leading, spacing: 5) {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .tint(isDone ? theme.success : theme.brandPrimary)
+
+                if !isDone, localAlpineLooksLongRunning(subtitle) {
+                    Text("安装依赖或首次启动可能较慢，卡片会持续刷新耗时。")
+                        .scaledFont(size: 10, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(2)
+                }
+            }
 
             HStack(spacing: 6) {
                 ForEach(Array(stages.enumerated()), id: \.offset) { index, stage in
@@ -381,10 +402,17 @@ struct StreamingStatusView: View {
         .shadow(color: .black.opacity(theme.isDark ? 0.18 : 0.06), radius: 12, x: 0, y: 6)
         .padding(.horizontal, Spacing.screenPadding)
         .padding(.vertical, Spacing.xs)
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                if Task.isCancelled { break }
+                localAlpineNow = Date()
+            }
+        }
     }
 
     @ViewBuilder
-    private func localAlpineStatePill(isDone: Bool) -> some View {
+    private func localAlpineStatePill(isDone: Bool, percentText: String) -> some View {
         HStack(spacing: 5) {
             if isDone {
                 Image(systemName: "checkmark.circle.fill")
@@ -393,6 +421,8 @@ struct StreamingStatusView: View {
                     .scaledFont(size: 11, weight: .semibold)
             } else {
                 PulsingDot(color: theme.brandPrimary)
+                Text(percentText)
+                    .scaledFont(size: 11, weight: .semibold)
                 Text("运行中")
                     .scaledFont(size: 11, weight: .semibold)
             }
@@ -469,7 +499,31 @@ struct StreamingStatusView: View {
     private func localAlpineProgress(activeStage: Int, total: Int, isDone: Bool) -> Double {
         if isDone { return 1 }
         guard total > 1 else { return 0.3 }
-        return min(0.9, max(0.18, (Double(activeStage) + 0.45) / Double(total)))
+        let stageProgress = (Double(activeStage) + 0.45) / Double(total)
+        let elapsedBonus: Double = {
+            guard let startedAt = visibleStatuses.first(where: { $0.action?.lowercased() == "local_alpine" })?.occurredAt else {
+                return 0
+            }
+            return min(0.12, max(0, localAlpineNow.timeIntervalSince(startedAt) / 600))
+        }()
+        return min(0.92, max(0.18, stageProgress + elapsedBonus))
+    }
+
+    private func localAlpineElapsedText(for status: ChatStatusUpdate?, now: Date) -> String? {
+        guard let startedAt = visibleStatuses.first(where: { $0.action?.lowercased() == "local_alpine" })?.occurredAt
+            ?? status?.occurredAt else { return nil }
+        let seconds = max(0, Int(now.timeIntervalSince(startedAt)))
+        if seconds < 60 { return "已运行 \(seconds) 秒" }
+        return "已运行 \(seconds / 60)分\(seconds % 60)秒"
+    }
+
+    private func localAlpineLooksLongRunning(_ description: String) -> Bool {
+        description.contains("依赖")
+            || description.contains("安装")
+            || description.contains("软件包")
+            || description.contains("首次")
+            || description.localizedCaseInsensitiveContains("install")
+            || description.localizedCaseInsensitiveContains("package")
     }
 
     // MARK: - Header

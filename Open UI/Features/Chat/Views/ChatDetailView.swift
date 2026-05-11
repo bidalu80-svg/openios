@@ -1632,7 +1632,7 @@ struct ChatDetailView: View {
                 if !imageFiles.isEmpty {
                     ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
                         if let fileId = imageReference(for: file) {
-                            chatImageView(fileId: fileId)
+                            chatImageView(fileId: fileId, allowsEditing: false)
                                 .frame(maxWidth: 220, maxHeight: 220)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
@@ -2346,7 +2346,7 @@ struct ChatDetailView: View {
                     Spacer()
                     ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
                         if let fileId = imageReference(for: file) {
-                            chatImageView(fileId: fileId)
+                            chatImageView(fileId: fileId, allowsEditing: false)
                                 .frame(
                                     maxWidth: imageFiles.count == 1 ? 200 : 100,
                                     maxHeight: imageFiles.count == 1 ? 200 : 100
@@ -2368,8 +2368,14 @@ struct ChatDetailView: View {
     }
 
     @ViewBuilder
-    private func chatImageView(fileId: String) -> some View {
-        AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+    private func chatImageView(fileId: String, allowsEditing: Bool = true) -> some View {
+        if allowsEditing {
+            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient) { image in
+                prepareGeneratedImageForEditing(image)
+            }
+        } else {
+            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+        }
     }
 
     private func imageReference(for file: ChatMessageFile) -> String? {
@@ -3278,6 +3284,27 @@ for item in items {
         )
         viewModel.attachments.append(attachment)
         viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
+    }
+
+    private func prepareGeneratedImageForEditing(_ image: UIImage) {
+        let data = FileAttachmentService.downsampleForUpload(image: image)
+        guard !data.isEmpty else {
+            viewModel.errorMessage = "无法读取这张图片"
+            return
+        }
+
+        let attachment = ChatAttachment(
+            type: .image,
+            name: "Edit_Source_\(Int(Date.now.timeIntervalSince1970)).jpg",
+            thumbnail: Image(uiImage: image),
+            data: data
+        )
+        viewModel.attachments.append(attachment)
+        viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
+        viewModel.imageGenerationEnabled = true
+        if viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            viewModel.inputText = "编辑这张图："
+        }
     }
 
     private func processAudioFileURL(_ url: URL) async {

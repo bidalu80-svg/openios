@@ -1177,7 +1177,73 @@ final class ChatViewModel {
 
     private static func isLocalAlpineAgentResult(_ message: ChatMessage) -> Bool {
         message.metadata?["iexa_local_alpine_result"] == "true"
-            || (message.role == .system && message.content.hasPrefix("Local Alpine 执行结果"))
+            || message.content.hasPrefix("Local Alpine 执行结果")
+            || message.model == "Local Alpine"
+            || message.statusHistory.contains { $0.action?.lowercased() == "local_alpine" }
+    }
+
+    private static func localAlpineExecutionStateSystemContext(from messages: [ChatMessage]) -> String? {
+        let alpineMessages = messages.filter { isLocalAlpineAgentResult($0) }
+        guard !alpineMessages.isEmpty else { return nil }
+
+        let blocks = alpineMessages.suffix(4).map { message -> String in
+            let metadata = message.metadata ?? [:]
+            let status = message.statusHistory.last?.description?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let state = message.isStreaming ? "running" : "completed"
+            let command = metadata["iexa_local_alpine_display_command"]
+                ?? metadata["iexa_local_alpine_command_preview"]
+            let cwd = metadata["iexa_local_alpine_cwd"]
+            let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            var lines = ["- state: \(state)"]
+            if let status, !status.isEmpty {
+                lines.append("  status: \(status)")
+            }
+            if let cwd, !cwd.isEmpty {
+                lines.append("  cwd: \(cwd)")
+            }
+            if let command, !command.isEmpty {
+                lines.append("  command/request:")
+                lines.append(indentForSystemContext(clippedForSystemContext(command, maxCharacters: 2_000)))
+            }
+            if !content.isEmpty {
+                lines.append(message.isStreaming ? "  partial output:" : "  result:")
+                lines.append(indentForSystemContext(clippedForSystemContext(content, maxCharacters: 8_000)))
+            }
+            return lines.joined(separator: "\n")
+        }
+
+        return """
+        [Local Alpine execution state]
+        The iOS host app runs `iexa_alpine` blocks asynchronously. This state is real host-side execution state, even if the command block itself is no longer visible in chat.
+
+        \(blocks.joined(separator: "\n\n"))
+
+        Rules for this state:
+        - If state is running, tell the user the Local Alpine command is still running or ask whether to stop it; do not apologize that no executable block was emitted.
+        - If result output is present, answer from that output as the source of truth.
+        - Do not emit a duplicate `iexa_alpine` block for the same request unless the user clearly asks to rerun or run a different command.
+        [/Local Alpine execution state]
+        """
+    }
+
+    private static func clippedForSystemContext(_ text: String, maxCharacters: Int) -> String {
+        guard text.count > maxCharacters else { return text }
+        return String(text.prefix(maxCharacters)) + "\n...（内容过长，已截断）"
+    }
+
+    private static func indentForSystemContext(_ text: String) -> String {
+        text.components(separatedBy: .newlines)
+            .map { "    \($0)" }
+            .joined(separator: "\n")
+    }
+
+    private static func localAlpineCommandPreview(from content: String) -> String {
+        let cleaned = content
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.count > 1_000 else { return cleaned }
+        return String(cleaned.prefix(1_000)) + "..."
     }
 
     // MARK: - Initialisation
@@ -3505,7 +3571,15 @@ final class ChatViewModel {
         )
 
         // Build API messages with image content fetched from server
-        let apiMessages = await buildAPIMessagesAsync()
+        let imageCanvasInstructionMessageId = (imageGenerationEnabled
+            || shouldUseDirectImageGeneration(modelId: modelId)
+            || shouldPreferChatNativeImageGeneration(modelId: modelId))
+            && Self.looksLikeImageGenerationRequest(messageText)
+            ? userMessage.id
+            : nil
+        let apiMessages = await buildAPIMessagesAsync(
+            imageCanvasInstructionMessageId: imageCanvasInstructionMessageId
+        )
         let parentId = userMessage.id
         sessionId = UUID().uuidString
         let effectiveChatId = conversationId ?? conversation?.id
@@ -4171,10 +4245,12 @@ final class ChatViewModel {
             metadata: [
                 "iexa_local_alpine_direct": "true",
                 "iexa_local_alpine_result": "true",
+                "iexa_local_alpine_command_preview": command,
                 "iexa_local_alpine_display_command": userMessage.content,
                 "iexa_local_alpine_cwd": "/mnt/iexa"
             ]
         ))
+        localAlpineAgentExecutedMessageIds.insert(assistantMessageId)
 
         let userHistoryNode = HistoryNode(
             id: userMessage.id,
@@ -4212,6 +4288,11 @@ final class ChatViewModel {
             command: command,
             detail: initialStatus.description ?? localAlpineRunningDescription(for: command)
         )
+        let progressHeartbeat = startLocalAlpineProgressHeartbeat(
+            messageId: assistantMessageId,
+            command: command
+        )
+        defer { progressHeartbeat.cancel() }
 
         var result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
         while let request = result.interactiveRequest {
@@ -4303,8 +4384,67 @@ final class ChatViewModel {
         ChatStatusUpdate(
             action: "local_alpine",
             description: description,
-            done: done
+            done: done,
+            occurredAt: .now
         )
+    }
+
+    private func localAlpineStatusHistory(messageId: String, appending status: ChatStatusUpdate) -> [ChatStatusUpdate] {
+        var existing = conversation?.messages.first(where: { $0.id == messageId })?.statusHistory ?? []
+        if existing.last?.description == status.description && existing.last?.done == status.done {
+            existing[existing.count - 1] = status
+        } else {
+            existing.append(status)
+        }
+        return existing
+    }
+
+    private func startLocalAlpineProgressHeartbeat(
+        messageId: String,
+        command: String,
+        startedAt: Date = .now
+    ) -> Task<Void, Never> {
+        Task { [weak self] in
+            var tick = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(8))
+                guard !Task.isCancelled else { break }
+                await MainActor.run {
+                    guard let self,
+                          let index = self.conversation?.messages.firstIndex(where: { $0.id == messageId }),
+                          self.conversation?.messages[index].isStreaming == true else { return }
+                    tick += 1
+                    let description = self.localAlpineHeartbeatDescription(
+                        command: command,
+                        elapsed: Date().timeIntervalSince(startedAt),
+                        tick: tick
+                    )
+                    let status = self.localAlpineStatus(description: description, done: false)
+                    let history = self.localAlpineStatusHistory(messageId: messageId, appending: status)
+                    self.conversation?.messages[index].statusHistory = history
+                    self.conversation?.history.updateNode(id: messageId) { node in
+                        node.statusHistory = history
+                    }
+                }
+            }
+        }
+    }
+
+    private func localAlpineHeartbeatDescription(command: String, elapsed: TimeInterval, tick: Int) -> String {
+        let lowercased = command.lowercased()
+        let seconds = max(1, Int(elapsed.rounded()))
+        if lowercased.contains("apk add") || lowercased.contains("pip install") || lowercased.contains("npm install") {
+            return "正在安装依赖，已运行 \(seconds) 秒..."
+        }
+        if lowercased.contains("apk ") || lowercased.contains("pip ") || lowercased.contains("npm ") {
+            return "正在处理软件包，已运行 \(seconds) 秒..."
+        }
+        if shouldLocalAlpineCheckDependencies(for: lowercased) {
+            return "正在执行命令，已运行 \(seconds) 秒..."
+        }
+        return tick.isMultiple(of: 2)
+            ? "命令仍在运行，已运行 \(seconds) 秒..."
+            : "正在等待本地 Alpine 返回结果，已运行 \(seconds) 秒..."
     }
 
     private func requestLocalAlpineInput(_ request: LocalAlpineInteractiveRequest) async -> String? {
@@ -6624,26 +6764,49 @@ final class ChatViewModel {
         }
 
         let lowercased = text.lowercased()
-        if lowercased.contains("竖屏")
-            || lowercased.contains("纵向")
-            || lowercased.contains("手机")
-            || lowercased.contains("壁纸")
-            || lowercased.contains("海报")
-            || lowercased.contains("portrait") {
+        let squareScore = keywordScore(
+            in: lowercased,
+            keywords: ["方图", "正方形", "头像", "logo", "标志", "图标", "app icon", "icon", "贴纸", "表情包", "专辑封面", "album cover", "square"]
+        )
+        let portraitScore = keywordScore(
+            in: lowercased,
+            keywords: ["竖屏", "纵向", "手机壁纸", "手机", "锁屏", "海报", "人像", "肖像", "半身", "全身", "人物", "角色", "女孩", "男孩", "女生", "男生", "模特", "穿搭", "服装", "portrait", "poster", "phone wallpaper", "story", "vertical"]
+        )
+        let landscapeScore = keywordScore(
+            in: lowercased,
+            keywords: ["横屏", "宽屏", "全景", "风景", "场景", "城市", "建筑", "汽车", "跑车", "车辆", "小米 su7", "su7", "山脉", "海边", "湖边", "街景", "电影感", "剧照", "桌面壁纸", "电脑壁纸", "landscape", "wide", "widescreen", "panorama", "cinematic", "banner", "vehicle", "automotive", "desktop wallpaper"]
+        )
+
+        if squareScore > 0 && portraitScore == 0 && landscapeScore == 0 {
+            return defaultSize
+        }
+        if portraitScore > landscapeScore {
             return "1024x1792"
         }
-        if lowercased.contains("横屏")
-            || lowercased.contains("宽屏")
-            || lowercased.contains("landscape") {
+        if landscapeScore > portraitScore {
             return "1792x1024"
         }
-        if lowercased.contains("方图")
-            || lowercased.contains("正方形")
-            || lowercased.contains("square") {
+        if squareScore > 0 {
             return defaultSize
         }
 
-        return defaultSize
+        return stableImageCanvasSizeFallback(for: text)
+    }
+
+    private static func keywordScore(in text: String, keywords: [String]) -> Int {
+        keywords.reduce(0) { score, keyword in
+            score + (text.contains(keyword) ? 1 : 0)
+        }
+    }
+
+    private static func stableImageCanvasSizeFallback(for text: String) -> String {
+        let choices = ["1024x1024", "1792x1024", "1024x1792"]
+        var hash: UInt64 = 1469598103934665603
+        for byte in text.lowercased().utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1099511628211
+        }
+        return choices[Int(hash % UInt64(choices.count))]
     }
 
     private static func imageEndpointSize(for canvasSize: String) -> String {
@@ -6706,6 +6869,16 @@ final class ChatViewModel {
 
         Canvas requirement: generate the image at \(exactRequirement). Do not crop into a square unless the requested size is square.
         """
+    }
+
+    private static func looksLikeImageGenerationRequest(_ text: String) -> Bool {
+        let lowercased = text.lowercased()
+        let keywords = [
+            "生图", "生成图", "生成一张", "生成图片", "生成图像", "画一张", "画个", "绘制", "做一张",
+            "图片", "图像", "照片", "插画", "海报", "壁纸", "头像", "logo",
+            "generate an image", "create an image", "make an image", "draw", "illustration", "poster", "wallpaper", "photo"
+        ]
+        return keywords.contains { lowercased.contains($0) }
     }
 
     private static func requestedVideoDuration(from prompt: String) -> Int? {
@@ -7692,10 +7865,23 @@ final class ChatViewModel {
         return sources
     }
 
-    private func contentForModel(message: ChatMessage) -> String {
+    private func contentForModel(
+        message: ChatMessage,
+        includeImageCanvasInstruction: Bool = false
+    ) -> String {
         guard message.role == .user else {
             return message.content
         }
+        var content = message.content
+        let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if includeImageCanvasInstruction,
+           !trimmedContent.isEmpty,
+           Self.looksLikeImageGenerationRequest(trimmedContent) {
+            let canvasSize = Self.requestedImageCanvasSize(from: trimmedContent)
+            let endpointSize = Self.imageEndpointSize(for: canvasSize)
+            content = Self.promptWithImageSizeInstruction(trimmedContent, canvasSize: canvasSize, endpointSize: endpointSize)
+        }
+
         let extraContexts = [
             webLinkContextsByMessageId[message.id],
             webSearchContextsByMessageId[message.id]
@@ -7704,12 +7890,12 @@ final class ChatViewModel {
             .filter { !$0.isEmpty }
 
         guard !extraContexts.isEmpty else {
-            return message.content
+            return content
         }
-        if message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return extraContexts.joined(separator: "\n\n")
         }
-        return message.content + "\n\n" + extraContexts.joined(separator: "\n\n")
+        return content + "\n\n" + extraContexts.joined(separator: "\n\n")
     }
 
     private func attachResolvedVideoFile(messageId: String, video: ResolvedWebVideo) {
@@ -7731,7 +7917,7 @@ final class ChatViewModel {
         }
     }
 
-    private func buildAPIMessagesAsync() async -> [[String: Any]] {
+    private func buildAPIMessagesAsync(imageCanvasInstructionMessageId: String? = nil) async -> [[String: Any]] {
         guard let conversation else { return [] }
         var apiMessages: [[String: Any]] = []
         let asyncEffectiveSP: String? = {
@@ -7746,7 +7932,8 @@ final class ChatViewModel {
         let alpineContext = selectedTerminalIsLocalAlpine && terminalEnabled
             ? Self.localAlpineAgentSystemContext()
             : nil
-        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, alpineContext, memoryContext]
+        let alpineExecutionStateContext = Self.localAlpineExecutionStateSystemContext(from: conversation.messages)
+        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, alpineContext, alpineExecutionStateContext, memoryContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
@@ -7755,7 +7942,10 @@ final class ChatViewModel {
         }
         for message in conversation.messages where !message.isStreaming
             && !Self.isLocalWorkspaceAgentResult(message) {
-            let modelContent = contentForModel(message: message)
+            let modelContent = contentForModel(
+                message: message,
+                includeImageCanvasInstruction: message.id == imageCanvasInstructionMessageId
+            )
             let imageFiles = message.files.filter { f in
                 f.type == "image" || (f.contentType ?? "").hasPrefix("image/")
             }
@@ -8342,7 +8532,11 @@ final class ChatViewModel {
             model: "Local Alpine",
             isStreaming: true,
             statusHistory: [initialStatus],
-            metadata: ["iexa_local_alpine_result": "true"]
+            metadata: [
+                "iexa_local_alpine_result": "true",
+                "iexa_local_alpine_command_preview": Self.localAlpineCommandPreview(from: content),
+                "iexa_local_alpine_cwd": "/mnt/iexa"
+            ]
         )
         let placeholderNode = HistoryNode(
             id: resultMessageId,
@@ -8360,6 +8554,7 @@ final class ChatViewModel {
         conversation?.history.addNode(placeholderNode)
         conversation?.history.appendChildId(resultMessageId, to: messageId)
         conversation?.history.currentId = resultMessageId
+        localAlpineAgentExecutedMessageIds.insert(resultMessageId)
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
         beginStreamingBackgroundTaskIfNeeded()
@@ -8368,7 +8563,14 @@ final class ChatViewModel {
             command: content,
             detail: initialStatus.description ?? "正在执行本地 Alpine 命令..."
         )
-        defer { endBackgroundTask() }
+        let progressHeartbeat = startLocalAlpineProgressHeartbeat(
+            messageId: resultMessageId,
+            command: content
+        )
+        defer {
+            progressHeartbeat.cancel()
+            endBackgroundTask()
+        }
 
         let result = await LocalAlpineAgentService.shared.executeBlocks(in: content) { request in
             await self.requestLocalAlpineInput(request)
@@ -8540,8 +8742,12 @@ final class ChatViewModel {
         )
 
         if let completedAssistantContentForAgent {
-            scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
-            scheduleLocalWorkspaceAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
+            if conversation?.messages.first(where: { $0.id == id }).map(Self.isLocalAlpineAgentResult) != true {
+                scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
+            }
+            if conversation?.messages.first(where: { $0.id == id }).map(Self.isLocalWorkspaceAgentResult) != true {
+                scheduleLocalWorkspaceAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
+            }
         }
     }
 
