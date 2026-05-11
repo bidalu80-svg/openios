@@ -195,7 +195,22 @@ struct ChatDetailView: View {
     var body: some View {
         @Bindable var vm = viewModel
 
-        ZStack {
+        let localAlpineInputRequestBinding = Binding(
+            get: { vm.localAlpineInputRequest },
+            set: { if $0 == nil, vm.localAlpineInputRequest != nil { vm.cancelLocalAlpineInput() } }
+        )
+        let localAlpineInputTextBinding = Binding(
+            get: { vm.localAlpineInputText },
+            set: { vm.localAlpineInputText = $0 }
+        )
+        let localAlpineConfirm: () -> Void = {
+            vm.submitLocalAlpineInput(vm.localAlpineInputText)
+        }
+        let localAlpineCancel: () -> Void = {
+            vm.cancelLocalAlpineInput()
+        }
+
+        let baseView = ZStack {
             theme.background.ignoresSafeArea()
             messageListArea
         }
@@ -208,6 +223,8 @@ struct ChatDetailView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
+
+        let lifecycleView = baseView
         .task {
             keyboard.start()
             if let manager = dependencies.conversationManager {
@@ -311,6 +328,8 @@ struct ChatDetailView: View {
             tokenUsageExactMessagesTotal += notification.userInfo?["exact"] as? Int ?? 0
             tokenUsageEstimatedMessagesTotal += notification.userInfo?["estimated"] as? Int ?? 0
         }
+
+        let presentationView = lifecycleView
         // Toasts & banners
         .overlay(alignment: .top) {
             if showCopiedToast { copiedToastView }
@@ -458,20 +477,10 @@ struct ChatDetailView: View {
             actionNotificationToast: $actionNotificationToast,
             actionCallContinuation: $actionCallContinuation,
             actionInputText: $actionInputText,
-            localAlpineInputRequest: Binding(
-                get: { viewModel.localAlpineInputRequest },
-                set: { if $0 == nil, viewModel.localAlpineInputRequest != nil { viewModel.cancelLocalAlpineInput() } }
-            ),
-            localAlpineInputText: Binding(
-                get: { viewModel.localAlpineInputText },
-                set: { viewModel.localAlpineInputText = $0 }
-            ),
-            onLocalAlpineConfirm: {
-                viewModel.submitLocalAlpineInput(viewModel.localAlpineInputText)
-            },
-            onLocalAlpineCancel: {
-                viewModel.cancelLocalAlpineInput()
-            }
+            localAlpineInputRequest: localAlpineInputRequestBinding,
+            localAlpineInputText: localAlpineInputTextBinding,
+            onLocalAlpineConfirm: localAlpineConfirm,
+            onLocalAlpineCancel: localAlpineCancel
         )
         .sheet(item: $downloadedFileURL) { url in
             ShareSheetView(activityItems: [url])
@@ -515,6 +524,8 @@ struct ChatDetailView: View {
             codePreviewLanguage: $codePreviewLanguage,
             onDismissOverlays: { dismissAllPickers() }
         )
+
+        return presentationView
     }
 
     // MARK: - Toolbar
