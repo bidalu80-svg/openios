@@ -2,7 +2,7 @@
 //  OpenUIWidgets.swift
 //  OpenUIWidgets
 //
-//  Iexa widget suite — action-focused, instant-launch widgets.
+//  Open UI widget suite — action-focused, instant-launch widgets.
 //  Modern adaptive design: supports Default, Dark, Clear, and Tinted modes.
 //  Uses SwiftUI system materials and widgetRenderingMode for full theme support.
 //

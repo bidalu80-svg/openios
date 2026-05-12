@@ -169,7 +169,7 @@ enum SSEEvent: Sendable {
     /// Extracts usage statistics from the final streaming chunk.
     var usage: [String: Any]? {
         guard case .json(let json) = self else { return nil }
-        return json["usage"] as? [String: Any]
+        return Self.extractUsage(from: json)
     }
 
     /// Whether this chunk indicates the response is complete.
@@ -222,6 +222,45 @@ enum SSEEvent: Sendable {
         if let array = value as? [Any] {
             let rendered = array.compactMap { renderContent($0) }.joined()
             return rendered.isEmpty ? nil : rendered
+        }
+
+        return nil
+    }
+
+    private static func extractUsage(from json: [String: Any]) -> [String: Any]? {
+        let usageKeys = [
+            "usage",
+            "token_usage",
+            "tokenUsage",
+            "response_usage",
+            "responseUsage",
+            "usage_metadata",
+            "usageMetadata"
+        ]
+        for key in usageKeys {
+            if let usage = json[key] as? [String: Any], !usage.isEmpty {
+                return usage
+            }
+        }
+
+        if let message = json["message"] as? [String: Any],
+           let usage = extractUsage(from: message) {
+            return usage
+        }
+        if let delta = json["delta"] as? [String: Any],
+           let usage = extractUsage(from: delta) {
+            return usage
+        }
+        if let response = json["response"] as? [String: Any],
+           let usage = extractUsage(from: response) {
+            return usage
+        }
+        if let choices = json["choices"] as? [[String: Any]] {
+            for choice in choices {
+                if let usage = extractUsage(from: choice) {
+                    return usage
+                }
+            }
         }
 
         return nil

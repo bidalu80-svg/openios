@@ -577,9 +577,13 @@ struct iPadMainChatView: View {
     // MARK: - Terminal Configuration
 
     private func configureTerminalBrowserIfNeeded() {
-        guard let apiClient = dependencies.apiClient else { return }
         let vm = dependencies.activeChatStore.viewModel(for: activeConversationId)
         guard vm.terminalEnabled, let server = vm.selectedTerminalServer else { return }
+        if server.isLocalAlpine {
+            terminalBrowserVM.configureLocalAlpine()
+            return
+        }
+        guard let apiClient = dependencies.apiClient else { return }
         terminalBrowserVM.configure(apiClient: apiClient, serverId: server.id)
     }
 

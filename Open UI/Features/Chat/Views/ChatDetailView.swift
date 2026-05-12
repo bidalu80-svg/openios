@@ -1512,27 +1512,38 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func messageBubble(for message: ChatMessage, isLastAssistant: Bool) -> some View {
-        ChatMessageBubble(
-            role: message.role,
-            showTimestamp: activeActionMessageId == message.id,
-            timestamp: message.timestamp
-        ) {
-            messageContent(for: message)
-        }
-        // Only apply tap gesture to user bubbles — assistant content contains
-        // interactive elements (links, text selection) that onTapGesture would block.
-        // Assistant action bar is always visible so no tap-reveal is needed.
-        .if(message.role == .user) { view in
-            view.onTapGesture {
-                withAnimation(MicroAnimation.snappy) {
-                    activeActionMessageId = activeActionMessageId == message.id ? nil : message.id
+        if isLocalAlpineResultMessage(message) {
+            LocalAlpineResultCard(content: message.content)
+                .padding(.horizontal, Spacing.screenPadding)
+                .padding(.vertical, Spacing.xs)
+        } else {
+            ChatMessageBubble(
+                role: message.role,
+                showTimestamp: activeActionMessageId == message.id,
+                timestamp: message.timestamp
+            ) {
+                messageContent(for: message)
+            }
+            // Only apply tap gesture to user bubbles — assistant content contains
+            // interactive elements (links, text selection) that onTapGesture would block.
+            // Assistant action bar is always visible so no tap-reveal is needed.
+            .if(message.role == .user) { view in
+                view.onTapGesture {
+                    withAnimation(MicroAnimation.snappy) {
+                        activeActionMessageId = activeActionMessageId == message.id ? nil : message.id
+                    }
+                    Haptics.play(.light)
                 }
-                Haptics.play(.light)
+            }
+            .if(message.role != .assistant) { view in
+                view.contextMenu { messageContextMenu(for: message) }
             }
         }
-        .if(message.role != .assistant) { view in
-            view.contextMenu { messageContextMenu(for: message) }
-        }
+    }
+
+    private func isLocalAlpineResultMessage(_ message: ChatMessage) -> Bool {
+        message.metadata?["iexa_local_alpine_result"] == "true"
+            || message.content.hasPrefix("本地 Alpine 执行结果")
     }
 
     @ViewBuilder
@@ -1753,6 +1764,180 @@ struct ChatDetailView: View {
         editingMessageText = ""
         Task { await viewModel.editMessage(id: id, newContent: trimmed) }
         Haptics.play(.medium)
+    }
+
+    private struct LocalAlpineResultCard: View {
+        let content: String
+
+        @Environment(\.theme) private var theme
+        @State private var isExpanded = false
+
+        private var step: String { extractLine(prefix: "步骤:") ?? "" }
+        private var exitCode: String { extractLine(prefix: "退出码:") ?? "unknown" }
+        private var elapsed: String? { extractLine(prefix: "耗时:") }
+        private var cwd: String? { extractLine(prefix: "工作目录:") }
+        private var command: String { extractBlock(after: "命令") ?? "" }
+        private var output: String { extractBlock(after: "输出") ?? "" }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 0) {
+                Button {
+                    withAnimation(MicroAnimation.snappy) {
+                        isExpanded.toggle()
+                    }
+                    Haptics.play(.light)
+                } label: {
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(theme.brandPrimary.opacity(0.12))
+                                .frame(width: 28, height: 28)
+                            Image(systemName: "terminal")
+                                .scaledFont(size: 13, weight: .semibold)
+                                .foregroundStyle(theme.brandPrimary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text("本地 Alpine")
+                                    .scaledFont(size: 13, weight: .semibold)
+                                    .foregroundStyle(theme.textPrimary)
+                                Text(statusText)
+                                    .scaledFont(size: 11, weight: .semibold)
+                                    .foregroundStyle(statusColor)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2)
+                                    .background(statusColor.opacity(0.12))
+                                    .clipShape(Capsule())
+                            }
+                            Text(summaryText)
+                                .scaledFont(size: 11, weight: .regular)
+                                .foregroundStyle(theme.textTertiary)
+                                .lineLimit(1)
+                        }
+
+                        Spacer(minLength: 8)
+
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .scaledFont(size: 11, weight: .bold)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if isExpanded {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if let cwd {
+                            metaRow("目录", cwd)
+                        }
+                        if !command.isEmpty {
+                            codePanel(title: "命令", text: command, maxHeight: 120)
+                        }
+                        if !output.isEmpty {
+                            codePanel(title: "输出", text: output, maxHeight: 220)
+                        }
+                    }
+                    .padding(.top, 10)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.72 : 0.82))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(0.45), lineWidth: 0.75)
+            )
+        }
+
+        private var statusText: String {
+            if exitCode == "0" { return "完成" }
+            if exitCode == "blocked" { return "已拦截" }
+            return "退出码 \(exitCode)"
+        }
+
+        private var statusColor: Color {
+            if exitCode == "0" { return theme.success }
+            if exitCode == "blocked" { return theme.warning }
+            return theme.error
+        }
+
+        private var summaryText: String {
+            let elapsedText = elapsed.map { " · \($0)" } ?? ""
+            let stepText = step.isEmpty ? "已执行命令" : "第 \(step)"
+            let commandText = command.isEmpty ? "" : " · \(short(command))"
+            return "\(stepText)\(elapsedText)\(commandText)"
+        }
+
+        private func metaRow(_ label: String, _ value: String) -> some View {
+            HStack(spacing: 8) {
+                Text(label)
+                    .scaledFont(size: 11, weight: .semibold)
+                    .foregroundStyle(theme.textTertiary)
+                Text(value)
+                    .scaledFont(size: 11, weight: .medium)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+
+        private func codePanel(title: String, text: String, maxHeight: CGFloat) -> some View {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .scaledFont(size: 11, weight: .semibold)
+                    .foregroundStyle(theme.textTertiary)
+                ScrollView {
+                    Text(text)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.textSecondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .frame(maxHeight: maxHeight)
+                .background(theme.background.opacity(theme.isDark ? 0.55 : 0.8))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+        }
+
+        private func extractLine(prefix: String) -> String? {
+            content
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .first { String($0).trimmingCharacters(in: .whitespaces).hasPrefix(prefix) }
+                .map {
+                    String($0)
+                        .replacingOccurrences(of: prefix, with: "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+        }
+
+        private func extractBlock(after heading: String) -> String? {
+            guard let headingRange = content.range(of: "\n\(heading)\n") else { return nil }
+            let rest = String(content[headingRange.upperBound...])
+            guard let startFence = rest.range(of: "```") else { return nil }
+            let afterFence = String(rest[startFence.upperBound...])
+            let afterLanguageLine: String
+            if let newline = afterFence.firstIndex(of: "\n") {
+                afterLanguageLine = String(afterFence[afterFence.index(after: newline)...])
+            } else {
+                afterLanguageLine = afterFence
+            }
+            guard let endFence = afterLanguageLine.range(of: "```") else { return nil }
+            return String(afterLanguageLine[..<endFence.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        private func short(_ value: String) -> String {
+            let oneLine = value
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard oneLine.count > 42 else { return oneLine }
+            return String(oneLine.prefix(39)) + "..."
+        }
     }
 
     // MARK: - Welcome View

@@ -129,7 +129,10 @@ actor LocalWorkspaceAgentService {
             ?? (dict["file"] as? String)
             ?? (dict["folder"] as? String)
             ?? "."
-        let content = dict["content"] as? String
+        let content = (dict["content"] as? String)
+            ?? (dict["query"] as? String)
+            ?? (dict["pattern"] as? String)
+            ?? (dict["text"] as? String)
 
         return [WorkspaceOperation(action: action, path: path, content: content)]
     }
@@ -189,6 +192,14 @@ actor LocalWorkspaceAgentService {
                 let label = operation.path == "." ? "根目录" : "`\(operation.path)`"
                 return "- \(label)包含：\(names.isEmpty ? "空" : names.joined(separator: ", "))"
 
+            case .search:
+                let url = try resolvePath(operation.path, root: root, allowRoot: true)
+                let query = operation.content?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !query.isEmpty else {
+                    return "- 搜索失败：缺少 query/pattern。"
+                }
+                return search(query: query, at: url, root: root)
+
             case .delete:
                 let url = try resolvePath(operation.path, root: root, allowRoot: false)
                 guard fileManager.fileExists(atPath: url.path) else {
@@ -244,6 +255,59 @@ actor LocalWorkspaceAgentService {
         }
         return target
     }
+
+    private func search(query: String, at url: URL, root: URL) -> String {
+        let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+        let files: [URL]
+
+        if isDirectory {
+            let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
+            let enumerator = fileManager.enumerator(
+                at: url,
+                includingPropertiesForKeys: keys,
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            )
+            files = (enumerator?.compactMap { entry -> URL? in
+                guard let fileURL = entry as? URL else { return nil }
+                let values = try? fileURL.resourceValues(forKeys: Set(keys))
+                guard values?.isRegularFile == true else { return nil }
+                if let size = values?.fileSize, size > maxPreviewBytes * 4 { return nil }
+                return fileURL
+            } ?? [])
+        } else {
+            files = [url]
+        }
+
+        let loweredQuery = query.lowercased()
+        var matches: [String] = []
+
+        for fileURL in files.prefix(300) {
+            guard let data = try? Data(contentsOf: fileURL),
+                  let text = String(data: data.prefix(maxPreviewBytes * 4), encoding: .utf8) else {
+                continue
+            }
+            let lines = text.split(whereSeparator: \.isNewline).map(String.init)
+            for (index, line) in lines.enumerated() where line.lowercased().contains(loweredQuery) {
+                matches.append("- `\(relativePath(fileURL, root: root)):\(index + 1)` \(String(line.prefix(180)))")
+                if matches.count >= 30 { break }
+            }
+            if matches.count >= 30 { break }
+        }
+
+        if matches.isEmpty {
+            return "- 未找到包含 `\(query)` 的内容。"
+        }
+        return "- 搜索 `\(query)` 找到 \(matches.count) 处：\n\(matches.joined(separator: "\n"))"
+    }
+
+    private func relativePath(_ url: URL, root: URL) -> String {
+        let rootPath = root.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        if path == rootPath { return "." }
+        let prefix = rootPath.hasSuffix("/") ? rootPath : "\(rootPath)/"
+        guard path.hasPrefix(prefix) else { return url.lastPathComponent }
+        return String(path.dropFirst(prefix.count))
+    }
 }
 
 private struct WorkspaceOperation {
@@ -258,6 +322,7 @@ private enum WorkspaceAction {
     case append
     case read
     case list
+    case search
     case delete
 
     init?(rawValueLike value: String) {
@@ -278,6 +343,8 @@ private enum WorkspaceAction {
             self = .read
         case "list", "ls", "listdirectory", "listfolder":
             self = .list
+        case "search", "grep", "findtext", "findinfiles":
+            self = .search
         case "delete", "remove", "rm", "unlink":
             self = .delete
         default:
