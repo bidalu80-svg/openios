@@ -260,7 +260,9 @@ final class ChatViewModel {
     private var localAlpineAgentTask: Task<Void, Never>?
     private var localAlpineContinuationTask: Task<Void, Never>?
     private var localAlpineAgentStopRequested = false
+    private var localAlpineNoCommandContinuationRetries = 0
     private let localAlpineAgentMaxSteps = 10
+    private let localAlpineContinuationMaxNoCommandRetries = 3
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     @ObservationIgnored private var localAlpineInputContinuation: CheckedContinuation<String?, Never>?
@@ -1196,6 +1198,7 @@ final class ChatViewModel {
             let state = message.isStreaming ? "running" : "completed"
             let command = metadata["iexa_local_alpine_display_command"]
             let cwd = metadata["iexa_local_alpine_cwd"]
+            let rawResult = metadata["iexa_local_alpine_raw_result"]
             let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
 
             var lines = ["- state: \(state)"]
@@ -1212,6 +1215,10 @@ final class ChatViewModel {
             if !content.isEmpty {
                 lines.append(message.isStreaming ? "  partial output:" : "  result:")
                 lines.append(indentForSystemContext(clippedForSystemContext(content, maxCharacters: 8_000)))
+            }
+            if let rawResult, !rawResult.isEmpty, rawResult != content {
+                lines.append("  raw result:")
+                lines.append(indentForSystemContext(clippedForSystemContext(rawResult, maxCharacters: 8_000)))
             }
             return lines.joined(separator: "\n")
         }
@@ -4495,6 +4502,7 @@ final class ChatViewModel {
         localAlpineContinuationTask = nil
         cancelLocalAlpineInput()
         localAlpineAgentStopRequested = false
+        localAlpineNoCommandContinuationRetries = 0
     }
 
     private func cancelLocalAlpineAgentLoop() {
@@ -8719,6 +8727,11 @@ final class ChatViewModel {
             isStreaming: false,
             statusHistory: [doneStatus]
         )
+        if let index = conversation?.messages.firstIndex(where: { $0.id == resultMessageId }) {
+            var metadata = conversation?.messages[index].metadata ?? [:]
+            metadata["iexa_local_alpine_raw_result"] = result.summary
+            conversation?.messages[index].metadata = metadata
+        }
         conversation?.history.updateNode(id: resultMessageId) { node in
             node.content = result.summary
             node.done = true
@@ -8728,7 +8741,9 @@ final class ChatViewModel {
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
+        localAlpineNoCommandContinuationRetries = 0
         let shouldContinueAfterResult = content.localizedCaseInsensitiveContains("iexa_alpine")
+            || Self.localAlpineResultNeedsFollowUp(result.summary)
         if result.interactiveRequest == nil, shouldContinueAfterResult, !localAlpineAgentStopRequested {
             scheduleLocalAlpineContinuationIfNeeded(after: resultMessageId)
         } else {
@@ -8736,7 +8751,7 @@ final class ChatViewModel {
         }
     }
 
-    private func scheduleLocalAlpineContinuationIfNeeded(after resultMessageId: String) {
+    private func scheduleLocalAlpineContinuationIfNeeded(after resultMessageId: String, forceContinue: Bool = false) {
         guard terminalEnabled, selectedTerminalIsLocalAlpine else { return }
         guard !localAlpineAgentStopRequested else { return }
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
@@ -8744,10 +8759,11 @@ final class ChatViewModel {
             appendLocalAlpineAgentLimitMessage(parentId: resultMessageId)
             return
         }
+        guard forceContinue || isLocalAlpineAgentStillNeeded(after: resultMessageId) else { return }
 
         localAlpineContinuationTask?.cancel()
         localAlpineContinuationTask = Task { [weak self] in
-            await self?.startLocalAlpineContinuation(parentId: resultMessageId)
+            await self?.startLocalAlpineContinuation(parentId: resultMessageId, forceContinue: forceContinue)
         }
     }
 
@@ -8788,9 +8804,9 @@ final class ChatViewModel {
         return false
     }
 
-    private func startLocalAlpineContinuation(parentId: String) async {
+    private func startLocalAlpineContinuation(parentId: String, forceContinue: Bool = false) async {
         guard !localAlpineAgentStopRequested else { return }
-        guard isLocalAlpineAgentStillNeeded(after: parentId) else { return }
+        guard forceContinue || isLocalAlpineAgentStillNeeded(after: parentId) else { return }
         guard localAlpineStepsSinceLastUser() < localAlpineAgentMaxSteps else {
             appendLocalAlpineAgentLimitMessage(parentId: parentId)
             return
@@ -8992,6 +9008,8 @@ final class ChatViewModel {
             cleanupStreaming()
             return
         }
+        let parentResultId = conversation?.history.nodes[assistantMessageId]?.parentId
+        let parentNeedsFollowUp = parentResultId.map { self.localAlpineResultNeedsFollowUp(after: $0) } ?? false
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             updateAssistantMessage(
@@ -9001,12 +9019,23 @@ final class ChatViewModel {
                 error: ChatMessageError(content: "未收到模型下一步，请重试。")
             )
             cleanupStreaming()
+            if parentNeedsFollowUp, let parentResultId {
+                if localAlpineNoCommandContinuationRetries < localAlpineContinuationMaxNoCommandRetries {
+                    localAlpineNoCommandContinuationRetries += 1
+                    localAlpineAgentStopRequested = false
+                    scheduleLocalAlpineContinuationIfNeeded(after: parentResultId, forceContinue: true)
+                } else {
+                    localAlpineAgentStopRequested = true
+                    localAlpineContinuationTask = nil
+                }
+            }
             return
         }
 
-        updateAssistantMessage(id: assistantMessageId, content: content, isStreaming: false)
+        let rawContent = content
+        updateAssistantMessage(id: assistantMessageId, content: rawContent, isStreaming: false)
         normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
-        let finalContent = conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? content
+        let finalContent = conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? rawContent
         applyUsage(usage, toMessageId: assistantMessageId)
         let lastUser = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
@@ -9026,13 +9055,37 @@ final class ChatViewModel {
         await persistLocalConversationIfNeeded()
         await sendCompletionNotificationIfNeeded(content: finalContent)
         endBackgroundTask()
-        if finalContent.localizedCaseInsensitiveContains("iexa_alpine") {
+        if rawContent.localizedCaseInsensitiveContains("iexa_alpine") {
+            localAlpineNoCommandContinuationRetries = 0
             localAlpineContinuationTask = nil
+        } else if parentNeedsFollowUp, let parentResultId,
+                  localAlpineNoCommandContinuationRetries < localAlpineContinuationMaxNoCommandRetries {
+            localAlpineNoCommandContinuationRetries += 1
+            localAlpineAgentStopRequested = false
+            localAlpineContinuationTask = nil
+            scheduleLocalAlpineContinuationIfNeeded(after: parentResultId, forceContinue: true)
         } else {
             localAlpineAgentStopRequested = true
             localAlpineContinuationTask = nil
         }
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func localAlpineResultNeedsFollowUp(after resultMessageId: String) -> Bool {
+        guard let message = conversation?.messages.first(where: { $0.id == resultMessageId }) else { return false }
+        let rawResult = message.metadata?["iexa_local_alpine_raw_result"] ?? message.content
+        return Self.localAlpineResultNeedsFollowUp(rawResult)
+    }
+
+    private static func localAlpineResultNeedsFollowUp(_ text: String) -> Bool {
+        let normalized = text.lowercased()
+        let markers = [
+            "退出码：`1`", "退出码：`2`", "退出码：`126`", "退出码：`127`", "退出码：`124`",
+            "not found", "error", "failed", "missing", "no such file", "traceback", "exception",
+            "command not found", "permission denied", "syntaxerror", "indentationerror",
+            "module not found", "no module named", "输入已取消", "存在错误输出"
+        ]
+        return markers.contains(where: { normalized.contains($0.lowercased()) })
     }
 
     private func pollLocalAlpineContinuation(
