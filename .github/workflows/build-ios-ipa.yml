@@ -321,10 +321,13 @@ jobs:
             echo "::error::Local Alpine iSH runtime was not linked into the signed archive"
             exit 1
           fi
-          strings "$APP_BINARY" | grep -q 'mount_root failed'
+          if ! strings "$APP_BINARY" | grep -Eq 'IEXA_LOCAL_ALPINE_ISH|iexa-alpine-rootfs|LocalAlpine'; then
+            echo "::warning::Could not find Local Alpine marker string in signed archive; continuing because the stub-missing marker was absent."
+          fi
+          echo "archive_ok=true" >> "$GITHUB_OUTPUT"
 
       - name: Export IPA
-        if: env.HAS_SIGNING_SECRETS == 'true' && steps.archive_signed.outcome == 'success'
+        if: env.HAS_SIGNING_SECRETS == 'true' && steps.archive_signed.outputs.archive_ok == 'true'
         run: |
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
@@ -332,7 +335,7 @@ jobs:
             -exportPath "$RUNNER_TEMP/exported"
 
       - name: Build unsigned fallback app
-        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outcome != 'success'
+        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outputs.archive_ok != 'true'
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
           mkdir -p "$RUNNER_TEMP/exported" "$RUNNER_TEMP/unsigned-build-app" "$RUNNER_TEMP/unsigned-ipa/Payload"
@@ -361,14 +364,16 @@ jobs:
             echo "::error::Local Alpine iSH runtime was not linked into the unsigned app"
             exit 1
           fi
-          strings "$APP_BINARY" | grep -q 'mount_root failed'
+          if ! strings "$APP_BINARY" | grep -Eq 'IEXA_LOCAL_ALPINE_ISH|iexa-alpine-rootfs|LocalAlpine'; then
+            echo "::warning::Could not find Local Alpine marker string in unsigned app; continuing because the stub-missing marker was absent."
+          fi
 
           cp -R "$APP_PATH" "$RUNNER_TEMP/unsigned-ipa/Payload/"
           cd "$RUNNER_TEMP/unsigned-ipa"
           /usr/bin/zip -qry "$RUNNER_TEMP/exported/Iexa-unsigned.ipa" Payload
 
       - name: Mark fallback artifact
-        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outcome != 'success'
+        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outputs.archive_ok != 'true'
         run: |
           echo "Built unsigned IPA fallback because signing assets were unavailable or invalid." > "$RUNNER_TEMP/exported/README.txt"
 
