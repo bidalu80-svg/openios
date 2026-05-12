@@ -207,11 +207,19 @@ jobs:
           p.write_text(s)
           PY
 
+      - name: Prepare bundled Local Alpine rootfs
+        run: |
+          if [ ! -f "Open UI/Resources/iexa-alpine-rootfs.tar.gz" ]; then
+            bash scripts/prepare-local-alpine-rootfs.sh
+          fi
+          test -s "Open UI/Resources/iexa-alpine-rootfs.tar.gz"
+
       - name: Archive app
         id: archive_signed
         if: env.HAS_SIGNING_SECRETS == 'true'
         continue-on-error: true
         run: |
+          set +e
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
           xcodebuild \
             -project "Open UI.xcodeproj" \
@@ -221,9 +229,16 @@ jobs:
             -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
             PRODUCT_BUNDLE_IDENTIFIER="$APP_BUNDLE_ID" \
             archive
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "archive_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "archive_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$status"
 
       - name: Export IPA
-        if: env.HAS_SIGNING_SECRETS == 'true' && steps.archive_signed.outcome == 'success'
+        if: env.HAS_SIGNING_SECRETS == 'true' && steps.archive_signed.outputs.archive_ok == 'true'
         run: |
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
@@ -231,7 +246,7 @@ jobs:
             -exportPath "$RUNNER_TEMP/exported"
 
       - name: Strip embedded extensions from IPA
-        if: env.HAS_SIGNING_SECRETS == 'true' && steps.archive_signed.outcome == 'success'
+        if: env.HAS_SIGNING_SECRETS == 'true' && steps.archive_signed.outputs.archive_ok == 'true'
         run: |
           python3 - <<'PY'
           import zipfile
@@ -251,7 +266,7 @@ jobs:
           PY
 
       - name: Build unsigned fallback app
-        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outcome != 'success'
+        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outputs.archive_ok != 'true'
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
           mkdir -p "$RUNNER_TEMP/exported" "$RUNNER_TEMP/unsigned-build-app" "$RUNNER_TEMP/unsigned-ipa/Payload"
@@ -282,7 +297,7 @@ jobs:
           /usr/bin/zip -qry "$RUNNER_TEMP/exported/Iexa-unsigned.ipa" Payload
 
       - name: Mark fallback artifact
-        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outcome != 'success'
+        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outputs.archive_ok != 'true'
         run: |
           echo "Built unsigned IPA fallback because signing assets were unavailable or invalid." > "$RUNNER_TEMP/exported/README.txt"
 

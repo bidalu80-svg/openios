@@ -7770,12 +7770,22 @@ final class ChatViewModel {
         let command = rawCommand.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !command.isEmpty else { return nil }
         let cwd = (dict["cwd"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let timeoutValue = dict["timeoutSeconds"] as? Int
-            ?? dict["timeout_seconds"] as? Int
-            ?? dict["timeout"] as? Int
-            ?? (dict["timeoutSeconds"] as? Double).map(Int.init)
-            ?? (dict["timeout_seconds"] as? Double).map(Int.init)
-            ?? (dict["timeout"] as? Double).map(Int.init)
+        let timeoutValue: Int?
+        if let value = dict["timeoutSeconds"] as? Int {
+            timeoutValue = value
+        } else if let value = dict["timeout_seconds"] as? Int {
+            timeoutValue = value
+        } else if let value = dict["timeout"] as? Int {
+            timeoutValue = value
+        } else if let value = dict["timeoutSeconds"] as? Double {
+            timeoutValue = Int(value)
+        } else if let value = dict["timeout_seconds"] as? Double {
+            timeoutValue = Int(value)
+        } else if let value = dict["timeout"] as? Double {
+            timeoutValue = Int(value)
+        } else {
+            timeoutValue = nil
+        }
         let timeout = min(max(timeoutValue ?? 90, 5), 300)
         return LocalAlpineAgentCommand(
             command: command,
