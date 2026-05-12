@@ -23,6 +23,13 @@ extension Notification.Name {
     static let chatTokenUsageDidAccumulate = Notification.Name("chatTokenUsageDidAccumulate")
 }
 
+private struct LocalAlpineAgentCommand {
+    let command: String
+    let cwd: String
+    let timeoutSeconds: Int
+    let reason: String?
+}
+
 /// Manages state and logic for a single chat conversation.
 /// Handles sending/streaming messages via Socket.IO, loading history, and model selection.
 /// Instances are held by `ActiveChatStore` so they survive navigation transitions.
@@ -143,6 +150,9 @@ final class ChatViewModel {
     var terminalEnabled: Bool = false
     /// The currently selected terminal server (auto-selects first if only one).
     var selectedTerminalServer: TerminalServer?
+    var selectedTerminalIsLocalAlpine: Bool {
+        selectedTerminalServer?.isLocalAlpine == true
+    }
     var isLoadingKnowledge: Bool = false
     var isShowingKnowledgePicker: Bool = false
     var knowledgeSearchQuery: String = ""
@@ -225,6 +235,9 @@ final class ChatViewModel {
     private var isSyncingExternalStream: Bool = false
     private(set) var sessionId: String = UUID().uuidString
     private let logger = Logger(subsystem: "com.openui", category: "ChatViewModel")
+    private let webLinkContextResolver = WebLinkContextResolver()
+    private var webLinkContextsByMessageId: [String: String] = [:]
+    private var webSearchContextsByMessageId: [String: String] = [:]
     private var hasFinishedStreaming = false
     /// Tracks the content length at the last `extractAndApplyTasksFromContent` call.
     /// Prevents the O(n) task-extraction scan from running on every single token;
@@ -235,6 +248,11 @@ final class ChatViewModel {
     /// Settings takes effect immediately without a per-token UserDefaults read.
     private var streamingHapticsEnabled: Bool = true
     private var activeTaskId: String?
+    private var localAlpineAgentTask: Task<Void, Never>?
+    private var localAlpineAgentRunId: UUID?
+    private var localAlpineAgentExecutedMessageIds: Set<String> = []
+    private var isLocalAlpineAgentLoopActive: Bool = false
+    private let localAlpineAgentMaxSteps = 10
     private var recoveryTimer: Timer?
     /// Cancellable delay task for the initial recovery timer delay.
     /// Replaces `DispatchQueue.main.asyncAfter` so it can be cancelled
@@ -786,6 +804,15 @@ final class ChatViewModel {
 
     private static func isImageFile(_ file: ChatMessageFile) -> Bool {
         file.type == "image" || (file.contentType ?? "").hasPrefix("image/")
+    }
+
+    private static func isRenderableImageReference(_ value: String?) -> Bool {
+        guard let value, !value.isEmpty else { return false }
+        if value.hasPrefix("data:image/") || value.hasPrefix("http://") || value.hasPrefix("https://") {
+            return true
+        }
+        let lower = value.lowercased()
+        return [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif", ".svg"].contains { lower.contains($0) }
     }
 
     private static func preservingInlineImageFiles(
@@ -1922,20 +1949,37 @@ final class ChatViewModel {
     /// Called once at chat load time. If any terminals are available, the
     /// user can toggle them on via the terminal pill in the input field.
     func loadTerminalServers() async {
-        guard !isOpenAICompatibleProvider else {
-            availableTerminalServers = []
-            selectedTerminalServer = nil
-            terminalEnabled = false
+        if isOpenAICompatibleProvider {
+            availableTerminalServers = [TerminalServer.localAlpine]
+            if selectedTerminalServer == nil || selectedTerminalServer?.isLocalAlpine != true {
+                selectedTerminalServer = TerminalServer.localAlpine
+            }
             return
         }
-        guard let manager else { return }
+        guard let manager else {
+            availableTerminalServers = [TerminalServer.localAlpine]
+            if selectedTerminalServer == nil {
+                selectedTerminalServer = TerminalServer.localAlpine
+            }
+            return
+        }
         do {
-            availableTerminalServers = try await manager.fetchTerminalServers()
-            // Auto-select first terminal if only one available
+            let remoteServers = try await manager.fetchTerminalServers()
+            availableTerminalServers = remoteServers + [TerminalServer.localAlpine]
+            if selectedTerminalServer?.isLocalAlpine != true,
+               let selected = selectedTerminalServer,
+               !remoteServers.contains(where: { $0.id == selected.id }) {
+                selectedTerminalServer = nil
+            }
+            // Auto-select first remote terminal when available; otherwise fall back to Local Alpine.
             if selectedTerminalServer == nil, let first = availableTerminalServers.first {
                 selectedTerminalServer = first
             }
         } catch {
+            availableTerminalServers = [TerminalServer.localAlpine]
+            if selectedTerminalServer == nil {
+                selectedTerminalServer = TerminalServer.localAlpine
+            }
             logger.debug("Terminal servers fetch failed: \(error.localizedDescription)")
         }
     }
@@ -2584,14 +2628,18 @@ final class ChatViewModel {
                 if let index = conversation?.messages.firstIndex(where: { $0.id == msgId }) {
                     conversation?.messages[index].isStreaming = false
                 }
+                normalizeAssistantGeneratedMedia(messageId: msgId)
+                let normalizedContent = conversation?.messages
+                    .first(where: { $0.id == msgId })?.content ?? finalContent
                 let chatId = conversationId ?? conversation?.id
                 Task {
-                    await self.sendCompletionNotificationIfNeeded(content: finalContent)
+                    await self.sendCompletionNotificationIfNeeded(content: normalizedContent)
                     if let chatId {
                         try? await Task.sleep(nanoseconds: 500_000_000)
                         guard let manager = self.manager else { return }
                         if let serverConv = try? await manager.fetchConversation(id: chatId) {
                             self.adoptServerMessages(serverConversation: serverConv)
+                            self.normalizeAssistantGeneratedMedia(messageId: msgId)
                         }
                         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                     }
@@ -2611,6 +2659,7 @@ final class ChatViewModel {
             if let msgId = messageId,
                let index = conversation?.messages.firstIndex(where: { $0.id == msgId }) {
                 conversation?.messages[index].isStreaming = false
+                normalizeAssistantGeneratedMedia(messageId: msgId)
             }
             // Final sync to pick up complete content, files, sources
             let chatId = conversationId ?? conversation?.id
@@ -2621,6 +2670,9 @@ final class ChatViewModel {
                     guard let manager = self.manager else { return }
                     if let serverConv = try? await manager.fetchConversation(id: chatId) {
                         self.adoptServerMessages(serverConversation: serverConv)
+                        if let msgId = messageId {
+                            self.normalizeAssistantGeneratedMedia(messageId: msgId)
+                        }
                     }
                     NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                 }
@@ -2732,6 +2784,9 @@ final class ChatViewModel {
                 guard let manager = self.manager else { return }
                 if let serverConv = try? await manager.fetchConversation(id: chatId) {
                     self.adoptServerMessages(serverConversation: serverConv)
+                    if let lastAssistant = self.conversation?.messages.last(where: { $0.role == .assistant }) {
+                        self.normalizeAssistantGeneratedMedia(messageId: lastAssistant.id)
+                    }
                 }
                 NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
             }
@@ -2821,6 +2876,7 @@ final class ChatViewModel {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else { return }
         guard let manager else { return }
+        cancelLocalAlpineAgentLoop()
         if attachments.contains(where: { $0.uploadStatus == .error && !canSendAttachmentWithoutCompletedUpload($0) }) {
             errorMessage = "One or more attachments failed to upload. Retry or remove them before sending."
             return
@@ -3167,6 +3223,20 @@ final class ChatViewModel {
         conversation?.history.currentId = assistantMessageId
         // ────────────────────────────────────────────────────────────────────
 
+        await resolveWebLinkContextIfNeeded(
+            userMessageId: userMessage.id,
+            assistantMessageId: assistantMessageId,
+            text: messageText
+        )
+
+        await resolveWebSearchContextIfNeeded(
+            userMessageId: userMessage.id,
+            assistantMessageId: assistantMessageId,
+            text: messageText,
+            modelId: modelId,
+            hasAttachments: !currentAttachments.isEmpty
+        )
+
         // Build API messages with image content fetched from server
         let apiMessages = await buildAPIMessagesAsync()
         let parentId = userMessage.id
@@ -3187,7 +3257,14 @@ final class ChatViewModel {
 
         // Activate the isolated streaming store so token updates bypass
         // conversation.messages and only invalidate the streaming message view.
-        streamingStore.beginStreaming(messageId: assistantMessageId, modelId: modelId)
+        let initialStatusHistory = conversation?.messages.first(where: { $0.id == assistantMessageId })?.statusHistory ?? []
+        let initialSources = conversation?.messages.first(where: { $0.id == assistantMessageId })?.sources ?? []
+        streamingStore.beginStreaming(
+            messageId: assistantMessageId,
+            modelId: modelId,
+            initialStatusHistory: initialStatusHistory,
+            initialSources: initialSources
+        )
 
         if isOpenAICompatibleProvider {
             streamingTask = Task { [weak self] in
@@ -3196,8 +3273,7 @@ final class ChatViewModel {
                 var exactUsage: [String: Any]?
 
                 do {
-                    if self.shouldUseDirectVideoGeneration(modelId: modelId)
-                        && Self.looksLikeImageGenerationPrompt(messageText) {
+                    if self.shouldUseDirectVideoGeneration(modelId: modelId) {
                         let videoPrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !videoPrompt.isEmpty else {
                             throw APIError.unknown(
@@ -3249,84 +3325,92 @@ final class ChatViewModel {
                         return
                     }
 
-                    if self.shouldUseDirectImageGeneration(modelId: modelId) {
-                        guard self.currentProviderType != .anthropic else {
-                            throw APIError.unknown(
-                                underlying: NSError(
-                                    domain: "ChatViewModel",
-                                    code: -1,
-                                    userInfo: [NSLocalizedDescriptionKey: "Claude/Anthropic 不提供图片生成端点。"]
-                                )
-                            )
-                        }
-                        let imagePrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let requestedImageSize = Self.requestedImageSize(from: imagePrompt)
-                        let imagePromptForAPI = Self.promptWithImageSizeInstruction(
-                            imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
-                            size: requestedImageSize
-                        )
-                        let imageReference: String
-                        if let editImage = self.firstEditableImage(from: currentAttachments) {
-                            imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                try await manager.editImage(
-                                    prompt: imagePromptForAPI,
-                                    model: modelId,
-                                    imageData: editImage.data,
-                                    fileName: editImage.fileName,
-                                    size: requestedImageSize
-                                )
-                            }
-                        } else {
-                            guard !imagePrompt.isEmpty else {
+                    if self.shouldUseDirectImageGeneration(modelId: modelId),
+                       !self.shouldPreferChatNativeImageGeneration(modelId: modelId) {
+                        do {
+                            guard self.currentProviderType != .anthropic else {
                                 throw APIError.unknown(
                                     underlying: NSError(
                                         domain: "ChatViewModel",
                                         code: -1,
-                                        userInfo: [NSLocalizedDescriptionKey: "请输入图片生成提示词。"]
+                                        userInfo: [NSLocalizedDescriptionKey: "Claude/Anthropic 不提供图片生成端点。"]
                                     )
                                 )
                             }
-                            imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                try await manager.generateImage(
-                                    prompt: imagePromptForAPI,
-                                    model: modelId,
-                                    size: requestedImageSize
-                                )
+                            let imagePrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let requestedImageSize = Self.requestedImageSize(from: imagePrompt)
+                            let imagePromptForAPI = Self.promptWithImageSizeInstruction(
+                                imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
+                                size: requestedImageSize
+                            )
+                            let imageReference: String
+                            if let editImage = self.firstEditableImage(from: currentAttachments) {
+                                imageReference = try await self.runImageRequestWithRateLimitRetry {
+                                    try await manager.editImage(
+                                        prompt: imagePromptForAPI,
+                                        model: modelId,
+                                        imageData: editImage.data,
+                                        fileName: editImage.fileName,
+                                        size: requestedImageSize
+                                    )
+                                }
+                            } else {
+                                guard !imagePrompt.isEmpty else {
+                                    throw APIError.unknown(
+                                        underlying: NSError(
+                                            domain: "ChatViewModel",
+                                            code: -1,
+                                            userInfo: [NSLocalizedDescriptionKey: "请输入图片生成提示词。"]
+                                        )
+                                    )
+                                }
+                                imageReference = try await self.runImageRequestWithRateLimitRetry {
+                                    try await manager.generateImage(
+                                        prompt: imagePromptForAPI,
+                                        model: modelId,
+                                        size: requestedImageSize
+                                    )
+                                }
                             }
+                            let displayReference = await self.localDisplayImageReference(from: imageReference) ?? imageReference
+                            self.updateAssistantMessage(
+                                id: assistantMessageId,
+                                content: "已生成图片",
+                                isStreaming: false
+                            )
+                            self.attachGeneratedImageFile(
+                                messageId: assistantMessageId,
+                                imageReference: imageReference,
+                                displayReference: displayReference
+                            )
+                            self.recordTokenUsageForCompletedTurn(
+                                assistantMessageId: assistantMessageId,
+                                userText: messageText,
+                                assistantText: "已生成图片",
+                                userAttachments: currentAttachments,
+                                mediaKind: .image,
+                                mediaCount: 1
+                            )
+                            self.hasFinishedStreaming = true
+                            self.isStreaming = false
+                            self.selfInitiatedStream = false
+                            self.activeTaskId = nil
+                            self.lastTaskExtractionLength = 0
+                            await self.persistLocalConversationIfNeeded()
+                            await self.sendCompletionNotificationIfNeeded(content: "已生成图片")
+                            self.endBackgroundTask()
+                            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                            return
+                        } catch {
+                            guard self.shouldFallbackToChatForImageGeneration(error) else { throw error }
+                            self.logger.warning("Direct image endpoint failed; falling back to chat-native image output: \(error.localizedDescription)")
                         }
-                        let displayReference = await self.localDisplayImageReference(from: imageReference) ?? imageReference
-                        self.updateAssistantMessage(
-                            id: assistantMessageId,
-                            content: "已生成图片",
-                            isStreaming: false
-                        )
-                        self.attachGeneratedImageFile(
-                            messageId: assistantMessageId,
-                            imageReference: imageReference,
-                            displayReference: displayReference
-                        )
-                        self.recordTokenUsageForCompletedTurn(
-                            assistantMessageId: assistantMessageId,
-                            userText: messageText,
-                            assistantText: "已生成图片",
-                            userAttachments: currentAttachments,
-                            mediaKind: .image,
-                            mediaCount: 1
-                        )
-                        self.hasFinishedStreaming = true
-                        self.isStreaming = false
-                        self.selfInitiatedStream = false
-                        self.activeTaskId = nil
-                        self.lastTaskExtractionLength = 0
-                        await self.persistLocalConversationIfNeeded()
-                        await self.sendCompletionNotificationIfNeeded(content: "已生成图片")
-                        self.endBackgroundTask()
-                        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
-                        return
                     }
 
                     var request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
                     if !fileRefs.isEmpty { request.files = fileRefs }
+                    await self.populateCommonRequestFields(&request)
+                    if !currentSkillIds.isEmpty { request.skillIds = currentSkillIds }
                     let sseStream = try await manager.sendMessageStreaming(request: request)
 
                     for try await event in sseStream {
@@ -3364,12 +3448,25 @@ final class ChatViewModel {
 
                 if Task.isCancelled { return }
 
+                if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.updateAssistantMessage(
+                        id: assistantMessageId,
+                        content: "",
+                        isStreaming: false,
+                        error: ChatMessageError(content: "未收到模型回复或图片数据，请重试。")
+                    )
+                    self.cleanupStreaming()
+                    return
+                }
+
                 self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+                self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+                let normalizedContent = self.conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? acc.content
                 self.applyUsage(exactUsage, toMessageId: assistantMessageId)
                 self.recordTokenUsageForCompletedTurn(
                     assistantMessageId: assistantMessageId,
                     userText: messageText,
-                    assistantText: acc.content,
+                    assistantText: normalizedContent,
                     userAttachments: currentAttachments,
                     usage: exactUsage
                 )
@@ -3379,7 +3476,7 @@ final class ChatViewModel {
                 self.activeTaskId = nil
                 self.lastTaskExtractionLength = 0
                 await self.persistLocalConversationIfNeeded()
-                await self.sendCompletionNotificationIfNeeded(content: acc.content)
+                await self.sendCompletionNotificationIfNeeded(content: normalizedContent)
                 self.endBackgroundTask()
                 NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
             }
@@ -3439,24 +3536,6 @@ final class ChatViewModel {
         streamingTask = Task { [weak self] in
             guard let self else { return }
             do {
-                if self.shouldUseDirectImageGeneration(modelId: modelId) {
-                    do {
-                        try await self.generateImageDirectly(
-                            manager: manager,
-                            modelId: modelId,
-                            messageText: messageText,
-                            currentAttachments: currentAttachments,
-                            assistantMessageId: assistantMessageId
-                        )
-                        return
-                    } catch {
-                        if !self.shouldFallbackToChatForImageGeneration(error) {
-                            throw error
-                        }
-                        self.logger.warning("Direct image endpoint failed; falling back to chat-native image output: \(error.localizedDescription)")
-                    }
-                }
-
                 var request = ChatCompletionRequest(
                     model: modelId, messages: apiMessages, stream: true,
                     chatId: effectiveChatId, sessionId: socketSessionId,
@@ -3556,10 +3635,14 @@ final class ChatViewModel {
                                         self.isStreaming = false
                                         // Post-completion
                                         self.adoptServerMessages(serverConversation: refreshed)
+                                        self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
                                         await manager.sendChatCompleted(chatId: chatId, messageId: assistantMessageId, model: modelId, sessionId: socketSessionId, messages: self.buildSimpleAPIMessages())
                                         try? await self.refreshConversationMetadata(chatId: chatId, assistantMessageId: assistantMessageId)
+                                        self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
                                         self.cleanupStreaming()
-                                        await self.sendCompletionNotificationIfNeeded(content: serverContent)
+                                        let finalContent = self.conversation?.messages
+                                            .first(where: { $0.id == assistantMessageId })?.content ?? serverContent
+                                        await self.sendCompletionNotificationIfNeeded(content: finalContent)
                                         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                                         return
                                     }
@@ -3573,6 +3656,7 @@ final class ChatViewModel {
                     self.updateAssistantMessage(id: assistantMessageId,
                         content: self.conversation?.messages.last(where: { $0.role == .assistant })?.content ?? "",
                         isStreaming: false)
+                    self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
                     self.cleanupStreaming()
                     NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                 } else if request.isPipeModel {
@@ -3582,11 +3666,16 @@ final class ChatViewModel {
                     // from the HTTP response body as standard OpenAI SSE.
                     self.logger.info("Using pipe model SSE path for \(modelId)")
                     let acc = ContentAccumulator()
+                    var exactUsage: [String: Any]?
 
                     do {
                         let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
                         for try await event in sseStream {
                             if Task.isCancelled { break }
+
+                            if let usage = event.usage, !usage.isEmpty {
+                                exactUsage = usage
+                            }
 
                             // Content delta tokens
                             if let delta = event.contentDelta, !delta.isEmpty {
@@ -3623,7 +3712,8 @@ final class ChatViewModel {
                         modelId: modelId,
                         socketSessionId: socketSessionId,
                         effectiveChatId: effectiveChatId,
-                        acc: acc
+                        acc: acc,
+                        usage: exactUsage
                     )
                 } else {
                     // ── SOCKET PATH (normal) ──
@@ -3668,6 +3758,7 @@ final class ChatViewModel {
         // Cancel the local HTTP task
         streamingTask?.cancel()
         streamingTask = nil
+        cancelLocalAlpineAgentLoop()
 
         // Stop the server-side task.
         // For self-initiated streams we already have the task_id from the HTTP POST response.
@@ -3886,11 +3977,15 @@ final class ChatViewModel {
                     // ── PIPE MODEL SSE PATH (regeneration) ──
                     self.logger.info("Regenerate: using pipe model SSE path for \(modelId)")
                     let acc = ContentAccumulator()
+                    var exactUsage: [String: Any]?
 
                     do {
                         let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
                         for try await event in sseStream {
                             if Task.isCancelled { break }
+                            if let usage = event.usage, !usage.isEmpty {
+                                exactUsage = usage
+                            }
                             if let delta = event.contentDelta, !delta.isEmpty {
                                 acc.append(delta)
                                 self.updateAssistantMessage(
@@ -3917,7 +4012,8 @@ final class ChatViewModel {
                         modelId: modelId,
                         socketSessionId: socketSessionId,
                         effectiveChatId: effectiveChatId,
-                        acc: acc
+                        acc: acc,
+                        usage: exactUsage
                     )
                 } else {
                     let json = try await manager.sendMessageHTTP(request: request)
@@ -4291,10 +4387,14 @@ final class ChatViewModel {
 
                 if request.isPipeModel {
                     let acc = ContentAccumulator()
+                    var exactUsage: [String: Any]?
                     do {
                         let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
                         for try await event in sseStream {
                             if Task.isCancelled { break }
+                            if let usage = event.usage, !usage.isEmpty {
+                                exactUsage = usage
+                            }
                             if let delta = event.contentDelta, !delta.isEmpty {
                                 acc.append(delta)
                                 self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
@@ -4311,7 +4411,7 @@ final class ChatViewModel {
                     }
                     if Task.isCancelled { return }
                     self.finishStreamingSuccessfully(assistantMessageId: assistantMessageId, modelId: modelId,
-                        socketSessionId: socketSessionId, effectiveChatId: effectiveChatId, acc: acc)
+                        socketSessionId: socketSessionId, effectiveChatId: effectiveChatId, acc: acc, usage: exactUsage)
                 } else {
                     let json = try await manager.sendMessageHTTP(request: request)
                     if let err = json["error"] as? String, !err.isEmpty {
@@ -4675,12 +4775,14 @@ final class ChatViewModel {
         // Done signal
         if payload["done"] as? Bool == true {
             logger.info("Received done:true – finalizing streaming")
+            let usage = SSEEvent.json(payload).usage
             finishStreamingSuccessfully(
                 assistantMessageId: assistantMessageId,
                 modelId: modelId,
                 socketSessionId: socketSessionId,
                 effectiveChatId: effectiveChatId,
-                acc: acc
+                acc: acc,
+                usage: usage
             )
         }
 
@@ -4716,7 +4818,8 @@ final class ChatViewModel {
         modelId: String,
         socketSessionId: String,
         effectiveChatId: String?,
-        acc: ContentAccumulator
+        acc: ContentAccumulator,
+        usage: [String: Any]? = nil
     ) {
         // If content is empty, poll server for it
         if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -4726,7 +4829,8 @@ final class ChatViewModel {
                     modelId: modelId,
                     socketSessionId: socketSessionId,
                     effectiveChatId: effectiveChatId,
-                    acc: acc
+                    acc: acc,
+                    usage: usage
                 )
             }
             return
@@ -4736,13 +4840,17 @@ final class ChatViewModel {
         // socket subscriptions yet. Follow-ups, title, and tags arrive
         // AFTER done:true via socket events, so we need to keep listening.
         updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+        normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+        let finalAssistantContent = conversation?.messages
+            .first(where: { $0.id == assistantMessageId })?.content ?? acc.content
+        applyUsage(usage, toMessageId: assistantMessageId)
         let lastUser = conversation?.messages.last(where: { $0.role == .user && !Self.isLocalWorkspaceAgentResult($0) })
         recordTokenUsageForCompletedTurn(
             assistantMessageId: assistantMessageId,
             userText: lastUser?.content ?? "",
-            assistantText: acc.content,
+            assistantText: finalAssistantContent,
             userAttachments: [],
-            usage: nil
+            usage: usage
         )
         hasFinishedStreaming = true
         isStreaming = false
@@ -4778,7 +4886,7 @@ final class ChatViewModel {
             // This ordering is critical: if endBackgroundTask() is called first,
             // iOS may immediately suspend the process before the notification
             // is scheduled — causing the banner to never appear.
-            await sendCompletionNotificationIfNeeded(content: acc.content)
+            await sendCompletionNotificationIfNeeded(content: finalAssistantContent)
             // Now it is safe to release the background time assertion.
             self.endBackgroundTask()
 
@@ -4820,11 +4928,13 @@ final class ChatViewModel {
                     // This handles the case where the server metadata doesn't include
                     // files but the tool response clearly references generated images.
                     self.populateFilesFromToolResults(messageId: assistantMessageId)
+                    self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
                 } else {
                     // Files already present — just wait for follow-ups/title
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
                     try? await refreshConversationMetadata(
                         chatId: chatId, assistantMessageId: assistantMessageId)
+                    self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
                 }
             }
             // NOTE: Do NOT call saveConversationToServer() here.
@@ -4844,7 +4954,7 @@ final class ChatViewModel {
             NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
             // Generate a suggested emoji for the response (fire-and-forget)
-            await self.generateSuggestedEmoji(for: acc.content)
+            await self.generateSuggestedEmoji(for: finalAssistantContent)
         }
     }
 
@@ -4878,7 +4988,8 @@ final class ChatViewModel {
         modelId: String,
         socketSessionId: String,
         effectiveChatId: String?,
-        acc: ContentAccumulator
+        acc: ContentAccumulator,
+        usage: [String: Any]? = nil
     ) async {
         guard let chatId = effectiveChatId, let manager else {
             updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
@@ -4903,17 +5014,31 @@ final class ChatViewModel {
         }
 
         updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+        normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+        var finalAssistantContent = conversation?.messages
+            .first(where: { $0.id == assistantMessageId })?.content ?? acc.content
+        if finalAssistantContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: "",
+                isStreaming: false,
+                error: ChatMessageError(content: "未收到模型回复或图片数据，请重试。")
+            )
+            cleanupStreaming()
+            return
+        }
         let lastUser = conversation?.messages.last(where: { $0.role == .user && !Self.isLocalWorkspaceAgentResult($0) })
+        applyUsage(usage, toMessageId: assistantMessageId)
         recordTokenUsageForCompletedTurn(
             assistantMessageId: assistantMessageId,
             userText: lastUser?.content ?? "",
-            assistantText: acc.content,
+            assistantText: finalAssistantContent,
             userAttachments: [],
-            usage: nil
+            usage: usage
         )
 
         // Send background notification if app is not active
-        await sendCompletionNotificationIfNeeded(content: acc.content)
+        await sendCompletionNotificationIfNeeded(content: finalAssistantContent)
 
         await manager.sendChatCompleted(
             chatId: chatId, messageId: assistantMessageId,
@@ -4933,6 +5058,9 @@ final class ChatViewModel {
 
         // Last resort: extract file IDs from tool call results in content
         populateFilesFromToolResults(messageId: assistantMessageId)
+        normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+        finalAssistantContent = conversation?.messages
+            .first(where: { $0.id == assistantMessageId })?.content ?? finalAssistantContent
 
         // NOTE: Do NOT call saveConversationToServer() here — same reason
         // as finishStreamingSuccessfully. The server's chatCompleted has the
@@ -5607,54 +5735,6 @@ final class ChatViewModel {
         if let fc = selectedModel?.functionCallingMode, fc == "native" {
             params["function_calling"] = "native"
         }
-
-        // Provider-specific reasoning/thinking compatibility:
-        // - OpenAI-style reasoning models generally honour `reasoning_effort`
-        // - Groq/Grok-compatible relays often expose `include_reasoning` / `reasoning_format`
-        // - Gemini OpenAI-compatible endpoints can accept `extra_body.google.thinking_config`
-        //   in addition to top-level `reasoning_effort`
-        if let effort = conversation?.chatParams?.reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !effort.isEmpty {
-            params["reasoning_effort"] = effort
-
-            let modelHaystack = "\(selectedModel?.id ?? "") \(selectedModel?.name ?? "")".lowercased()
-            if modelHaystack.contains("grok") || modelHaystack.contains("groq") {
-                params["include_reasoning"] = true
-                params["reasoning_format"] = "parsed"
-            }
-
-            if currentProviderType == .gemini {
-                let thinkingBudget: Int = {
-                    switch effort.lowercased() {
-                    case "minimal", "none": return 0
-                    case "low": return 1024
-                    case "medium": return 4096
-                    case "high", "xhigh": return 8192
-                    default: return 4096
-                    }
-                }()
-                params["extra_body"] = [
-                    "google": [
-                        "thinking_config": [
-                            "thinking_budget": thinkingBudget,
-                            "include_thoughts": true
-                        ]
-                    ]
-                ]
-            }
-        }
-
-        switch conversation?.chatParams?.thinkMode {
-        case .on:
-            params["think"] = true
-        case .off:
-            params["think"] = false
-        case .custom(let value):
-            if !value.isEmpty { params["think"] = value }
-        case .default, .none:
-            break
-        }
-
         if !params.isEmpty { request.params = params }
 
         // Always include usage stats in streaming response
@@ -5693,7 +5773,7 @@ final class ChatViewModel {
         if !allToolIds.isEmpty { request.toolIds = allToolIds }
 
         // Terminal ID if enabled
-        if terminalEnabled, let terminalServer = selectedTerminalServer {
+        if terminalEnabled, let terminalServer = selectedTerminalServer, !terminalServer.isLocalAlpine {
             request.terminalId = terminalServer.id
         }
 
@@ -5726,7 +5806,12 @@ final class ChatViewModel {
         let modelAllowsImageGeneration = selectedModel.map {
             Self.modelSupportsBuiltinFeature($0, key: "image_generation")
         } ?? false
-        let shouldEnableImageGeneration = imageGenerationEnabled || modelAllowsImageGeneration
+        let modelNameSuggestsImageGeneration = selectedModelId.map {
+            shouldUseDirectImageGeneration(modelId: $0) || shouldPreferChatNativeImageGeneration(modelId: $0)
+        } ?? false
+        let shouldEnableImageGeneration = imageGenerationEnabled
+            || modelAllowsImageGeneration
+            || modelNameSuggestsImageGeneration
 
         // Use ONLY the current toggle state. Server defaults are already applied
         // to these toggles at init time via syncUIWithModelDefaults() — which runs
@@ -5785,21 +5870,50 @@ final class ChatViewModel {
         let positives = [
             "image", "img", "dall-e", "dalle", "gpt-image", "imagen",
             "flux", "sdxl", "stable-diffusion", "midjourney", "mj-",
-            "banana", "nano-banana", "image-preview", "imagine"
+            "banana", "nano-banana"
         ]
         let negatives = [
             "vision", "ocr", "vl", "video", "videos", "veo", "sora",
             "wan", "kling", "hailuo", "runway", "luma", "pika", "vidu",
             "seedance", "text-to-video", "image-to-video", "i2v", "t2v",
-            "生视频", "视频生成", "chat", "instruct", "reasoning",
-            "qwen3.6-plus", "qwen3.6", "qwen-plus", "gemini-3-pro-preview"
+            "生视频", "视频生成"
         ]
         return positives.contains(where: { haystack.contains($0) })
             && !negatives.contains(where: { haystack.contains($0) })
     }
 
+    private func shouldPreferChatNativeImageGeneration(modelId: String) -> Bool {
+        let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
+            .lowercased()
+
+        // These are usually image-only OpenAI-compatible endpoints.
+        let directEndpointModels = [
+            "gpt-image", "dall-e", "dalle", "flux", "sdxl",
+            "stable-diffusion", "midjourney", "mj-",
+            "grok-imagine", "minimax-image"
+        ]
+        if directEndpointModels.contains(where: { haystack.contains($0) }) {
+            return false
+        }
+
+        // These providers/models often generate images through the normal chat
+        // completion path and return image URLs or inline media in the message.
+        if haystack.contains("gemini") && (haystack.contains("image") || haystack.contains("banana")) {
+            return true
+        }
+        if haystack.contains("qwen3.6")
+            || haystack.contains("qwen3-")
+            || haystack.contains("qwen-plus")
+            || haystack.contains("qwen-max") {
+            return true
+        }
+        if haystack.contains("grok-4") || haystack.contains("grok-3") {
+            return true
+        }
+        return false
+    }
+
     private func shouldUseDirectVideoGeneration(modelId: String) -> Bool {
-        guard currentProviderType != .iexa else { return false }
         let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
             .lowercased()
         let positives = [
@@ -5990,123 +6104,18 @@ final class ChatViewModel {
         return nil
     }
 
-    private func generateImageDirectly(
-        manager: ConversationManager,
-        modelId: String,
-        messageText: String,
-        currentAttachments: [ChatAttachment],
-        assistantMessageId: String
-    ) async throws {
-        guard currentProviderType != .anthropic else {
-            throw APIError.unknown(
-                underlying: NSError(
-                    domain: "ChatViewModel",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Claude/Anthropic 不提供图片生成端点。"]
-                )
-            )
-        }
-
-        let imagePrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let requestedImageSize = Self.requestedImageSize(from: imagePrompt)
-        let imagePromptForAPI = Self.promptWithImageSizeInstruction(
-            imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
-            size: requestedImageSize
-        )
-
-        let imageReference: String
-        if let editImage = firstEditableImage(from: currentAttachments) {
-            imageReference = try await runImageRequestWithRateLimitRetry {
-                try await manager.editImage(
-                    prompt: imagePromptForAPI,
-                    model: modelId,
-                    imageData: editImage.data,
-                    fileName: editImage.fileName,
-                    size: requestedImageSize
-                )
-            }
-        } else {
-            guard !imagePrompt.isEmpty else {
-                throw APIError.unknown(
-                    underlying: NSError(
-                        domain: "ChatViewModel",
-                        code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "请输入图片生成提示词。"]
-                    )
-                )
-            }
-            imageReference = try await runImageRequestWithRateLimitRetry {
-                try await manager.generateImage(
-                    prompt: imagePromptForAPI,
-                    model: modelId,
-                    size: requestedImageSize
-                )
-            }
-        }
-
-        let displayReference = await localDisplayImageReference(from: imageReference) ?? imageReference
-        updateAssistantMessage(
-            id: assistantMessageId,
-            content: "已生成图片",
-            isStreaming: false
-        )
-        attachGeneratedImageFile(
-            messageId: assistantMessageId,
-            imageReference: imageReference,
-            displayReference: displayReference
-        )
-        recordTokenUsageForCompletedTurn(
-            assistantMessageId: assistantMessageId,
-            userText: messageText,
-            assistantText: "已生成图片",
-            userAttachments: currentAttachments,
-            mediaKind: .image,
-            mediaCount: 1
-        )
-        hasFinishedStreaming = true
-        isStreaming = false
-        selfInitiatedStream = false
-        activeTaskId = nil
-        lastTaskExtractionLength = 0
-        await persistLocalConversationIfNeeded()
-        await sendCompletionNotificationIfNeeded(content: "已生成图片")
-        endBackgroundTask()
-        if currentProviderType == .iexa {
-            chatSubscription?.dispose()
-            chatSubscription = nil
-            channelSubscription?.dispose()
-            channelSubscription = nil
-        }
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
-    }
-
-    private func shouldFallbackToChatForImageGeneration(_ error: Error) -> Bool {
-        let apiError = APIError.from(error)
-        if case .httpError(let statusCode, _, _) = apiError {
-            return [400, 404, 405, 422, 501].contains(statusCode)
-        }
-        if case .responseDecoding = apiError {
-            return true
-        }
-        let text = error.localizedDescription.lowercased()
-        return text.contains("image") && (
-            text.contains("not found")
-                || text.contains("unsupported")
-                || text.contains("not support")
-                || text.contains("没有返回")
-        )
-    }
-
     private func attachGeneratedImageFile(
         messageId: String,
         imageReference: String,
         displayReference: String
     ) {
+        let contentType = Self.imageContentType(for: displayReference)
+        let fileName = Self.imageFileName(for: imageReference, contentType: contentType)
         let file = ChatMessageFile(
             type: "image",
             url: imageReference,
-            name: "generated-image.jpg",
-            contentType: "image/jpeg",
+            name: fileName,
+            contentType: contentType,
             displayURL: displayReference
         )
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
@@ -6119,6 +6128,52 @@ final class ChatViewModel {
             if !node.files.contains(where: { $0.url == file.url || $0.displayURL == file.displayURL }) {
                 node.files.append(file)
             }
+        }
+    }
+
+    private func shouldFallbackToChatForImageGeneration(_ error: Error) -> Bool {
+        let apiError = APIError.from(error)
+        if case .httpError(let statusCode, _, _) = apiError {
+            return [400, 404, 405, 422].contains(statusCode)
+        }
+        let message = error.localizedDescription.lowercased()
+        return message.contains("does not support")
+            || message.contains("invalid_model")
+            || message.contains("没有返回图片")
+            || message.contains("no image")
+            || message.contains("not support")
+    }
+
+    private static func imageContentType(for reference: String) -> String {
+        let lower = reference.lowercased()
+        if lower.hasPrefix("data:image/") {
+            let afterPrefix = lower.dropFirst("data:".count)
+            if let semicolon = afterPrefix.firstIndex(of: ";") {
+                return String(afterPrefix[..<semicolon])
+            }
+        }
+        if lower.contains(".png") { return "image/png" }
+        if lower.contains(".webp") { return "image/webp" }
+        if lower.contains(".gif") { return "image/gif" }
+        if lower.contains(".avif") { return "image/avif" }
+        if lower.contains(".svg") { return "image/svg+xml" }
+        return "image/jpeg"
+    }
+
+    private static func imageFileName(for reference: String, contentType: String) -> String {
+        if let url = URL(string: reference),
+           let last = url.pathComponents.last,
+           !last.isEmpty,
+           last.contains(".") {
+            return last
+        }
+        switch contentType {
+        case "image/png": return "generated-image.png"
+        case "image/webp": return "generated-image.webp"
+        case "image/gif": return "generated-image.gif"
+        case "image/avif": return "generated-image.avif"
+        case "image/svg+xml": return "generated-image.svg"
+        default: return "generated-image.jpg"
         }
     }
 
@@ -6289,10 +6344,15 @@ final class ChatViewModel {
         """
     }
 
-    private static func projectContinuitySystemContext(includeWorkspaceAgent: Bool) -> String {
-        let workspaceInstructions = includeWorkspaceAgent ? """
+    private static func projectContinuitySystemContext() -> String {
+        """
+        When generating code projects, treat every file as part of one connected project:
+        - Use exact relative file names and matching imports, links, entrypoints, and package/config files.
+        - For HTML/CSS/JavaScript projects split across index.html, style.css, and script.js, the HTML must link ./style.css and ./script.js, and the CSS/JS must be written for that same UI.
+        - For other languages, include the folder tree, entry file, dependency/config files, and imports so the project can run as a coherent whole instead of unrelated snippets.
+        - If the user only asks to "show", "preview", "write a page", or wants a single-file demo, return normal code blocks with an inline preview-friendly HTML file. Do not create workspace operations unless the user explicitly asks to save/create/modify/read/list/delete local files or folders.
 
-        Iexa has a local workspace agent. When the user asks you to create, modify, read, list, or delete local project files, include exactly one fenced block with language `iexa_workspace` containing JSON. Paths are relative to the app's Documents/Iexa Workspace folder and must never be absolute or use `..`.
+        Iexa has a local workspace agent. When the user asks you to create, modify, read, search, list, or delete local project files, include exactly one fenced block with language `iexa_workspace` containing JSON. Paths are relative to the app's Documents/Iexa Workspace folder and must never be absolute or use `..`.
         Supported operations:
         ```iexa_workspace
         {
@@ -6302,20 +6362,53 @@ final class ChatViewModel {
             {"action": "append", "path": "demo/README.md", "content": "\\nMore notes"},
             {"action": "read", "path": "demo/index.html"},
             {"action": "list", "path": "demo"},
+            {"action": "search", "path": "demo", "query": "button"},
             {"action": "delete", "path": "demo/old.txt"}
           ]
         }
         ```
         For multi-file projects, write all connected files in the same workspace block so the UI, styles, scripts, imports, and dependencies stay linked.
-        """ : ""
+        """
+    }
 
+    private static func workspaceGuardSystemContext() -> String {
+        """
+        Iexa can execute local workspace file operations, but only when the user explicitly asks to save/create/modify/read/search/list/delete files or folders in the local workspace.
+        If the user asks to write, show, preview, or demonstrate a webpage/app/component/code without explicitly asking to save it into local files, return normal Markdown code blocks and any preview-friendly single-file code. Do not output an `iexa_workspace` block in that case.
+        """
+    }
+
+    private func localAlpineAgentSystemContextIfNeeded() async -> String? {
+        guard shouldUseLocalAlpineAgentMode() else { return nil }
+        let status = await LocalAlpineTerminalService.shared.status()
+        let runtimeState = status.isRuntimeLinked ? "linked" : "not linked"
+        let rootfsState = status.isRootFSBundled ? "bundled" : "missing"
         return """
-        When generating code projects, treat every file as part of one connected project:
-        - Use exact relative file names and matching imports, links, entrypoints, and package/config files.
-        - For HTML/CSS/JavaScript projects split across index.html, style.css, and script.js, the HTML must link ./style.css and ./script.js, and the CSS/JS must be written for that same UI.
-        - For other languages, include the folder tree, entry file, dependency/config files, and imports so the project can run as a coherent whole instead of unrelated snippets.
-        - If the user only asks to "show", "preview", "write a page", or wants a single-file demo, return normal code blocks with an inline preview-friendly HTML file. Do not create workspace operations unless the user explicitly asks to save/create/modify/read/list/delete local files or folders.
-        \(workspaceInstructions)
+        Local Alpine Agent Mode is ON. You are controlling Iexa's isolated on-device Alpine shell.
+
+        Runtime profile:
+        - Runtime adapter: \(runtimeState)
+        - Rootfs archive: \(rootfsState) (\(status.rootArchiveName))
+        - App workspace: \(status.workspacePath)
+        - Default shell cwd: /
+
+        Tool protocol:
+        - To run a command, output exactly one fenced block with language `iexa_alpine`.
+        - Do not claim a command ran until the app returns a Local Alpine execution result.
+        - If no command is needed or the task is complete, do not output an `iexa_alpine` block; give the final answer.
+
+        Command format:
+        ```iexa_alpine
+        {"command":"pwd && ls -la","cwd":"/","timeoutSeconds":60,"reason":"inspect current workspace"}
+        ```
+
+        Rules:
+        - Use at most one `iexa_alpine` block per assistant turn.
+        - Inspect before editing or installing. Prefer `command -v`, `python3 --version`, `node --version`, `apk info`, and `ls` before assuming dependencies.
+        - If a command fails, read the exit code and output, then issue the next corrective command.
+        - Keep commands short and finite. Do not start long-running servers, watchers, REPLs, or interactive prompts.
+        - Never run destructive broad commands such as wiping root paths. Ask the user first for destructive deletes or overwrites outside the app workspace.
+        - For dependency installs, explain what is missing, then use the smallest `apk add --no-cache ...` command needed.
         """
     }
 
@@ -6343,6 +6436,502 @@ final class ChatViewModel {
         return msgs
     }
 
+    private func resolveWebLinkContextIfNeeded(
+        userMessageId: String,
+        assistantMessageId: String,
+        text: String
+    ) async {
+        guard WebLinkContextResolver.containsHTTPURL(text) else { return }
+
+        appendStatusUpdate(
+            id: assistantMessageId,
+            status: ChatStatusUpdate(
+                action: "link_context",
+                description: "正在读取链接内容...",
+                done: false
+            )
+        )
+
+        let result = await webLinkContextResolver.resolve(from: text, limit: 3)
+        if !result.context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            webLinkContextsByMessageId[userMessageId] = modelLinkContextPrompt(result.context)
+        }
+        for video in result.videos {
+            attachResolvedVideoFile(messageId: assistantMessageId, video: video)
+        }
+
+        let description: String
+        if result.successCount > 0 {
+            description = result.videos.isEmpty
+                ? "已读取 \(result.successCount) 个链接"
+                : "已解析 \(result.successCount) 个链接，找到 \(result.videos.count) 个 MP4"
+        } else {
+            description = "链接读取失败，已按原文发送"
+        }
+
+        appendStatusUpdate(
+            id: assistantMessageId,
+            status: ChatStatusUpdate(
+                action: "link_context",
+                description: description,
+                done: true,
+                count: result.successCount
+            )
+        )
+    }
+
+    private func modelLinkContextPrompt(_ context: String) -> String {
+        """
+
+        [客户端已读取的链接上下文]
+        用户消息里包含链接。以下内容由 iOS 客户端在发送前读取，用来帮助你回答；请把它当作该链接的可用上下文。若包含 MP4 URL，请直接返还给用户并结合页面标题/描述概括视频内容。
+        \(context)
+        [/客户端已读取的链接上下文]
+        """
+    }
+
+    private func resolveWebSearchContextIfNeeded(
+        userMessageId: String,
+        assistantMessageId: String,
+        text: String,
+        modelId: String,
+        hasAttachments: Bool
+    ) async {
+        guard webSearchEnabled else { return }
+        guard !hasAttachments else { return }
+        guard !WebLinkContextResolver.containsHTTPURL(text) else { return }
+        guard !shouldUseDirectImageGeneration(modelId: modelId),
+              !shouldPreferChatNativeImageGeneration(modelId: modelId),
+              !shouldUseDirectVideoGeneration(modelId: modelId) else {
+            return
+        }
+        guard let apiClient = manager?.apiClient,
+              apiClient.providerType == .iexa else {
+            return
+        }
+
+        let query = webSearchQuery(from: text)
+        guard !query.isEmpty else { return }
+
+        appendStatusUpdate(
+            id: assistantMessageId,
+            status: ChatStatusUpdate(
+                action: "web_search",
+                description: "正在规划搜索...",
+                done: false,
+                query: query,
+                queries: [query]
+            )
+        )
+
+        do {
+            let queries = await webSearchQueries(for: query, apiClient: apiClient, modelId: modelId)
+            appendStatusUpdate(
+                id: assistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "web_search",
+                    description: queries.count > 1 ? "正在搜索 \(queries.count) 个关键词..." : "正在联网搜索...",
+                    done: false,
+                    query: query,
+                    queries: queries
+                )
+            )
+
+            let searchOutput = try await runAgenticWebSearch(
+                query: query,
+                queries: queries,
+                apiClient: apiClient,
+                assistantMessageId: assistantMessageId
+            )
+            let result = searchOutput.result
+            let usedQueries = searchOutput.queries
+            let context = modelWebSearchContextPrompt(result: result, query: query, queries: usedQueries)
+            let sources = webSearchSources(from: result)
+
+            if !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                webSearchContextsByMessageId[userMessageId] = context
+            }
+            if !sources.isEmpty {
+                appendSources(id: assistantMessageId, sources: sources)
+                if streamingStore.streamingMessageId == assistantMessageId && streamingStore.isActive {
+                    streamingStore.appendSources(sources)
+                }
+            }
+
+            let urls = Array(Set(result.filenames + result.items.compactMap(\.link))).prefix(8)
+            let freshnessNote = webSearchResultFreshnessNote(result)
+            appendStatusUpdate(
+                id: assistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "web_search",
+                    description: freshnessNote ?? (result.loadedCount > 0
+                        ? "已搜索 \(result.loadedCount) 个网页"
+                        : "已完成联网搜索"),
+                    done: true,
+                    urls: Array(urls),
+                    items: result.items.prefix(6).map {
+                        ChatStatusItem(title: $0.title, link: $0.link)
+                    },
+                    count: max(result.loadedCount, sources.count),
+                    query: query,
+                    queries: usedQueries
+                )
+            )
+        } catch {
+            logger.warning("Web search failed: \(error.localizedDescription)")
+            appendStatusUpdate(
+                id: assistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "web_search",
+                    description: "联网搜索失败，已按原问题发送",
+                    done: true,
+                    count: 0,
+                    query: query,
+                    queries: [query]
+                )
+            )
+        }
+    }
+
+    private func webSearchQueries(for query: String, apiClient: APIClient, modelId: String) async -> [String] {
+        let serverConfig = activeChatStore?.serverTaskConfig ?? .default
+        guard serverConfig.enableSearchQueryGeneration else {
+            return Self.agenticSearchQueries(original: query, generated: [])
+        }
+
+        let taskModel = [
+            serverConfig.taskModelExternal,
+            serverConfig.taskModel,
+            modelId
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty }) ?? modelId
+
+        do {
+            let generated = try await apiClient.generateSearchQueries(
+                model: taskModel,
+                query: query,
+                context: recentUserContextForSearch(excluding: query),
+                maxQueries: 3
+            )
+            return Self.agenticSearchQueries(original: query, generated: generated)
+        } catch {
+            logger.debug("Search query generation failed: \(error.localizedDescription)")
+            return Self.agenticSearchQueries(original: query, generated: [])
+        }
+    }
+
+    private func runAgenticWebSearch(
+        query: String,
+        queries: [String],
+        apiClient: APIClient,
+        assistantMessageId: String
+    ) async throws -> (result: WebSearchResponse, queries: [String]) {
+        var result = try await apiClient.processWebSearch(queries: queries, originalQuery: query)
+        guard shouldRetryWebSearch(result) else {
+            return (result: result, queries: queries)
+        }
+
+        let retryQueries = Self.retrySearchQueries(original: query, existing: queries)
+        let extra = retryQueries.filter { candidate in
+            !queries.contains { $0.caseInsensitiveCompare(candidate) == .orderedSame }
+        }
+        guard !extra.isEmpty else {
+            return (result: result, queries: queries)
+        }
+
+        appendStatusUpdate(
+            id: assistantMessageId,
+            status: ChatStatusUpdate(
+                action: "web_search",
+                description: "结果偏少或可能过旧，正在补充搜索...",
+                done: false,
+                query: query,
+                queries: retryQueries
+            )
+        )
+
+        let retryResult = try await apiClient.processWebSearch(queries: extra, originalQuery: query)
+        result.mergeKeepingFirst(retryResult)
+        return (result: result, queries: retryQueries)
+    }
+
+    private func recentUserContextForSearch(excluding query: String) -> String? {
+        guard let conversation else { return nil }
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = conversation.messages
+            .filter { $0.role == .user && !$0.isStreaming }
+            .suffix(4)
+            .map(\.content)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != normalizedQuery }
+            .suffix(3)
+            .joined(separator: "\n")
+        return context.isEmpty ? nil : String(context.prefix(2_000))
+    }
+
+    private static func mergeSearchQueries(original: String, generated: [String], limit: Int) -> [String] {
+        var result: [String] = []
+        var seen = Set<String>()
+
+        func append(_ raw: String) {
+            let trimmed = raw
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            let key = trimmed.lowercased()
+            guard !seen.contains(key) else { return }
+            seen.insert(key)
+            result.append(trimmed)
+        }
+
+        append(original)
+        generated.forEach(append)
+        return Array(result.prefix(limit))
+    }
+
+    private static func agenticSearchQueries(original: String, generated: [String]) -> [String] {
+        let currentYear = Calendar(identifier: .gregorian).component(.year, from: Date())
+        let freshnessQueries = [
+            "\(original) \(currentYear)",
+            "\(original) latest",
+            "\(original) recent update"
+        ]
+        return mergeSearchQueries(
+            original: original,
+            generated: generated + freshnessQueries,
+            limit: 6
+        )
+    }
+
+    private static func retrySearchQueries(original: String, existing: [String]) -> [String] {
+        let currentYear = Calendar(identifier: .gregorian).component(.year, from: Date())
+        let retry = [
+            "\(original) \(currentYear) official",
+            "\(original) \(currentYear) news",
+            "\(original) site:github.com",
+            "\(original) documentation",
+            "\"\(original)\""
+        ]
+        return mergeSearchQueries(original: original, generated: existing + retry, limit: 8)
+    }
+
+    private func shouldRetryWebSearch(_ result: WebSearchResponse) -> Bool {
+        let evidenceCount = max(max(result.loadedCount, result.items.count), result.docs.count)
+        if evidenceCount < 3 { return true }
+        guard !hasFreshWebSearchEvidence(result) else { return false }
+        return true
+    }
+
+    private func hasFreshWebSearchEvidence(_ result: WebSearchResponse) -> Bool {
+        let currentYear = Calendar(identifier: .gregorian).component(.year, from: Date())
+        let recentYears = Set((max(1970, currentYear - 1)...currentYear).map(String.init))
+        let itemHaystacks = result.items.flatMap { item in
+            var values = [item.title, item.snippet, item.publishedAt].compactMap { $0 }
+            values.append(contentsOf: item.metadata.values)
+            return values
+        }
+        let docHaystacks = result.docs.flatMap { doc in
+            Array(doc.metadata.values) + [String(doc.content.prefix(500))]
+        }
+        let haystacks = itemHaystacks + docHaystacks
+
+        return haystacks.contains { text in
+            recentYears.contains { text.contains($0) }
+        }
+    }
+
+    private func webSearchResultFreshnessNote(_ result: WebSearchResponse) -> String? {
+        let evidenceCount = max(max(result.loadedCount, result.items.count), result.docs.count)
+        if evidenceCount == 0 { return "未找到可用网页结果" }
+        if !hasFreshWebSearchEvidence(result) {
+            return "已搜索 \(evidenceCount) 个网页，但缺少近期日期证据"
+        }
+        return nil
+    }
+
+    private func webSearchQuery(from text: String) -> String {
+        text
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func modelWebSearchContextPrompt(
+        result: WebSearchResponse,
+        query: String,
+        queries: [String] = []
+    ) -> String {
+        var blocks: [String] = []
+        var docsByURL: [String: WebSearchDocument] = [:]
+        for doc in result.docs {
+            guard let url = doc.metadata["source"] ?? doc.metadata["link"],
+                  docsByURL[url] == nil else { continue }
+            docsByURL[url] = doc
+        }
+
+        for (index, item) in result.items.prefix(6).enumerated() {
+            let url = item.link ?? result.filenames.dropFirst(index).first ?? ""
+            var lines = [
+                "### Result \(index + 1)",
+                "Title: \(item.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Untitled")"
+            ]
+            if !url.isEmpty {
+                lines.append("URL: \(url)")
+            }
+            if let snippet = item.snippet?.trimmingCharacters(in: .whitespacesAndNewlines), !snippet.isEmpty {
+                lines.append("Snippet: \(String(snippet.prefix(600)))")
+            }
+            if let publishedAt = item.publishedAt?.trimmingCharacters(in: .whitespacesAndNewlines), !publishedAt.isEmpty {
+                lines.append("Published/Updated: \(publishedAt)")
+            }
+            if !item.metadata.isEmpty {
+                let metadataLine = item.metadata
+                    .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                    .prefix(6)
+                    .map { "\($0.key)=\($0.value)" }
+                    .joined(separator: "; ")
+                if !metadataLine.isEmpty {
+                    lines.append("Metadata: \(metadataLine)")
+                }
+            }
+            if let doc = docsByURL[url] {
+                let excerpt = doc.content
+                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !excerpt.isEmpty {
+                    lines.append("Page excerpt: \(String(excerpt.prefix(1200)))")
+                }
+            }
+            blocks.append(lines.joined(separator: "\n"))
+        }
+
+        if blocks.isEmpty {
+            for (index, doc) in result.docs.prefix(4).enumerated() {
+                let url = doc.metadata["source"] ?? doc.metadata["link"] ?? ""
+                let title = doc.metadata["title"] ?? url
+                let excerpt = doc.content
+                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                var lines = [
+                    "### Result \(index + 1)",
+                    "Title: \(title)"
+                ]
+                if !url.isEmpty { lines.append("URL: \(url)") }
+                lines.append("Page excerpt: \(String(excerpt.prefix(1200)))")
+                blocks.append(lines.joined(separator: "\n"))
+            }
+        }
+
+        guard !blocks.isEmpty else { return "" }
+        let queryLines = Self.mergeSearchQueries(original: query, generated: queries, limit: 8)
+            .map { "- \($0)" }
+            .joined(separator: "\n")
+
+        return """
+
+        [客户端联网搜索结果]
+        搜索时间：\(Self.webSearchNowString())
+        查询：\(query)
+        实际搜索词：
+        \(queryLines)
+
+        以下结果由 Iexa 在发送本轮消息前通过后端联网搜索取得。请基于这些资料回答，并在回答里引用来源链接。
+        如果结果缺少近期日期、来源互相矛盾、或无法支持结论，请明确说明搜索结果不足，不要用过期资料硬编最新答案。
+
+        \(blocks.joined(separator: "\n\n"))
+        [/客户端联网搜索结果]
+        """
+    }
+
+    private static func webSearchNowString() -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm zzz"
+        return formatter.string(from: Date())
+    }
+
+    private func webSearchSources(from result: WebSearchResponse) -> [ChatSourceReference] {
+        var sources: [ChatSourceReference] = []
+        var seen = Set<String>()
+
+        for item in result.items {
+            let url = item.link
+            let key = url ?? item.title ?? UUID().uuidString
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            sources.append(ChatSourceReference(
+                id: url ?? key,
+                title: item.title,
+                url: url,
+                snippet: item.snippet,
+                type: "web",
+                metadata: item.metadata.isEmpty ? nil : item.metadata
+            ))
+        }
+
+        for doc in result.docs {
+            let url = doc.metadata["source"] ?? doc.metadata["link"]
+            let title = doc.metadata["title"] ?? doc.metadata["name"] ?? url
+            let key = url ?? title ?? UUID().uuidString
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            let excerpt = doc.content
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            sources.append(ChatSourceReference(
+                id: url ?? key,
+                title: title,
+                url: url,
+                snippet: excerpt.isEmpty ? nil : String(excerpt.prefix(240)),
+                type: "web",
+                metadata: doc.metadata.isEmpty ? nil : doc.metadata
+            ))
+        }
+
+        return sources
+    }
+
+    private func contentForModel(message: ChatMessage) -> String {
+        guard message.role == .user else {
+            return message.content
+        }
+        let extraContexts = [
+            webLinkContextsByMessageId[message.id],
+            webSearchContextsByMessageId[message.id]
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !extraContexts.isEmpty else {
+            return message.content
+        }
+        if message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return extraContexts.joined(separator: "\n\n")
+        }
+        return message.content + "\n\n" + extraContexts.joined(separator: "\n\n")
+    }
+
+    private func attachResolvedVideoFile(messageId: String, video: ResolvedWebVideo) {
+        let file = ChatMessageFile(
+            type: "video",
+            url: video.url,
+            name: video.title,
+            contentType: "video/mp4",
+            displayURL: nil
+        )
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        if conversation?.messages[index].files.contains(where: { $0.url == file.url }) != true {
+            conversation?.messages[index].files.append(file)
+        }
+        conversation?.history.updateNode(id: messageId) { node in
+            if !node.files.contains(where: { $0.url == file.url }) {
+                node.files.append(file)
+            }
+        }
+    }
+
     private func buildAPIMessagesAsync() async -> [[String: Any]] {
         guard let conversation else { return [] }
         var apiMessages: [[String: Any]] = []
@@ -6352,11 +6941,11 @@ final class ChatViewModel {
             return conversation.systemPrompt
         }()
         let memoryContext = await localMemorySystemContext()
-        let combinedSystemPrompt = [
-            asyncEffectiveSP,
-            Self.projectContinuitySystemContext(includeWorkspaceAgent: shouldExecuteLocalWorkspaceAgentForCurrentRequest()),
-            memoryContext
-        ]
+        let workspaceContext = shouldExecuteLocalWorkspaceAgentForCurrentRequest()
+            ? Self.projectContinuitySystemContext()
+            : Self.workspaceGuardSystemContext()
+        let localAlpineContext = await localAlpineAgentSystemContextIfNeeded()
+        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, localAlpineContext, memoryContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
@@ -6364,6 +6953,7 @@ final class ChatViewModel {
             apiMessages.append(["role": "system", "content": combinedSystemPrompt])
         }
         for message in conversation.messages where !message.isStreaming && !Self.isLocalWorkspaceAgentResult(message) {
+            let modelContent = contentForModel(message: message)
             let imageFiles = message.files.filter { f in
                 f.type == "image" || (f.contentType ?? "").hasPrefix("image/")
             }
@@ -6375,8 +6965,8 @@ final class ChatViewModel {
                 // Build multimodal content array (OpenAI vision format)
                 // Fetch image base64 from server, matching Flutter behavior
                 var contentArray: [[String: Any]] = []
-                if !message.content.isEmpty {
-                    contentArray.append(["type": "text", "text": message.content])
+                if !modelContent.isEmpty {
+                    contentArray.append(["type": "text", "text": modelContent])
                 }
                 for imgFile in imageFiles {
                     if let fileId = imgFile.url, !fileId.isEmpty {
@@ -6437,7 +7027,7 @@ final class ChatViewModel {
             } else {
                 var msgDict: [String: Any] = [
                     "role": message.role.rawValue,
-                    "content": message.content
+                    "content": modelContent
                 ]
 
                 if !message.files.isEmpty {
@@ -6769,7 +7359,9 @@ final class ChatViewModel {
             "列出文件", "生成项目", "创建项目", "项目文件", "workspace", "save file",
             "write file", "create file", "modify file", "delete file", "mkdir", "append",
             "落地到本地", "落地项目", "直接写到", "帮我保存", "存到工作区", "写入工作区",
-            "保存成文件", "create project", "save to workspace", "write to workspace"
+            "保存成文件", "create project", "save to workspace", "write to workspace",
+            "搜索文件", "搜索内容", "查找文件", "查找内容", "搜文件", "全文搜索",
+            "grep", "find in files", "search files", "search workspace"
         ].contains { userText.contains($0) }
 
         let previewOnlyIntent = [
@@ -6812,6 +7404,502 @@ final class ChatViewModel {
 
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func shouldUseLocalAlpineAgentMode() -> Bool {
+        terminalEnabled && selectedTerminalServer?.isLocalAlpine == true
+    }
+
+    private func cancelLocalAlpineAgentLoop() {
+        localAlpineAgentTask?.cancel()
+        localAlpineAgentTask = nil
+        localAlpineAgentRunId = nil
+        isLocalAlpineAgentLoopActive = false
+    }
+
+    private func scheduleLocalAlpineAgentIfNeeded(messageId: String, content: String, error: ChatMessageError?) {
+        guard error == nil else { return }
+        guard shouldUseLocalAlpineAgentMode() else { return }
+        guard !isLocalAlpineAgentLoopActive else { return }
+        guard !localAlpineAgentExecutedMessageIds.contains(messageId) else { return }
+        guard conversation?.messages.first(where: { $0.id == messageId })?.role == .assistant else { return }
+        guard extractLocalAlpineAgentCommand(from: content) != nil else { return }
+
+        localAlpineAgentExecutedMessageIds.insert(messageId)
+        localAlpineAgentTask?.cancel()
+        let runId = UUID()
+        localAlpineAgentRunId = runId
+        localAlpineAgentTask = Task { @MainActor [weak self] in
+            await self?.runLocalAlpineAgentLoop(startingAssistantMessageId: messageId, runId: runId)
+        }
+    }
+
+    private func runLocalAlpineAgentLoop(startingAssistantMessageId: String, runId: UUID) async {
+        guard let modelId = selectedModelId ?? conversation?.model, let manager else { return }
+
+        isLocalAlpineAgentLoopActive = true
+        isStreaming = true
+        hasFinishedStreaming = false
+        selfInitiatedStream = true
+        beginStreamingBackgroundTaskIfNeeded()
+
+        defer {
+            if localAlpineAgentRunId == runId {
+                localAlpineAgentTask = nil
+                localAlpineAgentRunId = nil
+                isLocalAlpineAgentLoopActive = false
+            }
+        }
+
+        var currentAssistantMessageId = startingAssistantMessageId
+        var lastVisibleContent = conversation?.messages.first(where: { $0.id == currentAssistantMessageId })?.content ?? ""
+
+        for step in 1...localAlpineAgentMaxSteps {
+            if Task.isCancelled || localAlpineAgentRunId != runId { return }
+            guard shouldUseLocalAlpineAgentMode() else { break }
+            guard let assistantContent = conversation?.messages.first(where: { $0.id == currentAssistantMessageId })?.content,
+                  let command = extractLocalAlpineAgentCommand(from: assistantContent) else {
+                break
+            }
+
+            appendStatusUpdate(
+                id: currentAssistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "local_alpine_agent_step_\(step)",
+                    description: "Agent \(agentProgressText(step: step)) · 准备执行本地 Alpine",
+                    done: false
+                )
+            )
+
+            let resultMessageId: String
+            if let safetyIssue = Self.localAlpineSafetyIssue(for: command.command) {
+                let summary = localAlpineBlockedResultSummary(
+                    step: step,
+                    command: command,
+                    reason: safetyIssue
+                )
+                resultMessageId = appendLocalAlpineResultMessage(parentId: currentAssistantMessageId, content: summary)
+                appendStatusUpdate(
+                    id: currentAssistantMessageId,
+                    status: ChatStatusUpdate(
+                        action: "local_alpine_agent_step_\(step)",
+                        description: "Agent \(agentProgressText(step: step)) · 已拦截危险命令",
+                        done: true
+                    )
+                )
+            } else {
+                appendStatusUpdate(
+                    id: currentAssistantMessageId,
+                    status: ChatStatusUpdate(
+                        action: "local_alpine_agent_step_\(step)",
+                        description: "Agent \(agentProgressText(step: step)) · 执行 \(Self.shortCommand(command.command))",
+                        done: false
+                    )
+                )
+
+                let startedAt = Date()
+                let timedCommand = Self.localAlpineTimedCommand(command.command, timeoutSeconds: command.timeoutSeconds)
+                let result = await LocalAlpineTerminalService.shared.execute(command: timedCommand, cwd: command.cwd)
+                if Task.isCancelled || localAlpineAgentRunId != runId { return }
+                let elapsed = Date().timeIntervalSince(startedAt)
+                let summary = localAlpineResultSummary(
+                    step: step,
+                    command: command,
+                    result: result,
+                    elapsed: elapsed
+                )
+                resultMessageId = appendLocalAlpineResultMessage(parentId: currentAssistantMessageId, content: summary)
+                appendStatusUpdate(
+                    id: currentAssistantMessageId,
+                    status: ChatStatusUpdate(
+                        action: "local_alpine_agent_step_\(step)",
+                        description: "Agent \(agentProgressText(step: step)) · 完成，退出码 \(result.exitCode.map(String.init) ?? "未知")",
+                        done: true
+                    )
+                )
+            }
+
+            await persistLocalConversationIfNeeded()
+
+            if step >= localAlpineAgentMaxSteps {
+                let limitMessageId = appendAssistantMessage(
+                    parentId: resultMessageId,
+                    modelId: modelId,
+                    content: "已达到本地 Alpine Agent 的安全步数上限（\(localAlpineAgentMaxSteps) 步）。我先停在这里，避免无限循环；你可以继续发送一句话让我接着处理。",
+                    isStreaming: false
+                )
+                lastVisibleContent = conversation?.messages.first(where: { $0.id == limitMessageId })?.content ?? lastVisibleContent
+                break
+            }
+
+            let nextAssistantMessageId = appendAssistantMessage(parentId: resultMessageId, modelId: modelId)
+            appendStatusUpdate(
+                id: nextAssistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "local_alpine_agent_thinking_\(step + 1)",
+                    description: "Agent \(agentProgressText(step: step + 1)) · 根据执行结果思考下一步",
+                    done: false
+                )
+            )
+
+            streamingStore.beginStreaming(messageId: nextAssistantMessageId, modelId: modelId)
+            let response = await streamLocalAlpineAgentReply(
+                manager: manager,
+                modelId: modelId,
+                assistantMessageId: nextAssistantMessageId,
+                parentId: resultMessageId
+            )
+
+            if Task.isCancelled || localAlpineAgentRunId != runId { return }
+            switch response {
+            case .success(let content):
+                lastVisibleContent = content
+                appendStatusUpdate(
+                    id: nextAssistantMessageId,
+                    status: ChatStatusUpdate(
+                        action: "local_alpine_agent_thinking_\(step + 1)",
+                        description: extractLocalAlpineAgentCommand(from: content) == nil ? "Agent 已给出最终结果" : "Agent 已规划下一步",
+                        done: true
+                    )
+                )
+                currentAssistantMessageId = nextAssistantMessageId
+                if extractLocalAlpineAgentCommand(from: content) == nil {
+                    break
+                }
+            case .failure(let message):
+                updateAssistantMessage(
+                    id: nextAssistantMessageId,
+                    content: "",
+                    isStreaming: false,
+                    error: ChatMessageError(content: message)
+                )
+                lastVisibleContent = message
+                break
+            }
+        }
+
+        if localAlpineAgentRunId == runId {
+            hasFinishedStreaming = true
+            isStreaming = false
+            selfInitiatedStream = false
+            activeTaskId = nil
+            lastTaskExtractionLength = 0
+            await persistLocalConversationIfNeeded()
+            if !lastVisibleContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                await sendCompletionNotificationIfNeeded(content: lastVisibleContent)
+            }
+            endBackgroundTask()
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        }
+    }
+
+    private enum LocalAlpineAgentStreamResult {
+        case success(String)
+        case failure(String)
+    }
+
+    private func streamLocalAlpineAgentReply(
+        manager: ConversationManager,
+        modelId: String,
+        assistantMessageId: String,
+        parentId: String
+    ) async -> LocalAlpineAgentStreamResult {
+        let apiMessages = await buildAPIMessagesAsync()
+        var request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
+        await populateCommonRequestFields(&request)
+
+        let acc = ContentAccumulator()
+        do {
+            if isOpenAICompatibleProvider || selectedModel?.isPipeModel == true {
+                let sseStream = try await manager.sendMessageStreaming(request: request)
+                for try await event in sseStream {
+                    if Task.isCancelled { return .failure("已停止本地 Alpine Agent。") }
+                    if let delta = event.contentDelta, !delta.isEmpty {
+                        acc.append(delta)
+                        updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                    }
+                    if event.isFinished { break }
+                }
+            } else {
+                request.chatId = conversationId ?? conversation?.id
+                request.sessionId = sessionId
+                request.messageId = assistantMessageId
+                request.parentId = parentId
+                await syncToServerViaTree()
+
+                let json = try await manager.sendMessageHTTP(request: request)
+                if let taskId = json["task_id"] as? String { activeTaskId = taskId }
+                if let err = json["error"] as? String, !err.isEmpty {
+                    throw NSError(domain: "LocalAlpineAgent", code: -1, userInfo: [NSLocalizedDescriptionKey: err])
+                }
+                if let detail = json["detail"] as? String, !detail.isEmpty, json["choices"] == nil {
+                    throw NSError(domain: "LocalAlpineAgent", code: -1, userInfo: [NSLocalizedDescriptionKey: detail])
+                }
+
+                var lastContentLength = 0
+                var staleCount = 0
+                for _ in 0..<80 {
+                    if Task.isCancelled { return .failure("已停止本地 Alpine Agent。") }
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    guard let chatId = conversationId ?? conversation?.id else { continue }
+                    let refreshed = try await manager.fetchConversation(id: chatId)
+                    let serverAssistant = refreshed.messages.first(where: { $0.id == assistantMessageId })
+                        ?? refreshed.messages.last(where: { $0.role == .assistant })
+                    guard let serverAssistant else { continue }
+                    let serverContent = serverAssistant.content
+                    if !serverContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        acc.replace(serverContent)
+                        updateAssistantMessage(id: assistantMessageId, content: serverContent, isStreaming: true)
+                        if serverContent.count > lastContentLength {
+                            lastContentLength = serverContent.count
+                            staleCount = 0
+                        } else {
+                            staleCount += 1
+                        }
+                        if staleCount >= 3 { break }
+                    }
+                }
+            }
+
+            let finalContent = acc.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !finalContent.isEmpty else {
+                updateAssistantMessage(
+                    id: assistantMessageId,
+                    content: "",
+                    isStreaming: false,
+                    error: ChatMessageError(content: "本地 Alpine Agent 没有收到模型续写。")
+                )
+                return .failure("本地 Alpine Agent 没有收到模型续写。")
+            }
+            updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+            await persistLocalConversationIfNeeded()
+            return .success(acc.content)
+        } catch {
+            let message = Self.localizedGenerationError(error)
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: acc.content,
+                isStreaming: false,
+                error: ChatMessageError(content: message)
+            )
+            return .failure(message)
+        }
+    }
+
+    private func appendLocalAlpineResultMessage(parentId: String, content: String) -> String {
+        let message = ChatMessage(
+            role: .system,
+            content: content,
+            timestamp: .now,
+            isStreaming: false,
+            metadata: ["iexa_local_alpine_result": "true"]
+        )
+        conversation?.messages.append(message)
+        let node = HistoryNode(
+            id: message.id,
+            parentId: parentId,
+            childrenIds: [],
+            role: .system,
+            content: content,
+            timestamp: message.timestamp,
+            done: true
+        )
+        conversation?.history.addNode(node)
+        conversation?.history.appendChildId(message.id, to: parentId)
+        conversation?.history.currentId = message.id
+        return message.id
+    }
+
+    private func appendAssistantMessage(
+        parentId: String,
+        modelId: String,
+        content: String = "",
+        isStreaming: Bool = true
+    ) -> String {
+        let message = ChatMessage(
+            role: .assistant,
+            content: content,
+            timestamp: .now,
+            model: modelId,
+            isStreaming: isStreaming
+        )
+        conversation?.messages.append(message)
+        let node = HistoryNode(
+            id: message.id,
+            parentId: parentId,
+            childrenIds: [],
+            role: .assistant,
+            content: content,
+            timestamp: message.timestamp,
+            model: modelId,
+            done: !isStreaming
+        )
+        conversation?.history.addNode(node)
+        conversation?.history.appendChildId(message.id, to: parentId)
+        conversation?.history.currentId = message.id
+        return message.id
+    }
+
+    private func extractLocalAlpineAgentCommand(from content: String) -> LocalAlpineAgentCommand? {
+        guard content.localizedCaseInsensitiveContains("iexa_alpine") else { return nil }
+        let pattern = #"(?s)```\s*iexa_alpine\s*\n(.*?)```"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let ns = content as NSString
+        guard let match = regex.firstMatch(in: content, range: NSRange(location: 0, length: ns.length)),
+              match.numberOfRanges > 1 else { return nil }
+        let raw = ns.substring(with: match.range(at: 1))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = raw.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data)
+        else { return nil }
+        return Self.localAlpineCommand(from: object)
+    }
+
+    private static func localAlpineCommand(from object: Any) -> LocalAlpineAgentCommand? {
+        if let array = object as? [[String: Any]] {
+            return array.compactMap { localAlpineCommand(from: $0) }.first
+        }
+        guard let dict = object as? [String: Any] else { return nil }
+        if let wrappedArray = dict["iexa_alpine"] as? [[String: Any]] {
+            return wrappedArray.compactMap { localAlpineCommand(from: $0) }.first
+        }
+        if let wrappedDict = dict["iexa_alpine"] as? [String: Any] {
+            return localAlpineCommand(from: wrappedDict)
+        }
+        guard let rawCommand = dict["command"] as? String else { return nil }
+        let command = rawCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else { return nil }
+        let cwd = (dict["cwd"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let timeoutValue = dict["timeoutSeconds"] as? Int
+            ?? dict["timeout_seconds"] as? Int
+            ?? dict["timeout"] as? Int
+            ?? (dict["timeoutSeconds"] as? Double).map(Int.init)
+            ?? (dict["timeout_seconds"] as? Double).map(Int.init)
+            ?? (dict["timeout"] as? Double).map(Int.init)
+        let timeout = min(max(timeoutValue ?? 90, 5), 300)
+        return LocalAlpineAgentCommand(
+            command: command,
+            cwd: (cwd?.isEmpty == false ? cwd! : "/"),
+            timeoutSeconds: timeout,
+            reason: dict["reason"] as? String
+        )
+    }
+
+    private func localAlpineResultSummary(
+        step: Int,
+        command: LocalAlpineAgentCommand,
+        result: LocalAlpineCommandResult,
+        elapsed: TimeInterval
+    ) -> String {
+        let output = Self.truncateForAgent(result.output, limit: 12_000)
+        let exitCode = result.exitCode.map(String.init) ?? "unknown"
+        return """
+        本地 Alpine 执行结果
+        步骤: \(step)/\(localAlpineAgentMaxSteps)
+        原因: \(command.reason ?? "未说明")
+        工作目录: \(command.cwd)
+        超时: \(command.timeoutSeconds)s
+        耗时: \(String(format: "%.1f", elapsed))s
+        退出码: \(exitCode)
+
+        命令
+        ```bash
+        \(command.command)
+        ```
+
+        输出
+        ```text
+        \(output)
+        ```
+
+        请根据这个真实执行结果继续下一步：如果已经完成，直接给用户最终答复；如果失败，先解释错误原因，再输出一个新的 `iexa_alpine` 命令块修复。
+        """
+    }
+
+    private func localAlpineBlockedResultSummary(
+        step: Int,
+        command: LocalAlpineAgentCommand,
+        reason: String
+    ) -> String {
+        """
+        本地 Alpine 执行结果
+        步骤: \(step)/\(localAlpineAgentMaxSteps)
+        工作目录: \(command.cwd)
+        退出码: blocked
+
+        命令
+        ```bash
+        \(command.command)
+        ```
+
+        输出
+        ```text
+        Iexa 已拦截这个命令：\(reason)
+        ```
+
+        请改用更小范围、更安全的命令；如果确实需要破坏性操作，先向用户说明风险并等待用户确认。
+        """
+    }
+
+    private func agentProgressText(step: Int) -> String {
+        let clampedStep = min(max(step, 1), localAlpineAgentMaxSteps)
+        let percent = Int((Double(clampedStep - 1) / Double(localAlpineAgentMaxSteps)) * 100)
+        return "\(percent)% · 第 \(clampedStep)/\(localAlpineAgentMaxSteps) 步"
+    }
+
+    private static func localAlpineTimedCommand(_ command: String, timeoutSeconds: Int) -> String {
+        let seconds = min(max(timeoutSeconds, 5), 300)
+        return "if command -v timeout >/dev/null 2>&1; then timeout \(seconds) sh -lc \(shellSingleQuote(command)); else sh -lc \(shellSingleQuote(command)); fi"
+    }
+
+    private static func shellSingleQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+
+    private static func localAlpineSafetyIssue(for command: String) -> String? {
+        let lower = command.lowercased()
+        let blockedSubstrings = [
+            ":(){", "mkfs", "shutdown", "reboot", "poweroff",
+            "dd if=", ">/dev/sda", "> /dev/sda", "chmod -r 777 /",
+            "chown -r root /", "apk del "
+        ]
+        if let hit = blockedSubstrings.first(where: { lower.contains($0) }) {
+            return "命中高风险片段 `\(hit)`"
+        }
+        let destructiveRootPatterns = [
+            #"rm\s+-[^\n;]*[rf][^\n;]*\s+/(?:\s|$)"#,
+            #"rm\s+-[^\n;]*[rf][^\n;]*\s+/bin(?:\s|/|$)"#,
+            #"rm\s+-[^\n;]*[rf][^\n;]*\s+/usr(?:\s|/|$)"#,
+            #"rm\s+-[^\n;]*[rf][^\n;]*\s+/etc(?:\s|/|$)"#
+        ]
+        for pattern in destructiveRootPatterns {
+            if lower.range(of: pattern, options: .regularExpression) != nil {
+                return "疑似删除系统路径"
+            }
+        }
+        return nil
+    }
+
+    private static func shortCommand(_ command: String) -> String {
+        let singleLine = command
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard singleLine.count > 48 else { return singleLine }
+        return String(singleLine.prefix(45)) + "..."
+    }
+
+    private static func truncateForAgent(_ value: String, limit: Int) -> String {
+        guard value.count > limit else { return value }
+        let headCount = max(0, limit - 700)
+        let head = String(value.prefix(headCount))
+        let tail = String(value.suffix(500))
+        return """
+        \(head)
+
+        ... [output truncated, total \(value.count) chars] ...
+
+        \(tail)
+        """
     }
 
     private func updateAssistantMessage(
@@ -6918,6 +8006,7 @@ final class ChatViewModel {
 
         if let completedAssistantContentForAgent {
             scheduleLocalWorkspaceAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
+            scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
         }
     }
 
@@ -7046,11 +8135,12 @@ final class ChatViewModel {
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
         let message = conversation!.messages[index]
 
-        // Only check assistant messages with content (tool results are embedded in content)
-        guard message.role == .assistant,
-              !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard message.role == .assistant else { return }
+        let hasContent = !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
-        let extractedFiles = ToolCallParser.extractFileReferences(from: message.content)
+        let extractedFiles = hasContent ? ToolCallParser.extractFileReferences(from: message.content) : []
+        let extractedImages = hasContent ? Self.extractInlineImageReferences(from: message.content) : []
+        var appendedFile = false
         if !extractedFiles.isEmpty {
             logger.info("Extracted \(extractedFiles.count) file(s) from tool results for message \(messageId)")
             var merged = message.files
@@ -7058,118 +8148,197 @@ final class ChatViewModel {
                 guard let url = file.url else { continue }
                 if !merged.contains(where: { $0.url == url || $0.displayURL == url }) {
                     merged.append(file)
+                    appendedFile = true
+                }
+            }
+            conversation?.messages[index].files = merged
+        }
+        if !extractedImages.isEmpty {
+            var merged = conversation?.messages[index].files ?? message.files
+            for image in extractedImages {
+                if !merged.contains(where: { $0.url == image.url || $0.displayURL == image.displayURL }) {
+                    merged.append(image)
+                    appendedFile = true
                 }
             }
             conversation?.messages[index].files = merged
         }
 
-        let extractedImageLinks = Self.extractImageLinks(from: message.content)
-        if !extractedImageLinks.isEmpty {
-            var merged = conversation?.messages[index].files ?? []
-            for link in extractedImageLinks {
-                if !merged.contains(where: { $0.url == link || $0.displayURL == link }) {
-                    merged.append(
-                        ChatMessageFile(
-                            type: "image",
-                            url: link,
-                            name: (URL(string: link)?.lastPathComponent).flatMap { $0.isEmpty ? nil : $0 } ?? "generated-image.jpg",
-                            contentType: Self.imageContentType(for: link),
-                            displayURL: nil
-                        )
-                    )
-                }
-            }
-            if merged.count != conversation?.messages[index].files.count {
-                logger.info("Extracted \(extractedImageLinks.count) inline image link(s) from assistant content for message \(messageId)")
-                conversation?.messages[index].files = merged
+        let cleanedContent = Self.cleanedAssistantContentAfterImageExtraction(message.content)
+        if cleanedContent != message.content {
+            conversation?.messages[index].content = cleanedContent
+        }
+        if appendedFile || cleanedContent != message.content {
+            let files = conversation?.messages[index].files ?? []
+            conversation?.history.updateNode(id: messageId) { node in
+                node.content = cleanedContent
+                node.files = files
+                node.done = true
             }
         }
     }
 
-    private static func extractImageLinks(from content: String) -> [String] {
-        guard !content.isEmpty else { return [] }
-        let patterns = [
-            #"(https?://[^\s<>\"]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^\s<>\"]*)?)"#,
-            #"!\[[^\]]*\]\((https?://[^)\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^)\s]*)?)\)"#,
-            #"<img[^>]+src=['\"](https?://[^'\"]+)['\"][^>]*>"#
-        ]
+    private func normalizeAssistantGeneratedMedia(messageId: String) {
+        populateFilesFromToolResults(messageId: messageId)
 
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        let message = conversation!.messages[index]
+        guard message.role == .assistant else { return }
+
+        let hasRenderableImage = message.files.contains { file in
+            Self.isImageFile(file)
+                && (Self.isRenderableImageReference(file.displayURL)
+                    || Self.isRenderableImageReference(file.url))
+        }
+        let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty, hasRenderableImage {
+            conversation?.messages[index].content = "已生成图片"
+            conversation?.history.updateNode(id: messageId) { node in
+                node.content = "已生成图片"
+                node.files = message.files
+                node.done = true
+            }
+        }
+    }
+
+    private static func extractInlineImageReferences(from content: String) -> [ChatMessageFile] {
+        let refs = extractImageReferenceStrings(from: content)
+        var seen = Set<String>()
+        var files: [ChatMessageFile] = []
+
+        for rawRef in refs {
+            let ref = rawRef.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !ref.isEmpty, !seen.contains(ref) else { continue }
+            seen.insert(ref)
+            let contentType = imageContentType(for: ref)
+            files.append(ChatMessageFile(
+                type: "image",
+                url: ref,
+                name: imageFileName(for: ref, contentType: contentType),
+                contentType: contentType,
+                displayURL: ref
+            ))
+        }
+
+        return files
+    }
+
+    private static func extractImageReferenceStrings(from content: String) -> [String] {
         var results: [String] = []
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
-            let nsRange = NSRange(content.startIndex..<content.endIndex, in: content)
-            let matches = regex.matches(in: content, range: nsRange)
-            for match in matches {
-                let captureRange = match.numberOfRanges > 1 ? match.range(at: 1) : match.range(at: 0)
-                guard let range = Range(captureRange, in: content) else { continue }
-                let raw = String(content[range]).trimmingCharacters(in: .whitespacesAndNewlines)
-                let cleaned = raw.trimmingCharacters(in: CharacterSet(charactersIn: ".,;!?)>]\"'"))
-                if !cleaned.isEmpty, !results.contains(cleaned) {
-                    results.append(cleaned)
-                }
+        let contextSuggestsImage = content.range(
+            of: #"(已生成图片|生成.*图|图片|图像|照片|image|photo|picture|generated)"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+
+        func addMatches(_ pattern: String, captureIndex: Int = 1) {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return }
+            let nsContent = content as NSString
+            let range = NSRange(location: 0, length: nsContent.length)
+            for match in regex.matches(in: content, range: range) where match.numberOfRanges > captureIndex {
+                let value = nsContent.substring(with: match.range(at: captureIndex))
+                results.append(value)
             }
         }
-        return results
+
+        addMatches(#"!\[[^\]]*\]\((data:image/[^)\s]+)\)"#)
+        addMatches(#"!\[[^\]]*\]\((https?://[^)\s]+)\)"#)
+        addMatches(#"!\[[^\]]*\]\((https?://[^)\s]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^)\s]*)?)\)"#)
+        addMatches(#"<img[^>]+src=["'](data:image/[^"']+)["']"#)
+        addMatches(#"<img[^>]+src=["'](https?://[^"']+)["']"#)
+        addMatches(#"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{128,})"#)
+        addMatches(#"(https?://[^\s"'<>]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^\s"'<>]+)?)"#)
+        addMatches(#"(https?://assets\.grok\.com/[^\s"'<>]+)"#)
+        addMatches(#"(https?://[^\s"'<>]+)"#)
+        addMatches(#"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"(https?://[^"]+)""#)
+        addMatches(#"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_-]{128,})""#)
+
+        return results.compactMap { value -> String? in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("data:image/") {
+                return trimmed
+            }
+            if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
+                return (isLikelyImageURL(trimmed) || contextSuggestsImage) ? trimmed : nil
+            }
+            guard looksLikeBase64Image(trimmed) else { return nil }
+            return "data:image/png;base64,\(trimmed)"
+        }
     }
 
-    static func stripExtractedImageLinks(from content: String) -> String {
-        var result = content
-        // Remove only embedded markup forms. Keep bare URLs visible as fallback
-        // so if a provider's external image fails to load, the user still sees
-        // the original link instead of an empty assistant message.
-        let embeddedPatterns = [
-            #"\!\[[^\]]*\]\((https?://[^)\s]+)\)"#,
-            #"<img[^>]+src=['\"](https?://[^'\"]+)['\"][^>]*>"#
+    private static func looksLikeBase64Image(_ value: String) -> Bool {
+        let compact = value
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard compact.count >= 128,
+              compact.range(of: #"^[A-Za-z0-9+/=_-]+$"#, options: .regularExpression) != nil else {
+            return false
+        }
+
+        return compact.hasPrefix("/9j/")
+            || compact.hasPrefix("iVBORw0KGgo")
+            || compact.hasPrefix("R0lGOD")
+            || compact.hasPrefix("UklGR")
+    }
+
+    private static func isLikelyImageURL(_ value: String) -> Bool {
+        guard let url = URL(string: value),
+              let host = url.host?.lowercased() else { return false }
+        let lower = value.lowercased()
+        if lower.range(of: #"\.(png|jpe?g|webp|gif|bmp|avif|svg)(\?|$)"#, options: .regularExpression) != nil {
+            return true
+        }
+        if lower.contains("data:image") || lower.contains("image/") {
+            return true
+        }
+        if ["assets.grok.com"].contains(host) {
+            return true
+        }
+        let imageHosts = ["image", "img", "cdn", "asset", "media", "static", "file", "files"]
+        if imageHosts.contains(where: { host.contains($0) }) {
+            return true
+        }
+        let imagePathHints = ["/image", "/images", "/generated", "/media", "/asset", "/assets", "/file", "/files"]
+        return imagePathHints.contains(where: { lower.contains($0) })
+    }
+
+    private static func cleanedAssistantContentAfterImageExtraction(_ content: String) -> String {
+        var cleaned = content
+        let patterns = [
+            #"!\[[^\]]*\]\(\s*data:image/[^)\s]+\s*\)"#,
+            #"!\[[^\]]*\]\(\s*https?://[^)\s]+\s*\)"#,
+            #"<img[^>]+src=["']data:image/[^"']+["'][^>]*>"#,
+            #"<img[^>]+src=["']https?://[^"']+["'][^>]*>"#,
+            #"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{128,}"#,
+            #"https?://assets\.grok\.com/[^\s"'<>]+"#,
+            #"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"https?://[^"]+""#,
+            #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"[A-Za-z0-9+/=_-]{128,}""#
         ]
-        for pattern in embeddedPatterns {
-            result = result.replacingOccurrences(
+        for pattern in patterns {
+            cleaned = cleaned.replacingOccurrences(
                 of: pattern,
                 with: "",
                 options: [.regularExpression, .caseInsensitive]
             )
         }
-        result = result.replacingOccurrences(
-            of: #"\n{3,}"#,
-            with: "\n\n",
-            options: .regularExpression
-        )
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func looksLikeImageGenerationPrompt(_ text: String) -> Bool {
-        let lower = text.lowercased()
-        let positives = [
-            "生成一张", "生成一幅", "生成一个", "生成图片", "帮我画", "画一张", "做一张图",
-            "出图", "生图", "绘制", "画个", "给我一张图",
-            "generate an image", "generate a picture", "create an image", "create a picture",
-            "draw a", "make an image", "render an image"
-        ]
-        let negatives = [
-            "图片链接", "image url", "html", "css", "js", "代码", "code", "接口文档", "api doc"
-        ]
-        return positives.contains(where: { lower.contains($0) })
-            && !negatives.contains(where: { lower.contains($0) })
-    }
-
-    private func shouldRouteImageGenerationThroughChat(modelId: String) -> Bool {
-        let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
-            .lowercased()
-        if currentProviderType == .gemini {
-            return haystack.contains("image-preview")
-                || haystack.contains("gemini-3-pro-image-preview")
-                || haystack.contains("gemini-2.5-flash-image")
+        for imageReference in extractImageReferenceStrings(from: content) where imageReference.hasPrefix("http") {
+            cleaned = cleaned.replacingOccurrences(of: imageReference, with: "")
         }
-        return false
-    }
+        cleaned = cleaned.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
-    private static func imageContentType(for urlString: String) -> String {
-        let lower = urlString.lowercased()
-        if lower.contains(".png") { return "image/png" }
-        if lower.contains(".webp") { return "image/webp" }
-        if lower.contains(".gif") { return "image/gif" }
-        if lower.contains(".bmp") { return "image/bmp" }
-        if lower.contains(".svg") { return "image/svg+xml" }
-        return "image/jpeg"
+        if !extractImageReferenceStrings(from: content).isEmpty {
+            let startsLikeRawJSON = cleaned.hasPrefix("{") || cleaned.hasPrefix("[")
+            let mostlyRequestJSON = startsLikeRawJSON
+                && (cleaned.contains("\"prompt\"") || cleaned.contains("\"size\"") || cleaned.contains("\"model\""))
+            if cleaned.isEmpty || mostlyRequestJSON {
+                return "已生成图片"
+            }
+            if cleaned.range(of: #"^https?://\S+$"#, options: .regularExpression) != nil {
+                return "已生成图片"
+            }
+        }
+
+        return cleaned
     }
 
     private func appendSources(id: String, sources: [ChatSourceReference]) {

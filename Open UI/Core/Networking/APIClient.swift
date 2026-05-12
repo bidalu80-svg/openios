@@ -2359,6 +2359,149 @@ final class APIClient: @unchecked Sendable {
         return content
     }
 
+    /// Runs server-side web search and returns loaded result metadata/content.
+    ///
+    /// `POST /api/v1/retrieval/process/web/search`
+    ///
+    /// This is the same retrieval endpoint used by Open WebUI for search-engine
+    /// style queries. It is intentionally separate from `processWebPage(url:)`,
+    /// which only reads a URL the user already pasted.
+    func processWebSearch(query: String) async throws -> WebSearchResponse {
+        try await processWebSearch(queries: [query], originalQuery: query)
+    }
+
+    func processWebSearch(queries: [String], originalQuery: String? = nil) async throws -> WebSearchResponse {
+        let trimmedQueries = Self.uniqueStrings(queries.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        })
+        guard !trimmedQueries.isEmpty else {
+            return WebSearchResponse(status: false, collectionNames: [], filenames: [], items: [], docs: [], loadedCount: 0)
+        }
+
+        let primaryQuery = Self.firstNonEmptyString([
+            originalQuery,
+            trimmedQueries.first
+        ])
+
+        let json: [String: Any]
+        do {
+            json = try await network.requestJSON(
+                path: "/api/v1/retrieval/process/web/search",
+                method: .post,
+                body: [
+                    "queries": trimmedQueries,
+                    "query": primaryQuery,
+                    "collection_name": ""
+                ],
+                timeout: 90
+            )
+        } catch let error as APIError {
+            // Some older compatible backends used `query` instead of Open WebUI's
+            // newer `queries` list. Retry only on request-shape errors.
+            if case .httpError(let statusCode, _, _) = error,
+               [400, 422].contains(statusCode) {
+                json = try await network.requestJSON(
+                    path: "/api/v1/retrieval/process/web/search",
+                    method: .post,
+                    body: [
+                        "query": primaryQuery,
+                        "collection_name": ""
+                    ],
+                    timeout: 90
+                )
+            } else {
+                throw error
+            }
+        }
+
+        var response = WebSearchResponse(json: json)
+        if response.docs.isEmpty, let collectionName = response.collectionNames.first {
+            do {
+                let collectionJSON = try await network.requestJSON(
+                    path: "/api/v1/retrieval/query/collection",
+                    method: .post,
+                    body: [
+                        "collection_names": [collectionName],
+                        "query": primaryQuery,
+                        "k": 6
+                    ],
+                    timeout: 60
+                )
+                response.docs = WebSearchDocument.documents(fromQueryResponse: collectionJSON)
+            } catch {
+                logger.debug("Web search collection query failed: \(error.localizedDescription)")
+            }
+        }
+
+        return response
+    }
+
+    /// Generates search-engine-friendly queries from the user's request.
+    ///
+    /// This is used to make Iexa search more agent-like: the model first rewrites
+    /// the user's request into a handful of focused search queries, then the
+    /// retrieval endpoint fans out across those queries.
+    func generateSearchQueries(
+        model: String,
+        query: String,
+        context: String? = nil,
+        maxQueries: Int = 3
+    ) async throws -> [String] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else { return [] }
+
+        let trimmedContext = context?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentDate = Self.searchCurrentDateString()
+
+        let systemPrompt = """
+        You rewrite a user's request into concise web search queries.
+        Return only JSON, no markdown, no commentary.
+        Output shape: {"queries":["query 1","query 2"]}
+        Current date: \(currentDate)
+        Rules:
+        - Generate 1 to \(maxQueries) queries.
+        - Make them short and search-engine friendly.
+        - For latest, current, today, price, version, release, news, law, policy, schedule, model, package, or API questions, include current-year or recency words such as latest, 2026, official, changelog, docs, or news when useful.
+        - Keep distinct intents: broad, exact, and keyword-focused when useful.
+        - Preserve product names, version numbers, dates, and other factual anchors.
+        - Do not repeat the same idea with only tiny wording changes.
+        """
+
+        let userPrompt = """
+        User request:
+        \(trimmedQuery)
+
+        \(trimmedContext.map { "Conversation context:\n\($0)\n" } ?? "")
+        """
+
+        let request = ChatCompletionRequest(
+            model: model,
+            messages: [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": userPrompt]
+            ],
+            stream: false
+        )
+        let json = try await network.requestJSON(
+            path: chatCompletionsPath,
+            method: .post,
+            body: chatCompletionBody(for: request),
+            timeout: 20
+        )
+        let response = extractAssistantText(from: json)
+        return Self.parseGeneratedSearchQueries(response, maxQueries: maxQueries)
+    }
+
+    private static func searchCurrentDateString() -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
     // MARK: - Skills
 
     /// GET /api/v1/skills/list?page=1 — returns paginated {items, total}
@@ -4806,6 +4949,139 @@ final class APIClient: @unchecked Sendable {
         }
 
         return nil
+    }
+
+    private static func parseGeneratedSearchQueries(_ response: String?, maxQueries: Int) -> [String] {
+        guard let response else { return [] }
+
+        let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        let jsonLike = trimmed
+            .replacingOccurrences(of: #"^```(?:json)?\s*"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s*```$"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let data = jsonLike.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) {
+            if let array = json as? [String] {
+                return normalizeQueryList(array, maxQueries: maxQueries)
+            }
+            if let dict = json as? [String: Any] {
+                for key in ["queries", "search_queries", "searchQueries", "items", "data"] {
+                    if let values = dict[key] {
+                        let parsed = flattenSearchQueries(values)
+                        if !parsed.isEmpty {
+                            return normalizeQueryList(parsed, maxQueries: maxQueries)
+                        }
+                    }
+                }
+                if let query = dict["query"] as? String {
+                    return normalizeQueryList([query], maxQueries: maxQueries)
+                }
+            }
+        }
+
+        let lineCandidates = jsonLike
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .map(Self.stripQueryDecoration)
+            .filter { !$0.isEmpty }
+
+        if lineCandidates.count > 1 {
+            return normalizeQueryList(lineCandidates, maxQueries: maxQueries)
+        }
+
+        let commaSeparated = jsonLike
+            .split { ",;、，".contains($0) }
+            .map(String.init)
+            .map(Self.stripQueryDecoration)
+            .filter { !$0.isEmpty }
+
+        if commaSeparated.count > 1 {
+            return normalizeQueryList(commaSeparated, maxQueries: maxQueries)
+        }
+
+        let single = Self.stripQueryDecoration(jsonLike)
+        return normalizeQueryList([single], maxQueries: maxQueries)
+    }
+
+    private static func flattenSearchQueries(_ value: Any) -> [String] {
+        if let strings = value as? [String] {
+            return strings
+        }
+        if let array = value as? [Any] {
+            return array.flatMap(flattenSearchQueries)
+        }
+        if let dict = value as? [String: Any] {
+            if let query = dict["query"] as? String {
+                return [query]
+            }
+            if let text = dict["text"] as? String {
+                return [text]
+            }
+            if let content = dict["content"] as? String {
+                return [content]
+            }
+        }
+        if let string = value as? String {
+            return [string]
+        }
+        return []
+    }
+
+    private static func normalizeQueryList(_ values: [String], maxQueries: Int) -> [String] {
+        var seen = Set<String>()
+        var queries: [String] = []
+        for raw in values {
+            let cleaned = stripQueryDecoration(raw)
+            guard !cleaned.isEmpty else { continue }
+            let key = cleaned.lowercased()
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            queries.append(cleaned)
+            if queries.count >= maxQueries {
+                break
+            }
+        }
+        return queries
+    }
+
+    private static func stripQueryDecoration(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let withoutBullet = trimmed.replacingOccurrences(
+            of: #"^[\-\*\d\.\)\]]+\s*"#,
+            with: "",
+            options: .regularExpression
+        )
+        let withoutQuotes = withoutBullet
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return withoutQuotes
+    }
+
+    private static func uniqueStrings(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            result.append(trimmed)
+        }
+        return result
+    }
+
+    private static func firstNonEmptyString(_ values: [String?]) -> String {
+        for value in values {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return ""
     }
 
     func generateEmoji(model: String, prompt: String) async throws -> String? {
