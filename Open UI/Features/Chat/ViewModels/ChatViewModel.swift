@@ -8671,7 +8671,7 @@ final class ChatViewModel {
 
         let result = await LocalAlpineAgentService.shared.executeBlocks(in: content) { request in
             guard !Task.isCancelled else { return nil }
-            await self.requestLocalAlpineInput(request)
+            return await self.requestLocalAlpineInput(request)
         }
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
         guard !Task.isCancelled else {
