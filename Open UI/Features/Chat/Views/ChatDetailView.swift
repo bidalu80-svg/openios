@@ -4277,7 +4277,6 @@ private struct ParsedLocalAlpineResult {
     init(content: String, metadata: [String: String]?) {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         let commandFromMetadata = metadata?["iexa_local_alpine_display_command"]
-            ?? metadata?["iexa_local_alpine_command_preview"]
             ?? ""
         let commandBlocks = Self.codeBlocks(in: trimmed, preferredLanguage: "bash").joined(separator: "\n\n---\n\n")
         let textBlocks = Self.codeBlocks(in: trimmed, preferredLanguage: "text").joined(separator: "\n\n---\n\n")

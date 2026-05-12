@@ -1195,7 +1195,6 @@ final class ChatViewModel {
             let status = message.statusHistory.last?.description?.trimmingCharacters(in: .whitespacesAndNewlines)
             let state = message.isStreaming ? "running" : "completed"
             let command = metadata["iexa_local_alpine_display_command"]
-                ?? metadata["iexa_local_alpine_command_preview"]
             let cwd = metadata["iexa_local_alpine_cwd"]
             let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -7325,12 +7324,14 @@ final class ChatViewModel {
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
-        - For a project/script, write files with `cat > file <<'EOF' ... EOF`, then run a bounded verification command.
+        - For scripts/projects, prefer `write_files` inside `iexa_alpine` to create files, then run a bounded verification command. This preserves Python/JS/HTML/CSS indentation better than heredoc shell text.
+        - Use heredoc only for very small one-off shell snippets. Never put long Python class/function bodies in heredoc if `write_files` can be used.
+        - After writing Python, run `python3 -m py_compile file.py` before running it. If syntax or indentation fails, rewrite the file and verify again before summarizing.
         - If the user wants to test Python `input()` / shell `read` with their own text, do not invent sample stdin and do not pipe a fixed `printf` value. Leave the input/read command unpiped; the app will pause, ask the user for stdin, feed that exact text to the program, and append the real output.
         - For unattended tests where the user did not ask to type input themselves, avoid interactive prompts by using constants, command-line args, environment variables, or an explicit `printf 'value\n' | python3 script.py`.
         - For Node/Python dependency installs, use bounded commands and print versions/errors. Avoid background daemons unless the user explicitly asks.
         - Keep commands safe and scoped to `/mnt/iexa`; do not use destructive commands outside that workspace.
-        - After the app appends a Local Alpine execution result, continue from that real output: if the task is not done, emit the next bounded `iexa_alpine` block; if an error appears, fix and rerun; if the task is done, give the final answer. Do not stop after one command unless the output proves the task is complete.
+        - After the app appends a Local Alpine execution result, continue from that real output: if the task is not done, emit the next bounded `iexa_alpine` block; if an error appears, fix and rerun; if the task is done, give a concise final summary of what you changed, what command verified it, and any remaining limitation. Do not stop after one command unless the output proves the task is complete.
 
         To execute commands, include exactly one fenced block with language `iexa_alpine` containing JSON. The app will run those commands locally on the device and append the real output. Do not output this block unless command execution is actually needed.
 
@@ -7339,7 +7340,13 @@ final class ChatViewModel {
         {
           "iexa_alpine": [
             {"command": "cat /etc/alpine-release && uname -m && pwd", "cwd": "/mnt/iexa"},
-            {"command": "cat > hello.py <<'EOF'\\nprint('hello from Iexa Alpine')\\nEOF\\npython3 hello.py", "cwd": "/mnt/iexa"}
+            {
+              "cwd": "/mnt/iexa",
+              "write_files": [
+                {"path": "hello.py", "content": "def main():\\n    print('hello from Iexa Alpine')\\n\\nif __name__ == '__main__':\\n    main()\\n"}
+              ],
+              "command": "python3 -m py_compile hello.py && python3 hello.py"
+            }
           ]
         }
         ```
@@ -8632,6 +8639,7 @@ final class ChatViewModel {
             metadata: [
                 "iexa_local_alpine_result": "true",
                 "iexa_local_alpine_command_preview": Self.localAlpineCommandPreview(from: content),
+                "iexa_local_alpine_display_command": Self.localAlpineCommandPreview(from: content),
                 "iexa_local_alpine_cwd": "/mnt/iexa"
             ]
         )
@@ -9093,9 +9101,10 @@ final class ChatViewModel {
         let instruction = """
         [Local Alpine continuation]
         You are in a continuous Local Alpine agent loop. Read the latest real Local Alpine result above.
-        - If the user's task is complete, answer normally and do not emit `iexa_alpine`.
+        - If the user's task is complete, answer normally and do not emit `iexa_alpine`. Include a concise Codex-style summary: what you did, what command/output verified it, and any remaining caveat.
         - If more work is needed, emit exactly one next `iexa_alpine` block with bounded non-interactive command(s).
         - If the last command failed, inspect the error, fix the files/dependencies/command, then rerun a concrete verification.
+        - For Python indentation/syntax errors, rewrite the file using `write_files`, then run `python3 -m py_compile <file>` before running the script.
         - Do not repeat the same command unless the output shows a clear reason.
         [/Local Alpine continuation]
         """

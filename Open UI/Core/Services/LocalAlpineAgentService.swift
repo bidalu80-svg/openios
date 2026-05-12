@@ -60,28 +60,50 @@ actor LocalAlpineAgentService {
         for command in trimmedCommands {
             let cwd = command.cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
             let effectiveCWD = (cwd?.isEmpty == false) ? cwd! : defaultCWD
-            var result = await LocalAlpineTerminalService.shared.execute(
-                command: command.command,
-                cwd: effectiveCWD
-            )
-            while let request = result.interactiveRequest {
-                if let inputProvider,
-                   let stdinInput = await inputProvider(request) {
-                    result = await LocalAlpineTerminalService.shared.execute(
-                        command: request.command,
-                        cwd: request.cwd,
-                        stdinInput: stdinInput
-                    )
-                } else {
-                    lines.append(format(command: command.command, cwd: effectiveCWD, result: result))
-                    return LocalAlpineAgentResult(
-                        didExecute: true,
-                        summary: lines.joined(separator: "\n\n"),
-                        interactiveRequest: request
-                    )
+            var stepLines: [String] = []
+            var shouldRunShellCommand = true
+            if !command.writeFiles.isEmpty {
+                let writeResult = await writeFiles(command.writeFiles, cwd: effectiveCWD)
+                stepLines.append(writeResult.summary)
+                if let syntaxCheck = await pythonSyntaxCheck(for: writeResult.writtenPaths, cwd: effectiveCWD) {
+                    stepLines.append(format(command: syntaxCheck.command, cwd: effectiveCWD, result: syntaxCheck.result))
+                    if syntaxCheck.result.exitCode != 0 {
+                        shouldRunShellCommand = false
+                    }
                 }
             }
-            lines.append(format(command: command.command, cwd: effectiveCWD, result: result))
+
+            if let shellCommand = command.command?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !shellCommand.isEmpty,
+               shouldRunShellCommand {
+                var result = await LocalAlpineTerminalService.shared.execute(
+                    command: shellCommand,
+                    cwd: effectiveCWD
+                )
+                while let request = result.interactiveRequest {
+                    if let inputProvider,
+                       let stdinInput = await inputProvider(request) {
+                        result = await LocalAlpineTerminalService.shared.execute(
+                            command: request.command,
+                            cwd: request.cwd,
+                            stdinInput: stdinInput
+                        )
+                    } else {
+                        stepLines.append(format(command: shellCommand, cwd: effectiveCWD, result: result))
+                        lines.append(stepLines.joined(separator: "\n\n"))
+                        return LocalAlpineAgentResult(
+                            didExecute: true,
+                            summary: lines.joined(separator: "\n\n"),
+                            interactiveRequest: request
+                        )
+                    }
+                }
+                stepLines.append(format(command: shellCommand, cwd: effectiveCWD, result: result))
+            }
+
+            if !stepLines.isEmpty {
+                lines.append(stepLines.joined(separator: "\n\n"))
+            }
         }
 
         if skippedCount > 0 {
@@ -127,7 +149,7 @@ actor LocalAlpineAgentService {
 
         let shell = block.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !shell.isEmpty else { throw LocalAlpineAgentError.noCommands }
-        return [LocalAlpineAgentCommand(command: shell, cwd: nil)]
+        return [LocalAlpineAgentCommand(command: shell, cwd: nil, writeFiles: [])]
     }
 
     private func parseCommands(from object: Any) -> [LocalAlpineAgentCommand] {
@@ -137,7 +159,7 @@ actor LocalAlpineAgentService {
 
         guard let dict = object as? [String: Any] else {
             if let command = object as? String {
-                return [LocalAlpineAgentCommand(command: command, cwd: nil)]
+                return [LocalAlpineAgentCommand(command: command, cwd: nil, writeFiles: [])]
             }
             return []
         }
@@ -147,14 +169,91 @@ actor LocalAlpineAgentService {
         }
 
         if let command = dict["command"] as? String {
-            return [LocalAlpineAgentCommand(command: command, cwd: dict["cwd"] as? String)]
+            return [LocalAlpineAgentCommand(
+                command: command,
+                cwd: dict["cwd"] as? String,
+                writeFiles: parseWriteFiles(from: dict["write_files"] ?? dict["files"])
+            )]
         }
 
         if let command = dict["cmd"] as? String {
-            return [LocalAlpineAgentCommand(command: command, cwd: dict["cwd"] as? String)]
+            return [LocalAlpineAgentCommand(
+                command: command,
+                cwd: dict["cwd"] as? String,
+                writeFiles: parseWriteFiles(from: dict["write_files"] ?? dict["files"])
+            )]
+        }
+
+        let files = parseWriteFiles(from: dict["write_files"] ?? dict["files"])
+        if !files.isEmpty {
+            return [LocalAlpineAgentCommand(command: nil, cwd: dict["cwd"] as? String, writeFiles: files)]
         }
 
         return []
+    }
+
+    private func parseWriteFiles(from object: Any?) -> [LocalAlpineAgentFile] {
+        if let array = object as? [Any] {
+            return array.compactMap(parseWriteFile(from:))
+        }
+        if let object {
+            return parseWriteFile(from: object).map { [$0] } ?? []
+        }
+        return []
+    }
+
+    private func parseWriteFile(from object: Any) -> LocalAlpineAgentFile? {
+        guard let dict = object as? [String: Any] else { return nil }
+        guard let path = (dict["path"] as? String)
+            ?? (dict["file"] as? String)
+            ?? (dict["name"] as? String),
+            let content = (dict["content"] as? String)
+                ?? (dict["text"] as? String)
+                ?? (dict["body"] as? String) else {
+            return nil
+        }
+        return LocalAlpineAgentFile(path: path, content: content)
+    }
+
+    private func writeFiles(_ files: [LocalAlpineAgentFile], cwd: String) async -> LocalAlpineWriteResult {
+        var lines = ["写入文件"]
+        var writtenPaths: [String] = []
+        for file in files.prefix(maxCommandsPerResponse) {
+            let target = resolvedFilePath(file.path, cwd: cwd)
+            let split = splitFilePath(target)
+            guard let data = file.content.data(using: .utf8) else {
+                lines.append("- `\(target)` 写入失败：内容不是有效 UTF-8")
+                continue
+            }
+            do {
+                try await LocalAlpineTerminalService.shared.writeFile(
+                    data: data,
+                    fileName: split.fileName,
+                    destinationPath: split.directory
+                )
+                lines.append("- `\(target)` (\(data.count) B)")
+                writtenPaths.append(target)
+            } catch {
+                lines.append("- `\(target)` 写入失败：\(error.localizedDescription)")
+            }
+        }
+        let skipped = max(0, files.count - maxCommandsPerResponse)
+        if skipped > 0 {
+            lines.append("- 已跳过 \(skipped) 个多余文件，避免一次写入过多。")
+        }
+        return LocalAlpineWriteResult(summary: lines.joined(separator: "\n"), writtenPaths: writtenPaths)
+    }
+
+    private func pythonSyntaxCheck(for paths: [String], cwd: String) async -> (command: String, result: LocalAlpineCommandResult)? {
+        let pythonFiles = paths.filter { $0.lowercased().hasSuffix(".py") }
+        guard !pythonFiles.isEmpty else { return nil }
+        let quotedPaths = pythonFiles
+            .map { runtimePath(forSharedPath: $0) }
+            .map(shellSingleQuoted)
+            .joined(separator: " ")
+        let command = "python3 -m py_compile \(quotedPaths)"
+        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
+        return (command, result)
     }
 
     private func format(command: String, cwd: String, result: LocalAlpineCommandResult) -> String {
@@ -186,6 +285,57 @@ actor LocalAlpineAgentService {
         guard output.count > maxOutputCharactersPerCommand else { return output }
         let prefix = String(output.prefix(maxOutputCharactersPerCommand))
         return prefix + "\n...（输出过长，已截断）"
+    }
+
+    private func resolvedFilePath(_ path: String, cwd: String) -> String {
+        let raw = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        guard !raw.isEmpty else { return "/untitled.txt" }
+        if raw.hasPrefix("/mnt/iexa/") {
+            return "/" + raw.dropFirst("/mnt/iexa/".count)
+        }
+        if raw == "/mnt/iexa" {
+            return "/"
+        }
+        if raw.hasPrefix("/") {
+            return raw
+        }
+
+        let normalizedCWD = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        let base: String
+        if normalizedCWD == "/mnt/iexa" || normalizedCWD.isEmpty {
+            base = "/"
+        } else if normalizedCWD.hasPrefix("/mnt/iexa/") {
+            base = "/" + normalizedCWD.dropFirst("/mnt/iexa/".count)
+        } else if normalizedCWD.hasPrefix("/") {
+            base = normalizedCWD
+        } else {
+            base = "/" + normalizedCWD
+        }
+        return (base == "/" ? "/" : base + "/") + raw
+    }
+
+    private func splitFilePath(_ path: String) -> (directory: String, fileName: String) {
+        let normalized = path.replacingOccurrences(of: "\\", with: "/")
+        guard let slashIndex = normalized.lastIndex(of: "/") else {
+            return ("/", normalized)
+        }
+        let fileName = String(normalized[normalized.index(after: slashIndex)...])
+        let directory = String(normalized[..<slashIndex])
+        return (directory.isEmpty ? "/" : directory, fileName.isEmpty ? "untitled.txt" : fileName)
+    }
+
+    private func runtimePath(forSharedPath path: String) -> String {
+        let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        if normalized == "/" { return "/mnt/iexa" }
+        if normalized.hasPrefix("/") { return "/mnt/iexa\(normalized)" }
+        return "/mnt/iexa/\(normalized)"
+    }
+
+    private func shellSingleQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     nonisolated static func visibleContent(from content: String) -> String {
@@ -268,8 +418,19 @@ actor LocalAlpineAgentService {
 }
 
 private struct LocalAlpineAgentCommand {
-    let command: String
+    let command: String?
     let cwd: String?
+    let writeFiles: [LocalAlpineAgentFile]
+}
+
+private struct LocalAlpineAgentFile {
+    let path: String
+    let content: String
+}
+
+private struct LocalAlpineWriteResult {
+    let summary: String
+    let writtenPaths: [String]
 }
 
 private enum LocalAlpineAgentError: LocalizedError {
