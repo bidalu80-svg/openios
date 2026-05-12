@@ -23,11 +23,17 @@ extension Notification.Name {
     static let chatTokenUsageDidAccumulate = Notification.Name("chatTokenUsageDidAccumulate")
 }
 
-private struct LocalAlpineAgentCommand {
+private struct LocalAlpineAgentCommand: Sendable {
     let command: String
     let cwd: String
     let timeoutSeconds: Int
     let reason: String?
+}
+
+private struct LocalAlpineAgentFailure: Sendable {
+    let command: LocalAlpineAgentCommand
+    let exitCode: Int?
+    let outputPreview: String
 }
 
 /// Manages state and logic for a single chat conversation.
@@ -6405,7 +6411,8 @@ final class ChatViewModel {
         Rules:
         - Use at most one `iexa_alpine` block per assistant turn.
         - Inspect before editing or installing. Prefer `command -v`, `python3 --version`, `node --version`, `apk info`, and `ls` before assuming dependencies.
-        - If a command fails, read the exit code and output, then issue the next corrective command.
+        - If a command fails, read the exit code and output, diagnose the likely cause, then issue a different corrective command. Never repeat the exact same failed command.
+        - If the same error repeats, stop executing commands and summarize what failed plus the next manual clue needed.
         - Keep commands short and finite. Do not start long-running servers, watchers, REPLs, or interactive prompts.
         - Never run destructive broad commands such as wiping root paths. Ask the user first for destructive deletes or overwrites outside the app workspace.
         - For dependency installs, explain what is missing, then use the smallest `apk add --no-cache ...` command needed.
@@ -7453,6 +7460,9 @@ final class ChatViewModel {
 
         var currentAssistantMessageId = startingAssistantMessageId
         var lastVisibleContent = conversation?.messages.first(where: { $0.id == currentAssistantMessageId })?.content ?? ""
+        var failedCommands: [String: LocalAlpineAgentFailure] = [:]
+        var failureSignatures: [String: Int] = [:]
+        var repeatedBlockedCommands: [String: Int] = [:]
 
         for step in 1...localAlpineAgentMaxSteps {
             if Task.isCancelled || localAlpineAgentRunId != runId { return }
@@ -7472,7 +7482,38 @@ final class ChatViewModel {
             )
 
             let resultMessageId: String
-            if let safetyIssue = Self.localAlpineSafetyIssue(for: command.command) {
+            let commandKey = Self.localAlpineCommandKey(command)
+            if let previousFailure = failedCommands[commandKey] {
+                let repeatedCount = (repeatedBlockedCommands[commandKey] ?? 0) + 1
+                repeatedBlockedCommands[commandKey] = repeatedCount
+                let summary = localAlpineRepeatedFailureSummary(
+                    step: step,
+                    command: command,
+                    previousFailure: previousFailure
+                )
+                resultMessageId = appendLocalAlpineResultMessage(parentId: currentAssistantMessageId, content: summary)
+                appendStatusUpdate(
+                    id: currentAssistantMessageId,
+                    status: ChatStatusUpdate(
+                        action: "local_alpine_agent_step_\(step)",
+                        description: "Agent \(agentProgressText(step: step)) · 已拦截重复失败命令",
+                        done: true
+                    )
+                )
+                if repeatedCount >= 2 {
+                    let stopMessageId = appendAssistantMessage(
+                        parentId: resultMessageId,
+                        modelId: modelId,
+                        content: localAlpineRepeatedCommandStopSummary(
+                            command: command,
+                            previousFailure: previousFailure
+                        ),
+                        isStreaming: false
+                    )
+                    lastVisibleContent = conversation?.messages.first(where: { $0.id == stopMessageId })?.content ?? lastVisibleContent
+                    break
+                }
+            } else if let safetyIssue = Self.localAlpineSafetyIssue(for: command.command) {
                 let summary = localAlpineBlockedResultSummary(
                     step: step,
                     command: command,
@@ -7509,11 +7550,45 @@ final class ChatViewModel {
                     elapsed: elapsed
                 )
                 resultMessageId = appendLocalAlpineResultMessage(parentId: currentAssistantMessageId, content: summary)
+                if Self.isLocalAlpineFailure(result) {
+                    failedCommands[commandKey] = LocalAlpineAgentFailure(
+                        command: command,
+                        exitCode: result.exitCode,
+                        outputPreview: Self.truncateForAgent(result.output, limit: 2_000)
+                    )
+                    let signature = Self.localAlpineFailureSignature(result)
+                    let count = (failureSignatures[signature] ?? 0) + 1
+                    failureSignatures[signature] = count
+                    if count >= 3 {
+                        appendStatusUpdate(
+                            id: currentAssistantMessageId,
+                            status: ChatStatusUpdate(
+                                action: "local_alpine_agent_step_\(step)",
+                                description: "Agent \(agentProgressText(step: step)) · 同类错误重复，已停止循环",
+                                done: true
+                            )
+                        )
+                        let stopMessageId = appendAssistantMessage(
+                            parentId: resultMessageId,
+                            modelId: modelId,
+                            content: localAlpineRepeatedErrorStopSummary(
+                                command: command,
+                                result: result,
+                                repeatCount: count
+                            ),
+                            isStreaming: false
+                        )
+                        lastVisibleContent = conversation?.messages.first(where: { $0.id == stopMessageId })?.content ?? lastVisibleContent
+                        break
+                    }
+                }
                 appendStatusUpdate(
                     id: currentAssistantMessageId,
                     status: ChatStatusUpdate(
                         action: "local_alpine_agent_step_\(step)",
-                        description: "Agent \(agentProgressText(step: step)) · 完成，退出码 \(result.exitCode.map(String.init) ?? "未知")",
+                        description: Self.isLocalAlpineFailure(result)
+                            ? "Agent \(agentProgressText(step: step)) · 执行失败，等待重新定位"
+                            : "Agent \(agentProgressText(step: step)) · 完成，退出码 \(result.exitCode.map(String.init) ?? "未知")",
                         done: true
                     )
                 )
@@ -7822,7 +7897,92 @@ final class ChatViewModel {
         \(output)
         ```
 
+        Agent guard
+        \(Self.isLocalAlpineFailure(result) ? "这条命令失败了。下一轮必须先根据退出码和输出定位原因，然后输出不同的修复/诊断命令；禁止重复同一条命令。" : "这条命令已经成功。若任务完成，请给用户总结，不要继续执行无意义命令。")
+
         请根据这个真实执行结果继续下一步：如果已经完成，直接给用户最终答复；如果失败，先解释错误原因，再输出一个新的 `iexa_alpine` 命令块修复。
+        """
+    }
+
+    private func localAlpineRepeatedFailureSummary(
+        step: Int,
+        command: LocalAlpineAgentCommand,
+        previousFailure: LocalAlpineAgentFailure
+    ) -> String {
+        let exitCode = previousFailure.exitCode.map(String.init) ?? "unknown"
+        return """
+        本地 Alpine 执行结果
+        步骤: \(step)/\(localAlpineAgentMaxSteps)
+        工作目录: \(command.cwd)
+        退出码: blocked-repeat
+
+        命令
+        ```bash
+        \(command.command)
+        ```
+
+        输出
+        ```text
+        Iexa 已拦截：这条命令之前已经失败，不能原样重复执行。
+
+        上次退出码: \(exitCode)
+        上次输出摘要:
+        \(previousFailure.outputPreview)
+        ```
+
+        请先根据上次错误重新定位原因，改用不同的诊断或修复命令；如果无法继续，请停止执行并总结当前阻塞点。
+        """
+    }
+
+    private func localAlpineRepeatedErrorStopSummary(
+        command: LocalAlpineAgentCommand,
+        result: LocalAlpineCommandResult,
+        repeatCount: Int
+    ) -> String {
+        let exitCode = result.exitCode.map(String.init) ?? "unknown"
+        let output = Self.truncateForAgent(result.output, limit: 2_000)
+        return """
+        我先停下，避免继续死循环。
+
+        同类错误已经连续出现 \(repeatCount) 次，最后一次命令退出码是 \(exitCode)。
+
+        最后执行的命令：
+        ```bash
+        \(command.command)
+        ```
+
+        最后输出摘要：
+        ```text
+        \(output)
+        ```
+
+        当前判断：需要换一个定位路径，而不是继续重复执行同类命令。
+        """
+    }
+
+    private func localAlpineRepeatedCommandStopSummary(
+        command: LocalAlpineAgentCommand,
+        previousFailure: LocalAlpineAgentFailure
+    ) -> String {
+        let exitCode = previousFailure.exitCode.map(String.init) ?? "unknown"
+        return """
+        我先停下，避免继续重复同一个失败命令。
+
+        模型连续想执行同一条已经失败过的命令，我已经拦截，没有再次运行它。
+
+        重复命令：
+        ```bash
+        \(command.command)
+        ```
+
+        上次退出码：\(exitCode)
+
+        上次输出摘要：
+        ```text
+        \(previousFailure.outputPreview)
+        ```
+
+        当前判断：需要重新定位错误原因，换诊断命令或修改代码后再运行，而不是原样重复。
         """
     }
 
@@ -7860,6 +8020,30 @@ final class ChatViewModel {
     private static func localAlpineTimedCommand(_ command: String, timeoutSeconds: Int) -> String {
         let seconds = min(max(timeoutSeconds, 5), 300)
         return "if command -v timeout >/dev/null 2>&1; then timeout \(seconds) sh -lc \(shellSingleQuote(command)); else sh -lc \(shellSingleQuote(command)); fi"
+    }
+
+    private static func isLocalAlpineFailure(_ result: LocalAlpineCommandResult) -> Bool {
+        guard let exitCode = result.exitCode else { return false }
+        return exitCode != 0
+    }
+
+    private static func localAlpineCommandKey(_ command: LocalAlpineAgentCommand) -> String {
+        let normalizedCommand = command.command
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        let normalizedCwd = command.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(normalizedCwd)\n\(normalizedCommand)"
+    }
+
+    private static func localAlpineFailureSignature(_ result: LocalAlpineCommandResult) -> String {
+        let lines = result.output
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .suffix(8)
+            .joined(separator: "\n")
+        return "\(result.exitCode.map(String.init) ?? "unknown")\n\(String(lines.prefix(1_500)))"
     }
 
     private static func shellSingleQuote(_ value: String) -> String {
