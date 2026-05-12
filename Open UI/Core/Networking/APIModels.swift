@@ -377,29 +377,34 @@ struct ChatCompletionRequest: Sendable {
             "messages": messages
         ]
         if let files, !files.isEmpty { data["files"] = files }
-        if let streamOptions, !streamOptions.isEmpty {
-            data["stream_options"] = streamOptions
+        if let streamOptions { data["stream_options"] = streamOptions }
+        if let features {
+            data["features"] = [
+                "web_search": features.webSearch,
+                "image_generation": features.imageGeneration,
+                "code_interpreter": features.codeInterpreter,
+                "memory": features.memory
+            ]
         }
 
-        // Pass common generation controls through to OpenAI-compatible endpoints.
-        // Many providers (OpenAI-shims, Gemini shims, Ollama-compatible gateways,
-        // Groq/Grok-compatible relays, etc.) accept these keys at the top level.
-        // Previously they were only stored in `request.params`, which meant the UI
-        // showed "thinking/reasoning enabled" but the actual request silently dropped
-        // those settings for non-Iexa providers.
-        if let params, !params.isEmpty {
-            let passthroughKeys: Set<String> = [
-                "temperature", "seed", "max_tokens",
-                "top_k", "top_p", "min_p",
-                "frequency_penalty", "presence_penalty",
-                "mirostat", "mirostat_eta", "mirostat_tau",
-                "repeat_last_n", "tfs_z", "repeat_penalty",
-                "num_keep", "num_ctx", "num_batch",
-                "reasoning_effort", "think", "format",
-                "include_reasoning", "reasoning_format", "extra_body"
-            ]
-            for (key, value) in params where passthroughKeys.contains(key) {
-                data[key] = value
+        // Preserve user/chat controls for OpenAI-compatible gateways. A lot of
+        // proxy providers expose reasoning, sampling, and output-format controls
+        // through the same top-level keys used by OpenAI/Ollama-compatible APIs.
+        if let params {
+            for (key, value) in params {
+                switch key {
+                case "temperature", "max_tokens", "max_completion_tokens", "seed",
+                     "top_k", "top_p", "min_p", "frequency_penalty", "presence_penalty",
+                     "mirostat", "mirostat_eta", "mirostat_tau",
+                     "repeat_last_n", "tfs_z", "repeat_penalty",
+                     "num_keep", "num_ctx", "num_batch",
+                     "reasoning_effort", "reasoning", "thinking", "think",
+                     "include_reasoning", "reasoning_format",
+                     "format", "response_format":
+                    data[key] = value
+                default:
+                    break
+                }
             }
         }
         return data
@@ -2190,6 +2195,269 @@ struct RetrievalConfig: Codable, Sendable {
         enableGoogleDriveIntegration = false
         enableOneDriveIntegration = false
         web = WebSearchConfig()
+    }
+}
+
+// MARK: - Web Search Response
+
+struct WebSearchResponse: Sendable {
+    var status: Bool
+    var collectionNames: [String]
+    var filenames: [String]
+    var items: [WebSearchResultItem]
+    var docs: [WebSearchDocument]
+    var loadedCount: Int
+
+    init(
+        status: Bool = false,
+        collectionNames: [String] = [],
+        filenames: [String] = [],
+        items: [WebSearchResultItem] = [],
+        docs: [WebSearchDocument] = [],
+        loadedCount: Int = 0
+    ) {
+        self.status = status
+        self.collectionNames = collectionNames
+        self.filenames = filenames
+        self.items = items
+        self.docs = docs
+        self.loadedCount = loadedCount
+    }
+
+    init(json: [String: Any]) {
+        status = json["status"] as? Bool ?? false
+
+        if let names = json["collection_names"] as? [String] {
+            collectionNames = names
+        } else if let name = json["collection_name"] as? String, !name.isEmpty {
+            collectionNames = [name]
+        } else {
+            collectionNames = []
+        }
+
+        filenames = (json["filenames"] as? [String]) ?? []
+        items = (json["items"] as? [[String: Any]] ?? []).compactMap(WebSearchResultItem.init(json:))
+        docs = (json["docs"] as? [[String: Any]] ?? []).compactMap(WebSearchDocument.init(json:))
+        loadedCount = json["loaded_count"] as? Int ?? filenames.count
+    }
+
+    mutating func mergeKeepingFirst(_ other: WebSearchResponse) {
+        status = status || other.status
+        collectionNames = Self.unique(collectionNames + other.collectionNames)
+        filenames = Self.unique(filenames + other.filenames)
+        items = Self.uniqueItems(items + other.items)
+        docs = Self.uniqueDocs(docs + other.docs)
+        loadedCount = max(max(loadedCount, filenames.count), max(items.count, docs.count))
+    }
+
+    private static func unique(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            result.append(trimmed)
+        }
+        return result
+    }
+
+    private static func uniqueItems(_ values: [WebSearchResultItem]) -> [WebSearchResultItem] {
+        var seen = Set<String>()
+        var result: [WebSearchResultItem] = []
+        for item in values {
+            let key = (item.link ?? item.title ?? item.snippet ?? UUID().uuidString)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard !key.isEmpty, !seen.contains(key) else { continue }
+            seen.insert(key)
+            result.append(item)
+        }
+        return result
+    }
+
+    private static func uniqueDocs(_ values: [WebSearchDocument]) -> [WebSearchDocument] {
+        var seen = Set<String>()
+        var result: [WebSearchDocument] = []
+        for doc in values {
+            let key = (
+                doc.metadata["source"]
+                    ?? doc.metadata["link"]
+                    ?? doc.metadata["url"]
+                    ?? String(doc.content.prefix(160))
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            guard !key.isEmpty, !seen.contains(key) else { continue }
+            seen.insert(key)
+            result.append(doc)
+        }
+        return result
+    }
+}
+
+struct WebSearchResultItem: Sendable, Hashable {
+    var title: String?
+    var link: String?
+    var snippet: String?
+    var publishedAt: String?
+    var metadata: [String: String]
+
+    init?(json: [String: Any]) {
+        title = json["title"] as? String
+            ?? json["name"] as? String
+        link = json["link"] as? String
+            ?? json["url"] as? String
+            ?? json["source"] as? String
+        snippet = json["snippet"] as? String
+            ?? json["content"] as? String
+            ?? json["description"] as? String
+        publishedAt = Self.firstString(
+            json,
+            keys: [
+                "published_at", "publishedAt", "published",
+                "date", "datetime", "updated_at", "updated",
+                "last_modified", "lastModified"
+            ]
+        )
+
+        var parsedMetadata = Self.stringMetadata(from: json["metadata"] as? [String: Any])
+        for key in ["source", "engine", "score", "rank"] {
+            if let value = json[key] {
+                parsedMetadata[key] = "\(value)"
+            }
+        }
+        if let publishedAt, !publishedAt.isEmpty {
+            parsedMetadata["published_at"] = publishedAt
+        }
+        metadata = parsedMetadata
+
+        if (title?.isEmpty ?? true), (link?.isEmpty ?? true), (snippet?.isEmpty ?? true) {
+            return nil
+        }
+    }
+
+    private static func firstString(_ json: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let string = json[key] as? String,
+               !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return string
+            }
+        }
+        return nil
+    }
+
+    private static func stringMetadata(from raw: [String: Any]?) -> [String: String] {
+        var metadata: [String: String] = [:]
+        for (key, value) in raw ?? [:] {
+            if let string = value as? String, !string.isEmpty {
+                metadata[key] = string
+            } else if let number = value as? NSNumber {
+                metadata[key] = number.stringValue
+            }
+        }
+        return metadata
+    }
+}
+
+struct WebSearchDocument: Sendable, Hashable {
+    var content: String
+    var metadata: [String: String]
+
+    init(content: String, metadata: [String: String] = [:]) {
+        self.content = content
+        self.metadata = metadata
+    }
+
+    init?(json: [String: Any]) {
+        guard let content = json["content"] as? String,
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        self.content = content
+
+        var parsed: [String: String] = [:]
+        if let raw = json["metadata"] as? [String: Any] {
+            for (key, value) in raw {
+                if let string = value as? String, !string.isEmpty {
+                    parsed[key] = string
+                }
+            }
+        }
+        metadata = parsed
+    }
+
+    static func documents(fromQueryResponse json: [String: Any]) -> [WebSearchDocument] {
+        if let results = json["results"] as? [[String: Any]] {
+            let parsed = results.compactMap { entry -> WebSearchDocument? in
+                let document = entry["document"] as? String
+                    ?? entry["content"] as? String
+                    ?? entry["text"] as? String
+                guard let document,
+                      !document.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                return WebSearchDocument(
+                    content: document,
+                    metadata: stringMetadata(from: entry["metadata"] as? [String: Any])
+                )
+            }
+            if !parsed.isEmpty { return parsed }
+        }
+
+        let documents = flattenStrings(json["documents"])
+        let metadatas = flattenMetadata(json["metadatas"] ?? json["metadata"])
+        guard !documents.isEmpty else { return [] }
+
+        return documents.enumerated().map { index, content in
+            WebSearchDocument(
+                content: content,
+                metadata: index < metadatas.count ? metadatas[index] : [:]
+            )
+        }
+    }
+
+    private static func flattenStrings(_ value: Any?) -> [String] {
+        if let strings = value as? [String] { return strings }
+        if let nested = value as? [[String]] { return nested.flatMap { $0 } }
+        if let anyArray = value as? [Any] {
+            return anyArray.flatMap { item -> [String] in
+                if let string = item as? String { return [string] }
+                if let nested = item as? [String] { return nested }
+                if let nestedAny = item as? [Any] { return flattenStrings(nestedAny) }
+                return []
+            }
+        }
+        return []
+    }
+
+    private static func flattenMetadata(_ value: Any?) -> [[String: String]] {
+        if let metadata = value as? [[String: Any]] {
+            return metadata.map { stringMetadata(from: $0) }
+        }
+        if let nested = value as? [[[String: Any]]] {
+            return nested.flatMap { $0.map { stringMetadata(from: $0) } }
+        }
+        if let anyArray = value as? [Any] {
+            return anyArray.flatMap { item -> [[String: String]] in
+                if let dict = item as? [String: Any] { return [stringMetadata(from: dict)] }
+                if let nested = item as? [[String: Any]] { return nested.map { stringMetadata(from: $0) } }
+                return []
+            }
+        }
+        return []
+    }
+
+    private static func stringMetadata(from raw: [String: Any]?) -> [String: String] {
+        var metadata: [String: String] = [:]
+        for (key, value) in raw ?? [:] {
+            if let string = value as? String, !string.isEmpty {
+                metadata[key] = string
+            }
+        }
+        return metadata
     }
 }
 
