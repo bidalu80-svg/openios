@@ -9,8 +9,16 @@ import Foundation
 /// When connected to Iexa native server, the model can run commands, manage files,
 /// and interact with a real operating system environment.
 struct TerminalServer: Identifiable, Hashable, Sendable {
+    static let localAlpineId = "__iexa_local_alpine__"
+
     let id: String
     let name: String
+
+    static let localAlpine = TerminalServer(id: localAlpineId, name: "Local Alpine")
+
+    var isLocalAlpine: Bool {
+        id == Self.localAlpineId
+    }
 
     /// Display name — falls back to ID if name is empty.
     var displayName: String {

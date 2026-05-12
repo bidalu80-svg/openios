@@ -144,14 +144,19 @@ final class StreamingContentStore {
     // MARK: - Methods
 
     /// Starts a new streaming session for a given message.
-    func beginStreaming(messageId: String, modelId: String?) {
+    func beginStreaming(
+        messageId: String,
+        modelId: String?,
+        initialStatusHistory: [ChatStatusUpdate] = [],
+        initialSources: [ChatSourceReference] = []
+    ) {
         streamingMessageId = messageId
         streamingContent = ""
         displayContent = ""
         frozenToolBoundaryOffset = 0
         frozenProseBoundaryOffset = 0
-        streamingStatusHistory = []
-        streamingSources = []
+        streamingStatusHistory = initialStatusHistory
+        streamingSources = initialSources
         streamingError = nil
         streamingModelId = modelId
         isActive = true
