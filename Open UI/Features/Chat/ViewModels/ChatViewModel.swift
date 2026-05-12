@@ -9118,6 +9118,10 @@ final class ChatViewModel {
         error: ChatMessageError? = nil
     ) {
         let displayContent = Self.cleanedProviderCitationArtifacts(content)
+        let visibleAlpineDisplayContent: String? = terminalEnabled && selectedTerminalIsLocalAlpine
+            ? LocalAlpineAgentService.visibleContent(from: displayContent)
+            : nil
+        let renderedDisplayContent = visibleAlpineDisplayContent ?? displayContent
         var completedAssistantContentForAgent: String?
 
         if isStreaming && streamingStore.streamingMessageId == id {
@@ -9125,7 +9129,7 @@ final class ChatViewModel {
             // Route content to the isolated StreamingContentStore.
             // This avoids mutating conversation.messages on every token,
             // which would invalidate ALL message views via @Observable.
-            streamingStore.updateContent(displayContent)
+            streamingStore.updateContent(displayContent, displayContent: renderedDisplayContent)
             if let sources { streamingStore.appendSources(sources) }
             if let statusHistory {
                 for s in statusHistory { streamingStore.appendStatus(s) }
@@ -9181,12 +9185,12 @@ final class ChatViewModel {
                 completedAssistantContentForAgent = finalContent
             } else {
                 // Normal non-streaming update (e.g., error before streaming started)
-                conversation?.messages[index].content = displayContent
+                conversation?.messages[index].content = renderedDisplayContent
                 conversation?.messages[index].isStreaming = isStreaming
                 // Also update tree node for non-streaming completions (e.g., error paths)
-                if !isStreaming && !displayContent.isEmpty {
+                if !isStreaming && !renderedDisplayContent.isEmpty {
                     conversation?.history.updateNode(id: id) { node in
-                        node.content = displayContent
+                        node.content = renderedDisplayContent
                         node.done = true
                     }
                 }

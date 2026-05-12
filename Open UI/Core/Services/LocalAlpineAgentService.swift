@@ -125,12 +125,9 @@ actor LocalAlpineAgentService {
             throw LocalAlpineAgentError.noCommands
         }
 
-        let shellLines = block
-            .split(whereSeparator: \.isNewline)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
-        guard !shellLines.isEmpty else { throw LocalAlpineAgentError.noCommands }
-        return [LocalAlpineAgentCommand(command: shellLines.joined(separator: "\n"), cwd: nil)]
+        let shell = block.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !shell.isEmpty else { throw LocalAlpineAgentError.noCommands }
+        return [LocalAlpineAgentCommand(command: shell, cwd: nil)]
     }
 
     private func parseCommands(from object: Any) -> [LocalAlpineAgentCommand] {
@@ -213,6 +210,14 @@ actor LocalAlpineAgentService {
             removalRanges.append(contentsOf: tagRegex.matches(in: content, range: fullRange).map(\.range))
         }
 
+        if let incompleteFenceRange = incompleteInstructionFenceRange(in: content) {
+            removalRanges.append(incompleteFenceRange)
+        }
+
+        if let incompleteTagRange = incompleteInstructionTagRange(in: content) {
+            removalRanges.append(incompleteTagRange)
+        }
+
         guard !removalRanges.isEmpty else {
             return content
         }
@@ -227,6 +232,38 @@ actor LocalAlpineAgentService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         return cleaned.isEmpty ? "正在执行本地 Alpine 命令..." : cleaned
+    }
+
+    nonisolated private static func incompleteInstructionFenceRange(in content: String) -> NSRange? {
+        guard let markerRange = content.range(
+            of: "```iexa_alpine",
+            options: [.caseInsensitive, .backwards]
+        ) else {
+            return nil
+        }
+
+        let afterMarker = content[markerRange.upperBound...]
+        guard afterMarker.range(of: "```") == nil else {
+            return nil
+        }
+
+        return NSRange(markerRange.lowerBound..<content.endIndex, in: content)
+    }
+
+    nonisolated private static func incompleteInstructionTagRange(in content: String) -> NSRange? {
+        guard let markerRange = content.range(
+            of: "<iexa_alpine>",
+            options: [.caseInsensitive, .backwards]
+        ) else {
+            return nil
+        }
+
+        let afterMarker = content[markerRange.upperBound...]
+        guard afterMarker.range(of: "</iexa_alpine>", options: .caseInsensitive) == nil else {
+            return nil
+        }
+
+        return NSRange(markerRange.lowerBound..<content.endIndex, in: content)
     }
 }
 

@@ -18,6 +18,10 @@ final class StreamingContentStore {
     /// Updated on every token — NOT read directly by the view during streaming.
     private(set) var streamingContent: String = ""
 
+    /// Optional sanitized content used only by the visible streaming UI.
+    /// The raw stream is preserved for persistence and agent execution.
+    private var presentationContent: String?
+
     /// The content actually shown to the user — drained smoothly from
     /// `streamingContent` by the proportional drain display link.
     /// Views should read THIS property, not `streamingContent`.
@@ -152,6 +156,7 @@ final class StreamingContentStore {
     ) {
         streamingMessageId = messageId
         streamingContent = ""
+        presentationContent = nil
         displayContent = ""
         frozenToolBoundaryOffset = 0
         frozenProseBoundaryOffset = 0
@@ -165,13 +170,26 @@ final class StreamingContentStore {
     }
 
     /// Updates the streaming content (called on each token batch from the server).
-    func updateContent(_ content: String) {
+    func updateContent(_ content: String, displayContent sanitizedDisplayContent: String? = nil) {
         // Ignore late tokens arriving after the server has signalled completion.
         // Socket events are async and can race with endStreaming(); this guard
         // prevents a stale token from growing streamingContent while isFinishing
         // is true, which would create a buffer the drain algorithm never catches up to.
         guard !isFinishing else { return }
         streamingContent = content
+        if let sanitizedDisplayContent, sanitizedDisplayContent != content {
+            presentationContent = sanitizedDisplayContent
+        } else {
+            presentationContent = nil
+        }
+
+        let displaySource = presentationContent ?? streamingContent
+        if !displaySource.hasPrefix(displayContent) {
+            displayContent = displaySource
+            lastKnownTotal = displaySource.count
+            drainAccumulator = 0
+            steadyRate = 0
+        }
     }
 
     /// Best-effort content to persist when the app is about to be suspended.
@@ -285,6 +303,7 @@ final class StreamingContentStore {
     private func completeCleanup() {
         streamingMessageId = nil
         streamingContent = ""
+        presentationContent = nil
         displayContent = ""
         frozenToolBoundaryOffset = 0
         frozenProseBoundaryOffset = 0
@@ -346,7 +365,7 @@ final class StreamingContentStore {
     /// **Finishing mode:** same algorithm, no rate change. Once buffer is
     ///   fully drained, triggers completeCleanup() to stop the display link.
     private func drainTick() {
-        let full = streamingContent
+        let full = presentationContent ?? streamingContent
         let totalCount = full.count
 
         // `displayedCount` is read once here and kept in sync if the VIZ
