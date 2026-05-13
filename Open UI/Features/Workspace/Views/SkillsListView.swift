@@ -157,7 +157,7 @@ struct SkillsListView: View {
         }
         // Document picker for import
         .sheet(isPresented: $showImportPicker) {
-            DocumentPicker(types: [.plainText, .json]) { url in
+            DocumentPicker(types: Self.importDocumentTypes) { url in
                 handleImportedFile(url: url, manager: manager)
             }
         }
@@ -249,6 +249,19 @@ struct SkillsListView: View {
         .onChange(of: manager.error) { _, err in
             if let err { errorMessage = err }
         }
+    }
+
+    private static var importDocumentTypes: [UTType] {
+        var types: [UTType] = []
+        if let markdown = UTType(filenameExtension: "md") {
+            types.append(markdown)
+        }
+        if let markdownLong = UTType(filenameExtension: "markdown") {
+            types.append(markdownLong)
+        }
+        types.append(.plainText)
+        types.append(.json)
+        return types
     }
 
     // MARK: - Search Bar

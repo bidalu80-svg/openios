@@ -1,4 +1,5 @@
 import SwiftUI
+import MarkdownView
 
 // MARK: - Streaming Status View
 
