@@ -92,7 +92,11 @@ struct StreamingStatusView: View {
 
     private var isWebSearchStatus: Bool {
         guard let action = latestStatus?.action?.lowercased() else { return false }
-        return ["web_search", "websearch", "web search"].contains(action)
+        return ["web_search", "websearch", "web search", "local_alpine_web_search"].contains(action)
+    }
+
+    private func isLocalAlpineWebSearch(_ status: ChatStatusUpdate?) -> Bool {
+        status?.action?.lowercased() == "local_alpine_web_search"
     }
 
     private var webSearchCard: some View {
@@ -190,29 +194,31 @@ struct StreamingStatusView: View {
 
     private func webSearchTitle(for status: ChatStatusUpdate?) -> String {
         guard let status else { return "正在联网搜索" }
+        let localAlpine = isLocalAlpineWebSearch(status)
         if status.done == true {
             if let count = status.count, count > 0 {
-                return "已搜索 \(count) 个网页"
+                return localAlpine ? "本地 Alpine 已读取 \(count) 个网页" : "已搜索 \(count) 个网页"
             }
             if !status.items.isEmpty {
-                return "已搜索 \(status.items.count) 个来源"
+                return localAlpine ? "本地 Alpine 已搜索 \(status.items.count) 个来源" : "已搜索 \(status.items.count) 个来源"
             }
-            return status.description ?? "已完成联网搜索"
+            return status.description ?? (localAlpine ? "本地 Alpine 搜索完成" : "已完成联网搜索")
         }
         if let query = status.query, !query.isEmpty {
-            return "正在搜索"
+            return localAlpine ? "本地 Alpine 搜索中" : "正在搜索"
         }
-        return status.description ?? "正在联网搜索"
+        return status.description ?? (localAlpine ? "本地 Alpine 搜索中" : "正在联网搜索")
     }
 
     private func webSearchSubtitle(for status: ChatStatusUpdate?) -> String {
         guard let status else { return "准备搜索" }
+        let localAlpine = isLocalAlpineWebSearch(status)
         if status.done == true {
             let sourceCount = max(status.items.count, status.urls.count)
             if sourceCount > 0 {
-                return "获取了 \(sourceCount) 个来源"
+                return localAlpine ? "本地读取 \(sourceCount) 个来源" : "获取了 \(sourceCount) 个来源"
             }
-            return "搜索完成"
+            return localAlpine ? "本地搜索完成" : "搜索完成"
         }
         if let query = status.query, !query.isEmpty {
             return query
@@ -281,6 +287,8 @@ struct StreamingStatusView: View {
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.55 : 0.8)))
 
+            webSearchFavicon(for: url, title: title, size: 18)
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .scaledFont(size: 12, weight: .semibold)
@@ -308,6 +316,35 @@ struct StreamingStatusView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.45 : 0.72))
         )
+    }
+
+    @ViewBuilder
+    private func webSearchFavicon(for urlString: String?, title: String, size: CGFloat) -> some View {
+        let faviconURL = urlString.flatMap(Self.faviconURL(for:))
+        CachedAsyncImage(url: faviconURL, targetPixelSize: Int(size * UIScreen.main.scale)) { image in
+            image
+                .resizable()
+                .scaledToFill()
+        } placeholder: {
+            Text(String(title.prefix(1)).uppercased())
+                .scaledFont(size: max(8, size * 0.45), weight: .bold)
+                .foregroundStyle(theme.textPrimary)
+                .frame(width: size, height: size)
+                .background(theme.surfaceContainerHighest)
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .overlay(Circle().strokeBorder(theme.cardBorder.opacity(0.45), lineWidth: 0.5))
+    }
+
+    private static func faviconURL(for sourceURL: String) -> URL? {
+        guard let encoded = sourceURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+        var components = URLComponents(string: "https://www.google.com/s2/favicons")
+        components?.queryItems = [
+            URLQueryItem(name: "domain_url", value: encoded),
+            URLQueryItem(name: "sz", value: "64")
+        ]
+        return components?.url
     }
 
     private func hostLabel(from urlString: String) -> String? {
@@ -747,20 +784,21 @@ struct StreamingStatusView: View {
         let isDone = status.done == true
 
         switch action.lowercased() {
-        case "web_search", "websearch", "web search":
+        case "web_search", "websearch", "web search", "local_alpine_web_search":
+            let localAlpine = action.lowercased() == "local_alpine_web_search"
             if isDone {
                 if let count = status.count, count > 0 {
-                    return "已搜索 \(count) 个网页"
+                    return localAlpine ? "本地 Alpine 已读取 \(count) 个网页" : "已搜索 \(count) 个网页"
                 }
-                return desc ?? "已完成联网搜索"
+                return desc ?? (localAlpine ? "本地 Alpine 搜索完成" : "已完成联网搜索")
             }
             if let query = status.query, !query.isEmpty {
-                return "正在搜索：\(query)"
+                return localAlpine ? "本地 Alpine 搜索：\(query)" : "正在搜索：\(query)"
             }
             if !status.queries.isEmpty {
-                return "正在搜索"
+                return localAlpine ? "本地 Alpine 搜索中" : "正在搜索"
             }
-            return desc ?? "正在联网搜索"
+            return desc ?? (localAlpine ? "本地 Alpine 搜索中" : "正在联网搜索")
 
         case "generate_image", "image_generation", "generateimage":
             if isDone { return desc ?? "Image generated" }

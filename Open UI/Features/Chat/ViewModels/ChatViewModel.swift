@@ -1239,7 +1239,7 @@ final class ChatViewModel {
             }
             if localAlpineOutputHasPythonSyntaxIssue(content + "\n" + (rawResult ?? "")) {
                 lines.append("  required next action:")
-                lines.append(indentForSystemContext("Python syntax/indentation error detected. Inspect the file with line numbers or rewrite it using write_files with content_lines/content_base64, then run python3 -m py_compile. Do not repeat only the same failed command."))
+                lines.append(indentForSystemContext("Python syntax/indentation error detected. Inspect the file with line numbers, patch the smallest broken block when practical, then run python3 -m py_compile. Whole-file write_files rewrite is only a fallback. Do not repeat only the same failed command."))
             }
             return lines.joined(separator: "\n")
         }
@@ -1255,7 +1255,7 @@ final class ChatViewModel {
         - If result output is present, answer from that output as the source of truth.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
-        - If the latest result contains Python IndentationError or SyntaxError, the next action must inspect the file with line numbers or rewrite it using `write_files` with `content_lines` or `content_base64`, then run `python3 -m py_compile`. Never repeat only the same `py_compile` or run command.
+        - If the latest result contains Python IndentationError or SyntaxError, the next action must inspect the file with line numbers, patch the smallest bad block when practical, then run `python3 -m py_compile`. Only rewrite the whole file when the file is tiny or too corrupted for a local patch. Never repeat only the same `py_compile` or run command.
         [/Local Alpine execution state]
         """
     }
@@ -6958,7 +6958,10 @@ final class ChatViewModel {
             request.terminalId = terminalServer.id
         }
 
-        // Background tasks — respect both server config and user settings
+        // Background tasks — respect both server config and user settings.
+        // Web search is handled on-device by ClientWebSearchService/Local Alpine.
+        // Do not ask the server to run its older web_search task; it produces stale
+        // results and can race the local search context.
         let serverConfig = activeChatStore?.serverTaskConfig ?? .default
         let titleGenEnabled = (UserDefaults.standard.object(forKey: "titleGenerationEnabled") as? Bool ?? true)
             && serverConfig.enableTitleGeneration
@@ -6971,7 +6974,6 @@ final class ChatViewModel {
         if suggestionsEnabled { bgTasks["follow_up_generation"] = true }
         if isFirst && titleGenEnabled { bgTasks["title_generation"] = true }
         if isFirst && tagsEnabled { bgTasks["tags_generation"] = true }
-        if webSearchEnabled { bgTasks["web_search"] = true }
         if !bgTasks.isEmpty { request.backgroundTasks = bgTasks }
     }
 
@@ -6999,9 +7001,9 @@ final class ChatViewModel {
         // the request, the toggle reflects either the server default OR the user's
         // explicit override. Checking server defaults again here would ignore the
         // user toggling a feature OFF mid-chat (the original bug).
-        if webSearchEnabled {
-            features.webSearch = true
-        }
+        // Keep server-side web_search disabled. The UI toggle now means
+        // "inject client-side Local Alpine search context before sending".
+        features.webSearch = false
         if shouldEnableImageGeneration {
             features.imageGeneration = true
         }
@@ -7632,7 +7634,8 @@ final class ChatViewModel {
         - For other languages, include the folder tree, entry file, dependency/config files, and imports so the project can run as a coherent whole instead of unrelated snippets.
         - If the user only asks to "show", "preview", "write a page", or wants a single-file demo, return normal code blocks with an inline preview-friendly HTML file. Do not create workspace operations unless the user explicitly asks to save/create/modify/read/search/list/delete local files or folders.
 
-        Iexa has a local workspace agent. When the user asks you to create, modify, read, search, list, or delete local project files, include exactly one fenced block with language `iexa_workspace` containing JSON. Paths are relative to the app's Documents/Iexa Workspace folder and must never be absolute or use `..`.
+        Iexa has a local workspace agent. Use it only when the user explicitly asks for the app's Documents/Iexa Workspace. If Local Alpine terminal mode is enabled, do not use `iexa_workspace`; local project files are in `/mnt/iexa` and must be operated with `iexa_alpine`.
+        When the user asks you to create, modify, read, search, list, or delete local project files in Documents/Iexa Workspace, include exactly one fenced block with language `iexa_workspace` containing JSON. Paths are relative to the app's Documents/Iexa Workspace folder and must never be absolute or use `..`.
         Do not claim that a local file operation has been completed unless you emit the `iexa_workspace` block for the app to execute. The app will append the real execution result; treat that appended result as the source of truth.
         Supported operations:
         ```iexa_workspace
@@ -7674,15 +7677,17 @@ final class ChatViewModel {
         - The execution is non-interactive. Do not rely on prompts, REPLs, `input()`, `read`, `scanf`, `cin`, `npm init` prompts, editors waiting for input, or long-running servers that never exit.
 
         Operational rules:
+        - Local Alpine terminal mode owns local project operations. If the user asks to list/read/search/create/modify/delete project files, inspect a directory, run a script, or "read the mnt directory", use `/mnt/iexa` via `iexa_alpine`; do not use the Documents/Iexa Workspace tool.
         - If the user asks you to run, execute, test, verify, inspect the environment, install packages, write a runnable script/project, crawl a website, or diagnose command output, use `iexa_alpine`.
         - Do not merely explain commands when the user wants action. Emit the block so the app executes it.
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
         - For scripts/projects, use `write_files` inside `iexa_alpine` to create files, then run a bounded verification command. Do not use `cat > file <<EOF` for Python/JS/HTML/CSS bodies.
+        - When fixing an existing file, do not rewrite the whole file by default. First inspect the exact lines (`nl -ba file.py | sed -n 'start,endp'`), then apply the smallest edit with a short Python/perl/sed patch or a purpose-built patch script. Use whole-file `write_files` only when the file is tiny or badly corrupted.
         - For indentation-sensitive files, prefer `content_lines` (array of exact lines) or `content_base64` instead of heredoc shell text. This preserves leading spaces exactly.
         - Use heredoc only for tiny one-off shell snippets. Never put long Python class/function bodies in heredoc if `write_files` can be used.
-        - After writing Python, run `python3 -m py_compile file.py` before running it. If syntax or indentation fails, rewrite the file and verify again before summarizing.
+        - After writing Python, run `python3 -m py_compile file.py` before running it. If syntax or indentation fails, locate the exact bad block, patch only that block when practical, then verify again before summarizing.
         - If the user wants to test Python `input()` / shell `read` with their own text, do not invent sample stdin and do not pipe a fixed `printf` value. Leave the input/read command unpiped; the app will pause, ask the user for stdin, feed that exact text to the program, and append the real output.
         - For unattended tests where the user did not ask to type input themselves, avoid interactive prompts by using constants, command-line args, environment variables, or an explicit `printf 'value\n' | python3 script.py`.
         - For Node/Python dependency installs, use bounded commands and print versions/errors. Avoid background daemons unless the user explicitly asks.
@@ -7813,7 +7818,7 @@ final class ChatViewModel {
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
-                    action: "web_search",
+                    action: "local_alpine_web_search",
                     description: "已获取当前时间",
                     done: true,
                     count: 0,
@@ -7829,7 +7834,7 @@ final class ChatViewModel {
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
-                    action: "web_search",
+                    action: "local_alpine_web_search",
                     description: "本地 Alpine 搜索已可用",
                     done: true,
                     count: 0,
@@ -7843,7 +7848,7 @@ final class ChatViewModel {
         appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
-                    action: "web_search",
+                    action: "local_alpine_web_search",
                     description: "正在用本地 Alpine 搜索...",
                     done: false,
                     query: query,
@@ -7865,7 +7870,7 @@ final class ChatViewModel {
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
-                    action: "web_search",
+                    action: "local_alpine_web_search",
                     description: "正在用本地 Alpine 搜索...",
                     done: false,
                     query: query,
@@ -7884,7 +7889,7 @@ final class ChatViewModel {
                 appendStatusUpdate(
                     id: assistantMessageId,
                     status: ChatStatusUpdate(
-                        action: "web_search",
+                        action: "local_alpine_web_search",
                         description: "联网搜索没有返回结果，已按原问题发送",
                         done: true,
                         count: 0,
@@ -7911,7 +7916,7 @@ final class ChatViewModel {
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
-                    action: "web_search",
+                    action: "local_alpine_web_search",
                     description: result.loadedCount > 0
                         ? "本地 Alpine 已读取 \(result.loadedCount) 个网页"
                         : "本地 Alpine 已搜索 \(max(sources.count, result.items.count)) 个来源",
@@ -7930,7 +7935,7 @@ final class ChatViewModel {
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
-                    action: "web_search",
+                    action: "local_alpine_web_search",
                     description: "本地 Alpine 搜索失败，已按原问题发送",
                     done: true,
                     count: 0,
@@ -8007,7 +8012,7 @@ final class ChatViewModel {
         appendStatusUpdate(
             id: assistantMessageId,
             status: ChatStatusUpdate(
-                action: "web_search",
+                action: "local_alpine_web_search",
                 description: "搜索结果偏少或可能过旧，正在补充搜索...",
                 done: false,
                 query: query,
@@ -9016,7 +9021,7 @@ final class ChatViewModel {
                 command: command.command,
                 cwd: command.cwd,
                 exitCode: nil,
-                outputPreview: "Unsafe Python file write blocked: heredoc/cat/tee can corrupt indentation in this UI. Rewrite using iexa_alpine write_files with content_lines or content_base64, then run python3 -m py_compile."
+                outputPreview: "Unsafe Python file write blocked: heredoc/cat/tee can corrupt indentation in this UI. Use iexa_alpine write_files with content_lines/content_base64 for new files, or inspect line numbers and patch the smallest broken block for existing files, then run python3 -m py_compile."
             )
         }
         if command.hasWriteFiles {
@@ -9068,17 +9073,17 @@ final class ChatViewModel {
 
         Python syntax/indentation guard
         已检测到 Python 缩进/语法错误。下一步禁止只重复 `py_compile` 或直接运行脚本。
-        必须先执行定位或重写：
+        必须先执行定位和局部修复：
         1. 读取带行号文件：`\(Self.localAlpineInspectCommand(forPythonFile: pythonFile))`
-        2. 或用 `write_files` 完整重写该 `.py` 文件，优先使用 `content_lines` 或 `content_base64`，不要用 heredoc。
-        3. 重写后再运行：`python3 -m py_compile <file>`。
+        2. 找到具体坏行后，优先用最小 patch 修那一段；只有文件很小或结构已坏透时才用 `write_files` 重写完整文件。
+        3. 修复后再运行：`python3 -m py_compile <file>`。
         """
         } else if failure.outputPreview.lowercased().contains("unsafe python file write blocked") {
             pythonRepairInstruction = """
 
         Python file write guard
         App 已拦截 `cat/tee/heredoc` 写入 Python 文件，因为这种写法在聊天 UI 中容易破坏缩进。
-        下一步必须改用 `iexa_alpine` JSON 的 `write_files`，并使用 `content_lines` 或 `content_base64` 写入完整文件，再执行 `python3 -m py_compile`。
+        下一步新建文件必须改用 `iexa_alpine` JSON 的 `write_files`，并使用 `content_lines` 或 `content_base64`；修复已有文件时先行号定位并最小 patch，再执行 `python3 -m py_compile`。
         """
         } else {
             pythonRepairInstruction = ""
@@ -9175,6 +9180,9 @@ final class ChatViewModel {
     }
 
     private func shouldExecuteLocalWorkspaceAgentForCurrentRequest() -> Bool {
+        if terminalEnabled, selectedTerminalIsLocalAlpine {
+            return false
+        }
         guard let userText = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalWorkspaceAgentResult($0)
         })?.content.lowercased() else { return false }
@@ -9439,8 +9447,7 @@ final class ChatViewModel {
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
         localAlpineNoCommandContinuationRetries = 0
-        let shouldContinueAfterResult = content.localizedCaseInsensitiveContains("iexa_alpine")
-            || Self.localAlpineResultNeedsFollowUp(result.summary)
+        let shouldContinueAfterResult = Self.localAlpineResultNeedsFollowUp(result.summary)
         if repeatedLocalAlpineErrorShouldStop(after: result, parentId: resultMessageId) {
             localAlpineAgentStopRequested = true
         } else if result.interactiveRequest == nil, shouldContinueAfterResult, !localAlpineAgentStopRequested {
@@ -9906,8 +9913,8 @@ final class ChatViewModel {
         - If the same error signature repeats twice after a fix, stop and summarize the blocker instead of looping.
         - If the user interrupts with a question or taps stop, answer the question and wait. Do not resume automatic execution until the user explicitly asks to continue/fix/run.
         Strategy Switch:
-        - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, rewrite file with `write_files`, then verification.
-        - For Python indentation/syntax errors, first inspect the file with `nl -ba <file> | sed -n '1,160p'` or rewrite the file using `write_files`, then run `python3 -m py_compile <file>` before running the script.
+        - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, patch the smallest broken block, then verification.
+        - For Python indentation/syntax errors, first inspect the file with `nl -ba <file> | sed -n '1,160p'`, identify the exact broken line/block, patch only that section when practical, then run `python3 -m py_compile <file>` before running the script. Whole-file rewrite is a fallback, not the default.
         - For indentation-sensitive rewrites, use `content_lines` or `content_base64`; do not use heredoc for Python class/function bodies.
         - If a Python heredoc/cat write is blocked, immediately switch to `write_files` with `content_lines` or `content_base64`.
         [/Local Alpine continuation]
