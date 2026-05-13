@@ -67,7 +67,7 @@ $deadline = $startedAt.AddSeconds($RunLookupSeconds)
 $run = $null
 do {
     Start-Sleep -Seconds 3
-    $runsJson = Invoke-Gh run list --workflow $Workflow --branch $Branch --json databaseId,headSha,status,conclusion,url,createdAt,event -L 20
+    $runsJson = Invoke-Gh run list --workflow $Workflow --branch $Branch --json "databaseId,headSha,status,conclusion,url,createdAt,event" -L 20
     $runs = $runsJson | ConvertFrom-Json
     $run = $runs |
         Where-Object { $_.headSha -eq $head -and $_.event -eq "workflow_dispatch" } |
@@ -94,7 +94,7 @@ if (-not $NoWatch) {
     }
 }
 
-$viewJson = Invoke-Gh run view $run.databaseId --json headSha,conclusion,url
+$viewJson = Invoke-Gh run view $run.databaseId --json "headSha,conclusion,url"
 $view = $viewJson | ConvertFrom-Json
 if ($view.headSha -ne $head) {
     throw "Final workflow headSha mismatch: $($view.headSha), expected $head."

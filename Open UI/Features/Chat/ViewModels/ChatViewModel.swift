@@ -33,6 +33,7 @@ private struct LocalAlpineAgentCommandFailure {
 private struct ParsedLocalAlpineCommand {
     let command: String
     let cwd: String
+    let hasWriteFiles: Bool
 }
 
 /// Manages state and logic for a single chat conversation.
@@ -1373,7 +1374,7 @@ final class ChatViewModel {
 
             let shell = block.trimmingCharacters(in: .whitespacesAndNewlines)
             if !shell.isEmpty {
-                return ParsedLocalAlpineCommand(command: shell, cwd: "/mnt/iexa")
+                return ParsedLocalAlpineCommand(command: shell, cwd: "/mnt/iexa", hasWriteFiles: false)
             }
         }
         return nil
@@ -1415,7 +1416,7 @@ final class ChatViewModel {
 
         if let command = object as? String {
             let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : ParsedLocalAlpineCommand(command: trimmed, cwd: "/mnt/iexa")
+            return trimmed.isEmpty ? nil : ParsedLocalAlpineCommand(command: trimmed, cwd: "/mnt/iexa", hasWriteFiles: false)
         }
 
         guard let dict = object as? [String: Any] else { return nil }
@@ -1429,10 +1430,31 @@ final class ChatViewModel {
             return nil
         }
         let cwd = (dict["cwd"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasWriteFiles = Self.hasLocalAlpineWriteFiles(dict["write_files"] ?? dict["files"])
         return ParsedLocalAlpineCommand(
             command: command.trimmingCharacters(in: .whitespacesAndNewlines),
-            cwd: cwd?.isEmpty == false ? cwd! : "/mnt/iexa"
+            cwd: cwd?.isEmpty == false ? cwd! : "/mnt/iexa",
+            hasWriteFiles: hasWriteFiles
         )
+    }
+
+    private static func hasLocalAlpineWriteFiles(_ object: Any?) -> Bool {
+        guard let object else { return false }
+        if let array = object as? [Any] {
+            return array.contains { hasLocalAlpineWriteFiles($0) }
+        }
+        guard let dict = object as? [String: Any] else { return false }
+        let hasPath = ((dict["path"] as? String)
+            ?? (dict["file"] as? String)
+            ?? (dict["name"] as? String))?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        let hasContent = dict["content"] != nil
+            || dict["text"] != nil
+            || dict["body"] != nil
+            || dict["content_lines"] != nil
+            || dict["lines"] != nil
+            || dict["content_base64"] != nil
+            || dict["base64"] != nil
+        return hasPath && hasContent
     }
 
     private static func localAlpineCommandKey(command: String, cwd: String) -> String {
@@ -8856,6 +8878,9 @@ final class ChatViewModel {
 
     private func repeatedLocalAlpineFailure(for content: String) -> LocalAlpineAgentCommandFailure? {
         guard let command = Self.firstLocalAlpineCommand(in: content) else { return nil }
+        if command.hasWriteFiles {
+            return nil
+        }
         let key = Self.localAlpineCommandKey(command: command.command, cwd: command.cwd)
         guard let failure = localAlpineFailedCommands[key] else { return nil }
         let count = (localAlpineBlockedRepeatCommands[key] ?? 0) + 1
