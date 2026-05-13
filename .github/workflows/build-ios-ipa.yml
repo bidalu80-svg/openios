@@ -27,6 +27,7 @@ jobs:
       IOS_WIDGET_BUNDLE_ID: ${{ secrets.IOS_WIDGET_BUNDLE_ID }}
       IOS_EXPORT_METHOD: ${{ secrets.IOS_EXPORT_METHOD }}
       KEYCHAIN_NAME: build.keychain
+      FORCE_UNSIGNED_IPA: true
 
     steps:
       - name: Checkout repository
@@ -163,6 +164,7 @@ jobs:
           widget_profile = os.environ.get('IOS_WIDGET_PROVISIONING_PROFILE_SPECIFIER', '')
           has_signing = os.environ.get('HAS_SIGNING_SECRETS') == 'true'
           has_widget_signing = os.environ.get('HAS_WIDGET_SIGNING') == 'true'
+          force_unsigned = os.environ.get('FORCE_UNSIGNED_IPA') == 'true'
 
           p = Path('Open UI.xcodeproj/project.pbxproj')
           s = p.read_text()
@@ -188,7 +190,7 @@ jobs:
           s = s.replace('PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.OpenUIWidget;', f'PRODUCT_BUNDLE_IDENTIFIER = {widget_bundle_id};')
           s = s.replace('PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui;', f'PRODUCT_BUNDLE_IDENTIFIER = {app_bundle_id};')
 
-          if has_signing:
+          if has_signing and not force_unsigned:
               # Scope manual signing to the app target build settings instead of
               # passing PROVISIONING_PROFILE_SPECIFIER to xcodebuild globally; global
               # overrides also hit Swift package targets and make archive fail.
@@ -305,8 +307,9 @@ jobs:
 
       - name: Archive app
         id: archive_signed
-        if: env.HAS_SIGNING_SECRETS == 'true'
+        if: env.FORCE_UNSIGNED_IPA != 'true' && env.HAS_SIGNING_SECRETS == 'true'
         continue-on-error: true
+        timeout-minutes: 25
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
           xcodebuild \
@@ -327,7 +330,7 @@ jobs:
           echo "archive_ok=true" >> "$GITHUB_OUTPUT"
 
       - name: Export IPA
-        if: env.HAS_SIGNING_SECRETS == 'true' && steps.archive_signed.outputs.archive_ok == 'true'
+        if: env.FORCE_UNSIGNED_IPA != 'true' && env.HAS_SIGNING_SECRETS == 'true' && steps.archive_signed.outputs.archive_ok == 'true'
         run: |
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
@@ -335,7 +338,7 @@ jobs:
             -exportPath "$RUNNER_TEMP/exported"
 
       - name: Build unsigned fallback app
-        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outputs.archive_ok != 'true'
+        if: env.FORCE_UNSIGNED_IPA == 'true' || env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outputs.archive_ok != 'true'
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
           mkdir -p "$RUNNER_TEMP/exported" "$RUNNER_TEMP/unsigned-build-app" "$RUNNER_TEMP/unsigned-ipa/Payload"
@@ -373,7 +376,7 @@ jobs:
           /usr/bin/zip -qry "$RUNNER_TEMP/exported/Iexa-unsigned.ipa" Payload
 
       - name: Mark fallback artifact
-        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outputs.archive_ok != 'true'
+        if: env.FORCE_UNSIGNED_IPA == 'true' || env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outputs.archive_ok != 'true'
         run: |
           echo "Built unsigned IPA fallback because signing assets were unavailable or invalid." > "$RUNNER_TEMP/exported/README.txt"
 
