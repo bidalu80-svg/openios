@@ -121,6 +121,19 @@ actor LocalAlpineAgentService {
                                 result: diagnostic.result
                             ))
                         }
+                        let repairs = await pythonSyntaxAutoRepair(
+                            command: syntaxCheck.command,
+                            output: syntaxCheck.result.output,
+                            cwd: effectiveCWD
+                        )
+                        for repair in repairs {
+                            stepLines.append(format(command: repair.command, cwd: effectiveCWD, result: repair.result))
+                            commandResults.append(Self.commandResult(
+                                command: repair.command,
+                                cwd: effectiveCWD,
+                                result: repair.result
+                            ))
+                        }
                         shouldRunShellCommand = false
                     }
                 }
@@ -149,6 +162,19 @@ actor LocalAlpineAgentService {
                                     command: diagnostic.command,
                                     cwd: effectiveCWD,
                                     result: diagnostic.result
+                                ))
+                            }
+                            let repairs = await pythonSyntaxAutoRepair(
+                                command: syntaxCheck.command,
+                                output: syntaxCheck.result.output,
+                                cwd: effectiveCWD
+                            )
+                            for repair in repairs {
+                                stepLines.append(format(command: repair.command, cwd: effectiveCWD, result: repair.result))
+                                commandResults.append(Self.commandResult(
+                                    command: repair.command,
+                                    cwd: effectiveCWD,
+                                    result: repair.result
                                 ))
                             }
                             commandToExecute = ""
@@ -230,6 +256,19 @@ actor LocalAlpineAgentService {
                         command: diagnostic.command,
                         cwd: effectiveCWD,
                         result: diagnostic.result
+                    ))
+                }
+                let repairs = await pythonSyntaxAutoRepair(
+                    command: commandToExecute,
+                    output: result.output,
+                    cwd: effectiveCWD
+                )
+                for repair in repairs {
+                    stepLines.append(format(command: repair.command, cwd: effectiveCWD, result: repair.result))
+                    commandResults.append(Self.commandResult(
+                        command: repair.command,
+                        cwd: effectiveCWD,
+                        result: repair.result
                     ))
                 }
             }
@@ -583,6 +622,129 @@ actor LocalAlpineAgentService {
         return (command, result)
     }
 
+    private func pythonSyntaxAutoRepair(
+        command: String,
+        output: String,
+        cwd: String
+    ) async -> [(command: String, result: LocalAlpineCommandResult)] {
+        guard Self.outputHasPythonSyntaxIssue(output),
+              let issueFile = Self.pythonFilePath(command: command, output: output, cwd: cwd) else {
+            return []
+        }
+
+        let sharedPath = resolvedFilePath(issueFile, cwd: cwd)
+        let runtimeFile = runtimePathForIssueFile(issueFile, sharedPath: sharedPath)
+
+        do {
+            let originalData = try await LocalAlpineTerminalService.shared.readFile(path: issueFile)
+            guard let original = String(data: originalData, encoding: .utf8),
+                  let repaired = Self.repairFlattenedPythonIndentation(original, force: true),
+                  repaired != original,
+                  let repairedData = repaired.data(using: .utf8) else {
+                return []
+            }
+
+            let split = splitFilePath(sharedPath)
+            try await LocalAlpineTerminalService.shared.writeFile(
+                data: repairedData,
+                fileName: split.fileName,
+                destinationPath: split.directory
+            )
+
+            var results: [(command: String, result: LocalAlpineCommandResult)] = []
+            let note = LocalAlpineCommandResult(
+                command: "iexa_auto_python_repair \(shellSingleQuoted(runtimeFile))",
+                output: """
+                已根据 SyntaxError/IndentationError 自动修复疑似被压平的 Python 缩进。
+                文件：\(runtimeFile)
+                下一步自动运行 py_compile 验证；如果验证失败，会恢复原文件。
+                """,
+                exitCode: 0,
+                interactiveRequest: nil
+            )
+            results.append((note.command, note))
+
+            let compileCommand = "python3 -m py_compile \(shellSingleQuoted(runtimeFile))"
+            let compile = await LocalAlpineTerminalService.shared.execute(command: compileCommand, cwd: cwd)
+            if compile.exitCode != 0 {
+                try? await LocalAlpineTerminalService.shared.writeFile(
+                    data: originalData,
+                    fileName: split.fileName,
+                    destinationPath: split.directory
+                )
+                let restored = LocalAlpineCommandResult(
+                    command: compileCommand,
+                    output: """
+                    \(compile.output)
+
+                    自动缩进修复未通过 py_compile，已恢复原文件，避免把错误内容越修越乱。
+                    """,
+                    exitCode: compile.exitCode,
+                    interactiveRequest: nil
+                )
+                results.append((compileCommand, restored))
+                return results
+            }
+
+            let verified = LocalAlpineCommandResult(
+                command: compileCommand,
+                output: compile.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "IEXA_AUTO_REPAIR_PY_COMPILE_SUCCESS"
+                    : compile.output + "\nIEXA_AUTO_REPAIR_PY_COMPILE_SUCCESS",
+                exitCode: compile.exitCode,
+                interactiveRequest: compile.interactiveRequest
+            )
+            results.append((compileCommand, verified))
+
+            if let verificationCommand = postRepairVerificationCommand(originalCommand: command, runtimeFile: runtimeFile) {
+                let verification = await LocalAlpineTerminalService.shared.execute(command: verificationCommand, cwd: cwd)
+                let output = verification.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? (verification.exitCode == 0 ? "IEXA_AUTO_REPAIR_VERIFIED_SUCCESS" : "")
+                    : verification.output + (verification.exitCode == 0 ? "\nIEXA_AUTO_REPAIR_VERIFIED_SUCCESS" : "")
+                let wrapped = LocalAlpineCommandResult(
+                    command: verificationCommand,
+                    output: output,
+                    exitCode: verification.exitCode,
+                    interactiveRequest: verification.interactiveRequest
+                )
+                results.append((verificationCommand, wrapped))
+            }
+
+            return results
+        } catch {
+            return []
+        }
+    }
+
+    private func runtimePathForIssueFile(_ issueFile: String, sharedPath: String) -> String {
+        let normalized = issueFile.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        if normalized == "/mnt/iexa" || normalized.hasPrefix("/mnt/iexa/") {
+            return normalized
+        }
+        return runtimePath(forSharedPath: sharedPath)
+    }
+
+    private func postRepairVerificationCommand(originalCommand: String, runtimeFile: String) -> String? {
+        let normalized = originalCommand
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if normalized.contains("&&") || normalized.contains(";") {
+            return originalCommand
+        }
+
+        if normalized.contains("-m py_compile") {
+            return "python3 \(shellSingleQuoted(runtimeFile))"
+        }
+
+        if normalized.contains("python") && normalized.contains(".py") {
+            return originalCommand
+        }
+
+        return nil
+    }
+
     private func format(command: String, cwd: String, result: LocalAlpineCommandResult) -> String {
         let output = truncated(result.output)
         let renderedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -732,8 +894,8 @@ actor LocalAlpineAgentService {
         return starters.contains { lowered.hasPrefix($0) }
     }
 
-    private nonisolated static func repairFlattenedPythonIndentation(_ content: String) -> String? {
-        guard pythonIndentationPreflightWarning(for: content) != nil else { return nil }
+    private nonisolated static func repairFlattenedPythonIndentation(_ content: String, force: Bool = false) -> String? {
+        guard force || pythonIndentationPreflightWarning(for: content) != nil else { return nil }
         let rawLines = content.components(separatedBy: .newlines)
         let significantIndents = rawLines.compactMap { line -> Int? in
             let text = line.trimmingCharacters(in: .whitespaces)

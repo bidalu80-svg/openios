@@ -11,11 +11,13 @@ struct WebLinkContextResolution: Sendable {
     }
 }
 
-struct ResolvedWebVideo: Sendable, Hashable {
+struct ResolvedWebVideo: Sendable, Hashable, Identifiable {
     let title: String
     let url: String
     let sourceURL: String
     let videoId: String?
+
+    var id: String { url }
 }
 
 struct WebLinkContextResolver: Sendable {
@@ -52,6 +54,10 @@ struct WebLinkContextResolver: Sendable {
 
     static func containsHTTPURL(_ text: String) -> Bool {
         !extractHTTPURLs(from: text, limit: 1).isEmpty
+    }
+
+    func resolveDouyinVideo(_ url: URL) async throws -> ResolvedWebVideo {
+        try await resolveDouyin(url).video
     }
 
     func resolve(from text: String, limit: Int = 3) async -> WebLinkContextResolution {
@@ -247,7 +253,7 @@ struct WebLinkContextResolver: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    private static func isDouyinURL(_ url: URL) -> Bool {
+    static func isDouyinURL(_ url: URL) -> Bool {
         guard let host = url.host?.lowercased() else { return false }
         return host.contains("douyin.com")
             || host.contains("iesdouyin.com")

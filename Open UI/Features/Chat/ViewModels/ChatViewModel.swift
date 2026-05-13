@@ -280,7 +280,7 @@ final class ChatViewModel {
     private var localAlpineFailureSignatures: [String: Int] = [:]
     private var localAlpineBlockedRepeatCommands: [String: Int] = [:]
     private let localAlpineAgentMaxSteps = 10
-    private let localAlpineContinuationMaxNoCommandRetries = 3
+    private let localAlpineContinuationMaxNoCommandRetries = 1
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     @ObservationIgnored private var localAlpineInputContinuation: CheckedContinuation<String?, Never>?
@@ -9205,6 +9205,10 @@ final class ChatViewModel {
     }
 
     private func repeatedLocalAlpineErrorShouldStop(after result: LocalAlpineAgentResult, parentId: String) -> Bool {
+        let loweredSummary = result.summary.lowercased()
+        if loweredSummary.contains("iexa_auto_repair_verified_success") {
+            return false
+        }
         guard let repeated = result.commandResults
             .filter(\.failed)
             .first(where: { (localAlpineFailureSignatures[Self.localAlpineFailureSignature($0)] ?? 0) >= 3 }) else {
@@ -10017,6 +10021,9 @@ final class ChatViewModel {
 
     private static func localAlpineResultNeedsFollowUp(_ text: String) -> Bool {
         let normalized = text.lowercased()
+        if normalized.contains("iexa_auto_repair_verified_success") {
+            return false
+        }
         let markers = [
             "退出码：`1`", "退出码：`2`", "退出码：`126`", "退出码：`127`", "退出码：`124`",
             "not found", "error", "failed", "missing", "no such file", "traceback", "exception",
