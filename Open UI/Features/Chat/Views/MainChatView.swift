@@ -278,12 +278,6 @@ struct MainChatView: View {
                             .accessibilityLabel("Menu")
                         }
 
-                        ToolbarItem(placement: .principal) {
-                            if activeChannelId == nil {
-                                modelSelector
-                            }
-                        }
-
                         ToolbarItem(placement: .topBarTrailing) {
                             if activeChannelId == nil {
                                 Button {
