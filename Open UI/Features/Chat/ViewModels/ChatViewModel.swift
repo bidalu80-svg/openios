@@ -8885,7 +8885,7 @@ final class ChatViewModel {
         guard let failure = localAlpineFailedCommands[key] else { return nil }
         let count = (localAlpineBlockedRepeatCommands[key] ?? 0) + 1
         localAlpineBlockedRepeatCommands[key] = count
-        if count >= 2 {
+        if count >= 3 {
             localAlpineAgentStopRequested = true
         }
         return failure
@@ -8919,7 +8919,7 @@ final class ChatViewModel {
         let repeatCount = localAlpineBlockedRepeatCommands[
             Self.localAlpineCommandKey(command: failure.command, cwd: failure.cwd)
         ] ?? 1
-        let shouldStop = repeatCount >= 2
+        let shouldStop = repeatCount >= 3
         let content = """
         Local Alpine 执行结果
 
@@ -8941,7 +8941,7 @@ final class ChatViewModel {
         ```
 
         Agent guard
-        \(shouldStop ? "模型连续重复同一条失败命令，我已停止本轮自动执行。请换一个定位路径或让用户补充线索。" : "下一轮必须先根据上次错误改用不同诊断/修复命令，禁止再次重复同一条命令。")
+        \(shouldStop ? "模型连续重复同一条失败命令，我已停止本轮自动执行。请总结已尝试的路径、最后错误和需要用户补充的线索。" : "Stuck Detection: 同一条失败命令已被拦截。下一轮必须 Strategy Switch：换文件检查、依赖检查、最小复现、语法检查或联网查资料，禁止再次重复同一条命令。")
         """
         return appendLocalAlpineSystemResult(parentId: parentId, content: content)
     }
@@ -9689,12 +9689,23 @@ final class ChatViewModel {
         let instruction = """
         [Local Alpine continuation]
         You are in a continuous Local Alpine agent loop. Read the latest real Local Alpine result above.
-        - If the user's task is complete, answer normally and do not emit `iexa_alpine`. Include a concise Codex-style summary: what you did, what command/output verified it, and any remaining caveat.
-        - If more work is needed, emit exactly one next `iexa_alpine` block with bounded non-interactive command(s).
+        Loop Runtime:
+        - Continue until the task is verified complete, blocked by missing external information, or the user stops it. Do not stop after a single command if the output shows an error or incomplete state.
+        - If the user's task is complete, answer normally and do not emit `iexa_alpine`. Include a concise Codex-style summary: what you did, what command/output verified it, files changed/created, and any remaining caveat.
+        Tool System:
+        - Use exactly one next tool action per assistant turn. For local shell/files, emit one `iexa_alpine` block. For current web facts, rely on the web-search context already injected by the app; if more current info is needed, ask for/perform a more precise search before guessing.
+        Browser:
+        - If a website/API check is needed, use `curl -I`, `curl -L`, `curl -w`, or a short Python `urllib` fetch. Never execute a bare domain as a shell command.
+        Retry:
         - If the last command failed, inspect the exit code/output first, then emit a different bounded diagnostic or fix command before rerunning verification.
+        - Retry only after changing something meaningful: edited file, installed missing dependency, changed cwd, changed command arguments, or gathered new diagnostics.
+        Stuck Detection:
+        - Never repeat the exact same failed command. If the app says a repeat was blocked, switch strategy immediately.
+        - If the same error signature repeats twice after a fix, stop and summarize the blocker instead of looping.
+        Strategy Switch:
+        - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, rewrite file with `write_files`, then verification.
         - For Python indentation/syntax errors, rewrite the file using `write_files`, then run `python3 -m py_compile <file>` before running the script.
         - For indentation-sensitive rewrites, use `content_lines` or `content_base64`; do not use heredoc for Python class/function bodies.
-        - Never repeat the exact same failed command. If the same error repeats, stop and summarize the blocker.
         [/Local Alpine continuation]
         """
         if !messages.isEmpty, messages[0]["role"] as? String == "system" {
