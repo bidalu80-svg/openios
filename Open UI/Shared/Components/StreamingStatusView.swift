@@ -116,6 +116,7 @@ struct StreamingStatusView: View {
         let subtitle = webSearchSubtitle(for: latest)
         let queries = webSearchQueries(for: latest)
         let items = webSearchItems(for: latest)
+        let visibleSourceCount = max(items.count, latest?.urls.count ?? 0)
 
         return VStack(alignment: .leading, spacing: 10) {
             Button {
@@ -140,16 +141,22 @@ struct StreamingStatusView: View {
                         }
                     }
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
-                            .scaledFont(size: 13, weight: .semibold)
-                            .foregroundStyle(theme.textSecondary)
-                            .lineLimit(1)
+                    HStack(spacing: 9) {
+                        webSearchSourceCluster(items)
 
-                        Text(subtitle)
-                            .scaledFont(size: 12, weight: .medium)
-                            .foregroundStyle(theme.textTertiary)
-                            .lineLimit(1)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(sourceLabel(count: visibleSourceCount, fallback: title))
+                                .scaledFont(size: 14, weight: .semibold)
+                                .foregroundStyle(theme.textSecondary)
+                                .lineLimit(1)
+
+                            if !isDone {
+                                Text(subtitle)
+                                    .scaledFont(size: 12, weight: .medium)
+                                    .foregroundStyle(theme.textTertiary)
+                                    .lineLimit(1)
+                            }
+                        }
                     }
 
                     Spacer(minLength: 0)
@@ -257,6 +264,37 @@ struct StreamingStatusView: View {
         }
     }
 
+    private func sourceLabel(count: Int, fallback: String) -> String {
+        guard count > 0 else { return fallback }
+        return "\(count) 个来源"
+    }
+
+    private func webSearchSourceCluster(_ items: [ChatStatusItem]) -> some View {
+        let visible = Array(items.prefix(3))
+        return HStack(spacing: -7) {
+            if visible.isEmpty {
+                Image(systemName: "globe")
+                    .scaledFont(size: 13, weight: .semibold)
+                    .foregroundStyle(theme.textTertiary)
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(theme.surfaceContainerHighest))
+                    .overlay(Circle().strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.8))
+            } else {
+                ForEach(Array(visible.enumerated()), id: \.offset) { _, item in
+                    let label = item.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let url = item.link?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    webSearchFavicon(
+                        for: url,
+                        title: label?.isEmpty == false ? label! : (url.flatMap(hostLabel(from:)) ?? "来源"),
+                        size: 30
+                    )
+                    .background(Circle().fill(theme.background))
+                }
+            }
+        }
+        .frame(width: visible.count <= 1 ? 30 : CGFloat(30 + max(0, visible.count - 1) * 23), height: 30, alignment: .leading)
+    }
+
     private func webSearchQueryChip(_ query: String) -> some View {
         HStack(spacing: 7) {
             Image(systemName: "magnifyingglass")
@@ -283,7 +321,13 @@ struct StreamingStatusView: View {
 
         return Group {
             if let urlString, let url = URL(string: urlString) {
-                Link(destination: url) {
+                Button {
+                    NotificationCenter.default.post(
+                        name: .markdownLinkTapped,
+                        object: nil,
+                        userInfo: ["url": url]
+                    )
+                } label: {
                     webSearchSourceRowContent(index: index, title: label, url: urlString, hasLink: true)
                 }
                 .buttonStyle(.plain)
@@ -752,7 +796,13 @@ struct StreamingStatusView: View {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 if let title = item.title {
                     if let urlString = item.link, let url = URL(string: urlString) {
-                        Link(destination: url) {
+                        Button {
+                            NotificationCenter.default.post(
+                                name: .markdownLinkTapped,
+                                object: nil,
+                                userInfo: ["url": url]
+                            )
+                        } label: {
                             itemRow(title: title, hasLink: true)
                         }
                         .buttonStyle(.plain)

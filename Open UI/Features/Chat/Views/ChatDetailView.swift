@@ -63,6 +63,10 @@ struct ChatDetailView: View {
     /// Maximum messages rendered at once (the sliding-window cap).
     private let maxWindowSize = 10
 
+    private static func canPreviewInApp(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
+    }
 
     // MARK: UI state
     @State private var showCopiedToast = false
@@ -159,6 +163,8 @@ struct ChatDetailView: View {
     @State private var downloadErrorMessage = ""
     /// URL for QuickLook in-app file preview (PDF, images, docs, etc.)
     @State private var previewFileURL: URL?
+    /// URL for in-app webpage preview from assistant markdown links.
+    @State private var previewWebURL: WebPreviewURL?
     /// Code preview from MarkdownView's eye button (fullscreen code view)
     @State private var codePreviewCode: String?
     @State private var codePreviewLanguage: String = ""
@@ -386,6 +392,10 @@ struct ChatDetailView: View {
         .sheet(item: $sourcesSheetMessage) { message in
             SourcesDetailSheet(sources: message.sources)
         }
+        .sheet(item: $previewWebURL) { item in
+            InAppWebPreviewSheet(url: item.url)
+                .themed()
+        }
         // Prompt variable input sheet — shown when a selected prompt has {{variables}}
         .sheet(isPresented: Binding<Bool>(
             get: { viewModel.pendingPromptForVariables != nil },
@@ -431,7 +441,11 @@ struct ChatDetailView: View {
                 return
             }
 
-            // All other URLs → open in Safari normally
+            if Self.canPreviewInApp(url) {
+                previewWebURL = WebPreviewURL(url: url)
+                return
+            }
+
             UIApplication.shared.open(url)
         }
         // Handle sendPrompt bridge calls from InlineVisualizerView.

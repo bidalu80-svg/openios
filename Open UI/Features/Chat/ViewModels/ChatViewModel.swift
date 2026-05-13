@@ -34,6 +34,7 @@ private struct ParsedLocalAlpineCommand {
     let command: String
     let cwd: String
     let hasWriteFiles: Bool
+    let writeFilePaths: [String]
 }
 
 /// Manages state and logic for a single chat conversation.
@@ -1239,7 +1240,7 @@ final class ChatViewModel {
             }
             if localAlpineOutputHasPythonSyntaxIssue(content + "\n" + (rawResult ?? "")) {
                 lines.append("  required next action:")
-                lines.append(indentForSystemContext("Python syntax/indentation error detected. Inspect the file with line numbers, patch the smallest broken block when practical, then run python3 -m py_compile. Whole-file write_files rewrite is only a fallback. Do not repeat only the same failed command."))
+                lines.append(indentForSystemContext("Python syntax/indentation error detected. The next step must inspect the file with line numbers before any write_files rewrite or patch. After the inspect output is available, patch the smallest broken block and run python3 -m py_compile. Do not repeat only the same failed command."))
             }
             return lines.joined(separator: "\n")
         }
@@ -1255,7 +1256,7 @@ final class ChatViewModel {
         - If result output is present, answer from that output as the source of truth.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
-        - If the latest result contains Python IndentationError or SyntaxError, the next action must inspect the file with line numbers, patch the smallest bad block when practical, then run `python3 -m py_compile`. Only rewrite the whole file when the file is tiny or too corrupted for a local patch. Never repeat only the same `py_compile` or run command.
+        - If the latest result contains Python IndentationError or SyntaxError, the next action must inspect the file with line numbers before any rewrite or patch. After the inspect output is available, patch the smallest bad block, then run `python3 -m py_compile`. Never repeat only the same `py_compile` or run command.
         [/Local Alpine execution state]
         """
     }
@@ -1386,7 +1387,12 @@ final class ChatViewModel {
 
             let shell = block.trimmingCharacters(in: .whitespacesAndNewlines)
             if !shell.isEmpty {
-                commands.append(ParsedLocalAlpineCommand(command: shell, cwd: "/mnt/iexa", hasWriteFiles: false))
+                commands.append(ParsedLocalAlpineCommand(
+                    command: shell,
+                    cwd: "/mnt/iexa",
+                    hasWriteFiles: false,
+                    writeFilePaths: []
+                ))
             }
         }
         return commands
@@ -1427,7 +1433,12 @@ final class ChatViewModel {
 
         if let command = object as? String {
             let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? [] : [ParsedLocalAlpineCommand(command: trimmed, cwd: "/mnt/iexa", hasWriteFiles: false)]
+            return trimmed.isEmpty ? [] : [ParsedLocalAlpineCommand(
+                command: trimmed,
+                cwd: "/mnt/iexa",
+                hasWriteFiles: false,
+                writeFilePaths: []
+            )]
         }
 
         guard let dict = object as? [String: Any] else { return [] }
@@ -1435,29 +1446,35 @@ final class ChatViewModel {
             return localAlpineCommands(from: nested)
         }
 
-        let command = (dict["command"] as? String) ?? (dict["cmd"] as? String)
-        guard let command,
-              !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return []
-        }
+        let command = ((dict["command"] as? String) ?? (dict["cmd"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let writeFilePaths = Self.localAlpineWriteFilePaths(from: dict["write_files"] ?? dict["files"])
+        guard command?.isEmpty == false || !writeFilePaths.isEmpty else { return [] }
         let cwd = (dict["cwd"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hasWriteFiles = Self.hasLocalAlpineWriteFiles(dict["write_files"] ?? dict["files"])
         return [ParsedLocalAlpineCommand(
-            command: command.trimmingCharacters(in: .whitespacesAndNewlines),
+            command: command ?? "",
             cwd: cwd?.isEmpty == false ? cwd! : "/mnt/iexa",
-            hasWriteFiles: hasWriteFiles
+            hasWriteFiles: !writeFilePaths.isEmpty,
+            writeFilePaths: writeFilePaths
         )]
     }
 
     private static func hasLocalAlpineWriteFiles(_ object: Any?) -> Bool {
-        guard let object else { return false }
+        !localAlpineWriteFilePaths(from: object).isEmpty
+    }
+
+    private static func localAlpineWriteFilePaths(from object: Any?) -> [String] {
+        guard let object else { return [] }
         if let array = object as? [Any] {
-            return array.contains { hasLocalAlpineWriteFiles($0) }
+            return array.flatMap { localAlpineWriteFilePaths(from: $0) }
         }
-        guard let dict = object as? [String: Any] else { return false }
-        let hasPath = ((dict["path"] as? String)
+        guard let dict = object as? [String: Any] else { return [] }
+        guard let path = ((dict["path"] as? String)
             ?? (dict["file"] as? String)
-            ?? (dict["name"] as? String))?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ?? (dict["name"] as? String))?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty else {
+            return []
+        }
         let hasContent = dict["content"] != nil
             || dict["text"] != nil
             || dict["body"] != nil
@@ -1465,7 +1482,23 @@ final class ChatViewModel {
             || dict["lines"] != nil
             || dict["content_base64"] != nil
             || dict["base64"] != nil
-        return hasPath && hasContent
+        return hasContent ? [path] : []
+    }
+
+    private static func localAlpineRuntimePath(for path: String, cwd: String) -> String {
+        let cleanedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        guard !cleanedPath.isEmpty else { return "/mnt/iexa/untitled.py" }
+        if cleanedPath.hasPrefix("/mnt/iexa/") || cleanedPath == "/mnt/iexa" {
+            return cleanedPath
+        }
+        if cleanedPath.hasPrefix("/") {
+            return "/mnt/iexa\(cleanedPath)"
+        }
+        let cleanedCWD = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        let base = cleanedCWD.isEmpty ? "/mnt/iexa" : cleanedCWD
+        return base.hasSuffix("/") ? base + cleanedPath : base + "/" + cleanedPath
     }
 
     private static func localAlpineCommandKey(command: String, cwd: String) -> String {
@@ -1504,6 +1537,20 @@ final class ChatViewModel {
             .lowercased()
         return normalized.contains("python3 -m py_compile")
             || normalized.contains("python -m py_compile")
+    }
+
+    private static func localAlpineCommandInspectsPythonFile(_ command: String) -> Bool {
+        let normalized = command
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard normalized.contains(".py") else { return false }
+        return normalized.contains("nl -ba")
+            || normalized.contains("cat -n")
+            || normalized.contains("sed -n")
+            || normalized.contains("awk")
+            || normalized.contains("python3 - <<")
+            || normalized.contains("python - <<")
     }
 
     private static func localAlpineCommandWritesPythonWithHeredoc(_ command: String) -> Bool {
@@ -7693,7 +7740,7 @@ final class ChatViewModel {
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
         - For scripts/projects, use `write_files` inside `iexa_alpine` to create files, then run a bounded verification command. Do not use `cat > file <<EOF` for Python/JS/HTML/CSS bodies.
-        - When fixing an existing file, do not rewrite the whole file by default. First inspect the exact lines (`nl -ba file.py | sed -n 'start,endp'`), then apply the smallest edit with a short Python/perl/sed patch or a purpose-built patch script. Use whole-file `write_files` only when the file is tiny or badly corrupted.
+        - When fixing an existing Python file after a syntax/indentation error, first inspect the exact lines (`nl -ba file.py | sed -n 'start,endp'`), then apply the smallest edit with a short Python/perl/sed patch or a purpose-built patch script. Do not use whole-file `write_files` as the first repair step.
         - For indentation-sensitive files, prefer `content_lines` (array of exact lines) or `content_base64` instead of heredoc shell text. This preserves leading spaces exactly.
         - Use heredoc only for tiny one-off shell snippets. Never put long Python class/function bodies in heredoc if `write_files` can be used.
         - After writing Python, run `python3 -m py_compile file.py` before running it. If syntax or indentation fails, locate the exact bad block, patch only that block when practical, then verify again before summarizing.
@@ -9039,6 +9086,75 @@ final class ChatViewModel {
         return failure
     }
 
+    private func appendLocalAlpinePythonInspectionGuardIfNeeded(
+        attemptedMessageId: String,
+        content: String
+    ) -> String? {
+        guard let latestIssue = latestLocalAlpinePythonSyntaxIssue() else { return nil }
+        let commands = Self.localAlpineCommands(in: content)
+        guard !commands.isEmpty else { return nil }
+
+        let writesPython = commands.contains { command in
+            command.writeFilePaths.contains {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasSuffix(".py")
+            }
+        }
+        let syntaxCheckOnly = commands.contains { command in
+            Self.localAlpineCommandIsPythonSyntaxCheckOnly(command.command)
+        }
+        guard writesPython || syntaxCheckOnly else { return nil }
+        guard !commands.contains(where: { Self.localAlpineCommandInspectsPythonFile($0.command) }) else {
+            return nil
+        }
+
+        let inspectPath = latestIssue.path
+            ?? commands.flatMap(\.writeFilePaths).first(where: {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasSuffix(".py")
+            })
+        let runtimePath = inspectPath.map {
+            Self.localAlpineRuntimePath(for: $0, cwd: latestIssue.cwd ?? "/mnt/iexa")
+        }
+
+        let content = """
+        Local Alpine 执行结果
+
+        已拦截这一步，避免直接重写或重复检查坏掉的 Python 文件。
+
+        上一轮是真实 Python 缩进/语法错误。下一步必须先读取带行号代码，再做局部修复；不要直接用 `write_files` 重写整个 `.py` 文件，也不要只重复 `py_compile`。
+
+        必须先执行：
+
+        ```bash
+        \(Self.localAlpineInspectCommand(forPythonFile: runtimePath))
+        ```
+
+        然后根据行号输出，用一个小的 Python/perl/sed patch 修具体坏块，最后再运行 `python3 -m py_compile <file>`。
+        """
+
+        localAlpineAgentExecutedMessageIds.insert(attemptedMessageId)
+        return appendLocalAlpineSystemResult(parentId: attemptedMessageId, content: content)
+    }
+
+    private func latestLocalAlpinePythonSyntaxIssue() -> (path: String?, cwd: String?)? {
+        guard let messages = conversation?.messages else { return nil }
+        for message in messages.reversed() where Self.isLocalAlpineAgentResult(message) {
+            let text = message.content + "\n" + (message.metadata?["iexa_local_alpine_raw_result"] ?? "")
+            if Self.localAlpineOutputHasPythonSyntaxIssue(text) {
+                let command = message.metadata?["iexa_local_alpine_display_command"] ?? ""
+                let cwd = message.metadata?["iexa_local_alpine_cwd"] ?? "/mnt/iexa"
+                return (
+                    Self.localAlpinePythonFilePath(command: command, output: text, cwd: cwd),
+                    cwd
+                )
+            }
+            if text.localizedCaseInsensitiveContains("Local Alpine 执行结果"),
+               text.contains("退出码：`0`") {
+                return nil
+            }
+        }
+        return nil
+    }
+
     private func recordLocalAlpineFailures(from result: LocalAlpineAgentResult) {
         for commandResult in result.commandResults where commandResult.failed {
             let key = Self.localAlpineCommandKey(command: commandResult.command, cwd: commandResult.cwd)
@@ -9082,7 +9198,7 @@ final class ChatViewModel {
         已检测到 Python 缩进/语法错误。下一步禁止只重复 `py_compile` 或直接运行脚本。
         必须先执行定位和局部修复：
         1. 读取带行号文件：`\(Self.localAlpineInspectCommand(forPythonFile: pythonFile))`
-        2. 找到具体坏行后，优先用最小 patch 修那一段；只有文件很小或结构已坏透时才用 `write_files` 重写完整文件。
+        2. 找到具体坏行后，用一个小的 Python/perl/sed patch 修那一段；不要直接 `write_files` 重写整个 `.py` 文件。
         3. 修复后再运行：`python3 -m py_compile <file>`。
         """
         } else if failure.outputPreview.lowercased().contains("unsafe python file write blocked") {
@@ -9090,7 +9206,7 @@ final class ChatViewModel {
 
         Python file write guard
         App 已拦截 `cat/tee/heredoc` 写入 Python 文件，因为这种写法在聊天 UI 中容易破坏缩进。
-        下一步新建文件必须改用 `iexa_alpine` JSON 的 `write_files`，并使用 `content_lines` 或 `content_base64`；修复已有文件时先行号定位并最小 patch，再执行 `python3 -m py_compile`。
+        下一步新建文件必须改用 `iexa_alpine` JSON 的 `write_files`，并使用 `content_lines` 或 `content_base64`；修复已有文件时先行号定位并用小 patch 修复，再执行 `python3 -m py_compile`。
         """
         } else {
             pythonRepairInstruction = ""
@@ -9336,6 +9452,14 @@ final class ChatViewModel {
 
         let hasExecutableBlocks = await LocalAlpineAgentService.shared.hasExecutableBlocks(in: content)
         guard hasExecutableBlocks else { return }
+
+        if let guardMessageId = appendLocalAlpinePythonInspectionGuardIfNeeded(
+            attemptedMessageId: messageId,
+            content: content
+        ) {
+            scheduleLocalAlpineContinuationIfNeeded(after: guardMessageId, forceContinue: true)
+            return
+        }
 
         if let repeatedFailure = repeatedLocalAlpineFailure(for: content) {
             let guardMessageId = appendLocalAlpineRepeatedCommandMessage(parentId: messageId, failure: repeatedFailure)
@@ -9943,7 +10067,7 @@ final class ChatViewModel {
         - If the user interrupts with a question or taps stop, answer the question and wait. Do not resume automatic execution until the user explicitly asks to continue/fix/run.
         Strategy Switch:
         - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, patch the smallest broken block, then verification.
-        - For Python indentation/syntax errors, first inspect the file with `nl -ba <file> | sed -n '1,160p'`, identify the exact broken line/block, patch only that section when practical, then run `python3 -m py_compile <file>` before running the script. Whole-file rewrite is a fallback, not the default.
+        - For Python indentation/syntax errors, first inspect the file with `nl -ba <file> | sed -n '1,160p'`, identify the exact broken line/block, patch only that section with a small Python/perl/sed patch, then run `python3 -m py_compile <file>` before running the script. Do not use `write_files` to rewrite the whole `.py` file as the first repair step.
         - For indentation-sensitive rewrites, use `content_lines` or `content_base64`; do not use heredoc for Python class/function bodies.
         - If a Python heredoc/cat write is blocked, immediately switch to `write_files` with `content_lines` or `content_base64`.
         [/Local Alpine continuation]
@@ -9996,6 +10120,19 @@ final class ChatViewModel {
             ? LocalAlpineAgentService.visibleContent(from: displayContent)
             : nil
         let renderedDisplayContent = visibleAlpineDisplayContent ?? displayContent
+        let alpineInstructionIsHidden = terminalEnabled
+            && selectedTerminalIsLocalAlpine
+            && displayContent.localizedCaseInsensitiveContains("iexa_alpine")
+            && visibleAlpineDisplayContent != nil
+            && renderedDisplayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let effectiveStatusHistory = statusHistory ?? (alpineInstructionIsHidden ? [
+            ChatStatusUpdate(
+                action: "local_alpine_agent",
+                description: isStreaming ? "正在准备执行本地 Alpine 命令..." : "已决定继续执行下一步",
+                done: isStreaming ? false : true,
+                occurredAt: .now
+            )
+        ] : nil)
         var completedAssistantContentForAgent: String?
 
         if isStreaming && streamingStore.streamingMessageId == id {
@@ -10005,7 +10142,7 @@ final class ChatViewModel {
             // which would invalidate ALL message views via @Observable.
             streamingStore.updateContent(displayContent, displayContent: renderedDisplayContent)
             if let sources { streamingStore.appendSources(sources) }
-            if let statusHistory {
+            if let statusHistory = effectiveStatusHistory {
                 for s in statusHistory { streamingStore.appendStatus(s) }
             }
             if let error { streamingStore.setError(error) }
@@ -10078,7 +10215,7 @@ final class ChatViewModel {
                     node.sources = sources
                 }
             }
-            if let statusHistory {
+            if let statusHistory = effectiveStatusHistory {
                 conversation?.messages[index].statusHistory = statusHistory
                 conversation?.history.updateNode(id: id) { node in
                     node.statusHistory = statusHistory

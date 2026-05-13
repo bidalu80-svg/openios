@@ -115,6 +115,25 @@ actor LocalAlpineAgentService {
             if let shellCommand = command.command?.trimmingCharacters(in: .whitespacesAndNewlines),
                !shellCommand.isEmpty,
                shouldRunShellCommand {
+                if let blockedOutput = unsafePythonFileWriteWarning(for: shellCommand) {
+                    let result = LocalAlpineCommandResult(
+                        command: shellCommand,
+                        output: blockedOutput,
+                        exitCode: 125,
+                        interactiveRequest: nil
+                    )
+                    stepLines.append(format(command: shellCommand, cwd: effectiveCWD, result: result))
+                    commandResults.append(Self.commandResult(
+                        command: shellCommand,
+                        cwd: effectiveCWD,
+                        result: result
+                    ))
+                    if !stepLines.isEmpty {
+                        lines.append(stepLines.joined(separator: "\n\n"))
+                    }
+                    continue
+                }
+
                 var commandToExecute = shellCommand
 
                 if let extractedWrite = await extractPythonHeredocWrites(from: shellCommand, cwd: effectiveCWD) {
@@ -143,23 +162,6 @@ actor LocalAlpineAgentService {
                     if extractedFilesPassedSyntaxCheck {
                         commandToExecute = extractedWrite.remainingCommand
                     }
-                } else if let blockedOutput = unsafePythonFileWriteWarning(for: shellCommand) {
-                    let result = LocalAlpineCommandResult(
-                        command: shellCommand,
-                        output: blockedOutput,
-                        exitCode: 125,
-                        interactiveRequest: nil
-                    )
-                    stepLines.append(format(command: shellCommand, cwd: effectiveCWD, result: result))
-                    commandResults.append(Self.commandResult(
-                        command: shellCommand,
-                        cwd: effectiveCWD,
-                        result: result
-                    ))
-                    if !stepLines.isEmpty {
-                        lines.append(stepLines.joined(separator: "\n\n"))
-                    }
-                    continue
                 }
 
                 commandToExecute = commandToExecute.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -342,17 +344,19 @@ actor LocalAlpineAgentService {
         guard let path = (dict["path"] as? String)
             ?? (dict["file"] as? String)
             ?? (dict["name"] as? String),
-            let content = Self.writeFileContent(from: dict) else {
+            let payload = Self.writeFilePayload(from: dict) else {
             return nil
         }
-        return LocalAlpineAgentFile(path: path, content: content)
+        return LocalAlpineAgentFile(path: path, content: payload.content, source: payload.source)
     }
 
-    private nonisolated static func writeFileContent(from dict: [String: Any]) -> String? {
+    private nonisolated static func writeFilePayload(
+        from dict: [String: Any]
+    ) -> (content: String, source: LocalAlpineAgentFileSource)? {
         if let content = (dict["content"] as? String)
             ?? (dict["text"] as? String)
             ?? (dict["body"] as? String) {
-            return content
+            return (content, .content)
         }
 
         if let lines = (dict["content_lines"] as? [String])
@@ -364,14 +368,14 @@ actor LocalAlpineAgentService {
             if shouldAppendNewline, !content.hasSuffix("\n") {
                 content += "\n"
             }
-            return content
+            return (content, .contentLines)
         }
 
         if let base64 = (dict["content_base64"] as? String)
             ?? (dict["base64"] as? String),
            let data = Data(base64Encoded: base64),
            let content = String(data: data, encoding: .utf8) {
-            return content
+            return (content, .contentBase64)
         }
 
         return nil
@@ -393,7 +397,11 @@ actor LocalAlpineAgentService {
                     fileName: split.fileName,
                     destinationPath: split.directory
                 )
-                lines.append("- `\(target)` (\(data.count) B)")
+                lines.append("- `\(target)` (\(data.count) B，来源：\(file.source.displayName))")
+                if target.lowercased().hasSuffix(".py"),
+                   let warning = Self.pythonIndentationPreflightWarning(for: file.content) {
+                    lines.append("  - Python 缩进预检警告：\(warning)")
+                }
                 writtenPaths.append(target)
             } catch {
                 lines.append("- `\(target)` 写入失败：\(error.localizedDescription)")
@@ -643,6 +651,46 @@ actor LocalAlpineAgentService {
         }
     }
 
+    private nonisolated static func pythonIndentationPreflightWarning(for content: String) -> String? {
+        let lines = content.components(separatedBy: .newlines)
+        let significant = lines.enumerated().compactMap { index, rawLine -> (number: Int, indent: Int, text: String)? in
+            let text = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty, !text.hasPrefix("#") else { return nil }
+            let indent = rawLine.prefix { $0 == " " || $0 == "\t" }.count
+            return (index + 1, indent, text)
+        }
+
+        guard significant.count >= 2 else { return nil }
+
+        for index in significant.indices.dropLast() {
+            let current = significant[index]
+            guard pythonLineOpensBlock(current.text) else { continue }
+            guard let next = significant[(index + 1)..<significant.endIndex].first else { continue }
+            if next.indent <= current.indent {
+                return "第 \(current.number) 行以 `:` 开启代码块，但第 \(next.number) 行没有增加缩进。写入模块会原样保存模型给出的内容，请改用正确缩进的 content_lines 或 content_base64。"
+            }
+        }
+
+        let hasPythonBlocks = significant.contains { pythonLineOpensBlock($0.text) }
+        let maxIndent = significant.map { $0.indent }.max() ?? 0
+        if hasPythonBlocks, maxIndent == 1 {
+            return "检测到 Python 代码块但最大缩进只有 1 个空格，这通常是模型输出缩进被压平。"
+        }
+
+        return nil
+    }
+
+    private nonisolated static func pythonLineOpensBlock(_ text: String) -> Bool {
+        guard text.hasSuffix(":") else { return false }
+        let lowered = text.lowercased()
+        let starters = [
+            "def ", "class ", "if ", "elif ", "else:", "for ", "while ",
+            "try:", "except", "finally:", "with ", "async def ", "async with ",
+            "match ", "case "
+        ]
+        return starters.contains { lowered.hasPrefix($0) }
+    }
+
     private nonisolated static func pythonHeredocWriteSpec(from line: String) -> PythonHeredocWriteSpec? {
         let patterns: [(pattern: String, pathRange: Int, markerRange: Int)] = [
             (#"^\s*cat\s+>+\s*(['"]?)([^'">\s;|&]+\.py)\1\s*<<-?\s*(['"]?)([A-Za-z0-9_.-]+)\3\s*$"#, 2, 4),
@@ -759,7 +807,7 @@ actor LocalAlpineAgentService {
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return cleaned.isEmpty ? "正在执行本地 Alpine 命令..." : cleaned
+        return cleaned
     }
 
     nonisolated private static func incompleteInstructionFenceRange(in content: String) -> NSRange? {
@@ -804,6 +852,21 @@ private struct LocalAlpineAgentCommand {
 private struct LocalAlpineAgentFile {
     let path: String
     let content: String
+    let source: LocalAlpineAgentFileSource
+}
+
+private enum LocalAlpineAgentFileSource {
+    case content
+    case contentLines
+    case contentBase64
+
+    var displayName: String {
+        switch self {
+        case .content: return "content"
+        case .contentLines: return "content_lines"
+        case .contentBase64: return "content_base64"
+        }
+    }
 }
 
 private struct LocalAlpineWriteResult {
