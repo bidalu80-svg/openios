@@ -7547,7 +7547,7 @@ final class ChatViewModel {
         - Shell: Alpine Linux ash/busybox style shell. Prefer POSIX sh syntax.
         - Default working directory: `/mnt/iexa`.
         - `/mnt/iexa` is the shared writable project directory. Create project files there.
-        - Package manager: `apk`. Use `apk update` and `apk add --no-cache ...` when a missing dependency is needed.
+        - Package manager: `apk`. Do not install packages on every run. First check with `command -v ...` or version commands; only use `apk update && apk add --no-cache ...` when the output proves a dependency is missing.
         - Current bundled tool profile normally includes: `sh`/`ash`, `busybox`, `apk`, `wget`, `curl`, `python3`, `node`, `npm`, `gcc`, `g++`, `git`, and `vim`.
         - Common packages that may still be missing for generated projects: `py3-pip`, `make`, `build-base`, `linux-headers`, `cmake`, `pkgconf`, `zip`, `unzip`, and `openssl-dev`.
         - The execution is non-interactive. Do not rely on prompts, REPLs, `input()`, `read`, `scanf`, `cin`, `npm init` prompts, editors waiting for input, or long-running servers that never exit.
@@ -7556,7 +7556,7 @@ final class ChatViewModel {
         - If the user asks you to run, execute, test, verify, inspect the environment, install packages, write a runnable script/project, crawl a website, or diagnose command output, use `iexa_alpine`.
         - Do not merely explain commands when the user wants action. Emit the block so the app executes it.
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
-        - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages.
+        - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
         - For scripts/projects, use `write_files` inside `iexa_alpine` to create files, then run a bounded verification command. Do not use `cat > file <<EOF` for Python/JS/HTML/CSS bodies.
         - For indentation-sensitive files, prefer `content_lines` (array of exact lines) or `content_base64` instead of heredoc shell text. This preserves leading spaces exactly.
@@ -9698,7 +9698,7 @@ final class ChatViewModel {
         - If a website/API check is needed, use `curl -I`, `curl -L`, `curl -w`, or a short Python `urllib` fetch. Never execute a bare domain as a shell command.
         Retry:
         - If the last command failed, inspect the exit code/output first, then emit a different bounded diagnostic or fix command before rerunning verification.
-        - Retry only after changing something meaningful: edited file, installed missing dependency, changed cwd, changed command arguments, or gathered new diagnostics.
+        - Retry only after changing something meaningful: edited file, installed a dependency that was proven missing, changed cwd, changed command arguments, or gathered new diagnostics.
         Stuck Detection:
         - Never repeat the exact same failed command. If the app says a repeat was blocked, switch strategy immediately.
         - If the same error signature repeats twice after a fix, stop and summarize the blocker instead of looping.

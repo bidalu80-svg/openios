@@ -31,12 +31,6 @@ struct LocalAlpineInteractiveRequest: Identifiable, Sendable {
     let cwd: String
 }
 
-private struct AlpinePackageRequirement {
-    let checkCommand: String
-    let packages: [String]
-    let markers: [String]
-}
-
 actor LocalAlpineTerminalService {
     static let shared = LocalAlpineTerminalService()
 
@@ -335,11 +329,7 @@ actor LocalAlpineTerminalService {
             """
         }
 
-        let rewritten = rewriteApkNodeAlias(in: command)
-        if shouldBypassAutoDependencyRepair(rewritten) {
-            return rewritten
-        }
-        return commandWithAutoDependencyRepair(rewritten)
+        return rewriteApkNodeAlias(in: command)
     }
 
     private func interactiveInputWarning(for command: String) -> String? {
@@ -387,63 +377,6 @@ actor LocalAlpineTerminalService {
         let input = shellSingleQuoted(stdinInput)
         let script = shellSingleQuoted(command)
         return "printf '%s\\n' \(input) | /bin/sh -lc \(script)"
-    }
-
-    private func shouldBypassAutoDependencyRepair(_ command: String) -> Bool {
-        let lowercased = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return lowercased.contains("apk add ")
-            || lowercased.contains("apk upgrade")
-            || lowercased.contains("apk fix")
-    }
-
-    private func commandWithAutoDependencyRepair(_ command: String) -> String {
-        let requirements = inferredPackageRequirements(for: command)
-        guard !requirements.isEmpty else {
-            return command
-        }
-
-        let installLines = requirements.map { requirement in
-            """
-            if ! command -v \(requirement.checkCommand) >/dev/null 2>&1; then
-              IEXA_MISSING="$IEXA_MISSING \(requirement.packages.joined(separator: " "))"
-            fi
-            """
-        }.joined(separator: "\n")
-
-        return """
-        IEXA_MISSING=""
-        \(installLines)
-        if [ -n "$IEXA_MISSING" ]; then
-          echo "[Iexa] Installing missing Alpine packages:$IEXA_MISSING"
-          apk update
-          apk add --no-cache $IEXA_MISSING
-        fi
-        \(command)
-        """
-    }
-
-    private func inferredPackageRequirements(for command: String) -> [AlpinePackageRequirement] {
-        let lowercased = command.lowercased()
-        let candidates: [AlpinePackageRequirement] = [
-            .init(checkCommand: "python3", packages: ["python3", "py3-pip"], markers: ["python3", "python ", ".py", "pip "]),
-            .init(checkCommand: "pip3", packages: ["py3-pip"], markers: ["pip3", "pip "]),
-            .init(checkCommand: "node", packages: ["nodejs", "npm"], markers: ["node ", "node\n", "npm ", ".js"]),
-            .init(checkCommand: "npm", packages: ["npm"], markers: ["npm "]),
-            .init(checkCommand: "gcc", packages: ["build-base"], markers: ["gcc", "g++", " cc ", "make ", "cmake", ".c ", ".cpp"]),
-            .init(checkCommand: "vim", packages: ["vim"], markers: ["vim ", "vi "]),
-            .init(checkCommand: "curl", packages: ["curl"], markers: ["curl "]),
-            .init(checkCommand: "git", packages: ["git"], markers: ["git "]),
-            .init(checkCommand: "bash", packages: ["bash"], markers: ["bash "])
-        ]
-
-        var seenChecks: Set<String> = []
-        var result: [AlpinePackageRequirement] = []
-        for candidate in candidates where candidate.markers.contains(where: { lowercased.contains($0) }) {
-            if seenChecks.insert(candidate.checkCommand).inserted {
-                result.append(candidate)
-            }
-        }
-        return result
     }
 
     private func rewriteApkNodeAlias(in command: String) -> String {
