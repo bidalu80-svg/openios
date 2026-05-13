@@ -2600,9 +2600,9 @@ struct ChatDetailView: View {
                 .resizable()
                 .scaledToFill()
         } placeholder: {
-            Text(String((source.displayLabel(preferDomain: false) ?? source.title ?? source.url ?? "?").prefix(1)).uppercased())
-                .scaledFont(size: max(8, size * 0.42), weight: .bold)
-                .foregroundStyle(theme.textPrimary)
+            Image(systemName: "globe")
+                .scaledFont(size: max(9, size * 0.46), weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
                 .frame(width: size, height: size)
                 .background(theme.surfaceContainer)
         }
@@ -2615,12 +2615,7 @@ struct ChatDetailView: View {
 
     private static func faviconURL(for sourceURL: String) -> URL? {
         guard let parsed = URL(string: sourceURL), let host = parsed.host, !host.isEmpty else { return nil }
-        var components = URLComponents(string: "https://www.google.com/s2/favicons")
-        components?.queryItems = [
-            URLQueryItem(name: "sz", value: "64"),
-            URLQueryItem(name: "domain", value: host)
-        ]
-        return components?.url
+        return URL(string: "https://icons.duckduckgo.com/ip3/\(host).ico")
     }
 
     // MARK: - Follow-Up Suggestions

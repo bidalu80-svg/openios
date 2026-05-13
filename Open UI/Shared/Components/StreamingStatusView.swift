@@ -385,9 +385,9 @@ struct StreamingStatusView: View {
                 .resizable()
                 .scaledToFill()
         } placeholder: {
-            Text(String(title.prefix(1)).uppercased())
-                .scaledFont(size: max(8, size * 0.45), weight: .bold)
-                .foregroundStyle(theme.textPrimary)
+            Image(systemName: "globe")
+                .scaledFont(size: max(10, size * 0.48), weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
                 .frame(width: size, height: size)
                 .background(theme.surfaceContainerHighest)
         }
@@ -397,13 +397,8 @@ struct StreamingStatusView: View {
     }
 
     private static func faviconURL(for sourceURL: String) -> URL? {
-        guard let encoded = sourceURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
-        var components = URLComponents(string: "https://www.google.com/s2/favicons")
-        components?.queryItems = [
-            URLQueryItem(name: "domain_url", value: encoded),
-            URLQueryItem(name: "sz", value: "64")
-        ]
-        return components?.url
+        guard let url = URL(string: sourceURL), let host = url.host, !host.isEmpty else { return nil }
+        return URL(string: "https://icons.duckduckgo.com/ip3/\(host).ico")
     }
 
     private func hostLabel(from urlString: String) -> String? {

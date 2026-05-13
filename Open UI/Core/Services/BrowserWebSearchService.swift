@@ -58,9 +58,9 @@ final class BrowserWebSearchService: NSObject {
     private func searchItems(for query: String) async -> [WebSearchResultItem] {
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
         let urls = [
-            "https://www.baidu.com/s?wd=\(encoded)&rn=10",
+            "https://www.bing.com/search?q=\(encoded)&setlang=zh-Hans",
             "https://duckduckgo.com/html/?q=\(encoded)",
-            "https://www.bing.com/search?q=\(encoded)&setlang=zh-Hans"
+            "https://www.baidu.com/s?wd=\(encoded)&rn=10"
         ]
 
         for rawURL in urls {
@@ -69,7 +69,10 @@ final class BrowserWebSearchService: NSObject {
                 continue
             }
             try? await Task.sleep(nanoseconds: 700_000_000)
-            let items = await evaluateSearchItems()
+            let items = await evaluateSearchItems().filter { item in
+                guard let link = item.link, let url = URL(string: link) else { return false }
+                return !Self.isBlockedDocumentURL(url)
+            }
             if !items.isEmpty {
                 return items
             }
@@ -214,6 +217,11 @@ final class BrowserWebSearchService: NSObject {
                 const q = url.searchParams.get('q') || url.searchParams.get('u');
                 if (q && /^https?:/i.test(q)) return q;
               }
+              if (url.hostname.endsWith('baidu.com')) {
+                const q = url.searchParams.get('url') || url.searchParams.get('target') || url.searchParams.get('wd');
+                if (q && /^https?:/i.test(q)) return q;
+                return '';
+              }
               return url.href;
             } catch (_) {
               return '';
@@ -223,7 +231,8 @@ final class BrowserWebSearchService: NSObject {
             try {
               const url = new URL(raw);
               if (!/^https?:$/.test(url.protocol)) return true;
-              if (blockedHosts.has(url.hostname) && ['/search', '/html/', '/', '/s'].includes(url.pathname)) return true;
+              if (url.hostname.endsWith('baidu.com')) return true;
+              if (blockedHosts.has(url.hostname) && ['/search', '/html/', '/', '/s', '/link', '/url', '/ck/a'].includes(url.pathname)) return true;
               return /\\.(jpg|jpeg|png|gif|webp|avif|svg|mp4|mov|mp3|zip|rar|7z|ipa|apk|dmg|pdf)(\\?|$)/i.test(url.pathname);
             } catch (_) {
               return true;
@@ -336,6 +345,14 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private static func isBlockedDocumentURL(_ url: URL) -> Bool {
+        let host = url.host?.lowercased() ?? ""
+        if host == "baidu.com" || host.hasSuffix(".baidu.com") {
+            return true
+        }
+        if ["duckduckgo.com", "www.duckduckgo.com", "bing.com", "www.bing.com", "cn.bing.com", "google.com", "www.google.com"].contains(host),
+           ["/search", "/html/", "/", "/s", "/link", "/url", "/ck/a"].contains(url.path.lowercased()) {
+            return true
+        }
         let path = url.path.lowercased()
         let blockedExt = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg", ".mp4", ".mov", ".mp3", ".zip", ".rar", ".7z", ".ipa", ".apk", ".dmg", ".pdf"]
         return blockedExt.contains { path.hasSuffix($0) }

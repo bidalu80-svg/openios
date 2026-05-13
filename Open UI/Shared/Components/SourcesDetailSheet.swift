@@ -141,11 +141,6 @@ struct SourcesDetailSheet: View {
 
     private static func faviconURL(for sourceURL: String) -> URL? {
         guard let parsed = URL(string: sourceURL), let host = parsed.host, !host.isEmpty else { return nil }
-        var components = URLComponents(string: "https://www.google.com/s2/favicons")
-        components?.queryItems = [
-            URLQueryItem(name: "sz", value: "64"),
-            URLQueryItem(name: "domain", value: host)
-        ]
-        return components?.url
+        return URL(string: "https://icons.duckduckgo.com/ip3/\(host).ico")
     }
 }

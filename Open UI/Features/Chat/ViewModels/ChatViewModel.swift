@@ -7667,7 +7667,40 @@ final class ChatViewModel {
 
     private static func localizedGenerationError(_ error: Error) -> String {
         let apiError = APIError.from(error)
-        return apiError.errorDescription ?? error.localizedDescription
+        return cleanedProviderErrorMessage(apiError.serverDetail ?? error.localizedDescription)
+            ?? apiError.errorDescription
+            ?? error.localizedDescription
+    }
+
+    private static func cleanedProviderErrorMessage(_ raw: String) -> String? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        let lowercased = text.lowercased()
+        if lowercased.contains("model_not_supported") || text.contains("不受支持") {
+            let model = firstRegexCapture(in: text, pattern: #"['\"]model['\"]\s*:\s*['\"]([^'\"]+)['\"]"#)
+                ?? firstRegexCapture(in: text, pattern: #"模型\s*['\"]([^'\"]+)['\"]\s*不受支持"#)
+            if let model, !model.isEmpty {
+                return "当前提供方不支持模型 \(model)。请切换到模型列表里的可用模型后重试。"
+            }
+            return "当前提供方不支持所选模型。请切换到模型列表里的可用模型后重试。"
+        }
+        if lowercased.hasPrefix("{\"error\"") || lowercased.hasPrefix("{'error'") {
+            return "提供方返回了错误响应，请检查当前模型和提供方配置后重试。"
+        }
+        return nil
+    }
+
+    private static func firstRegexCapture(in text: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        guard let match = regex.firstMatch(in: text, range: range),
+              match.numberOfRanges > 1 else {
+            return nil
+        }
+        return nsText.substring(with: match.range(at: 1))
     }
 
     private func localMemorySystemContext() async -> String? {
@@ -8445,6 +8478,8 @@ final class ChatViewModel {
         以下结果由 Iexa 客户端在发送本轮消息前，通过内置 WKWebView 浏览器搜索/读取网页取得；如果浏览器结果不足，客户端会合并本地 Alpine 抓取结果。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果。回答要求：
         - 先直接给结论，再补充必要来源和时间。
         - 天气、油价、新闻、价格、版本等实时问题，必须说清楚信息日期/发布时间；资料不够精确就明确说“未在搜索结果中找到精确值”，不要编。
+        - 如果结果只是搜索页/中转页/摘要，或没有打开到可用正文，不要让用户自己去搜；请换更具体的关键词继续请求客户端搜索，或明确说明缺少可验证来源。
+        - 如果用户明确让你“那你搜啊/你自己搜”，不要回答操作步骤给用户；应当直接基于搜索资料回答，资料不足就继续细化搜索。
         - 引用来源时使用普通链接或来源标题，不要输出 cite turn0search 之类隐藏引用标记，也不要输出无法显示的方框字符。
         - 不要声称你无法联网。
 
@@ -9643,7 +9678,8 @@ final class ChatViewModel {
         let incompleteMarkers = [
             "退出码：`1`", "退出码：`2`", "退出码：`126`", "退出码：`127`", "退出码：`124`",
             "not found", "error", "failed", "missing", "no such file", "traceback", "exception",
-            "command not found", "permission denied", "输入已取消", "存在错误输出"
+            "command not found", "permission denied", "输入已取消", "存在错误输出",
+            "写入已拒绝", "写入失败", "缩进预检失败"
         ]
         if incompleteMarkers.contains(where: { resultText.contains($0.lowercased()) }) {
             return true
@@ -9831,7 +9867,7 @@ final class ChatViewModel {
                         id: assistantMessageId,
                         content: "",
                         isStreaming: false,
-                        error: ChatMessageError(content: err)
+                        error: ChatMessageError(content: Self.cleanedProviderErrorMessage(err) ?? err)
                     )
                     self.cleanupStreaming()
                     return
@@ -9859,11 +9895,12 @@ final class ChatViewModel {
                 }
             } catch {
                 if !Task.isCancelled {
+                    let message = Self.localizedGenerationError(error)
                     self.updateAssistantMessage(
                         id: assistantMessageId,
                         content: acc.content,
                         isStreaming: false,
-                        error: ChatMessageError(content: error.localizedDescription)
+                        error: ChatMessageError(content: message)
                     )
                     self.cleanupStreaming()
                     await self.persistLocalConversationIfNeeded()
@@ -9952,7 +9989,11 @@ final class ChatViewModel {
         await persistLocalConversationIfNeeded()
         await sendCompletionNotificationIfNeeded(content: finalContent)
         endBackgroundTask()
-        if rawContent.localizedCaseInsensitiveContains("iexa_alpine") {
+        if isFinalSummary {
+            localAlpineAgentStopRequested = true
+            localAlpineContinuationTask = nil
+            localAlpineNoCommandContinuationRetries = 0
+        } else if rawContent.localizedCaseInsensitiveContains("iexa_alpine") {
             localAlpineNoCommandContinuationRetries = 0
             localAlpineContinuationTask = nil
         } else if parentNeedsFollowUp, let parentResultId,
@@ -9980,7 +10021,8 @@ final class ChatViewModel {
             "退出码：`1`", "退出码：`2`", "退出码：`126`", "退出码：`127`", "退出码：`124`",
             "not found", "error", "failed", "missing", "no such file", "traceback", "exception",
             "command not found", "permission denied", "syntaxerror", "indentationerror",
-            "module not found", "no module named", "输入已取消", "存在错误输出"
+            "module not found", "no module named", "输入已取消", "存在错误输出",
+            "写入已拒绝", "写入失败", "缩进预检失败"
         ]
         return markers.contains(where: { normalized.contains($0.lowercased()) })
     }

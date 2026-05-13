@@ -177,6 +177,13 @@ def normalize_url(raw):
     if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
         qs = urllib.parse.parse_qs(parsed.query)
         return qs.get("uddg", [raw])[0]
+    if parsed.netloc.endswith("baidu.com"):
+        qs = urllib.parse.parse_qs(parsed.query)
+        for key in ("url", "target"):
+            value = qs.get(key, [""])[0]
+            if value.startswith(("http://", "https://")):
+                return value
+        return ""
     return raw if raw.startswith(("http://", "https://")) else ""
 
 
@@ -196,7 +203,9 @@ def is_search_navigation(url):
     host = (parsed.netloc or "").lower()
     path = (parsed.path or "").lower()
     blocked = {"www.google.com", "google.com", "www.bing.com", "bing.com", "cn.bing.com", "www.baidu.com", "baidu.com"}
-    return host in blocked and path in {"/search", "/s", "/url", "/ck/a"}
+    if host.endswith("baidu.com"):
+        return True
+    return host in blocked and path in {"/search", "/s", "/url", "/ck/a", "/link", "/html/"}
 
 
 def search_bing_rss(query):
