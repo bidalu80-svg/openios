@@ -6959,7 +6959,7 @@ final class ChatViewModel {
         }
 
         // Background tasks — respect both server config and user settings.
-        // Web search is handled on-device by ClientWebSearchService/Local Alpine.
+        // Web search is handled on-device by ClientWebSearchService.
         // Do not ask the server to run its older web_search task; it produces stale
         // results and can race the local search context.
         let serverConfig = activeChatStore?.serverTaskConfig ?? .default
@@ -7002,7 +7002,7 @@ final class ChatViewModel {
         // explicit override. Checking server defaults again here would ignore the
         // user toggling a feature OFF mid-chat (the original bug).
         // Keep server-side web_search disabled. The UI toggle now means
-        // "inject client-side Local Alpine search context before sending".
+        // "inject client-side browser search context before sending".
         features.webSearch = false
         if shouldEnableImageGeneration {
             features.imageGeneration = true
@@ -7818,7 +7818,7 @@ final class ChatViewModel {
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
-                    action: "local_alpine_web_search",
+                    action: "browser_web_search",
                     description: "已获取当前时间",
                     done: true,
                     count: 0,
@@ -7834,8 +7834,8 @@ final class ChatViewModel {
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
-                    action: "local_alpine_web_search",
-                    description: "本地 Alpine 搜索已可用",
+                    action: "browser_web_search",
+                    description: "内置浏览器搜索已可用",
                     done: true,
                     count: 0,
                     query: query,
@@ -7848,8 +7848,8 @@ final class ChatViewModel {
         appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
-                    action: "local_alpine_web_search",
-                    description: "正在用本地 Alpine 搜索...",
+                    action: "browser_web_search",
+                    description: "正在用内置浏览器搜索...",
                     done: false,
                     query: query,
                     queries: [query]
@@ -7870,8 +7870,8 @@ final class ChatViewModel {
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
-                    action: "local_alpine_web_search",
-                    description: "正在用本地 Alpine 搜索...",
+                    action: "browser_web_search",
+                    description: "正在用内置浏览器搜索...",
                     done: false,
                     query: query,
                     queries: queries
@@ -7889,7 +7889,7 @@ final class ChatViewModel {
                 appendStatusUpdate(
                     id: assistantMessageId,
                     status: ChatStatusUpdate(
-                        action: "local_alpine_web_search",
+                        action: "browser_web_search",
                         description: "联网搜索没有返回结果，已按原问题发送",
                         done: true,
                         count: 0,
@@ -7916,10 +7916,10 @@ final class ChatViewModel {
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
-                    action: "local_alpine_web_search",
+                    action: "browser_web_search",
                     description: result.loadedCount > 0
-                        ? "本地 Alpine 已读取 \(result.loadedCount) 个网页"
-                        : "本地 Alpine 已搜索 \(max(sources.count, result.items.count)) 个来源",
+                        ? "内置浏览器已读取 \(result.loadedCount) 个网页"
+                        : "内置浏览器已搜索 \(max(sources.count, result.items.count)) 个来源",
                     done: true,
                     urls: Array(urls),
                     items: result.items.prefix(6).map {
@@ -7935,8 +7935,8 @@ final class ChatViewModel {
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
-                    action: "local_alpine_web_search",
-                    description: "本地 Alpine 搜索失败，已按原问题发送",
+                    action: "browser_web_search",
+                    description: "内置浏览器搜索失败，已按原问题发送",
                     done: true,
                     count: 0,
                     query: query,
@@ -8012,7 +8012,7 @@ final class ChatViewModel {
         appendStatusUpdate(
             id: assistantMessageId,
             status: ChatStatusUpdate(
-                action: "local_alpine_web_search",
+                action: "browser_web_search",
                 description: "搜索结果偏少或可能过旧，正在补充搜索...",
                 done: false,
                 query: query,
@@ -8318,7 +8318,7 @@ final class ChatViewModel {
         """
 
         [客户端联网搜索能力]
-        Iexa 客户端已接入本地 Alpine 联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明搜索由本地 Alpine Linux 环境执行。当用户要求“搜索、联网查、最新、今天、实时、新闻”等内容时，客户端会先在本地 Alpine 中运行脚本搜索并抓取网页，再把结果附加到本轮消息里给你使用。不要声称你无法联网或无法实时搜索。
+        Iexa 客户端已接入内置浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明搜索由 iOS 内置浏览器工具执行，必要时会回退到本地 Alpine 抓取。当用户要求“搜索、联网查、最新、今天、实时、新闻”等内容时，客户端会先用 WKWebView 打开搜索页并读取网页内容，再把结果附加到本轮消息里给你使用。不要声称你无法联网或无法实时搜索。
         [/客户端联网搜索能力]
         """
     }
@@ -8381,19 +8381,19 @@ final class ChatViewModel {
 
         return """
 
-        [本地 Alpine 联网搜索结果]
+        [内置浏览器联网搜索结果]
         查询：\(query)
         实际搜索词：
         \(queryLines)
 
-        以下结果由 Iexa 客户端在发送本轮消息前，通过本地 Alpine Linux 运行 Python/urllib 搜索和抓取网页取得。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果。回答要求：
+        以下结果由 Iexa 客户端在发送本轮消息前，通过内置 WKWebView 浏览器搜索/读取网页取得；如果浏览器结果不足，客户端会合并本地 Alpine 抓取结果。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果。回答要求：
         - 先直接给结论，再补充必要来源和时间。
         - 天气、油价、新闻、价格、版本等实时问题，必须说清楚信息日期/发布时间；资料不够精确就明确说“未在搜索结果中找到精确值”，不要编。
         - 引用来源时使用普通链接或来源标题，不要输出 cite turn0search 之类隐藏引用标记，也不要输出无法显示的方框字符。
         - 不要声称你无法联网。
 
         \(blocks.joined(separator: "\n\n"))
-        [/本地 Alpine 联网搜索结果]
+        [/内置浏览器联网搜索结果]
         """
     }
 

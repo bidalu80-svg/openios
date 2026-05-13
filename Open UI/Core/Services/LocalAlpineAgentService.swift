@@ -99,6 +99,14 @@ actor LocalAlpineAgentService {
                         result: syntaxCheck.result
                     ))
                     if syntaxCheck.result.exitCode != 0 {
+                        if let diagnostic = await pythonSyntaxDiagnostic(for: writeResult.writtenPaths, cwd: effectiveCWD) {
+                            stepLines.append(format(command: diagnostic.command, cwd: effectiveCWD, result: diagnostic.result))
+                            commandResults.append(Self.commandResult(
+                                command: diagnostic.command,
+                                cwd: effectiveCWD,
+                                result: diagnostic.result
+                            ))
+                        }
                         shouldRunShellCommand = false
                     }
                 }
@@ -339,6 +347,27 @@ actor LocalAlpineAgentService {
             .map(shellSingleQuoted)
             .joined(separator: " ")
         let command = "python3 -m py_compile \(quotedPaths)"
+        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
+        return (command, result)
+    }
+
+    private func pythonSyntaxDiagnostic(for paths: [String], cwd: String) async -> (command: String, result: LocalAlpineCommandResult)? {
+        let pythonFiles = paths.filter { $0.lowercased().hasSuffix(".py") }
+        guard !pythonFiles.isEmpty else { return nil }
+        let quotedPaths = pythonFiles
+            .map { runtimePath(forSharedPath: $0) }
+            .map(shellSingleQuoted)
+            .joined(separator: " ")
+        let command = """
+        for file in \(quotedPaths); do
+          printf '== file with line numbers: %s ==\\n' "$file"
+          if [ -f "$file" ]; then
+            nl -ba "$file" | sed -n '1,160p'
+          else
+            printf 'missing: %s\\n' "$file"
+          fi
+        done
+        """
         let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
         return (command, result)
     }

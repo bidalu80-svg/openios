@@ -5,10 +5,27 @@ struct ClientWebSearchService: Sendable {
         let normalizedQueries = Self.unique(queries.map(Self.normalizedQuery))
         guard !normalizedQueries.isEmpty else { return WebSearchResponse() }
 
-        return try await Self.searchWithLocalAlpine(
-            queries: Array(normalizedQueries.prefix(4)),
+        let searchQueries = Array(normalizedQueries.prefix(4))
+        let browserResult = await BrowserWebSearchService.shared.search(
+            queries: searchQueries,
             originalQuery: originalQuery ?? normalizedQueries.first
         )
+        if browserResult.loadedCount > 0 || browserResult.items.count >= 3 || browserResult.docs.count >= 2 {
+            return browserResult
+        }
+
+        do {
+            let alpineResult = try await Self.searchWithLocalAlpine(
+                queries: searchQueries,
+                originalQuery: originalQuery ?? normalizedQueries.first
+            )
+            return Self.merge(primary: browserResult, fallback: alpineResult)
+        } catch {
+            if browserResult.status || !browserResult.items.isEmpty || !browserResult.docs.isEmpty {
+                return browserResult
+            }
+            throw error
+        }
     }
 
     private static func searchWithLocalAlpine(queries: [String], originalQuery: String?) async throws -> WebSearchResponse {
@@ -407,6 +424,41 @@ if __name__ == "__main__":
             result.append(value)
         }
         return result
+    }
+
+    private static func merge(primary: WebSearchResponse, fallback: WebSearchResponse) -> WebSearchResponse {
+        var filenames: [String] = []
+        var seenFilenames = Set<String>()
+        for filename in primary.filenames + fallback.filenames {
+            let key = filename.lowercased()
+            guard !key.isEmpty, seenFilenames.insert(key).inserted else { continue }
+            filenames.append(filename)
+        }
+
+        var items: [WebSearchResultItem] = []
+        var seenItems = Set<String>()
+        for item in primary.items + fallback.items {
+            let key = (item.link ?? item.title ?? item.snippet ?? UUID().uuidString).lowercased()
+            guard seenItems.insert(key).inserted else { continue }
+            items.append(item)
+        }
+
+        var docs: [WebSearchDocument] = []
+        var seenDocs = Set<String>()
+        for doc in primary.docs + fallback.docs {
+            let key = (doc.metadata["source"] ?? doc.metadata["link"] ?? String(doc.content.prefix(160))).lowercased()
+            guard seenDocs.insert(key).inserted else { continue }
+            docs.append(doc)
+        }
+
+        return WebSearchResponse(
+            status: primary.status || fallback.status || !items.isEmpty || !docs.isEmpty,
+            collectionNames: Array(Set(primary.collectionNames + fallback.collectionNames)),
+            filenames: filenames,
+            items: Array(items.prefix(10)),
+            docs: Array(docs.prefix(8)),
+            loadedCount: primary.loadedCount + fallback.loadedCount
+        )
     }
 
 }

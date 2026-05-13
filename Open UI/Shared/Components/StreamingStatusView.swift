@@ -92,11 +92,15 @@ struct StreamingStatusView: View {
 
     private var isWebSearchStatus: Bool {
         guard let action = latestStatus?.action?.lowercased() else { return false }
-        return ["web_search", "websearch", "web search", "local_alpine_web_search"].contains(action)
+        return ["web_search", "websearch", "web search", "local_alpine_web_search", "browser_web_search"].contains(action)
     }
 
     private func isLocalAlpineWebSearch(_ status: ChatStatusUpdate?) -> Bool {
         status?.action?.lowercased() == "local_alpine_web_search"
+    }
+
+    private func isBrowserWebSearch(_ status: ChatStatusUpdate?) -> Bool {
+        status?.action?.lowercased() == "browser_web_search"
     }
 
     private var webSearchCard: some View {
@@ -195,30 +199,34 @@ struct StreamingStatusView: View {
     private func webSearchTitle(for status: ChatStatusUpdate?) -> String {
         guard let status else { return "正在联网搜索" }
         let localAlpine = isLocalAlpineWebSearch(status)
+        let browser = isBrowserWebSearch(status)
         if status.done == true {
             if let count = status.count, count > 0 {
+                if browser { return "内置浏览器已读取 \(count) 个网页" }
                 return localAlpine ? "本地 Alpine 已读取 \(count) 个网页" : "已搜索 \(count) 个网页"
             }
             if !status.items.isEmpty {
+                if browser { return "内置浏览器已搜索 \(status.items.count) 个来源" }
                 return localAlpine ? "本地 Alpine 已搜索 \(status.items.count) 个来源" : "已搜索 \(status.items.count) 个来源"
             }
-            return status.description ?? (localAlpine ? "本地 Alpine 搜索完成" : "已完成联网搜索")
+            return status.description ?? (browser ? "内置浏览器搜索完成" : (localAlpine ? "本地 Alpine 搜索完成" : "已完成联网搜索"))
         }
         if let query = status.query, !query.isEmpty {
-            return localAlpine ? "本地 Alpine 搜索中" : "正在搜索"
+            return browser ? "内置浏览器搜索中" : (localAlpine ? "本地 Alpine 搜索中" : "正在搜索")
         }
-        return status.description ?? (localAlpine ? "本地 Alpine 搜索中" : "正在联网搜索")
+        return status.description ?? (browser ? "内置浏览器搜索中" : (localAlpine ? "本地 Alpine 搜索中" : "正在联网搜索"))
     }
 
     private func webSearchSubtitle(for status: ChatStatusUpdate?) -> String {
         guard let status else { return "准备搜索" }
         let localAlpine = isLocalAlpineWebSearch(status)
+        let browser = isBrowserWebSearch(status)
         if status.done == true {
             let sourceCount = max(status.items.count, status.urls.count)
             if sourceCount > 0 {
-                return localAlpine ? "本地读取 \(sourceCount) 个来源" : "获取了 \(sourceCount) 个来源"
+                return browser ? "浏览器读取 \(sourceCount) 个来源" : (localAlpine ? "本地读取 \(sourceCount) 个来源" : "获取了 \(sourceCount) 个来源")
             }
-            return localAlpine ? "本地搜索完成" : "搜索完成"
+            return browser ? "浏览器搜索完成" : (localAlpine ? "本地搜索完成" : "搜索完成")
         }
         if let query = status.query, !query.isEmpty {
             return query
@@ -784,21 +792,23 @@ struct StreamingStatusView: View {
         let isDone = status.done == true
 
         switch action.lowercased() {
-        case "web_search", "websearch", "web search", "local_alpine_web_search":
+        case "web_search", "websearch", "web search", "local_alpine_web_search", "browser_web_search":
             let localAlpine = action.lowercased() == "local_alpine_web_search"
+            let browser = action.lowercased() == "browser_web_search"
             if isDone {
                 if let count = status.count, count > 0 {
+                    if browser { return "内置浏览器已读取 \(count) 个网页" }
                     return localAlpine ? "本地 Alpine 已读取 \(count) 个网页" : "已搜索 \(count) 个网页"
                 }
-                return desc ?? (localAlpine ? "本地 Alpine 搜索完成" : "已完成联网搜索")
+                return desc ?? (browser ? "内置浏览器搜索完成" : (localAlpine ? "本地 Alpine 搜索完成" : "已完成联网搜索"))
             }
             if let query = status.query, !query.isEmpty {
-                return localAlpine ? "本地 Alpine 搜索：\(query)" : "正在搜索：\(query)"
+                return browser ? "内置浏览器搜索：\(query)" : (localAlpine ? "本地 Alpine 搜索：\(query)" : "正在搜索：\(query)")
             }
             if !status.queries.isEmpty {
-                return localAlpine ? "本地 Alpine 搜索中" : "正在搜索"
+                return browser ? "内置浏览器搜索中" : (localAlpine ? "本地 Alpine 搜索中" : "正在搜索")
             }
-            return desc ?? (localAlpine ? "本地 Alpine 搜索中" : "正在联网搜索")
+            return desc ?? (browser ? "内置浏览器搜索中" : (localAlpine ? "本地 Alpine 搜索中" : "正在联网搜索"))
 
         case "generate_image", "image_generation", "generateimage":
             if isDone { return desc ?? "Image generated" }
