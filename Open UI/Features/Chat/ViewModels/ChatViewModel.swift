@@ -3265,12 +3265,13 @@ final class ChatViewModel {
         // conversation.messages and only invalidate the streaming message view.
         let initialStatusHistory = conversation?.messages.first(where: { $0.id == assistantMessageId })?.statusHistory ?? []
         let initialSources = conversation?.messages.first(where: { $0.id == assistantMessageId })?.sources ?? []
-        streamingStore.beginStreaming(
-            messageId: assistantMessageId,
-            modelId: modelId,
-            initialStatusHistory: initialStatusHistory,
-            initialSources: initialSources
-        )
+        streamingStore.beginStreaming(messageId: assistantMessageId, modelId: modelId)
+        for status in initialStatusHistory {
+            streamingStore.appendStatus(status)
+        }
+        if !initialSources.isEmpty {
+            streamingStore.appendSources(initialSources)
+        }
 
         if isOpenAICompatibleProvider {
             streamingTask = Task { [weak self] in
