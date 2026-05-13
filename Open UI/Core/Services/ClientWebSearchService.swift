@@ -1,656 +1,395 @@
 import Foundation
 
 struct ClientWebSearchService: Sendable {
-    private static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-    private static let maxResultsPerQuery = 5
-    private static let maxFetchedPages = 4
-    private static let maxPageCharacters = 5_000
-    private static let maxCombinedDocumentCharacters = 18_000
-    private static let searxngInstances = [
-        "https://search.inetol.net",
-        "https://searx.tiekoetter.com",
-        "https://searx.rhscz.eu",
-        "https://search.seddens.net"
-    ]
-
     func search(queries: [String], originalQuery: String?) async throws -> WebSearchResponse {
         let normalizedQueries = Self.unique(queries.map(Self.normalizedQuery))
         guard !normalizedQueries.isEmpty else { return WebSearchResponse() }
 
-        let outcomes = await withTaskGroup(of: [WebSearchResultItem].self) { group in
-            for query in normalizedQueries.prefix(3) {
-                group.addTask {
-                    if let searxng = try? await Self.searchSearXNG(query: query), !searxng.isEmpty {
-                        return searxng
-                    }
-                    if let rss = try? await Self.searchBingRSS(query: query), !rss.isEmpty {
-                        return rss
-                    }
-                    if let html = try? await Self.searchBingHTML(query: query, host: "www.bing.com"), !html.isEmpty {
-                        return html
-                    }
-                    if let cnHTML = try? await Self.searchBingHTML(query: query, host: "cn.bing.com"), !cnHTML.isEmpty {
-                        return cnHTML
-                    }
-                    if let google = try? await Self.searchGoogleHTML(query: query), !google.isEmpty {
-                        return google
-                    }
-                    if let baidu = try? await Self.searchBaiduHTML(query: query), !baidu.isEmpty {
-                        return baidu
-                    }
-                    if let simple = try? await Self.searchBingLite(query: query), !simple.isEmpty {
-                        return simple
-                    }
-                    return []
-                }
-            }
-
-            var collected: [WebSearchResultItem] = []
-            for await items in group {
-                collected.append(contentsOf: items)
-            }
-            return collected
-        }
-
-        let items = Array(Self.rank(
-            Self.deduplicate(outcomes),
-            query: originalQuery ?? normalizedQueries.first ?? ""
-        ).prefix(8))
-        let fetchedDocs = await Self.fetchWebDocuments(from: items)
-        let docs = fetchedDocs.isEmpty ? Self.searchSummaryDocuments(from: items) : fetchedDocs
-        let loadedPageCount = docs.filter { $0.metadata["provider"] == "client_search_page" }.count
-        return WebSearchResponse(
-            status: !items.isEmpty,
-            filenames: items.compactMap(\.link),
-            items: Array(items),
-            docs: docs,
-            loadedCount: loadedPageCount
+        return try await Self.searchWithLocalAlpine(
+            queries: Array(normalizedQueries.prefix(4)),
+            originalQuery: originalQuery ?? normalizedQueries.first
         )
     }
 
-    private static func searchBingRSS(query: String) async throws -> [WebSearchResultItem] {
-        var components = URLComponents(string: "https://www.bing.com/search")
-        components?.queryItems = [
-            URLQueryItem(name: "q", value: query),
-            URLQueryItem(name: "format", value: "rss"),
-            URLQueryItem(name: "setlang", value: "zh-Hans")
-        ]
-        guard let url = components?.url else { return [] }
-        let data = try await load(url)
-        return parseRSS(decodeText(data))
-    }
+    private static func searchWithLocalAlpine(queries: [String], originalQuery: String?) async throws -> WebSearchResponse {
+        let suffix = UUID().uuidString.prefix(8).lowercased()
+        let scriptName = "iexa-search-\(suffix).py"
+        let inputName = "iexa-search-\(suffix).json"
+        let inputData = try JSONSerialization.data(
+            withJSONObject: [
+                "queries": queries,
+                "original_query": originalQuery ?? queries.first ?? ""
+            ],
+            options: []
+        )
 
-    private static func searchBingHTML(query: String, host: String) async throws -> [WebSearchResultItem] {
-        var components = URLComponents(string: "https://\(host)/search")
-        components?.queryItems = [
-            URLQueryItem(name: "q", value: query),
-            URLQueryItem(name: "setlang", value: "zh-Hans")
-        ]
-        guard let url = components?.url else { return [] }
-        let data = try await load(url)
-        return parseBingHTML(decodeText(data))
-    }
+        try await LocalAlpineTerminalService.shared.writeFile(
+            data: Data(Self.localAlpineSearchScript().utf8),
+            fileName: scriptName,
+            destinationPath: "/"
+        )
+        try await LocalAlpineTerminalService.shared.writeFile(
+            data: inputData,
+            fileName: inputName,
+            destinationPath: "/"
+        )
 
-    private static func searchBingLite(query: String) async throws -> [WebSearchResultItem] {
-        var components = URLComponents(string: "https://www.bing.com/search")
-        components?.queryItems = [
-            URLQueryItem(name: "q", value: query),
-            URLQueryItem(name: "ensearch", value: "1")
-        ]
-        guard let url = components?.url else { return [] }
-        let data = try await load(url)
-        return parseGenericSearchHTML(decodeText(data), provider: "bing_lite")
-    }
-
-    private static func searchGoogleHTML(query: String) async throws -> [WebSearchResultItem] {
-        var components = URLComponents(string: "https://www.google.com/search")
-        components?.queryItems = [
-            URLQueryItem(name: "q", value: query),
-            URLQueryItem(name: "hl", value: "zh-CN"),
-            URLQueryItem(name: "num", value: "\(maxResultsPerQuery)")
-        ]
-        guard let url = components?.url else { return [] }
-        let data = try await load(url)
-        return parseGoogleHTML(decodeText(data))
-    }
-
-    private static func searchBaiduHTML(query: String) async throws -> [WebSearchResultItem] {
-        var components = URLComponents(string: "https://www.baidu.com/s")
-        components?.queryItems = [
-            URLQueryItem(name: "wd", value: query),
-            URLQueryItem(name: "rn", value: "\(maxResultsPerQuery)")
-        ]
-        guard let url = components?.url else { return [] }
-        let data = try await load(url)
-        return parseBaiduHTML(decodeText(data))
-    }
-
-    private static func searchSearXNG(query: String) async throws -> [WebSearchResultItem] {
-        let configured = UserDefaults.standard.string(forKey: "searxngQueryURL")?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let configuredBases = [configured].compactMap { value -> String? in
-            guard let value, !value.isEmpty else { return nil }
-            return value
-        }
-        let bases = unique(configuredBases + searxngInstances)
-        var lastError: Error?
-
-        for base in bases.prefix(4) {
-            do {
-                let items = try await searchSearXNG(query: query, baseURL: base)
-                if !items.isEmpty { return items }
-            } catch {
-                lastError = error
-                continue
-            }
-        }
-
-        if let lastError { throw lastError }
-        return []
-    }
-
-    private static func searchSearXNG(query: String, baseURL: String) async throws -> [WebSearchResultItem] {
-        let trimmedBase = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let searchURL: String
-        if trimmedBase.localizedCaseInsensitiveContains("{query}") {
-            searchURL = trimmedBase
-                .replacingOccurrences(of: "{query}", with: query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query)
-                .replacingOccurrences(of: "{language}", with: "zh-CN")
-                .replacingOccurrences(of: "{format}", with: "json")
-        } else {
-            searchURL = "\(trimmedBase)/search"
-        }
-
-        var components = URLComponents(string: searchURL)
-        if !trimmedBase.localizedCaseInsensitiveContains("{query}") {
-            components?.queryItems = [
-                URLQueryItem(name: "q", value: query),
-                URLQueryItem(name: "format", value: "json"),
-                URLQueryItem(name: "language", value: "zh-CN"),
-                URLQueryItem(name: "safesearch", value: "1")
-            ]
-        }
-        guard let url = components?.url else { return [] }
-
-        let (data, _) = try await loadResponse(url, timeout: 10, resourceTimeout: 14)
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let results = json["results"] as? [[String: Any]] else {
-            return []
-        }
-
-        return results.prefix(maxResultsPerQuery).compactMap { raw in
-            webSearchItem(
-                title: raw["title"] as? String,
-                link: (raw["url"] as? String) ?? (raw["link"] as? String),
-                snippet: (raw["content"] as? String)
-                    ?? (raw["snippet"] as? String)
-                    ?? (raw["description"] as? String)
+        let command = "python3 \(scriptName) \(inputName)"
+        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
+        let exitCode = result.exitCode ?? 1
+        guard exitCode == 0 else {
+            throw LocalAlpineSearchError(
+                message: "Local Alpine search failed with exit code \(exitCode): \(String(result.output.prefix(600)))"
             )
         }
-    }
-
-    private static func load(_ url: URL) async throws -> Data {
-        let (data, _) = try await loadResponse(url, timeout: 12, resourceTimeout: 18)
-        return data
-    }
-
-    private static func loadResponse(
-        _ url: URL,
-        timeout: TimeInterval,
-        resourceTimeout: TimeInterval
-    ) async throws -> (Data, HTTPURLResponse) {
-        var request = URLRequest(url: url, timeoutInterval: timeout)
-        request.httpMethod = "GET"
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,application/json;q=0.7,*/*;q=0.4", forHTTPHeaderField: "Accept")
-        request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
-
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = timeout
-        config.timeoutIntervalForResource = resourceTimeout
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        let session = URLSession(configuration: config)
-        defer { session.finishTasksAndInvalidate() }
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse,
-              (200..<400).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
-        }
-        return (data, http)
-    }
-
-    private static func fetchWebDocuments(from items: [WebSearchResultItem]) async -> [WebSearchDocument] {
-        let candidates = items.enumerated().compactMap { index, item -> PageFetchCandidate? in
-            guard let link = item.link,
-                  let url = URL(string: link),
-                  isFetchableWebURL(url),
-                  !isSearchNavigationURL(link) else {
-                return nil
-            }
-            return PageFetchCandidate(index: index, item: item, url: url)
-        }.prefix(maxFetchedPages)
-
-        guard !candidates.isEmpty else { return [] }
-
-        let outcomes = await withTaskGroup(of: PageFetchOutcome.self) { group in
-            for candidate in candidates {
-                group.addTask {
-                    do {
-                        let doc = try await fetchWebDocument(candidate)
-                        return PageFetchOutcome(index: candidate.index, document: doc)
-                    } catch {
-                        let fallback = searchSummaryDocument(from: candidate.item)
-                        return PageFetchOutcome(index: candidate.index, document: fallback)
-                    }
-                }
-            }
-
-            var collected: [PageFetchOutcome] = []
-            for await outcome in group {
-                collected.append(outcome)
-            }
-            return collected.sorted { $0.index < $1.index }
-        }
-
-        var usedCharacters = 0
-        var docs: [WebSearchDocument] = []
-        for outcome in outcomes {
-            guard var doc = outcome.document else { continue }
-            let remaining = maxCombinedDocumentCharacters - usedCharacters
-            guard remaining > 400 else { break }
-            if doc.content.count > remaining {
-                doc.content = String(doc.content.prefix(remaining))
-            }
-            usedCharacters += doc.content.count
-            docs.append(doc)
-        }
-        return docs
-    }
-
-    private static func fetchWebDocument(_ candidate: PageFetchCandidate) async throws -> WebSearchDocument {
-        let (data, response) = try await loadResponse(candidate.url, timeout: 10, resourceTimeout: 16)
-        let contentType = (response.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
-        guard isReadableContentType(contentType, data: data) else {
-            throw URLError(.cannotDecodeContentData)
-        }
-
-        let decoded = decodeText(data)
-        let finalURL = response.url?.absoluteString ?? candidate.url.absoluteString
-        let title: String?
-        let description: String?
-        let pageText: String
-        let publishedTime: String?
-
-        if contentType.contains("text/html") || decoded.localizedCaseInsensitiveContains("<html") {
-            title = firstMatch(in: decoded, pattern: #"(?is)<title[^>]*>(.*?)</title>"#).map(htmlToPlainText)
-                ?? candidate.item.title
-            description = metaContent(in: decoded, names: ["description", "og:description", "twitter:description"])
-                ?? candidate.item.snippet
-            publishedTime = metaContent(in: decoded, names: [
-                "article:published_time", "article:modified_time", "og:updated_time",
-                "date", "pubdate", "publishdate", "publish_date"
-            ])
-            pageText = readableHTMLText(decoded)
-        } else {
-            title = candidate.item.title
-            description = candidate.item.snippet
-            publishedTime = nil
-            pageText = cleanupMultilineText(decoded)
-        }
-
-        let excerpt = String(pageText.prefix(maxPageCharacters))
-        guard !excerpt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw URLError(.cannotParseResponse)
-        }
-
-        var sections: [String] = []
-        if let title, !title.isEmpty { sections.append("Title: \(title)") }
-        sections.append("URL: \(finalURL)")
-        if let publishedTime, !publishedTime.isEmpty { sections.append("Published/Updated: \(publishedTime)") }
-        if let description, !description.isEmpty { sections.append("Description: \(description)") }
-        sections.append("Content excerpt:\n\(excerpt)")
-
-        var metadata = [
-            "title": title ?? candidate.item.title ?? "",
-            "source": finalURL,
-            "link": finalURL,
-            "provider": "client_search_page"
-        ].filter { !$0.value.isEmpty }
-        if let publishedTime, !publishedTime.isEmpty {
-            metadata["published_time"] = publishedTime
-        }
-        if let snippet = candidate.item.snippet, !snippet.isEmpty {
-            metadata["search_snippet"] = snippet
-        }
-
-        return WebSearchDocument(
-            content: sections.joined(separator: "\n"),
-            metadata: metadata
-        )
-    }
-
-    private static func parseRSS(_ xml: String) -> [WebSearchResultItem] {
-        let items = matches(in: xml, pattern: #"(?is)<item\b[^>]*>(.*?)</item>"#)
-        return items.prefix(maxResultsPerQuery).compactMap { block in
-            let title = firstMatch(in: block, pattern: #"(?is)<title[^>]*>(.*?)</title>"#).map(cleanupText)
-            let link = firstMatch(in: block, pattern: #"(?is)<link[^>]*>(.*?)</link>"#).map(cleanupText)
-            let description = firstMatch(in: block, pattern: #"(?is)<description[^>]*>(.*?)</description>"#).map { htmlToPlainText($0) }
-            return webSearchItem(title: title, link: link, snippet: description)
-        }
-    }
-
-    private static func parseBingHTML(_ html: String) -> [WebSearchResultItem] {
-        let blocks = matches(in: html, pattern: #"(?is)<li[^>]+class=["'][^"']*\bb_algo\b[^"']*["'][^>]*>(.*?)</li>"#)
-        return blocks.prefix(maxResultsPerQuery).compactMap { block in
-            let titleHTML = firstMatch(in: block, pattern: #"(?is)<h2[^>]*>\s*<a[^>]+href=["'][^"']+["'][^>]*>(.*?)</a>"#)
-            let href = firstMatch(in: block, pattern: #"(?is)<h2[^>]*>\s*<a[^>]+href=["']([^"']+)["']"#)
-            let snippetHTML = firstMatch(in: block, pattern: #"(?is)<p[^>]*>(.*?)</p>"#)
-            return webSearchItem(
-                title: titleHTML.map(htmlToPlainText),
-                link: href.flatMap(normalizedBingURL),
-                snippet: snippetHTML.map(htmlToPlainText)
+        guard let jsonText = Self.extractLocalAlpineSearchJSON(from: result.output),
+              let data = jsonText.data(using: .utf8),
+              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw LocalAlpineSearchError(
+                message: "Local Alpine search returned unreadable output: \(String(result.output.prefix(600)))"
             )
         }
+
+        return WebSearchResponse(json: json)
     }
 
-    private static func parseGoogleHTML(_ html: String) -> [WebSearchResultItem] {
-        let blocks = matches(in: html, pattern: #"(?is)<div[^>]+class=["'][^"']*\bg\b[^"']*["'][^>]*>(.*?)</div>\s*</div>"#)
-        let parsed = blocks.prefix(maxResultsPerQuery).compactMap { block -> WebSearchResultItem? in
-            let href = firstMatch(in: block, pattern: #"(?is)<a[^>]+href=["'](?:/url\?q=)?([^"'&]+)[^"']*["']"#)
-            let title = firstMatch(in: block, pattern: #"(?is)<h3[^>]*>(.*?)</h3>"#).map(htmlToPlainText)
-            let snippet = firstMatch(in: block, pattern: #"(?is)<div[^>]+(?:data-sncf|class=["'][^"']*(?:VwiC3b|IsZvec|kb0PBd))[^>]*>(.*?)</div>"#).map(htmlToPlainText)
-            return webSearchItem(title: title, link: href.flatMap(normalizedGoogleURL), snippet: snippet)
-        }
-        return parsed.isEmpty ? parseGenericSearchHTML(html, provider: "google") : parsed
-    }
-
-    private static func parseBaiduHTML(_ html: String) -> [WebSearchResultItem] {
-        let blocks = matches(in: html, pattern: #"(?is)<div[^>]+class=["'][^"']*\bresult\b[^"']*["'][^>]*>(.*?)</div>\s*</div>"#)
-        let parsed = blocks.prefix(maxResultsPerQuery).compactMap { block -> WebSearchResultItem? in
-            let href = firstMatch(in: block, pattern: #"(?is)<a[^>]+href=["']([^"']+)["'][^>]*>"#)
-            let title = firstMatch(in: block, pattern: #"(?is)<h3[^>]*>(.*?)</h3>"#).map(htmlToPlainText)
-                ?? firstMatch(in: block, pattern: #"(?is)<a[^>]+href=["'][^"']+["'][^>]*>(.*?)</a>"#).map(htmlToPlainText)
-            let snippet = firstMatch(in: block, pattern: #"(?is)<span[^>]+class=["'][^"']*(?:content-right|c-abstract|c-span-last)[^"']*["'][^>]*>(.*?)</span>"#).map(htmlToPlainText)
-                ?? firstMatch(in: block, pattern: #"(?is)<div[^>]+class=["'][^"']*(?:c-abstract|c-span-last)[^"']*["'][^>]*>(.*?)</div>"#).map(htmlToPlainText)
-            return webSearchItem(title: title, link: href.flatMap(normalizedBaiduURL), snippet: snippet)
-        }
-        return parsed.isEmpty ? parseGenericSearchHTML(html, provider: "baidu") : parsed
-    }
-
-    private static func parseGenericSearchHTML(_ html: String, provider: String) -> [WebSearchResultItem] {
-        let anchors = matchGroups(in: html, pattern: #"(?is)<a[^>]+href=["']([^"']+)["'][^>]*>(.*?)</a>"#)
-        var items: [WebSearchResultItem] = []
-        for anchor in anchors {
-            guard items.count < maxResultsPerQuery else { break }
-            guard anchor.count >= 2 else { continue }
-            let href = anchor[0]
-            let title = htmlToPlainText(anchor[1])
-            guard title.count >= 2,
-                  let link = normalizedGenericURL(href),
-                  !isSearchNavigationURL(link) else { continue }
-            if let item = webSearchItem(title: title, link: link, snippet: provider) {
-                items.append(item)
-            }
-        }
-        return deduplicate(items)
-    }
-
-    private static func webSearchItem(title: String?, link: String?, snippet: String?) -> WebSearchResultItem? {
-        let json: [String: Any] = [
-            "title": title ?? "",
-            "link": link ?? "",
-            "snippet": snippet ?? ""
-        ]
-        return WebSearchResultItem(json: json)
-    }
-
-    private static func normalizedBingURL(_ raw: String) -> String? {
-        let decoded = cleanupText(raw)
-        guard let url = URL(string: decoded) else { return decoded.isEmpty ? nil : decoded }
-        if url.host?.contains("bing.com") == true,
-           url.path == "/ck/a",
-           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let encoded = components.queryItems?.first(where: { $0.name == "u" })?.value {
-            let stripped = encoded.hasPrefix("a1") ? String(encoded.dropFirst(2)) : encoded
-            if let data = Data(base64Encoded: stripped),
-               let actual = String(data: data, encoding: .utf8),
-               !actual.isEmpty {
-                return actual
-            }
-        }
-        return decoded
-    }
-
-    private static func normalizedGoogleURL(_ raw: String) -> String? {
-        let decoded = cleanupText(raw)
-        if decoded.hasPrefix("/url?"),
-           let components = URLComponents(string: "https://www.google.com\(decoded)"),
-           let q = components.queryItems?.first(where: { $0.name == "q" })?.value {
-            return q
-        }
-        return normalizedGenericURL(decoded)
-    }
-
-    private static func normalizedBaiduURL(_ raw: String) -> String? {
-        let decoded = cleanupText(raw)
-        if decoded.hasPrefix("http://") || decoded.hasPrefix("https://") {
-            return decoded
-        }
-        if decoded.hasPrefix("/") {
-            return "https://www.baidu.com\(decoded)"
-        }
-        return nil
-    }
-
-    private static func normalizedGenericURL(_ raw: String) -> String? {
-        var decoded = cleanupText(raw)
-        decoded = decoded.removingPercentEncoding ?? decoded
-        if decoded.hasPrefix("//") { return "https:\(decoded)" }
-        if decoded.hasPrefix("http://") || decoded.hasPrefix("https://") { return decoded }
-        return nil
-    }
-
-    private static func isSearchNavigationURL(_ url: String) -> Bool {
-        guard let parsed = URL(string: url),
-              let host = parsed.host?.lowercased() else { return true }
-        let blockedHosts = ["google.com", "www.google.com", "bing.com", "www.bing.com", "cn.bing.com", "baidu.com", "www.baidu.com"]
-        let path = parsed.path.lowercased()
-        if blockedHosts.contains(host), ["/search", "/s", "/url", "/preferences", "/advanced_search"].contains(path) {
-            return true
-        }
-        return false
-    }
-
-    private static func isFetchableWebURL(_ url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",
-              let host = url.host?.lowercased(),
-              !host.isEmpty else { return false }
-
-        let blockedHosts = [
-            "google.com", "www.google.com", "bing.com", "www.bing.com",
-            "cn.bing.com", "baidu.com", "www.baidu.com"
-        ]
-        if blockedHosts.contains(host), ["/search", "/s", "/url", "/ck/a"].contains(url.path.lowercased()) {
-            return false
+    private static func extractLocalAlpineSearchJSON(from output: String) -> String? {
+        let begin = "IEXA_SEARCH_JSON_BEGIN"
+        let end = "IEXA_SEARCH_JSON_END"
+        if let beginRange = output.range(of: begin),
+           let endRange = output.range(of: end, range: beginRange.upperBound..<output.endIndex) {
+            return String(output[beginRange.upperBound..<endRange.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        let blockedExtensions = [
-            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg",
-            ".mp4", ".mov", ".m4v", ".mp3", ".zip", ".rar", ".7z", ".ipa", ".apk", ".dmg"
-        ]
-        let path = url.path.lowercased()
-        return !blockedExtensions.contains { path.hasSuffix($0) }
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{"), trimmed.hasSuffix("}") else { return nil }
+        return trimmed
     }
 
-    private static func isReadableContentType(_ contentType: String, data: Data) -> Bool {
-        if contentType.isEmpty {
-            let prefix = decodeText(Data(data.prefix(512)))
-            return prefix.localizedCaseInsensitiveContains("<html")
-                || prefix.range(of: #"^[\s\S]{20,}"#, options: .regularExpression) != nil
-        }
-        return contentType.contains("text/html")
-            || contentType.contains("text/plain")
-            || contentType.contains("application/json")
-            || contentType.contains("application/xml")
-            || contentType.contains("+json")
-            || contentType.contains("+xml")
+    private static func localAlpineSearchScript() -> String {
+        #"""
+import html
+import json
+import re
+import socket
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+socket.setdefaulttimeout(8)
+
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) IexaLocalAlpineSearch/1.0 Safari/537.36"
+MAX_RESULTS = 8
+MAX_DOCS = 4
+MAX_PAGE_CHARS = 5000
+MAX_COMBINED_DOC_CHARS = 18000
+DEADLINE = time.time() + 38
+
+
+def time_left(default=6):
+    return max(1, min(default, int(DEADLINE - time.time())))
+
+
+def clean_text(value):
+    value = html.unescape(value or "")
+    value = re.sub(r"(?is)<script\b[^>]*>.*?</script>", " ", value)
+    value = re.sub(r"(?is)<style\b[^>]*>.*?</style>", " ", value)
+    value = re.sub(r"(?is)<[^>]+>", " ", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def multiline_text(value):
+    value = html.unescape(value or "")
+    value = re.sub(r"(?is)<script\b[^>]*>.*?</script>", " ", value)
+    value = re.sub(r"(?is)<style\b[^>]*>.*?</style>", " ", value)
+    value = re.sub(r"(?is)<br\s*/?>", "\n", value)
+    value = re.sub(r"(?is)</p\s*>", "\n", value)
+    value = re.sub(r"(?is)<[^>]+>", " ", value)
+    value = re.sub(r"[ \t\xa0]+", " ", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    lines = []
+    for line in value.splitlines():
+        line = line.strip()
+        if len(line) < 2:
+            continue
+        lowered = line.lower()
+        if lowered in ("javascript", "cookie", "cookies", "privacy policy", "terms of use"):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def fetch(url, limit=900000):
+    if time.time() >= DEADLINE:
+        raise TimeoutError("search budget exhausted")
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,application/json;q=0.7,*/*;q=0.4",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=time_left()) as response:
+        data = response.read(limit)
+        ctype = response.headers.get("content-type", "")
+        final_url = response.geturl()
+    charset = "utf-8"
+    match = re.search(r"charset=([\w.-]+)", ctype, re.I)
+    if match:
+        charset = match.group(1)
+    text = data.decode(charset, "replace")
+    return text, final_url, ctype
+
+
+def normalize_url(raw):
+    raw = html.unescape(raw or "").strip()
+    if not raw:
+        return ""
+    raw = urllib.parse.unquote(raw)
+    if raw.startswith("//"):
+        return "https:" + raw
+    if raw.startswith("/url?"):
+        parsed = urllib.parse.urlparse("https://www.google.com" + raw)
+        qs = urllib.parse.parse_qs(parsed.query)
+        return qs.get("q", [""])[0]
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+        qs = urllib.parse.parse_qs(parsed.query)
+        return qs.get("uddg", [raw])[0]
+    return raw if raw.startswith(("http://", "https://")) else ""
+
+
+def item(title, link, snippet):
+    link = normalize_url(link)
+    title = clean_text(title)
+    snippet = clean_text(snippet)
+    if not (title or link or snippet):
+        return None
+    if link and is_search_navigation(link):
+        return None
+    return {"title": title, "link": link, "snippet": snippet}
+
+
+def is_search_navigation(url):
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    blocked = {"www.google.com", "google.com", "www.bing.com", "bing.com", "cn.bing.com", "www.baidu.com", "baidu.com"}
+    return host in blocked and path in {"/search", "/s", "/url", "/ck/a"}
+
+
+def search_bing_rss(query):
+    url = "https://www.bing.com/search?" + urllib.parse.urlencode({"q": query, "format": "rss", "setlang": "zh-Hans"})
+    text, _, _ = fetch(url, limit=350000)
+    found = []
+    for block in re.findall(r"(?is)<item\b[^>]*>(.*?)</item>", text):
+        title = first(block, r"(?is)<title[^>]*>(.*?)</title>")
+        link = first(block, r"(?is)<link[^>]*>(.*?)</link>")
+        snippet = first(block, r"(?is)<description[^>]*>(.*?)</description>")
+        parsed = item(title, link, snippet)
+        if parsed:
+            found.append(parsed)
+    return found
+
+
+def search_duckduckgo(query):
+    url = "https://lite.duckduckgo.com/lite/?" + urllib.parse.urlencode({"q": query})
+    text, _, _ = fetch(url, limit=450000)
+    found = []
+    for href, body in re.findall(r'(?is)<a[^>]+class=["\']result-link["\'][^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', text):
+        parsed = item(body, href, "")
+        if parsed:
+            found.append(parsed)
+    if found:
+        return found
+    for href, body in re.findall(r'(?is)<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', text):
+        parsed = item(body, href, "")
+        if parsed:
+            found.append(parsed)
+    return found
+
+
+def search_baidu(query):
+    url = "https://www.baidu.com/s?" + urllib.parse.urlencode({"wd": query, "rn": "8"})
+    text, _, _ = fetch(url, limit=500000)
+    found = []
+    blocks = re.findall(r'(?is)<div[^>]+class=["\'][^"\']*\bresult\b[^"\']*["\'][^>]*>(.*?)</div>\s*</div>', text)
+    for block in blocks:
+        href = first(block, r'(?is)<a[^>]+href=["\']([^"\']+)["\']')
+        title = first(block, r"(?is)<h3[^>]*>(.*?)</h3>") or first(block, r'(?is)<a[^>]+href=["\'][^"\']+["\'][^>]*>(.*?)</a>')
+        snippet = first(block, r'(?is)<span[^>]+class=["\'][^"\']*(?:content-right|c-abstract|c-span-last)[^"\']*["\'][^>]*>(.*?)</span>')
+        parsed = item(title, href, snippet)
+        if parsed:
+            found.append(parsed)
+    return found
+
+
+def first(text, pattern):
+    match = re.search(pattern, text or "")
+    return match.group(1) if match else ""
+
+
+def dedupe(items):
+    result = []
+    seen = set()
+    for value in items:
+        key = (value.get("link") or value.get("title") or value.get("snippet") or "").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def blocked_document_url(url):
+    parsed = urllib.parse.urlparse(url or "")
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return True
+    lowered = parsed.path.lower()
+    blocked_ext = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg", ".mp4", ".mov", ".mp3", ".zip", ".rar", ".7z", ".ipa", ".apk", ".dmg", ".pdf")
+    return lowered.endswith(blocked_ext) or is_search_navigation(url)
+
+
+def fetch_document(search_item):
+    url = search_item.get("link") or ""
+    if blocked_document_url(url):
+        return None
+    text, final_url, ctype = fetch(url, limit=1000000)
+    title = clean_text(first(text, r"(?is)<title[^>]*>(.*?)</title>")) or search_item.get("title") or final_url
+    desc = (
+        clean_text(first(text, r'(?is)<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)["\']'))
+        or clean_text(first(text, r'(?is)<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']*)["\']'))
+        or search_item.get("snippet")
+        or ""
+    )
+    published = (
+        clean_text(first(text, r'(?is)<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']*)["\']'))
+        or clean_text(first(text, r'(?is)<meta[^>]+name=["\']date["\'][^>]+content=["\']([^"\']*)["\']'))
+        or ""
+    )
+    body = first(text, r"(?is)<article\b[^>]*>(.*?)</article>") or first(text, r"(?is)<main\b[^>]*>(.*?)</main>") or first(text, r"(?is)<body\b[^>]*>(.*?)</body>") or text
+    excerpt = multiline_text(body)[:MAX_PAGE_CHARS]
+    if not excerpt:
+        return None
+    sections = []
+    if title:
+        sections.append("Title: " + title)
+    sections.append("URL: " + final_url)
+    if published:
+        sections.append("Published/Updated: " + published)
+    if desc:
+        sections.append("Description: " + desc)
+    sections.append("Content excerpt:\n" + excerpt)
+    metadata = {
+        "title": title,
+        "source": final_url,
+        "link": final_url,
+        "provider": "local_alpine_search_page",
+    }
+    if published:
+        metadata["published_time"] = published
+    if search_item.get("snippet"):
+        metadata["search_snippet"] = search_item.get("snippet", "")
+    return {"content": "\n".join(sections), "metadata": metadata}
+
+
+def summary_doc(search_item):
+    lines = []
+    if search_item.get("title"):
+        lines.append("Title: " + search_item["title"])
+    if search_item.get("link"):
+        lines.append("URL: " + search_item["link"])
+    if search_item.get("snippet"):
+        lines.append("Search snippet: " + search_item["snippet"])
+    if not lines:
+        return None
+    return {
+        "content": "\n".join(lines),
+        "metadata": {
+            "title": search_item.get("title", ""),
+            "source": search_item.get("link", ""),
+            "link": search_item.get("link", ""),
+            "provider": "local_alpine_search_summary",
+        },
     }
 
-    private static func searchSummaryDocuments(from items: [WebSearchResultItem]) -> [WebSearchDocument] {
-        items.prefix(6).compactMap(searchSummaryDocument(from:))
-    }
 
-    private static func searchSummaryDocument(from item: WebSearchResultItem) -> WebSearchDocument? {
-        let content = [
-            item.title.map { "Title: \($0)" },
-            item.link.map { "URL: \($0)" },
-            item.snippet.map { "Search snippet: \($0)" }
-        ]
-            .compactMap { $0 }
-            .joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty else { return nil }
-        return WebSearchDocument(
-            content: content,
-            metadata: [
-                "title": item.title ?? "",
-                "source": item.link ?? "",
-                "link": item.link ?? "",
-                "provider": "client_search_summary"
-            ].filter { !$0.value.isEmpty }
-        )
-    }
+def rank(items, query):
+    terms = [part.lower() for part in re.split(r"\W+", query or "") if len(part) >= 2]
+    def score(value):
+        haystack = " ".join([value.get("title", ""), value.get("snippet", ""), value.get("link", "")]).lower()
+        points = sum(3 for term in terms if term in haystack)
+        if value.get("link") and not blocked_document_url(value.get("link")):
+            points += 4
+        if len(value.get("snippet", "")) > 20:
+            points += 1
+        return -points, value.get("title", "")
+    return sorted(items, key=score)
 
-    private static func readableHTMLText(_ html: String) -> String {
-        let articleCandidates = [
-            firstMatch(in: html, pattern: #"(?is)<article\b[^>]*>(.*?)</article>"#),
-            firstMatch(in: html, pattern: #"(?is)<main\b[^>]*>(.*?)</main>"#),
-            firstMatch(in: html, pattern: #"(?is)<body\b[^>]*>(.*?)</body>"#)
-        ]
-        let selected = articleCandidates.compactMap { $0 }.max { $0.count < $1.count } ?? html
-        return cleanupMultilineText(htmlToPlainText(selected))
-    }
 
-    private static func cleanupMultilineText(_ text: String) -> String {
-        var value = decodeHTMLEntities(text)
-        let replacements: [(String, String)] = [
-            (#"\r\n?"#, "\n"),
-            (#"[ \t\u{00a0}]+"#, " "),
-            (#"\n{3,}"#, "\n\n")
-        ]
-        for (pattern, replacement) in replacements {
-            value = value.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
-        }
-        let lines = value
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { line in
-                guard line.count >= 2 else { return false }
-                let lowered = line.lowercased()
-                let boilerplate = [
-                    "javascript", "cookie", "cookies", "privacy policy", "terms of use",
-                    "版权所有", "隐私政策", "用户协议", "广告", "登录", "注册"
-                ]
-                return !boilerplate.contains { lowered == $0 || lowered.hasPrefix($0) }
-            }
-        return lines.joined(separator: "\n")
+def run():
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    queries = [str(q).strip() for q in payload.get("queries", []) if str(q).strip()]
+    original = str(payload.get("original_query") or (queries[0] if queries else ""))
+    items = []
+    errors = []
+    for query in queries[:4]:
+        for provider in (search_bing_rss, search_duckduckgo, search_baidu):
+            if time.time() >= DEADLINE or len(items) >= MAX_RESULTS:
+                break
+            try:
+                items.extend(provider(query)[:5])
+            except Exception as exc:
+                errors.append(f"{provider.__name__}: {type(exc).__name__}: {exc}")
+        items = dedupe(items)
+        if len(items) >= MAX_RESULTS:
+            break
+    items = rank(dedupe(items), original)[:MAX_RESULTS]
+    docs = []
+    used = 0
+    for search_item in items[:MAX_DOCS]:
+        if time.time() >= DEADLINE:
+            break
+        doc = None
+        try:
+            doc = fetch_document(search_item)
+        except Exception as exc:
+            errors.append(f"fetch: {type(exc).__name__}: {exc}")
+        if doc is None:
+            doc = summary_doc(search_item)
+        if not doc:
+            continue
+        remaining = MAX_COMBINED_DOC_CHARS - used
+        if remaining <= 400:
+            break
+        content = doc.get("content", "")
+        if len(content) > remaining:
+            doc["content"] = content[:remaining]
+        used += len(doc.get("content", ""))
+        docs.append(doc)
+    result = {
+        "status": bool(items or docs),
+        "collection_names": ["local_alpine_search"],
+        "filenames": [value.get("link", "") for value in items if value.get("link")],
+        "items": items,
+        "docs": docs,
+        "loaded_count": sum(1 for doc in docs if doc.get("metadata", {}).get("provider") == "local_alpine_search_page"),
     }
+    if errors:
+        result["debug"] = errors[:6]
+    print("IEXA_SEARCH_JSON_BEGIN")
+    print(json.dumps(result, ensure_ascii=False))
+    print("IEXA_SEARCH_JSON_END")
 
-    private static func metaContent(in html: String, names: [String]) -> String? {
-        for name in names {
-            let escaped = NSRegularExpression.escapedPattern(for: name)
-            let patterns = [
-                #"<meta[^>]+name=["']\#(escaped)["'][^>]+content=["']([^"']*)["'][^>]*>"#,
-                #"<meta[^>]+content=["']([^"']*)["'][^>]+name=["']\#(escaped)["'][^>]*>"#,
-                #"<meta[^>]+property=["']\#(escaped)["'][^>]+content=["']([^"']*)["'][^>]*>"#,
-                #"<meta[^>]+content=["']([^"']*)["'][^>]+property=["']\#(escaped)["'][^>]*>"#
-            ]
-            for pattern in patterns {
-                if let value = firstMatch(in: html, pattern: pattern).map(htmlToPlainText),
-                   !value.isEmpty {
-                    return value
-                }
-            }
-        }
-        return nil
-    }
 
-    private static func matches(in text: String, pattern: String) -> [String] {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
-            return []
-        }
-        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
-        return regex.matches(in: text, range: nsRange).compactMap { match in
-            guard match.numberOfRanges > 1,
-                  let range = Range(match.range(at: 1), in: text) else { return nil }
-            return String(text[range])
-        }
-    }
-
-    private static func firstMatch(in text: String, pattern: String) -> String? {
-        matches(in: text, pattern: pattern).first
-    }
-
-    private static func matchGroups(in text: String, pattern: String) -> [[String]] {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else {
-            return []
-        }
-        let nsText = text as NSString
-        let nsRange = NSRange(location: 0, length: nsText.length)
-        return regex.matches(in: text, range: nsRange).map { match in
-            guard match.numberOfRanges > 1 else { return [] }
-            return (1..<match.numberOfRanges).map { index in
-                let range = match.range(at: index)
-                guard range.location != NSNotFound else { return "" }
-                return nsText.substring(with: range)
-            }
-        }
-    }
-
-    private static func htmlToPlainText(_ html: String) -> String {
-        var text = html
-        let replacements: [(String, String)] = [
-            (#"(?is)<script\b[^>]*>.*?</script>"#, " "),
-            (#"(?is)<style\b[^>]*>.*?</style>"#, " "),
-            (#"(?is)<br\s*/?>"#, "\n"),
-            (#"(?is)</p\s*>"#, "\n"),
-            (#"(?is)<[^>]+>"#, " ")
-        ]
-        for (pattern, replacement) in replacements {
-            text = text.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
-        }
-        return cleanupText(text)
-    }
-
-    private static func cleanupText(_ text: String) -> String {
-        decodeHTMLEntities(text)
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func decodeHTMLEntities(_ text: String) -> String {
-        var value = text
-        let entities: [String: String] = [
-            "&nbsp;": " ",
-            "&amp;": "&",
-            "&quot;": "\"",
-            "&#39;": "'",
-            "&apos;": "'",
-            "&lt;": "<",
-            "&gt;": ">"
-        ]
-        for (entity, replacement) in entities {
-            value = value.replacingOccurrences(of: entity, with: replacement)
-        }
-        return value
-    }
-
-    private static func decodeText(_ data: Data) -> String {
-        String(data: data, encoding: .utf8)
-            ?? String(data: data, encoding: .unicode)
-            ?? String(data: data, encoding: .isoLatin1)
-            ?? ""
+if __name__ == "__main__":
+    run()
+"""#
     }
 
     private static func normalizedQuery(_ query: String) -> String {
@@ -670,58 +409,12 @@ struct ClientWebSearchService: Sendable {
         return result
     }
 
-    private static func deduplicate(_ items: [WebSearchResultItem]) -> [WebSearchResultItem] {
-        var seen = Set<String>()
-        var result: [WebSearchResultItem] = []
-        for item in items {
-            let key = (item.link ?? item.title ?? item.snippet ?? UUID().uuidString).lowercased()
-            guard seen.insert(key).inserted else { continue }
-            result.append(item)
-        }
-        return result
-    }
-
-    private static func rank(_ items: [WebSearchResultItem], query: String) -> [WebSearchResultItem] {
-        let terms = query
-            .lowercased()
-            .components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { $0.count >= 2 }
-
-        func score(_ item: WebSearchResultItem) -> Int {
-            var value = 0
-            let haystack = [item.title, item.snippet, item.link]
-                .compactMap { $0 }
-                .joined(separator: " ")
-                .lowercased()
-            for term in terms where haystack.contains(term) {
-                value += 3
-            }
-            if let link = item.link, let url = URL(string: link), isFetchableWebURL(url) {
-                value += 4
-            }
-            if let snippet = item.snippet, snippet.count > 20 {
-                value += 1
-            }
-            return value
-        }
-
-        return items.sorted { lhs, rhs in
-            let l = score(lhs)
-            let r = score(rhs)
-            if l == r { return (lhs.title ?? "") < (rhs.title ?? "") }
-            return l > r
-        }
-    }
 }
 
-private struct PageFetchCandidate: Sendable {
-    let index: Int
-    let item: WebSearchResultItem
-    let url: URL
-}
+private struct LocalAlpineSearchError: LocalizedError, Sendable {
+    let message: String
 
-private struct PageFetchOutcome: Sendable {
-    let index: Int
-    let document: WebSearchDocument?
+    var errorDescription: String? {
+        message
+    }
 }

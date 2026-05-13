@@ -7,10 +7,8 @@ import MarkdownView
 ///
 /// The code is displayed using `MarkdownView` (same engine as all other code blocks)
 /// which provides full syntax highlighting via HighlightSwift. Pressing "Run"
-/// executes the code locally via `PythonExecutionService` (Pyodide/WASM) and shows
-/// stdout, stderr, and any matplotlib figures inline — no server round-trip required.
-///
-/// The first run downloads Pyodide (~10 MB, cached afterwards).
+/// executes the code in the bundled Local Alpine runtime so imports, packages,
+/// network, and files match the app's terminal environment.
 struct PythonCodeBlockView: View {
 
     let code: String
@@ -19,7 +17,7 @@ struct PythonCodeBlockView: View {
 
     enum RunState: Equatable {
         case idle
-        case loading        // Pyodide engine loading
+        case loading        // Local runtime preparing
         case running        // Code executing
         case done(result: PythonExecutionResult)
 
@@ -318,20 +316,11 @@ struct PythonCodeBlockView: View {
     // MARK: - Run Action
 
     private func runCode() {
-        let service = PythonExecutionService.shared
-
-        // Set state based on current engine state
-        switch service.engineState {
-        case .notLoaded, .loading:
-            runState = .loading
-        case .ready:
-            runState = .running
-        case .error:
-            runState = .running // Will immediately return an error result
-        }
-
-        service.execute(code: code) { result in
-            Task { @MainActor in
+        runState = .running
+        let codeToRun = code
+        Task {
+            let result = await Self.runCodeInLocalAlpine(code: codeToRun)
+            await MainActor.run {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     self.runState = .done(result: result)
                 }
@@ -342,6 +331,46 @@ struct PythonCodeBlockView: View {
                 }
             }
         }
+    }
+
+    private static func runCodeInLocalAlpine(code: String) async -> PythonExecutionResult {
+        let fileName = "codeblock-\(UUID().uuidString.prefix(8)).py"
+        guard let data = code.data(using: .utf8) else {
+            return PythonExecutionResult(
+                status: .error,
+                stdout: "",
+                stderr: "代码不是有效 UTF-8，无法写入 Local Alpine。",
+                images: []
+            )
+        }
+
+        do {
+            try await LocalAlpineTerminalService.shared.writeFile(
+                data: data,
+                fileName: fileName,
+                destinationPath: "/"
+            )
+        } catch {
+            return PythonExecutionResult(
+                status: .error,
+                stdout: "",
+                stderr: "写入 Local Alpine 临时文件失败：\(error.localizedDescription)",
+                images: []
+            )
+        }
+
+        let command = "python3 -m py_compile '\(fileName)' && python3 '\(fileName)'"
+        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
+        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if result.exitCode == 0 {
+            return PythonExecutionResult(status: .success, stdout: output, stderr: "", images: [])
+        }
+        return PythonExecutionResult(
+            status: .error,
+            stdout: "",
+            stderr: output.isEmpty ? "Local Alpine 执行失败，退出码：\(result.exitCode.map(String.init) ?? "unknown")" : output,
+            images: []
+        )
     }
 }
 

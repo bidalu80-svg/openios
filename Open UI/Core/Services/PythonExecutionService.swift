@@ -4,8 +4,8 @@ import os.log
 
 // MARK: - Python Execution Result
 
-struct PythonExecutionResult {
-    enum Status {
+struct PythonExecutionResult: Sendable {
+    enum Status: Sendable {
         case success
         case error
     }

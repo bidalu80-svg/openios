@@ -23,7 +23,7 @@ struct SourcesDetailSheet: View {
                 .padding(.bottom, Spacing.xxl)
             }
             .background(theme.background)
-            .navigationTitle("\(sources.count) Source\(sources.count == 1 ? "" : "s")")
+            .navigationTitle("\(sources.count) 个来源")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -61,27 +61,24 @@ struct SourcesDetailSheet: View {
                     .background(theme.surfaceContainer)
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
 
-                // Favicon
-                if let url, let domain = extractDomain(url) {
-                    AsyncImage(url: URL(string: "https://www.google.com/s2/favicons?sz=32&domain=\(domain)")) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .frame(width: 16, height: 16)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                        default:
-                            Image(systemName: "globe")
-                                .scaledFont(size: 12)
-                                .foregroundStyle(theme.textTertiary)
-                                .frame(width: 16, height: 16)
-                        }
+                if let url, let faviconURL = Self.faviconURL(for: url) {
+                    CachedAsyncImage(url: faviconURL, targetPixelSize: Int(18 * UIScreen.main.scale)) { image in
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    } placeholder: {
+                        Image(systemName: "globe")
+                            .scaledFont(size: 12)
+                            .foregroundStyle(theme.textTertiary)
                     }
+                    .frame(width: 18, height: 18)
+                    .background(theme.surfaceContainer)
+                    .clipShape(Circle())
                 } else {
                     Image(systemName: "doc.text")
                         .scaledFont(size: 12)
                         .foregroundStyle(theme.textTertiary)
-                        .frame(width: 16, height: 16)
+                        .frame(width: 18, height: 18)
                 }
 
                 // URL or title
@@ -106,7 +103,7 @@ struct SourcesDetailSheet: View {
                             .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
                     } else {
-                        Text("Source \(index)")
+                        Text("来源 \(index)")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textTertiary)
                     }
@@ -142,12 +139,13 @@ struct SourcesDetailSheet: View {
         source.resolvedURL
     }
 
-    private func extractDomain(_ url: String) -> String? {
-        guard let parsed = URL(string: url) else { return nil }
-        var host = parsed.host ?? ""
-        if host.hasPrefix("www.") {
-            host = String(host.dropFirst(4))
-        }
-        return host.isEmpty ? nil : host
+    private static func faviconURL(for sourceURL: String) -> URL? {
+        guard let parsed = URL(string: sourceURL), let host = parsed.host, !host.isEmpty else { return nil }
+        var components = URLComponents(string: "https://www.google.com/s2/favicons")
+        components?.queryItems = [
+            URLQueryItem(name: "sz", value: "64"),
+            URLQueryItem(name: "domain", value: host)
+        ]
+        return components?.url
     }
 }

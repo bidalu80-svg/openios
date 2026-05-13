@@ -273,6 +273,7 @@ final class ChatViewModel {
     private var localAlpineAgentTask: Task<Void, Never>?
     private var localAlpineContinuationTask: Task<Void, Never>?
     private var localAlpineAgentStopRequested = false
+    private var localAlpineAutoExecutionPaused = false
     private var localAlpineNoCommandContinuationRetries = 0
     private var localAlpineFailedCommands: [String: LocalAlpineAgentCommandFailure] = [:]
     private var localAlpineFailureSignatures: [String: Int] = [:]
@@ -1236,6 +1237,10 @@ final class ChatViewModel {
                 lines.append("  raw result:")
                 lines.append(indentForSystemContext(clippedForSystemContext(rawResult, maxCharacters: 8_000)))
             }
+            if localAlpineOutputHasPythonSyntaxIssue(content + "\n" + (rawResult ?? "")) {
+                lines.append("  required next action:")
+                lines.append(indentForSystemContext("Python syntax/indentation error detected. Inspect the file with line numbers or rewrite it using write_files with content_lines/content_base64, then run python3 -m py_compile. Do not repeat only the same failed command."))
+            }
             return lines.joined(separator: "\n")
         }
 
@@ -1249,6 +1254,8 @@ final class ChatViewModel {
         - If state is running, tell the user the Local Alpine command is still running or ask whether to stop it; do not apologize that no executable block was emitted.
         - If result output is present, answer from that output as the source of truth.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
+        - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
+        - If the latest result contains Python IndentationError or SyntaxError, the next action must inspect the file with line numbers or rewrite it using `write_files` with `content_lines` or `content_base64`, then run `python3 -m py_compile`. Never repeat only the same `py_compile` or run command.
         [/Local Alpine execution state]
         """
     }
@@ -1477,6 +1484,94 @@ final class ChatViewModel {
             .joined(separator: "\n")
         let clipped = String(lines.prefix(1_500)).lowercased()
         return "\(result.exitCode.map(String.init) ?? "unknown")\n\(clipped)"
+    }
+
+    private static func localAlpineOutputHasPythonSyntaxIssue(_ output: String) -> Bool {
+        let lowercased = output.lowercased()
+        return lowercased.contains("indentationerror")
+            || lowercased.contains("syntaxerror")
+            || lowercased.contains("taberror")
+    }
+
+    private static func localAlpineCommandIsPythonSyntaxCheckOnly(_ command: String) -> Bool {
+        let normalized = command
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalized.contains("python3 -m py_compile")
+            || normalized.contains("python -m py_compile")
+    }
+
+    private static func localAlpineCommandWritesPythonWithHeredoc(_ command: String) -> Bool {
+        let normalized = command.lowercased()
+        guard normalized.contains(".py") else { return false }
+        guard normalized.contains("<<") else { return false }
+        return normalized.contains("cat >")
+            || normalized.contains("cat <<")
+            || normalized.contains("tee ")
+            || normalized.contains("python3 - <<")
+            || normalized.contains("python - <<")
+    }
+
+    private static func localAlpinePythonFilePath(command: String, output: String, cwd: String) -> String? {
+        let combined = output + "\n" + command
+        let patterns = [
+            #"File\s+\"([^\"]+\.py)\""#,
+            #"\(([A-Za-z0-9_./\-]+\.py),\s*line\s+\d+\)"#,
+            #"([/A-Za-z0-9_.\-]+\.py)"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            let nsCombined = combined as NSString
+            let range = NSRange(location: 0, length: nsCombined.length)
+            guard let match = regex.firstMatch(in: combined, range: range),
+                  match.numberOfRanges >= 2 else { continue }
+            let candidate = nsCombined.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if candidate.isEmpty { continue }
+            if candidate.hasPrefix("/") {
+                return candidate
+            }
+            let normalizedCWD = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+            let base = normalizedCWD.isEmpty ? "/mnt/iexa" : normalizedCWD
+            return base.hasSuffix("/") ? base + candidate : base + "/" + candidate
+        }
+        return nil
+    }
+
+    private static func localAlpineInspectCommand(forPythonFile path: String?) -> String {
+        let file = (path?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? path!.trimmingCharacters(in: .whitespacesAndNewlines)
+            : "/mnt/iexa/simple_crawler.py"
+        let quoted = "'" + file.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return "printf '== file with line numbers ==\\n' && nl -ba \(quoted) | sed -n '1,160p'"
+    }
+
+    private static func isLocalAlpineInterjection(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        if isExplicitLocalAlpineResumeRequest(normalized) { return false }
+        let terms = [
+            "为什么不修复", "你中途为什么不修复", "你不会修复吗", "不会修复吗",
+            "怎么还报错", "怎么老是报错", "为什么一直", "怎么回事", "什么问题",
+            "哪里错", "哪里错误", "原因是什么", "为啥", "为什么", "你在干嘛",
+            "别执行", "不要执行", "先别执行", "停一下", "先停", "停止", "暂停",
+            "不要再跑", "别再跑", "别继续", "不要继续", "先解释", "解释一下",
+            "说清楚", "别动", "先别动"
+        ]
+        return terms.contains { normalized.contains($0) }
+    }
+
+    private static func isExplicitLocalAlpineResumeRequest(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        let terms = [
+            "继续修复", "继续执行", "继续运行", "继续跑", "继续调试",
+            "修复并运行", "修好再运行", "自动修复", "直接修复", "你来修复",
+            "直接改", "修复它", "把它修好", "继续 agent", "继续agent",
+            "继续处理", "接着修", "接着跑", "继续"
+        ]
+        return terms.contains { normalized.contains($0) }
     }
 
     // MARK: - Initialisation
@@ -3421,7 +3516,13 @@ final class ChatViewModel {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else { return }
         guard let manager else { return }
-        resetLocalAlpineAgentLoopForNewTurn()
+        let isLocalAlpineInterjection = Self.isLocalAlpineInterjection(text)
+        let isExplicitLocalAlpineResume = Self.isExplicitLocalAlpineResumeRequest(text)
+        if isLocalAlpineInterjection && !isExplicitLocalAlpineResume {
+            pauseLocalAlpineAgentLoopForUserInterjection()
+        } else {
+            resetLocalAlpineAgentLoopForNewTurn()
+        }
         if attachments.contains(where: { $0.uploadStatus == .error && !canSendAttachmentWithoutCompletedUpload($0) }) {
             errorMessage = "One or more attachments failed to upload. Retry or remove them before sending."
             return
@@ -3489,8 +3590,11 @@ final class ChatViewModel {
         errorMessage = nil
 
         let normalizedLocalAlpineText = Self.normalizedLocalAlpineCommand(currentText)
-        let shouldAutoUseLocalAlpine = shouldAutoRouteExplicitLocalAlpineCommand(normalizedLocalAlpineText)
-            || Self.isExplicitLocalAlpineRequest(currentText)
+        let shouldAutoUseLocalAlpine = !isLocalAlpineInterjection && (
+            shouldAutoRouteExplicitLocalAlpineCommand(normalizedLocalAlpineText)
+                || Self.isExplicitLocalAlpineRequest(currentText)
+                || isExplicitLocalAlpineResume
+        )
         if shouldAutoUseLocalAlpine {
             selectedTerminalServer = .localAlpine
             terminalEnabled = true
@@ -4583,6 +4687,10 @@ final class ChatViewModel {
         await persistLocalConversationIfNeeded()
         endBackgroundTask()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+
+        if result.interactiveRequest == nil {
+            scheduleLocalAlpineFinalSummary(after: assistantMessageId)
+        }
     }
 
     private func localAlpineInitialStatus(for command: String) -> ChatStatusUpdate {
@@ -4725,6 +4833,7 @@ final class ChatViewModel {
         localAlpineContinuationTask = nil
         cancelLocalAlpineInput()
         localAlpineAgentStopRequested = false
+        localAlpineAutoExecutionPaused = false
         localAlpineNoCommandContinuationRetries = 0
         localAlpineFailedCommands.removeAll()
         localAlpineFailureSignatures.removeAll()
@@ -4733,11 +4842,23 @@ final class ChatViewModel {
 
     private func cancelLocalAlpineAgentLoop() {
         localAlpineAgentStopRequested = true
+        localAlpineAutoExecutionPaused = true
         localAlpineAgentTask?.cancel()
         localAlpineAgentTask = nil
         localAlpineContinuationTask?.cancel()
         localAlpineContinuationTask = nil
         cancelLocalAlpineInput()
+    }
+
+    private func pauseLocalAlpineAgentLoopForUserInterjection() {
+        localAlpineAgentStopRequested = true
+        localAlpineAutoExecutionPaused = true
+        localAlpineAgentTask?.cancel()
+        localAlpineAgentTask = nil
+        localAlpineContinuationTask?.cancel()
+        localAlpineContinuationTask = nil
+        cancelLocalAlpineInput()
+        localAlpineNoCommandContinuationRetries = 0
     }
 
     private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
@@ -7567,6 +7688,7 @@ final class ChatViewModel {
         - For Node/Python dependency installs, use bounded commands and print versions/errors. Avoid background daemons unless the user explicitly asks.
         - Keep commands safe and scoped to `/mnt/iexa`; do not use destructive commands outside that workspace.
         - After the app appends a Local Alpine execution result, continue from that real output: if the task is not done, emit the next bounded `iexa_alpine` block; if an error appears, fix and rerun; if the task is done, give a concise final summary of what you changed, what command verified it, and any remaining limitation. Do not stop after one command unless the output proves the task is complete.
+        - If the user asks an interruption/meta question such as "为什么不修复", "怎么还报错", "你不会修复吗", "什么问题", or asks to stop, do not emit `iexa_alpine`; explain the latest result and wait for an explicit continue/fix/run request.
 
         To execute commands, include exactly one fenced block with language `iexa_alpine` containing JSON. The app will run those commands locally on the device and append the real output. Do not output this block unless command execution is actually needed.
 
@@ -7708,7 +7830,7 @@ final class ChatViewModel {
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
                     action: "web_search",
-                    description: "联网搜索已可用",
+                    description: "本地 Alpine 搜索已可用",
                     done: true,
                     count: 0,
                     query: query,
@@ -7719,14 +7841,14 @@ final class ChatViewModel {
         }
 
         appendStatusUpdate(
-            id: assistantMessageId,
-            status: ChatStatusUpdate(
-                action: "web_search",
-                description: "正在联网搜索...",
-                done: false,
-                query: query,
-                queries: [query]
-            )
+                id: assistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "web_search",
+                    description: "正在用本地 Alpine 搜索...",
+                    done: false,
+                    query: query,
+                    queries: [query]
+                )
         )
 
         do {
@@ -7744,7 +7866,7 @@ final class ChatViewModel {
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
                     action: "web_search",
-                    description: "正在联网搜索...",
+                    description: "正在用本地 Alpine 搜索...",
                     done: false,
                     query: query,
                     queries: queries
@@ -7791,8 +7913,8 @@ final class ChatViewModel {
                 status: ChatStatusUpdate(
                     action: "web_search",
                     description: result.loadedCount > 0
-                        ? "已读取 \(result.loadedCount) 个网页"
-                        : "已搜索 \(max(sources.count, result.items.count)) 个来源",
+                        ? "本地 Alpine 已读取 \(result.loadedCount) 个网页"
+                        : "本地 Alpine 已搜索 \(max(sources.count, result.items.count)) 个来源",
                     done: true,
                     urls: Array(urls),
                     items: result.items.prefix(6).map {
@@ -7809,7 +7931,7 @@ final class ChatViewModel {
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
                     action: "web_search",
-                    description: "联网搜索失败，已按原问题发送",
+                    description: "本地 Alpine 搜索失败，已按原问题发送",
                     done: true,
                     count: 0,
                     query: query,
@@ -8191,7 +8313,7 @@ final class ChatViewModel {
         """
 
         [客户端联网搜索能力]
-        Iexa 客户端已接入联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以。当用户要求“搜索、联网查、最新、今天、实时、新闻”等内容时，客户端会先搜索网页，并把搜索结果附加到本轮消息里给你使用。不要声称你无法联网或无法实时搜索。
+        Iexa 客户端已接入本地 Alpine 联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明搜索由本地 Alpine Linux 环境执行。当用户要求“搜索、联网查、最新、今天、实时、新闻”等内容时，客户端会先在本地 Alpine 中运行脚本搜索并抓取网页，再把结果附加到本轮消息里给你使用。不要声称你无法联网或无法实时搜索。
         [/客户端联网搜索能力]
         """
     }
@@ -8254,19 +8376,19 @@ final class ChatViewModel {
 
         return """
 
-        [客户端联网搜索结果]
+        [本地 Alpine 联网搜索结果]
         查询：\(query)
         实际搜索词：
         \(queryLines)
 
-        以下结果由 Iexa 客户端在发送本轮消息前联网搜索取得。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果。回答要求：
+        以下结果由 Iexa 客户端在发送本轮消息前，通过本地 Alpine Linux 运行 Python/urllib 搜索和抓取网页取得。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果。回答要求：
         - 先直接给结论，再补充必要来源和时间。
         - 天气、油价、新闻、价格、版本等实时问题，必须说清楚信息日期/发布时间；资料不够精确就明确说“未在搜索结果中找到精确值”，不要编。
         - 引用来源时使用普通链接或来源标题，不要输出 cite turn0search 之类隐藏引用标记，也不要输出无法显示的方框字符。
         - 不要声称你无法联网。
 
         \(blocks.joined(separator: "\n\n"))
-        [/客户端联网搜索结果]
+        [/本地 Alpine 联网搜索结果]
         """
     }
 
@@ -8381,7 +8503,8 @@ final class ChatViewModel {
         let alpineExecutionStateContext = selectedTerminalIsLocalAlpine && terminalEnabled
             ? Self.localAlpineExecutionStateSystemContext(from: conversation.messages)
             : nil
-        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, alpineContext, alpineExecutionStateContext, memoryContext]
+        let localSkillsContext = LocalSkillsService.shared.contextPrompt()
+        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, alpineContext, alpineExecutionStateContext, localSkillsContext, memoryContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
@@ -8799,6 +8922,7 @@ final class ChatViewModel {
     private func scheduleLocalAlpineAgentIfNeeded(messageId: String, content: String, error: ChatMessageError?) {
         guard error == nil else { return }
         guard !localAlpineAgentStopRequested else { return }
+        guard !localAlpineAutoExecutionPaused else { return }
         guard terminalEnabled, selectedTerminalIsLocalAlpine else { return }
         guard let message = conversation?.messages.first(where: { $0.id == messageId }),
               message.role == .assistant else { return }
@@ -8878,16 +9002,28 @@ final class ChatViewModel {
 
     private func repeatedLocalAlpineFailure(for content: String) -> LocalAlpineAgentCommandFailure? {
         guard let command = Self.firstLocalAlpineCommand(in: content) else { return nil }
+        let key = Self.localAlpineCommandKey(command: command.command, cwd: command.cwd)
+        func recordBlockedAttempt() {
+            let count = (localAlpineBlockedRepeatCommands[key] ?? 0) + 1
+            localAlpineBlockedRepeatCommands[key] = count
+            if count >= 3 {
+                localAlpineAgentStopRequested = true
+            }
+        }
+        if Self.localAlpineCommandWritesPythonWithHeredoc(command.command) {
+            recordBlockedAttempt()
+            return LocalAlpineAgentCommandFailure(
+                command: command.command,
+                cwd: command.cwd,
+                exitCode: nil,
+                outputPreview: "Unsafe Python file write blocked: heredoc/cat/tee can corrupt indentation in this UI. Rewrite using iexa_alpine write_files with content_lines or content_base64, then run python3 -m py_compile."
+            )
+        }
         if command.hasWriteFiles {
             return nil
         }
-        let key = Self.localAlpineCommandKey(command: command.command, cwd: command.cwd)
         guard let failure = localAlpineFailedCommands[key] else { return nil }
-        let count = (localAlpineBlockedRepeatCommands[key] ?? 0) + 1
-        localAlpineBlockedRepeatCommands[key] = count
-        if count >= 3 {
-            localAlpineAgentStopRequested = true
-        }
+        recordBlockedAttempt()
         return failure
     }
 
@@ -8920,6 +9056,33 @@ final class ChatViewModel {
             Self.localAlpineCommandKey(command: failure.command, cwd: failure.cwd)
         ] ?? 1
         let shouldStop = repeatCount >= 3
+        let pythonSyntaxIssue = Self.localAlpineOutputHasPythonSyntaxIssue(failure.outputPreview)
+        let pythonFile = Self.localAlpinePythonFilePath(
+            command: failure.command,
+            output: failure.outputPreview,
+            cwd: failure.cwd
+        )
+        let pythonRepairInstruction: String
+        if pythonSyntaxIssue {
+            pythonRepairInstruction = """
+
+        Python syntax/indentation guard
+        已检测到 Python 缩进/语法错误。下一步禁止只重复 `py_compile` 或直接运行脚本。
+        必须先执行定位或重写：
+        1. 读取带行号文件：`\(Self.localAlpineInspectCommand(forPythonFile: pythonFile))`
+        2. 或用 `write_files` 完整重写该 `.py` 文件，优先使用 `content_lines` 或 `content_base64`，不要用 heredoc。
+        3. 重写后再运行：`python3 -m py_compile <file>`。
+        """
+        } else if failure.outputPreview.lowercased().contains("unsafe python file write blocked") {
+            pythonRepairInstruction = """
+
+        Python file write guard
+        App 已拦截 `cat/tee/heredoc` 写入 Python 文件，因为这种写法在聊天 UI 中容易破坏缩进。
+        下一步必须改用 `iexa_alpine` JSON 的 `write_files`，并使用 `content_lines` 或 `content_base64` 写入完整文件，再执行 `python3 -m py_compile`。
+        """
+        } else {
+            pythonRepairInstruction = ""
+        }
         let content = """
         Local Alpine 执行结果
 
@@ -8942,6 +9105,7 @@ final class ChatViewModel {
 
         Agent guard
         \(shouldStop ? "模型连续重复同一条失败命令，我已停止本轮自动执行。请总结已尝试的路径、最后错误和需要用户补充的线索。" : "Stuck Detection: 同一条失败命令已被拦截。下一轮必须 Strategy Switch：换文件检查、依赖检查、最小复现、语法检查或联网查资料，禁止再次重复同一条命令。")
+        \(pythonRepairInstruction)
         """
         return appendLocalAlpineSystemResult(parentId: parentId, content: content)
     }
@@ -9283,6 +9447,26 @@ final class ChatViewModel {
             scheduleLocalAlpineContinuationIfNeeded(after: resultMessageId)
         } else {
             localAlpineAgentStopRequested = true
+            if result.interactiveRequest == nil {
+                scheduleLocalAlpineFinalSummary(after: resultMessageId)
+            }
+        }
+    }
+
+    private func scheduleLocalAlpineFinalSummary(after resultMessageId: String) {
+        guard terminalEnabled, selectedTerminalIsLocalAlpine else { return }
+        guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
+        guard conversation?.messages.contains(where: {
+            $0.metadata?["iexa_local_alpine_final_summary"] == resultMessageId
+        }) != true else { return }
+
+        localAlpineContinuationTask?.cancel()
+        localAlpineContinuationTask = Task { [weak self] in
+            await self?.startLocalAlpineContinuation(
+                parentId: resultMessageId,
+                forceContinue: true,
+                finalSummaryOnly: true
+            )
         }
     }
 
@@ -9339,12 +9523,18 @@ final class ChatViewModel {
         return false
     }
 
-    private func startLocalAlpineContinuation(parentId: String, forceContinue: Bool = false) async {
-        guard !localAlpineAgentStopRequested else { return }
-        guard forceContinue || isLocalAlpineAgentStillNeeded(after: parentId) else { return }
-        guard localAlpineStepsSinceLastUser() < localAlpineAgentMaxSteps else {
-            appendLocalAlpineAgentLimitMessage(parentId: parentId)
-            return
+    private func startLocalAlpineContinuation(
+        parentId: String,
+        forceContinue: Bool = false,
+        finalSummaryOnly: Bool = false
+    ) async {
+        if !finalSummaryOnly {
+            guard !localAlpineAgentStopRequested else { return }
+            guard forceContinue || isLocalAlpineAgentStillNeeded(after: parentId) else { return }
+            guard localAlpineStepsSinceLastUser() < localAlpineAgentMaxSteps else {
+                appendLocalAlpineAgentLimitMessage(parentId: parentId)
+                return
+            }
         }
         guard let manager else { return }
         guard let conversation, conversation.messages.contains(where: { $0.id == parentId }) else { return }
@@ -9365,7 +9555,12 @@ final class ChatViewModel {
             model: modelId,
             isStreaming: true,
             statusHistory: [thinkingStatus],
-            metadata: ["iexa_local_alpine_continuation": "true"]
+            metadata: finalSummaryOnly
+                ? [
+                    "iexa_local_alpine_continuation": "true",
+                    "iexa_local_alpine_final_summary": parentId
+                ]
+                : ["iexa_local_alpine_continuation": "true"]
         )
         let assistantNode = HistoryNode(
             id: assistantMessageId,
@@ -9386,7 +9581,11 @@ final class ChatViewModel {
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
         var apiMessages = await buildAPIMessagesAsync()
-        Self.appendLocalAlpineContinuationInstruction(to: &apiMessages)
+        if finalSummaryOnly {
+            Self.appendLocalAlpineFinalSummaryInstruction(to: &apiMessages)
+        } else {
+            Self.appendLocalAlpineContinuationInstruction(to: &apiMessages)
+        }
 
         isStreaming = true
         hasFinishedStreaming = false
@@ -9539,7 +9738,10 @@ final class ChatViewModel {
         content: String,
         usage: [String: Any]?
     ) async {
-        guard !localAlpineAgentStopRequested else {
+        let isFinalSummary = conversation?.messages.first(where: { $0.id == assistantMessageId })?
+            .metadata?["iexa_local_alpine_final_summary"] != nil
+
+        guard !localAlpineAgentStopRequested || isFinalSummary else {
             cleanupStreaming()
             return
         }
@@ -9702,11 +9904,38 @@ final class ChatViewModel {
         Stuck Detection:
         - Never repeat the exact same failed command. If the app says a repeat was blocked, switch strategy immediately.
         - If the same error signature repeats twice after a fix, stop and summarize the blocker instead of looping.
+        - If the user interrupts with a question or taps stop, answer the question and wait. Do not resume automatic execution until the user explicitly asks to continue/fix/run.
         Strategy Switch:
         - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, rewrite file with `write_files`, then verification.
-        - For Python indentation/syntax errors, rewrite the file using `write_files`, then run `python3 -m py_compile <file>` before running the script.
+        - For Python indentation/syntax errors, first inspect the file with `nl -ba <file> | sed -n '1,160p'` or rewrite the file using `write_files`, then run `python3 -m py_compile <file>` before running the script.
         - For indentation-sensitive rewrites, use `content_lines` or `content_base64`; do not use heredoc for Python class/function bodies.
+        - If a Python heredoc/cat write is blocked, immediately switch to `write_files` with `content_lines` or `content_base64`.
         [/Local Alpine continuation]
+        """
+        if !messages.isEmpty, messages[0]["role"] as? String == "system" {
+            var system = messages[0]
+            let existing = system["content"] as? String ?? ""
+            system["content"] = [existing, instruction]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: "\n\n")
+            messages[0] = system
+        } else {
+            messages.insert(["role": "system", "content": instruction], at: 0)
+        }
+    }
+
+    private static func appendLocalAlpineFinalSummaryInstruction(to messages: inout [[String: Any]]) {
+        let instruction = """
+        [Local Alpine final summary]
+        The latest Local Alpine message above is a real command execution result. Do not emit `iexa_alpine` in this turn.
+        Reply to the user in normal language only.
+        Summarize the completed operation concisely:
+        - For inspection/listing commands, state the concrete result the user asked for.
+        - For script/project commands, say what ran, whether it succeeded, and the key output.
+        - If files were created or changed, mention their paths.
+        - If the command failed, explain the immediate error and the next fix path, but do not run another command until the user asks.
+        Keep it short and based only on the real Local Alpine output.
+        [/Local Alpine final summary]
         """
         if !messages.isEmpty, messages[0]["role"] as? String == "system" {
             var system = messages[0]

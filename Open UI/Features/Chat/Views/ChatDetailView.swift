@@ -2560,29 +2560,53 @@ struct ChatDetailView: View {
                 sourcesSheetMessage = msg
             }
         } label: {
-            HStack(spacing: Spacing.xs) {
-                HStack(spacing: -4) {
+            HStack(spacing: 8) {
+                HStack(spacing: -6) {
                     ForEach(Array(sources.prefix(3).enumerated()), id: \.offset) { _, source in
-                        Circle()
-                            .fill(theme.brandPrimary.opacity(0.2))
-                            .frame(width: 18, height: 18)
-                            .overlay(
-                                Text(String((source.title ?? source.url ?? "?").prefix(1)).uppercased())
-                                    .scaledFont(size: 8, weight: .bold)
-                                    .foregroundStyle(theme.brandPrimary)
-                            )
+                        sourceFavicon(source, size: 24)
                     }
                 }
-                Text("\(sources.count) Source\(sources.count == 1 ? "" : "s")")
-                    .scaledFont(size: 12, weight: .medium)
-                    .foregroundStyle(theme.textSecondary)
+                Text("\(sources.count) 个来源")
+                    .scaledFont(size: 16, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
             }
-            .padding(.horizontal, Spacing.sm)
-            .padding(.vertical, Spacing.xs)
-            .background(theme.surfaceContainer.opacity(0.6))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(theme.surfaceContainer.opacity(0.55))
             .clipShape(Capsule())
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func sourceFavicon(_ source: ChatSourceReference, size: CGFloat) -> some View {
+        let url = source.resolvedURL.flatMap(Self.faviconURL(for:))
+        CachedAsyncImage(url: url, targetPixelSize: Int(size * UIScreen.main.scale)) { image in
+            image
+                .resizable()
+                .scaledToFill()
+        } placeholder: {
+            Text(String((source.displayLabel(preferDomain: false) ?? source.title ?? source.url ?? "?").prefix(1)).uppercased())
+                .scaledFont(size: max(8, size * 0.42), weight: .bold)
+                .foregroundStyle(theme.textPrimary)
+                .frame(width: size, height: size)
+                .background(theme.surfaceContainer)
+        }
+        .frame(width: size, height: size)
+        .background(theme.surfaceContainer)
+        .clipShape(Circle())
+        .overlay(Circle().strokeBorder(theme.background.opacity(0.85), lineWidth: 1))
+        .shadow(color: Color.black.opacity(0.08), radius: 2, y: 1)
+    }
+
+    private static func faviconURL(for sourceURL: String) -> URL? {
+        guard let parsed = URL(string: sourceURL), let host = parsed.host, !host.isEmpty else { return nil }
+        var components = URLComponents(string: "https://www.google.com/s2/favicons")
+        components?.queryItems = [
+            URLQueryItem(name: "sz", value: "64"),
+            URLQueryItem(name: "domain", value: host)
+        ]
+        return components?.url
     }
 
     // MARK: - Follow-Up Suggestions

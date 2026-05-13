@@ -180,6 +180,17 @@ struct SettingsView: View {
                     // Personalization
                     SettingsSection(header: "个性化") {
                         SettingsCell(
+                            icon: "cube.box",
+                            title: "技能",
+                            subtitle: "本地技能、开关和创建",
+                            iconColor: .green,
+                            showDivider: true,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.skills)
+                        }
+
+                        SettingsCell(
                             icon: "brain",
                             title: "记忆",
                             subtitle: "AI 记住的与你有关的信息",
@@ -292,6 +303,8 @@ struct SettingsView: View {
                     NotificationSettingsView()
                 case .adminConsole:
                     AdminConsoleView()
+                case .skills:
+                    LocalSkillsSettingsView()
                 case .memories:
                     MemoriesView()
                 case .storage:
@@ -452,6 +465,7 @@ enum SettingsDestination: Hashable {
     case sttSettings
     case notifications
     case adminConsole
+    case skills
     case memories
     case storage
 }
