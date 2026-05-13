@@ -36,7 +36,9 @@ struct StreamingStatusView: View {
         if visibleStatuses.isEmpty {
             EmptyView()
         } else if isLocalAlpineStatus {
-            localAlpineCard
+            localAlpineActivityRow
+        } else if isLocalAlpineAgentStatus {
+            localAlpineAgentActivityRow
         } else if isWebSearchStatus {
             webSearchCard
         } else {
@@ -88,6 +90,10 @@ struct StreamingStatusView: View {
 
     private var isLocalAlpineStatus: Bool {
         latestStatus?.action?.lowercased() == "local_alpine"
+    }
+
+    private var isLocalAlpineAgentStatus: Bool {
+        latestStatus?.action?.lowercased() == "local_alpine_agent"
     }
 
     private var isWebSearchStatus: Bool {
@@ -586,6 +592,60 @@ struct StreamingStatusView: View {
             || description.localizedCaseInsensitiveContains("failed")
     }
 
+    private var localAlpineActivityRow: some View {
+        let latest = latestStatus
+        let isDone = latest?.done == true
+        let title = latest.map(resolveStatusDescription(for:))
+            ?? "正在执行本地 Alpine 命令..."
+        let didFail = localAlpineDidFail(title)
+        let color: Color = didFail ? .orange : (isDone ? theme.textTertiary : theme.brandPrimary)
+
+        return HStack(spacing: 7) {
+            Image(systemName: isDone ? (didFail ? "exclamationmark.circle" : "checkmark.circle") : "terminal")
+                .scaledFont(size: 12, weight: .semibold)
+                .foregroundStyle(color)
+
+            if isDone {
+                Text(title)
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(didFail ? .orange : theme.textTertiary)
+                    .lineLimit(1)
+            } else {
+                ShimmerText(text: title, theme: theme)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, Spacing.screenPadding)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var localAlpineAgentActivityRow: some View {
+        let latest = latestStatus
+        let isDone = latest?.done == true
+        let title = latest.map(resolveStatusDescription(for:))
+            ?? "正在整理本地 Alpine 输出"
+
+        return HStack(spacing: 7) {
+            Image(systemName: isDone ? "checkmark.circle" : "terminal")
+                .scaledFont(size: 12, weight: .semibold)
+                .foregroundStyle(isDone ? theme.textTertiary : theme.brandPrimary)
+
+            if isDone {
+                Text(title)
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+                    .lineLimit(1)
+            } else {
+                ShimmerText(text: title, theme: theme)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, Spacing.screenPadding)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     // MARK: - Header
 
     private var statusHeader: some View {
@@ -820,6 +880,10 @@ struct StreamingStatusView: View {
 
         case "tool_call", "execute_tool":
             return desc ?? (isDone ? "Tool completed" : "Executing tool…")
+
+        case "local_alpine_agent":
+            if isDone { return desc ?? "已整理本地 Alpine 输出" }
+            return desc ?? "本地输出已返回，正在思考下一步..."
 
         case "memory", "memory_search":
             if isDone { return desc ?? "Memory retrieved" }

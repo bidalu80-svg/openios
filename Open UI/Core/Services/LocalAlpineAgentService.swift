@@ -115,8 +115,63 @@ actor LocalAlpineAgentService {
             if let shellCommand = command.command?.trimmingCharacters(in: .whitespacesAndNewlines),
                !shellCommand.isEmpty,
                shouldRunShellCommand {
+                var commandToExecute = shellCommand
+
+                if let extractedWrite = await extractPythonHeredocWrites(from: shellCommand, cwd: effectiveCWD) {
+                    var extractedFilesPassedSyntaxCheck = true
+                    stepLines.append(extractedWrite.summary)
+                    if let syntaxCheck = await pythonSyntaxCheck(for: extractedWrite.writtenPaths, cwd: effectiveCWD) {
+                        stepLines.append(format(command: syntaxCheck.command, cwd: effectiveCWD, result: syntaxCheck.result))
+                        commandResults.append(Self.commandResult(
+                            command: syntaxCheck.command,
+                            cwd: effectiveCWD,
+                            result: syntaxCheck.result
+                        ))
+                        if syntaxCheck.result.exitCode != 0 {
+                            extractedFilesPassedSyntaxCheck = false
+                            if let diagnostic = await pythonSyntaxDiagnostic(for: extractedWrite.writtenPaths, cwd: effectiveCWD) {
+                                stepLines.append(format(command: diagnostic.command, cwd: effectiveCWD, result: diagnostic.result))
+                                commandResults.append(Self.commandResult(
+                                    command: diagnostic.command,
+                                    cwd: effectiveCWD,
+                                    result: diagnostic.result
+                                ))
+                            }
+                            commandToExecute = ""
+                        }
+                    }
+                    if extractedFilesPassedSyntaxCheck {
+                        commandToExecute = extractedWrite.remainingCommand
+                    }
+                } else if let blockedOutput = unsafePythonFileWriteWarning(for: shellCommand) {
+                    let result = LocalAlpineCommandResult(
+                        command: shellCommand,
+                        output: blockedOutput,
+                        exitCode: 125,
+                        interactiveRequest: nil
+                    )
+                    stepLines.append(format(command: shellCommand, cwd: effectiveCWD, result: result))
+                    commandResults.append(Self.commandResult(
+                        command: shellCommand,
+                        cwd: effectiveCWD,
+                        result: result
+                    ))
+                    if !stepLines.isEmpty {
+                        lines.append(stepLines.joined(separator: "\n\n"))
+                    }
+                    continue
+                }
+
+                commandToExecute = commandToExecute.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !commandToExecute.isEmpty else {
+                    if !stepLines.isEmpty {
+                        lines.append(stepLines.joined(separator: "\n\n"))
+                    }
+                    continue
+                }
+
                 var result = await LocalAlpineTerminalService.shared.execute(
-                    command: shellCommand,
+                    command: commandToExecute,
                     cwd: effectiveCWD
                 )
                 while let request = result.interactiveRequest {
@@ -128,9 +183,9 @@ actor LocalAlpineAgentService {
                             stdinInput: stdinInput
                         )
                     } else {
-                        stepLines.append(format(command: shellCommand, cwd: effectiveCWD, result: result))
+                        stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
                         commandResults.append(Self.commandResult(
-                            command: shellCommand,
+                            command: commandToExecute,
                             cwd: effectiveCWD,
                             result: result
                         ))
@@ -143,12 +198,24 @@ actor LocalAlpineAgentService {
                         )
                     }
                 }
-                stepLines.append(format(command: shellCommand, cwd: effectiveCWD, result: result))
+                stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
                 commandResults.append(Self.commandResult(
-                    command: shellCommand,
+                    command: commandToExecute,
                     cwd: effectiveCWD,
                     result: result
                 ))
+                if let diagnostic = await pythonSyntaxDiagnostic(
+                    command: commandToExecute,
+                    output: result.output,
+                    cwd: effectiveCWD
+                ) {
+                    stepLines.append(format(command: diagnostic.command, cwd: effectiveCWD, result: diagnostic.result))
+                    commandResults.append(Self.commandResult(
+                        command: diagnostic.command,
+                        cwd: effectiveCWD,
+                        result: diagnostic.result
+                    ))
+                }
             }
 
             if !stepLines.isEmpty {
@@ -339,6 +406,76 @@ actor LocalAlpineAgentService {
         return LocalAlpineWriteResult(summary: lines.joined(separator: "\n"), writtenPaths: writtenPaths)
     }
 
+    private func extractPythonHeredocWrites(from command: String, cwd: String) async -> LocalAlpineExtractedWriteResult? {
+        let commandLines = command.components(separatedBy: .newlines)
+        var remainingLines: [String] = []
+        var summaryLines = ["写入文件（已自动保护 Python 缩进）"]
+        var writtenPaths: [String] = []
+        var extractedCount = 0
+        var index = 0
+
+        while index < commandLines.count {
+            let line = commandLines[index]
+            guard let spec = Self.pythonHeredocWriteSpec(from: line) else {
+                remainingLines.append(line)
+                index += 1
+                continue
+            }
+
+            extractedCount += 1
+            index += 1
+            var bodyLines: [String] = []
+            var foundTerminator = false
+            while index < commandLines.count {
+                let candidate = commandLines[index]
+                if Self.isHeredocTerminator(candidate, marker: spec.marker) {
+                    foundTerminator = true
+                    index += 1
+                    break
+                }
+                bodyLines.append(candidate)
+                index += 1
+            }
+
+            guard foundTerminator else {
+                return nil
+            }
+
+            let target = resolvedFilePath(spec.path, cwd: cwd)
+            let split = splitFilePath(target)
+            var content = bodyLines.joined(separator: "\n")
+            if !content.hasSuffix("\n") {
+                content += "\n"
+            }
+            guard let data = content.data(using: .utf8) else {
+                summaryLines.append("- `\(target)` 写入失败：内容不是有效 UTF-8")
+                continue
+            }
+
+            do {
+                try await LocalAlpineTerminalService.shared.writeFile(
+                    data: data,
+                    fileName: split.fileName,
+                    destinationPath: split.directory
+                )
+                summaryLines.append("- `\(target)` (\(data.count) B，保留原始缩进)")
+                writtenPaths.append(target)
+            } catch {
+                summaryLines.append("- `\(target)` 写入失败：\(error.localizedDescription)")
+            }
+        }
+
+        guard extractedCount > 0 else { return nil }
+        let remainingCommand = writtenPaths.count == extractedCount
+            ? remainingLines.joined(separator: "\n")
+            : ""
+        return LocalAlpineExtractedWriteResult(
+            summary: summaryLines.joined(separator: "\n"),
+            writtenPaths: writtenPaths,
+            remainingCommand: remainingCommand
+        )
+    }
+
     private func pythonSyntaxCheck(for paths: [String], cwd: String) async -> (command: String, result: LocalAlpineCommandResult)? {
         let pythonFiles = paths.filter { $0.lowercased().hasSuffix(".py") }
         guard !pythonFiles.isEmpty else { return nil }
@@ -367,6 +504,30 @@ actor LocalAlpineAgentService {
             printf 'missing: %s\\n' "$file"
           fi
         done
+        """
+        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
+        return (command, result)
+    }
+
+    private func pythonSyntaxDiagnostic(
+        command: String,
+        output: String,
+        cwd: String
+    ) async -> (command: String, result: LocalAlpineCommandResult)? {
+        guard Self.outputHasPythonSyntaxIssue(output),
+              let file = Self.pythonFilePath(command: command, output: output, cwd: cwd) else {
+            return nil
+        }
+
+        let quotedFile = shellSingleQuoted(file)
+        let command = """
+        file=\(quotedFile)
+        printf '== python file with line numbers: %s ==\\n' "$file"
+        if [ -f "$file" ]; then
+          nl -ba "$file" | sed -n '1,220p'
+        else
+          printf 'missing: %s\\n' "$file"
+        fi
         """
         let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
         return (command, result)
@@ -452,6 +613,107 @@ actor LocalAlpineAgentService {
 
     private func shellSingleQuoted(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    private func unsafePythonFileWriteWarning(for command: String) -> String? {
+        guard Self.commandWritesPythonThroughShellText(command) else { return nil }
+        return """
+        Unsafe Python file write blocked.
+
+        This command writes a `.py` file through shell text redirection/heredoc (`cat`, `tee`, `printf`, `echo`, or `python - <<`). In this chat UI that path can corrupt leading spaces and cause Python IndentationError.
+
+        Use `iexa_alpine` JSON `write_files` with `content_lines` or `content_base64` for new Python files. When fixing an existing file, inspect line numbers first and patch the smallest broken block, then run `python3 -m py_compile`.
+        """
+    }
+
+    private nonisolated static func commandWritesPythonThroughShellText(_ command: String) -> Bool {
+        let normalized = command.lowercased()
+        guard normalized.contains(".py") else { return false }
+
+        let patterns = [
+            #"(?is)\bcat\s+>+[^;&|]*\.py\b"#,
+            #"(?is)\bcat\s+<<[\s\S]{0,240}>+[^;&|]*\.py\b"#,
+            #"(?is)\btee\s+(?:-a\s+)?[^;&|]*\.py\b"#,
+            #"(?is)\b(?:printf|echo)\b[\s\S]{0,400}>+[^;&|]*\.py\b"#,
+            #"(?is)\bpython3?\s+-\s*<<"#
+        ]
+
+        return patterns.contains { pattern in
+            command.range(of: pattern, options: .regularExpression) != nil
+        }
+    }
+
+    private nonisolated static func pythonHeredocWriteSpec(from line: String) -> PythonHeredocWriteSpec? {
+        let patterns: [(pattern: String, pathRange: Int, markerRange: Int)] = [
+            (#"^\s*cat\s+>+\s*(['"]?)([^'">\s;|&]+\.py)\1\s*<<-?\s*(['"]?)([A-Za-z0-9_.-]+)\3\s*$"#, 2, 4),
+            (#"^\s*cat\s*<<-?\s*(['"]?)([A-Za-z0-9_.-]+)\1\s*>+\s*(['"]?)([^'">\s;|&]+\.py)\3\s*$"#, 4, 2),
+            (#"^\s*tee\s+(?:-a\s+)?(['"]?)([^'">\s;|&]+\.py)\1(?:\s*>\s*/dev/null)?\s*<<-?\s*(['"]?)([A-Za-z0-9_.-]+)\3\s*$"#, 2, 4),
+            (#"^\s*tee\s+(?:-a\s+)?(['"]?)([^'">\s;|&]+\.py)\1\s*<<-?\s*(['"]?)([A-Za-z0-9_.-]+)\3(?:\s*>\s*/dev/null)?\s*$"#, 2, 4)
+        ]
+
+        for entry in patterns {
+            guard let regex = try? NSRegularExpression(pattern: entry.pattern, options: [.caseInsensitive]) else {
+                continue
+            }
+            let nsLine = line as NSString
+            let fullRange = NSRange(location: 0, length: nsLine.length)
+            guard let match = regex.firstMatch(in: line, range: fullRange),
+                  match.numberOfRanges > max(entry.pathRange, entry.markerRange) else {
+                continue
+            }
+
+            let path = nsLine.substring(with: match.range(at: entry.pathRange))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let marker = nsLine.substring(with: match.range(at: entry.markerRange))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty, !marker.isEmpty else { continue }
+            return PythonHeredocWriteSpec(path: path, marker: marker)
+        }
+
+        return nil
+    }
+
+    private nonisolated static func isHeredocTerminator(_ line: String, marker: String) -> Bool {
+        line.trimmingCharacters(in: .whitespacesAndNewlines) == marker
+    }
+
+    private nonisolated static func outputHasPythonSyntaxIssue(_ output: String) -> Bool {
+        let lowercased = output.lowercased()
+        return lowercased.contains("indentationerror")
+            || lowercased.contains("syntaxerror")
+            || lowercased.contains("taberror")
+    }
+
+    private nonisolated static func pythonFilePath(command: String, output: String, cwd: String) -> String? {
+        let combined = output + "\n" + command
+        let patterns = [
+            #"File\s+\"([^\"]+\.py)\""#,
+            #"\(([A-Za-z0-9_./\-]+\.py),\s*line\s+\d+\)"#,
+            #"([/A-Za-z0-9_.\-]+\.py)"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let nsCombined = combined as NSString
+            let range = NSRange(location: 0, length: nsCombined.length)
+            guard let match = regex.firstMatch(in: combined, range: range),
+                  match.numberOfRanges >= 2 else {
+                continue
+            }
+
+            let candidate = nsCombined.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !candidate.isEmpty else { continue }
+            if candidate.hasPrefix("/") {
+                return candidate
+            }
+
+            let normalizedCWD = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+            let base = normalizedCWD.isEmpty ? "/mnt/iexa" : normalizedCWD
+            return base.hasSuffix("/") ? base + candidate : base + "/" + candidate
+        }
+
+        return nil
     }
 
     nonisolated static func visibleContent(from content: String) -> String {
@@ -547,6 +809,17 @@ private struct LocalAlpineAgentFile {
 private struct LocalAlpineWriteResult {
     let summary: String
     let writtenPaths: [String]
+}
+
+private struct LocalAlpineExtractedWriteResult {
+    let summary: String
+    let writtenPaths: [String]
+    let remainingCommand: String
+}
+
+private struct PythonHeredocWriteSpec {
+    let path: String
+    let marker: String
 }
 
 private enum LocalAlpineAgentError: LocalizedError {

@@ -1372,19 +1372,24 @@ final class ChatViewModel {
     }
 
     private static func firstLocalAlpineCommand(in content: String) -> ParsedLocalAlpineCommand? {
+        localAlpineCommands(in: content).first
+    }
+
+    private static func localAlpineCommands(in content: String) -> [ParsedLocalAlpineCommand] {
+        var commands: [ParsedLocalAlpineCommand] = []
         for block in localAlpineInstructionBlocks(from: content) {
             if let data = block.data(using: .utf8),
-               let object = try? JSONSerialization.jsonObject(with: data),
-               let parsed = firstLocalAlpineCommand(from: object) {
-                return parsed
+               let object = try? JSONSerialization.jsonObject(with: data) {
+                commands.append(contentsOf: localAlpineCommands(from: object))
+                continue
             }
 
             let shell = block.trimmingCharacters(in: .whitespacesAndNewlines)
             if !shell.isEmpty {
-                return ParsedLocalAlpineCommand(command: shell, cwd: "/mnt/iexa", hasWriteFiles: false)
+                commands.append(ParsedLocalAlpineCommand(command: shell, cwd: "/mnt/iexa", hasWriteFiles: false))
             }
         }
-        return nil
+        return commands
     }
 
     private static func localAlpineInstructionBlocks(from content: String) -> [String] {
@@ -1412,37 +1417,36 @@ final class ChatViewModel {
     }
 
     private static func firstLocalAlpineCommand(from object: Any) -> ParsedLocalAlpineCommand? {
+        localAlpineCommands(from: object).first
+    }
+
+    private static func localAlpineCommands(from object: Any) -> [ParsedLocalAlpineCommand] {
         if let array = object as? [Any] {
-            for value in array {
-                if let parsed = firstLocalAlpineCommand(from: value) {
-                    return parsed
-                }
-            }
-            return nil
+            return array.flatMap { localAlpineCommands(from: $0) }
         }
 
         if let command = object as? String {
             let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : ParsedLocalAlpineCommand(command: trimmed, cwd: "/mnt/iexa", hasWriteFiles: false)
+            return trimmed.isEmpty ? [] : [ParsedLocalAlpineCommand(command: trimmed, cwd: "/mnt/iexa", hasWriteFiles: false)]
         }
 
-        guard let dict = object as? [String: Any] else { return nil }
+        guard let dict = object as? [String: Any] else { return [] }
         if let nested = dict["iexa_alpine"] ?? dict["commands"] {
-            return firstLocalAlpineCommand(from: nested)
+            return localAlpineCommands(from: nested)
         }
 
         let command = (dict["command"] as? String) ?? (dict["cmd"] as? String)
         guard let command,
               !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
+            return []
         }
         let cwd = (dict["cwd"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasWriteFiles = Self.hasLocalAlpineWriteFiles(dict["write_files"] ?? dict["files"])
-        return ParsedLocalAlpineCommand(
+        return [ParsedLocalAlpineCommand(
             command: command.trimmingCharacters(in: .whitespacesAndNewlines),
             cwd: cwd?.isEmpty == false ? cwd! : "/mnt/iexa",
             hasWriteFiles: hasWriteFiles
-        )
+        )]
     }
 
     private static func hasLocalAlpineWriteFiles(_ object: Any?) -> Bool {
@@ -1505,12 +1509,17 @@ final class ChatViewModel {
     private static func localAlpineCommandWritesPythonWithHeredoc(_ command: String) -> Bool {
         let normalized = command.lowercased()
         guard normalized.contains(".py") else { return false }
-        guard normalized.contains("<<") else { return false }
-        return normalized.contains("cat >")
-            || normalized.contains("cat <<")
-            || normalized.contains("tee ")
-            || normalized.contains("python3 - <<")
-            || normalized.contains("python - <<")
+
+        let patterns = [
+            #"(?is)\bcat\s+>+[^;&|]*\.py\b"#,
+            #"(?is)\bcat\s+<<[\s\S]{0,240}>+[^;&|]*\.py\b"#,
+            #"(?is)\btee\s+(?:-a\s+)?[^;&|]*\.py\b"#,
+            #"(?is)\b(?:printf|echo)\b[\s\S]{0,400}>+[^;&|]*\.py\b"#,
+            #"(?is)\bpython3?\s+-\s*<<"#
+        ]
+        return patterns.contains { pattern in
+            command.range(of: pattern, options: .regularExpression) != nil
+        }
     }
 
     private static func localAlpinePythonFilePath(command: String, output: String, cwd: String) -> String? {
@@ -9006,29 +9015,27 @@ final class ChatViewModel {
     }
 
     private func repeatedLocalAlpineFailure(for content: String) -> LocalAlpineAgentCommandFailure? {
-        guard let command = Self.firstLocalAlpineCommand(in: content) else { return nil }
-        let key = Self.localAlpineCommandKey(command: command.command, cwd: command.cwd)
-        func recordBlockedAttempt() {
+        let commands = Self.localAlpineCommands(in: content)
+        guard !commands.isEmpty else { return nil }
+
+        func recordBlockedAttempt(for key: String) {
             let count = (localAlpineBlockedRepeatCommands[key] ?? 0) + 1
             localAlpineBlockedRepeatCommands[key] = count
             if count >= 3 {
                 localAlpineAgentStopRequested = true
             }
         }
-        if Self.localAlpineCommandWritesPythonWithHeredoc(command.command) {
-            recordBlockedAttempt()
-            return LocalAlpineAgentCommandFailure(
-                command: command.command,
-                cwd: command.cwd,
-                exitCode: nil,
-                outputPreview: "Unsafe Python file write blocked: heredoc/cat/tee can corrupt indentation in this UI. Use iexa_alpine write_files with content_lines/content_base64 for new files, or inspect line numbers and patch the smallest broken block for existing files, then run python3 -m py_compile."
-            )
-        }
-        if command.hasWriteFiles {
+
+        if commands.contains(where: \.hasWriteFiles) {
             return nil
         }
+
+        guard let command = commands.first(where: {
+            localAlpineFailedCommands[Self.localAlpineCommandKey(command: $0.command, cwd: $0.cwd)] != nil
+        }) else { return nil }
+        let key = Self.localAlpineCommandKey(command: command.command, cwd: command.cwd)
         guard let failure = localAlpineFailedCommands[key] else { return nil }
-        recordBlockedAttempt()
+        recordBlockedAttempt(for: key)
         return failure
     }
 
@@ -9549,9 +9556,12 @@ final class ChatViewModel {
         guard !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         let assistantMessageId = UUID().uuidString
+        let thinkingDescription = finalSummaryOnly
+            ? "本地输出已返回，正在整理回答..."
+            : "本地输出已返回，正在思考下一步..."
         let thinkingStatus = ChatStatusUpdate(
             action: "local_alpine_agent",
-            description: "正在根据本地 Alpine 输出判断下一步...",
+            description: thinkingDescription,
             done: false
         )
         let assistantMessage = ChatMessage(
@@ -9777,7 +9787,26 @@ final class ChatViewModel {
         }
 
         let rawContent = content
-        updateAssistantMessage(id: assistantMessageId, content: rawContent, isStreaming: false)
+        let doneDescription: String
+        if isFinalSummary {
+            doneDescription = "已整理本地 Alpine 回答"
+        } else if rawContent.localizedCaseInsensitiveContains("iexa_alpine") {
+            doneDescription = "已决定继续执行下一步"
+        } else {
+            doneDescription = "已整理本地 Alpine 输出"
+        }
+        let doneStatus = ChatStatusUpdate(
+            action: "local_alpine_agent",
+            description: doneDescription,
+            done: true,
+            occurredAt: .now
+        )
+        updateAssistantMessage(
+            id: assistantMessageId,
+            content: rawContent,
+            isStreaming: false,
+            statusHistory: [doneStatus]
+        )
         normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
         let finalContent = conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? rawContent
         applyUsage(usage, toMessageId: assistantMessageId)

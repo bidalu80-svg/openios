@@ -4175,6 +4175,7 @@ private struct LocalAlpineResultCard: View {
     let isStreaming: Bool
     let statusHistory: [ChatStatusUpdate]
 
+    @Environment(\.theme) private var theme
     @State private var isExpanded = false
 
     private var parsed: ParsedLocalAlpineResult {
@@ -4182,15 +4183,14 @@ private struct LocalAlpineResultCard: View {
     }
 
     private var statusText: String {
-        if isStreaming { return "运行中" }
-        if parsed.hasNonZeroExit { return "完成，有错误" }
-        return "完成"
+        if isStreaming { return parsed.streamingSummary(statusDetail: statusDetail) }
+        return parsed.activitySummary(hasError: parsed.hasNonZeroExit)
     }
 
     private var statusColor: Color {
-        if isStreaming { return .orange }
-        if parsed.hasNonZeroExit { return .red }
-        return .green
+        if isStreaming { return theme.brandPrimary }
+        if parsed.hasNonZeroExit { return .orange }
+        return theme.textTertiary
     }
 
     private var statusDetail: String {
@@ -4198,71 +4198,41 @@ private struct LocalAlpineResultCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 7) {
             Button {
                 withAnimation(MicroAnimation.snappy) {
                     isExpanded.toggle()
                 }
             } label: {
-                HStack(spacing: 10) {
+                HStack(spacing: 7) {
                     Image(systemName: "terminal.fill")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color(.systemBackground))
-                        .frame(width: 30, height: 30)
-                        .background(statusColor)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("本地 Alpine")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.primary)
-                        Text(parsed.summaryText(isStreaming: isStreaming, statusDetail: statusDetail))
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-
-                    Spacer(minLength: 8)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(statusColor)
 
                     Text(statusText)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(statusColor)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(statusColor.opacity(0.12))
-                        .clipShape(Capsule())
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(parsed.hasNonZeroExit ? .orange : .secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    Spacer(minLength: 4)
 
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
-            if !isExpanded, !parsed.collapsedPreview.isEmpty {
-                Text(parsed.collapsedPreview)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-            }
-
             if isExpanded {
-                Divider()
                 if !parsed.commandText.isEmpty {
                     LocalAlpineCodeSection(title: "命令", text: parsed.commandText, maxHeight: 140)
                 }
                 LocalAlpineCodeSection(title: "输出", text: parsed.outputText, maxHeight: 240)
             }
         }
-        .padding(12)
-        .background(Color(.secondarySystemBackground))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.vertical, 4)
     }
 }
 
@@ -4293,9 +4263,9 @@ private struct LocalAlpineCodeSection: View {
 
 private struct ParsedLocalAlpineResult {
     let commandCount: Int
+    let editedFileCount: Int
     let commandText: String
     let outputText: String
-    let collapsedPreview: String
     let hasNonZeroExit: Bool
 
     init(content: String, metadata: [String: String]?) {
@@ -4312,19 +4282,31 @@ private struct ParsedLocalAlpineResult {
             limit: 8_000
         )
         outputText = Self.clip(textBlocks.isEmpty ? trimmed : textBlocks, limit: 20_000)
-        commandCount = max(1, Self.headingCount(in: trimmed, heading: "命令"))
-        collapsedPreview = Self.clip(
-            textBlocks.isEmpty ? trimmed : textBlocks.trimmingCharacters(in: .whitespacesAndNewlines),
-            limit: 240
-        )
+        let metadataHasCommand = !commandFromMetadata.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        commandCount = max(Self.headingCount(in: trimmed, heading: "命令"), metadataHasCommand ? 1 : 0)
+        editedFileCount = Self.editedFileCount(in: trimmed)
         hasNonZeroExit = Self.containsNonZeroExit(in: trimmed)
     }
 
-    func summaryText(isStreaming: Bool, statusDetail: String) -> String {
-        if isStreaming {
-            return statusDetail.isEmpty ? "正在执行命令..." : statusDetail
+    func streamingSummary(statusDetail: String) -> String {
+        statusDetail.isEmpty ? "正在运行本地 Alpine" : statusDetail
+    }
+
+    func activitySummary(hasError: Bool) -> String {
+        var parts: [String] = []
+        if editedFileCount > 0 {
+            parts.append("已编辑 \(editedFileCount) 个文件")
         }
-        return "已运行 \(commandCount) 条命令"
+        if commandCount > 0 {
+            parts.append("已运行 \(commandCount) 条命令")
+        }
+        if parts.isEmpty {
+            parts.append("本地 Alpine 已完成")
+        }
+        if hasError {
+            parts.append("有错误")
+        }
+        return parts.joined(separator: "  ")
     }
 
     private static func codeBlocks(in content: String, preferredLanguage: String) -> [String] {
@@ -4363,6 +4345,14 @@ private struct ParsedLocalAlpineResult {
             if value != "0" { return true }
         }
         return false
+    }
+
+    private static func editedFileCount(in content: String) -> Int {
+        guard let regex = try? NSRegularExpression(pattern: #"(?m)^\s*-\s+`[^`]+`"#) else {
+            return 0
+        }
+        let range = NSRange(content.startIndex..<content.endIndex, in: content)
+        return regex.numberOfMatches(in: content, range: range)
     }
 
     private static func clip(_ text: String, limit: Int) -> String {
