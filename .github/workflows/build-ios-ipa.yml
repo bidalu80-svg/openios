@@ -320,11 +320,13 @@ jobs:
             -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
             archive
           APP_BINARY="$RUNNER_TEMP/Iexa.xcarchive/Products/Applications/Iexa.app/Iexa"
-          if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
+          SIGNED_APP_STRINGS="$RUNNER_TEMP/signed-app-strings.txt"
+          strings "$APP_BINARY" > "$SIGNED_APP_STRINGS"
+          if grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1' "$SIGNED_APP_STRINGS"; then
             echo "::error::Local Alpine iSH runtime was not linked into the signed archive"
             exit 1
           fi
-          if ! strings "$APP_BINARY" | grep -Eq 'IEXA_LOCAL_ALPINE_ISH|iexa-alpine-rootfs|LocalAlpine'; then
+          if ! grep -Eq 'IEXA_LOCAL_ALPINE_ISH|iexa-alpine-rootfs|LocalAlpine' "$SIGNED_APP_STRINGS"; then
             echo "::warning::Could not find Local Alpine marker string in signed archive; continuing because the stub-missing marker was absent."
           fi
           echo "archive_ok=true" >> "$GITHUB_OUTPUT"
@@ -363,11 +365,13 @@ jobs:
           rm -rf "$APP_PATH/PlugIns"
           rm -rf "$APP_PATH/Extensions"
           APP_BINARY="$APP_PATH/Iexa"
-          if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
+          UNSIGNED_APP_STRINGS="$RUNNER_TEMP/unsigned-app-strings.txt"
+          strings "$APP_BINARY" > "$UNSIGNED_APP_STRINGS"
+          if grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1' "$UNSIGNED_APP_STRINGS"; then
             echo "::error::Local Alpine iSH runtime was not linked into the unsigned app"
             exit 1
           fi
-          if ! strings "$APP_BINARY" | grep -Eq 'IEXA_LOCAL_ALPINE_ISH|iexa-alpine-rootfs|LocalAlpine'; then
+          if ! grep -Eq 'IEXA_LOCAL_ALPINE_ISH|iexa-alpine-rootfs|LocalAlpine' "$UNSIGNED_APP_STRINGS"; then
             echo "::warning::Could not find Local Alpine marker string in unsigned app; continuing because the stub-missing marker was absent."
           fi
 
