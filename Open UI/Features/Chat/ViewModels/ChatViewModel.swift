@@ -23,6 +23,18 @@ extension Notification.Name {
     static let chatTokenUsageDidAccumulate = Notification.Name("chatTokenUsageDidAccumulate")
 }
 
+private struct LocalAlpineAgentCommandFailure {
+    let command: String
+    let cwd: String
+    let exitCode: Int?
+    let outputPreview: String
+}
+
+private struct ParsedLocalAlpineCommand {
+    let command: String
+    let cwd: String
+}
+
 /// Manages state and logic for a single chat conversation.
 /// Handles sending/streaming messages via Socket.IO, loading history, and model selection.
 /// Instances are held by `ActiveChatStore` so they survive navigation transitions.
@@ -261,6 +273,9 @@ final class ChatViewModel {
     private var localAlpineContinuationTask: Task<Void, Never>?
     private var localAlpineAgentStopRequested = false
     private var localAlpineNoCommandContinuationRetries = 0
+    private var localAlpineFailedCommands: [String: LocalAlpineAgentCommandFailure] = [:]
+    private var localAlpineFailureSignatures: [String: Int] = [:]
+    private var localAlpineBlockedRepeatCommands: [String: Int] = [:]
     private let localAlpineAgentMaxSteps = 10
     private let localAlpineContinuationMaxNoCommandRetries = 3
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
@@ -1249,11 +1264,197 @@ final class ChatViewModel {
     }
 
     private static func localAlpineCommandPreview(from content: String) -> String {
+        if let preview = localAlpineInstructionPreview(from: content) {
+            return preview
+        }
+
         let cleaned = content
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleaned.count > 1_000 else { return cleaned }
         return String(cleaned.prefix(1_000)) + "..."
+    }
+
+    private static func localAlpineInstructionPreview(from content: String) -> String? {
+        for block in localAlpineInstructionBlocks(from: content) {
+            if let data = block.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data),
+               let preview = localAlpineInstructionPreview(from: object) {
+                return clipLocalAlpinePreview(preview)
+            }
+
+            let shell = block.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !shell.isEmpty {
+                return clipLocalAlpinePreview(shell)
+            }
+        }
+        return nil
+    }
+
+    private static func localAlpineInstructionPreview(from object: Any) -> String? {
+        if let array = object as? [Any] {
+            let previews = array.compactMap { localAlpineInstructionPreview(from: $0) }
+            return previews.isEmpty ? nil : previews.prefix(4).joined(separator: "\n---\n")
+        }
+
+        if let command = object as? String {
+            let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        guard let dict = object as? [String: Any] else { return nil }
+        if let nested = dict["iexa_alpine"] ?? dict["commands"] {
+            return localAlpineInstructionPreview(from: nested)
+        }
+
+        var lines: [String] = []
+        if let cwd = dict["cwd"] as? String, !cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.append("cwd: \(cwd.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        lines.append(contentsOf: localAlpineWriteFilePreviews(from: dict["write_files"] ?? dict["files"]))
+        if let command = (dict["command"] as? String) ?? (dict["cmd"] as? String),
+           !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.append("command: \(command.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    private static func localAlpineWriteFilePreviews(from object: Any?) -> [String] {
+        guard let object else { return [] }
+        let values: [Any]
+        if let array = object as? [Any] {
+            values = array
+        } else {
+            values = [object]
+        }
+
+        return values.compactMap { value in
+            guard let dict = value as? [String: Any] else { return nil }
+            let path = ((dict["path"] as? String)
+                ?? (dict["file"] as? String)
+                ?? (dict["name"] as? String)
+                ?? "untitled").trimmingCharacters(in: .whitespacesAndNewlines)
+            let size: Int?
+            if let content = (dict["content"] as? String)
+                ?? (dict["text"] as? String)
+                ?? (dict["body"] as? String) {
+                size = content.utf8.count
+            } else if let lines = (dict["content_lines"] as? [String]) ?? (dict["lines"] as? [String]) {
+                size = lines.joined(separator: "\n").utf8.count
+            } else if let base64 = (dict["content_base64"] as? String) ?? (dict["base64"] as? String) {
+                size = (base64.count * 3) / 4
+            } else {
+                size = nil
+            }
+            if let size {
+                return "write_file: \(path) (\(size) B)"
+            }
+            return "write_file: \(path)"
+        }
+    }
+
+    private static func clipLocalAlpinePreview(_ text: String) -> String {
+        let cleaned = text
+            .replacingOccurrences(of: #""content_base64"\s*:\s*"[^"]+""#, with: #""content_base64":"<hidden>""#, options: .regularExpression)
+            .replacingOccurrences(of: #""base64"\s*:\s*"[^"]+""#, with: #""base64":"<hidden>""#, options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.count > 1_000 else { return cleaned }
+        return String(cleaned.prefix(1_000)) + "..."
+    }
+
+    private static func firstLocalAlpineCommand(in content: String) -> ParsedLocalAlpineCommand? {
+        for block in localAlpineInstructionBlocks(from: content) {
+            if let data = block.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data),
+               let parsed = firstLocalAlpineCommand(from: object) {
+                return parsed
+            }
+
+            let shell = block.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !shell.isEmpty {
+                return ParsedLocalAlpineCommand(command: shell, cwd: "/mnt/iexa")
+            }
+        }
+        return nil
+    }
+
+    private static func localAlpineInstructionBlocks(from content: String) -> [String] {
+        var blocks: [String] = []
+        let nsContent = content as NSString
+        let fullRange = NSRange(location: 0, length: nsContent.length)
+
+        if let regex = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)```"#, options: [.caseInsensitive]) {
+            for match in regex.matches(in: content, range: fullRange) where match.numberOfRanges >= 3 {
+                let info = nsContent.substring(with: match.range(at: 1)).lowercased()
+                let body = nsContent.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if info.contains("iexa_alpine")
+                    || (info.trimmingCharacters(in: .whitespacesAndNewlines) == "json" && body.contains("\"iexa_alpine\"")) {
+                    blocks.append(body)
+                }
+            }
+        }
+
+        if let tagRegex = try? NSRegularExpression(pattern: #"<iexa_alpine>([\s\S]*?)</iexa_alpine>"#, options: [.caseInsensitive]) {
+            for match in tagRegex.matches(in: content, range: fullRange) where match.numberOfRanges >= 2 {
+                blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+        return blocks
+    }
+
+    private static func firstLocalAlpineCommand(from object: Any) -> ParsedLocalAlpineCommand? {
+        if let array = object as? [Any] {
+            for value in array {
+                if let parsed = firstLocalAlpineCommand(from: value) {
+                    return parsed
+                }
+            }
+            return nil
+        }
+
+        if let command = object as? String {
+            let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : ParsedLocalAlpineCommand(command: trimmed, cwd: "/mnt/iexa")
+        }
+
+        guard let dict = object as? [String: Any] else { return nil }
+        if let nested = dict["iexa_alpine"] ?? dict["commands"] {
+            return firstLocalAlpineCommand(from: nested)
+        }
+
+        let command = (dict["command"] as? String) ?? (dict["cmd"] as? String)
+        guard let command,
+              !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let cwd = (dict["cwd"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ParsedLocalAlpineCommand(
+            command: command.trimmingCharacters(in: .whitespacesAndNewlines),
+            cwd: cwd?.isEmpty == false ? cwd! : "/mnt/iexa"
+        )
+    }
+
+    private static func localAlpineCommandKey(command: String, cwd: String) -> String {
+        let normalizedCommand = command
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let normalizedCWD = cwd
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return "\(normalizedCWD.isEmpty ? "/mnt/iexa" : normalizedCWD)\n\(normalizedCommand)"
+    }
+
+    private static func localAlpineFailureSignature(_ result: LocalAlpineAgentCommandResult) -> String {
+        let lines = result.outputPreview
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .suffix(8)
+            .joined(separator: "\n")
+        let clipped = String(lines.prefix(1_500)).lowercased()
+        return "\(result.exitCode.map(String.init) ?? "unknown")\n\(clipped)"
     }
 
     // MARK: - Initialisation
@@ -4503,6 +4704,9 @@ final class ChatViewModel {
         cancelLocalAlpineInput()
         localAlpineAgentStopRequested = false
         localAlpineNoCommandContinuationRetries = 0
+        localAlpineFailedCommands.removeAll()
+        localAlpineFailureSignatures.removeAll()
+        localAlpineBlockedRepeatCommands.removeAll()
     }
 
     private func cancelLocalAlpineAgentLoop() {
@@ -7332,8 +7536,9 @@ final class ChatViewModel {
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
-        - For scripts/projects, prefer `write_files` inside `iexa_alpine` to create files, then run a bounded verification command. This preserves Python/JS/HTML/CSS indentation better than heredoc shell text.
-        - Use heredoc only for very small one-off shell snippets. Never put long Python class/function bodies in heredoc if `write_files` can be used.
+        - For scripts/projects, use `write_files` inside `iexa_alpine` to create files, then run a bounded verification command. Do not use `cat > file <<EOF` for Python/JS/HTML/CSS bodies.
+        - For indentation-sensitive files, prefer `content_lines` (array of exact lines) or `content_base64` instead of heredoc shell text. This preserves leading spaces exactly.
+        - Use heredoc only for tiny one-off shell snippets. Never put long Python class/function bodies in heredoc if `write_files` can be used.
         - After writing Python, run `python3 -m py_compile file.py` before running it. If syntax or indentation fails, rewrite the file and verify again before summarizing.
         - If the user wants to test Python `input()` / shell `read` with their own text, do not invent sample stdin and do not pipe a fixed `printf` value. Leave the input/read command unpiped; the app will pause, ask the user for stdin, feed that exact text to the program, and append the real output.
         - For unattended tests where the user did not ask to type input themselves, avoid interactive prompts by using constants, command-line args, environment variables, or an explicit `printf 'value\n' | python3 script.py`.
@@ -7351,7 +7556,7 @@ final class ChatViewModel {
             {
               "cwd": "/mnt/iexa",
               "write_files": [
-                {"path": "hello.py", "content": "def main():\\n    print('hello from Iexa Alpine')\\n\\nif __name__ == '__main__':\\n    main()\\n"}
+                {"path": "hello.py", "content_lines": ["def main():", "    print('hello from Iexa Alpine')", "", "if __name__ == '__main__':", "    main()"]}
               ],
               "command": "python3 -m py_compile hello.py && python3 hello.py"
             }
@@ -7508,7 +7713,7 @@ final class ChatViewModel {
                 queries = await webSearchQueries(for: query, userText: text, apiClient: apiClient, modelId: modelId)
             } else {
                 queries = Self.mergeSearchQueries(
-                    original: query,
+                    original: Self.preciseFallbackSearchQuery(for: text, originalQuery: query),
                     generated: Self.fallbackWebSearchQueries(for: text, originalQuery: query),
                     limit: 4
                 )
@@ -7524,7 +7729,13 @@ final class ChatViewModel {
                 )
             )
 
-            let result = try await ClientWebSearchService().search(queries: queries, originalQuery: query)
+            let searchOutput = try await runAgenticWebSearch(
+                query: query,
+                queries: queries,
+                assistantMessageId: assistantMessageId
+            )
+            let result = searchOutput.result
+            let usedQueries = searchOutput.queries
             guard result.loadedCount > 0 || !result.items.isEmpty || !result.docs.isEmpty else {
                 appendStatusUpdate(
                     id: assistantMessageId,
@@ -7534,12 +7745,12 @@ final class ChatViewModel {
                         done: true,
                         count: 0,
                         query: query,
-                        queries: queries
+                        queries: usedQueries
                     )
                 )
                 return
             }
-            let context = modelWebSearchContextPrompt(result: result, query: query, queries: queries)
+            let context = modelWebSearchContextPrompt(result: result, query: query, queries: usedQueries)
             let sources = webSearchSources(from: result)
 
             if !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -7567,7 +7778,7 @@ final class ChatViewModel {
                     },
                     count: max(result.loadedCount, sources.count),
                     query: query,
-                    queries: queries
+                    queries: usedQueries
                 )
             )
         } catch {
@@ -7590,7 +7801,7 @@ final class ChatViewModel {
         let serverConfig = activeChatStore?.serverTaskConfig ?? .default
         let fallbackQueries = Self.fallbackWebSearchQueries(for: userText, originalQuery: query)
         guard serverConfig.enableSearchQueryGeneration else {
-            return Self.mergeSearchQueries(original: query, generated: fallbackQueries, limit: 4)
+            return Self.mergeSearchQueries(original: Self.preciseFallbackSearchQuery(for: userText, originalQuery: query), generated: fallbackQueries, limit: 4)
         }
 
         let taskModel = [
@@ -7608,10 +7819,14 @@ final class ChatViewModel {
                 context: recentUserContextForSearch(excluding: query),
                 maxQueries: 3
             )
-            return Self.mergeSearchQueries(original: query, generated: generated + fallbackQueries, limit: 4)
+            return Self.mergeSearchQueries(
+                original: Self.preciseFallbackSearchQuery(for: userText, originalQuery: query),
+                generated: generated + fallbackQueries,
+                limit: 4
+            )
         } catch {
             logger.debug("Search query generation failed: \(error.localizedDescription)")
-            return Self.mergeSearchQueries(original: query, generated: fallbackQueries, limit: 4)
+            return Self.mergeSearchQueries(original: Self.preciseFallbackSearchQuery(for: userText, originalQuery: query), generated: fallbackQueries, limit: 4)
         }
     }
 
@@ -7627,6 +7842,120 @@ final class ChatViewModel {
             .suffix(3)
             .joined(separator: "\n")
         return context.isEmpty ? nil : String(context.prefix(2_000))
+    }
+
+    private func runAgenticWebSearch(
+        query: String,
+        queries: [String],
+        assistantMessageId: String
+    ) async throws -> (result: WebSearchResponse, queries: [String]) {
+        let first = try await ClientWebSearchService().search(queries: queries, originalQuery: query)
+        guard shouldRetryWebSearch(first, originalQuery: query) else {
+            return (first, queries)
+        }
+
+        let retryQueries = Self.retryWebSearchQueries(original: query, existing: queries)
+        guard !retryQueries.isEmpty else {
+            return (first, queries)
+        }
+
+        let mergedQueries = Self.mergeSearchQueries(original: queries.first ?? query, generated: Array(queries.dropFirst()) + retryQueries, limit: 7)
+        appendStatusUpdate(
+            id: assistantMessageId,
+            status: ChatStatusUpdate(
+                action: "web_search",
+                description: "搜索结果偏少或可能过旧，正在补充搜索...",
+                done: false,
+                query: query,
+                queries: mergedQueries
+            )
+        )
+
+        let retry = try await ClientWebSearchService().search(queries: retryQueries, originalQuery: query)
+        return (mergeWebSearchResponses(first, retry), mergedQueries)
+    }
+
+    private func shouldRetryWebSearch(_ result: WebSearchResponse, originalQuery: String) -> Bool {
+        if result.loadedCount == 0 && result.items.count < 3 { return true }
+        if result.items.count < 2 && result.docs.count < 2 { return true }
+        let normalized = originalQuery.lowercased()
+        let freshnessNeeded = [
+            "最新", "今天", "今日", "现在", "目前", "刚刚", "新闻", "热搜", "价格", "油价",
+            "天气", "股价", "汇率", "版本", "发布", "latest", "today", "current", "news",
+            "price", "release", "version"
+        ].contains { normalized.contains($0) }
+        return freshnessNeeded && !hasFreshWebSearchEvidence(result)
+    }
+
+    private func hasFreshWebSearchEvidence(_ result: WebSearchResponse) -> Bool {
+        let currentYear = Calendar.current.component(.year, from: Date())
+        let freshYears = [(currentYear), (currentYear - 1)].map(String.init)
+        let haystack = (
+            result.items.map { [$0.title, $0.snippet, $0.link].compactMap { $0 }.joined(separator: " ") }
+            + result.docs.map { doc in
+                let metadata = doc.metadata.values.joined(separator: " ")
+                return metadata + " " + String(doc.content.prefix(1_500))
+            }
+        )
+        .joined(separator: "\n")
+        .lowercased()
+        if freshYears.contains(where: { haystack.contains($0) }) { return true }
+        return ["today", "latest", "current", "updated", "published", "今天", "今日", "最新", "更新", "发布"].contains {
+            haystack.contains($0)
+        }
+    }
+
+    private static func retryWebSearchQueries(original: String, existing: [String]) -> [String] {
+        let today = DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)
+        let currentYear = Calendar.current.component(.year, from: Date())
+        let precise = preciseFallbackSearchQuery(for: original, originalQuery: original)
+        return mergeSearchQueries(
+            original: "\(precise) 最新 \(today)",
+            generated: [
+                "\(precise) official latest",
+                "\(precise) 官方 最新",
+                "\(precise) news today",
+                "\(precise) \(currentYear)"
+            ],
+            limit: 4
+        )
+        .filter { candidate in
+            !existing.contains { $0.caseInsensitiveCompare(candidate) == .orderedSame }
+        }
+    }
+
+    private func mergeWebSearchResponses(_ primary: WebSearchResponse, _ retry: WebSearchResponse) -> WebSearchResponse {
+        var filenames: [String] = []
+        var seenFilenames = Set<String>()
+        for filename in primary.filenames + retry.filenames {
+            guard seenFilenames.insert(filename.lowercased()).inserted else { continue }
+            filenames.append(filename)
+        }
+
+        var items: [WebSearchResultItem] = []
+        var seenItems = Set<String>()
+        for item in primary.items + retry.items {
+            let key = (item.link ?? item.title ?? item.snippet ?? UUID().uuidString).lowercased()
+            guard seenItems.insert(key).inserted else { continue }
+            items.append(item)
+        }
+
+        var docs: [WebSearchDocument] = []
+        var seenDocs = Set<String>()
+        for doc in primary.docs + retry.docs {
+            let key = (doc.metadata["source"] ?? doc.metadata["link"] ?? String(doc.content.prefix(160))).lowercased()
+            guard seenDocs.insert(key).inserted else { continue }
+            docs.append(doc)
+        }
+
+        return WebSearchResponse(
+            status: primary.status || retry.status || !items.isEmpty || !docs.isEmpty,
+            collectionNames: Array(Set(primary.collectionNames + retry.collectionNames)),
+            filenames: filenames,
+            items: Array(items.prefix(10)),
+            docs: Array(docs.prefix(8)),
+            loadedCount: primary.loadedCount + retry.loadedCount
+        )
     }
 
     private static func mergeSearchQueries(original: String, generated: [String], limit: Int) -> [String] {
@@ -7649,12 +7978,47 @@ final class ChatViewModel {
         return Array(result.prefix(limit))
     }
 
+    private static func preciseFallbackSearchQuery(for userText: String, originalQuery: String) -> String {
+        let cleaned = originalQuery
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = cleaned.isEmpty ? userText : cleaned
+        var query = source
+
+        let removablePatterns = [
+            #"(?i)\b(can you|could you|please|help me|search for|search|lookup|find out|tell me about)\b"#,
+            #"(帮我|替我|给我)?(联网)?(搜索|搜一下|搜搜|查一下|查询一下|查查看|看一下)"#,
+            #"(你知道|我想知道|请问|一下|看看|吗|么|呢|？|\?)"#
+        ]
+        for pattern in removablePatterns {
+            query = query.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
+        }
+        query = query
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "：:，,。.!！")))
+
+        guard !query.isEmpty else { return cleaned.isEmpty ? userText : cleaned }
+        if query.count <= 80 { return query }
+
+        let tokens = query
+            .components(separatedBy: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "，,。；;：:")))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { token in
+                guard token.count >= 2 else { return false }
+                let stopwords = ["这个", "那个", "怎么", "为什么", "是不是", "能不能", "有没有", "what", "why", "how", "the", "and"]
+                return !stopwords.contains(token.lowercased())
+            }
+        let compact = tokens.prefix(8).joined(separator: " ")
+        return compact.isEmpty ? String(query.prefix(80)) : compact
+    }
+
     private static func fallbackWebSearchQueries(for userText: String, originalQuery: String) -> [String] {
         let normalized = userText
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         let today = DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)
+        let precise = preciseFallbackSearchQuery(for: userText, originalQuery: originalQuery)
         var generated: [String] = []
 
         func add(_ query: String) {
@@ -7670,25 +8034,29 @@ final class ChatViewModel {
         let asksNews = ["新闻", "热搜", "最新消息", "刚刚", "latest", "news", "breaking"].contains(where: { normalized.contains($0) })
             || (normalized.contains("最新") && !asksWeather && !asksFuelPrice)
 
+        if precise != originalQuery {
+            add(precise)
+        }
+
         if asksWeather {
-            add("\(originalQuery) 实时天气")
-            add("\(originalQuery) 今天 温度 降雨 风力")
-            add("中国天气 \(originalQuery)")
+            add("\(precise) 实时天气")
+            add("\(precise) 今天 温度 降雨 风力")
+            add("中国天气 \(precise)")
         }
 
         if asksFuelPrice {
-            add("\(originalQuery) 今日油价 92 95 98 柴油")
-            add("\(originalQuery) 最新油价 \(today)")
+            add("\(precise) 今日油价 92 95 98 柴油")
+            add("\(precise) 最新油价 \(today)")
         }
 
         if asksNews {
-            add("\(originalQuery) 最新消息 \(today)")
-            add("\(originalQuery) 今天 新闻 24小时")
+            add("\(precise) 最新消息 \(today)")
+            add("\(precise) 今天 新闻 24小时")
         }
 
         if ["价格", "股价", "汇率", "版本", "发布", "release", "version", "price", "stock"].contains(where: { normalized.contains($0) }) {
-            add("\(originalQuery) 最新 \(today)")
-            add("\(originalQuery) 官方 最新")
+            add("\(precise) 最新 \(today)")
+            add("\(precise) 官方 最新")
         }
 
         return generated
@@ -8486,6 +8854,137 @@ final class ChatViewModel {
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
     }
 
+    private func repeatedLocalAlpineFailure(for content: String) -> LocalAlpineAgentCommandFailure? {
+        guard let command = Self.firstLocalAlpineCommand(in: content) else { return nil }
+        let key = Self.localAlpineCommandKey(command: command.command, cwd: command.cwd)
+        guard let failure = localAlpineFailedCommands[key] else { return nil }
+        let count = (localAlpineBlockedRepeatCommands[key] ?? 0) + 1
+        localAlpineBlockedRepeatCommands[key] = count
+        if count >= 2 {
+            localAlpineAgentStopRequested = true
+        }
+        return failure
+    }
+
+    private func recordLocalAlpineFailures(from result: LocalAlpineAgentResult) {
+        for commandResult in result.commandResults where commandResult.failed {
+            let key = Self.localAlpineCommandKey(command: commandResult.command, cwd: commandResult.cwd)
+            localAlpineFailedCommands[key] = LocalAlpineAgentCommandFailure(
+                command: commandResult.command,
+                cwd: commandResult.cwd,
+                exitCode: commandResult.exitCode,
+                outputPreview: commandResult.outputPreview
+            )
+            let signature = Self.localAlpineFailureSignature(commandResult)
+            localAlpineFailureSignatures[signature] = (localAlpineFailureSignatures[signature] ?? 0) + 1
+        }
+    }
+
+    private func repeatedLocalAlpineErrorShouldStop(after result: LocalAlpineAgentResult, parentId: String) -> Bool {
+        guard let repeated = result.commandResults
+            .filter(\.failed)
+            .first(where: { (localAlpineFailureSignatures[Self.localAlpineFailureSignature($0)] ?? 0) >= 3 }) else {
+            return false
+        }
+        appendLocalAlpineRepeatedErrorStopMessage(parentId: parentId, result: repeated)
+        return true
+    }
+
+    private func appendLocalAlpineRepeatedCommandMessage(parentId: String, failure: LocalAlpineAgentCommandFailure) -> String {
+        let repeatCount = localAlpineBlockedRepeatCommands[
+            Self.localAlpineCommandKey(command: failure.command, cwd: failure.cwd)
+        ] ?? 1
+        let shouldStop = repeatCount >= 2
+        let content = """
+        Local Alpine 执行结果
+
+        已拦截重复失败命令，避免死循环。
+
+        命令
+
+        ```bash
+        \(failure.command)
+        ```
+
+        工作目录：`\(failure.cwd)`
+        上次退出码：`\(failure.exitCode.map(String.init) ?? "unknown")`
+
+        上次输出摘要
+
+        ```text
+        \(failure.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : failure.outputPreview)
+        ```
+
+        Agent guard
+        \(shouldStop ? "模型连续重复同一条失败命令，我已停止本轮自动执行。请换一个定位路径或让用户补充线索。" : "下一轮必须先根据上次错误改用不同诊断/修复命令，禁止再次重复同一条命令。")
+        """
+        return appendLocalAlpineSystemResult(parentId: parentId, content: content)
+    }
+
+    private func appendLocalAlpineRepeatedErrorStopMessage(parentId: String, result: LocalAlpineAgentCommandResult) {
+        let content = """
+        我先停下，避免继续死循环。
+
+        同类错误已经连续出现多次，最后一次命令退出码是 `\(result.exitCode.map(String.init) ?? "unknown")`。
+
+        最后执行的命令：
+
+        ```bash
+        \(result.command)
+        ```
+
+        输出摘要：
+
+        ```text
+        \(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : result.outputPreview)
+        ```
+
+        当前判断：需要换一个定位路径，而不是继续重复执行同类命令。
+        """
+        appendAssistantResult(parentId: parentId, model: selectedModelId ?? "Local Alpine Agent", content: content)
+    }
+
+    private func appendLocalAlpineSystemResult(parentId: String, content: String) -> String {
+        appendAssistantResult(parentId: parentId, model: "Local Alpine", content: content, metadata: [
+            "iexa_local_alpine_result": "true",
+            "iexa_local_alpine_raw_result": content
+        ])
+    }
+
+    @discardableResult
+    private func appendAssistantResult(
+        parentId: String,
+        model: String,
+        content: String,
+        metadata: [String: String]? = nil
+    ) -> String {
+        let message = ChatMessage(
+            role: .assistant,
+            content: content,
+            timestamp: .now,
+            model: model,
+            isStreaming: false,
+            metadata: metadata
+        )
+        let node = HistoryNode(
+            id: message.id,
+            parentId: parentId,
+            childrenIds: [],
+            role: .assistant,
+            content: content,
+            timestamp: message.timestamp,
+            model: model,
+            done: true
+        )
+        conversation?.messages.append(message)
+        conversation?.history.addNode(node)
+        conversation?.history.appendChildId(message.id, to: parentId)
+        conversation?.history.currentId = message.id
+        Task { await persistLocalConversationIfNeeded() }
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        return message.id
+    }
+
     private func shouldExecuteLocalWorkspaceAgentForCurrentRequest() -> Bool {
         guard let userText = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalWorkspaceAgentResult($0)
@@ -8634,6 +9133,14 @@ final class ChatViewModel {
         let hasExecutableBlocks = await LocalAlpineAgentService.shared.hasExecutableBlocks(in: content)
         guard hasExecutableBlocks else { return }
 
+        if let repeatedFailure = repeatedLocalAlpineFailure(for: content) {
+            let guardMessageId = appendLocalAlpineRepeatedCommandMessage(parentId: messageId, failure: repeatedFailure)
+            if !localAlpineAgentStopRequested {
+                scheduleLocalAlpineContinuationIfNeeded(after: guardMessageId, forceContinue: true)
+            }
+            return
+        }
+
         let resultMessageId = UUID().uuidString
         let initialStatus = localAlpineStatus(description: localAlpineRunningDescription(for: content), done: false)
         let placeholderMessage = ChatMessage(
@@ -8732,6 +9239,7 @@ final class ChatViewModel {
             metadata["iexa_local_alpine_raw_result"] = result.summary
             conversation?.messages[index].metadata = metadata
         }
+        recordLocalAlpineFailures(from: result)
         conversation?.history.updateNode(id: resultMessageId) { node in
             node.content = result.summary
             node.done = true
@@ -8744,7 +9252,9 @@ final class ChatViewModel {
         localAlpineNoCommandContinuationRetries = 0
         let shouldContinueAfterResult = content.localizedCaseInsensitiveContains("iexa_alpine")
             || Self.localAlpineResultNeedsFollowUp(result.summary)
-        if result.interactiveRequest == nil, shouldContinueAfterResult, !localAlpineAgentStopRequested {
+        if repeatedLocalAlpineErrorShouldStop(after: result, parentId: resultMessageId) {
+            localAlpineAgentStopRequested = true
+        } else if result.interactiveRequest == nil, shouldContinueAfterResult, !localAlpineAgentStopRequested {
             scheduleLocalAlpineContinuationIfNeeded(after: resultMessageId)
         } else {
             localAlpineAgentStopRequested = true
@@ -9156,9 +9666,10 @@ final class ChatViewModel {
         You are in a continuous Local Alpine agent loop. Read the latest real Local Alpine result above.
         - If the user's task is complete, answer normally and do not emit `iexa_alpine`. Include a concise Codex-style summary: what you did, what command/output verified it, and any remaining caveat.
         - If more work is needed, emit exactly one next `iexa_alpine` block with bounded non-interactive command(s).
-        - If the last command failed, inspect the error, fix the files/dependencies/command, then rerun a concrete verification.
+        - If the last command failed, inspect the exit code/output first, then emit a different bounded diagnostic or fix command before rerunning verification.
         - For Python indentation/syntax errors, rewrite the file using `write_files`, then run `python3 -m py_compile <file>` before running the script.
-        - Do not repeat the same command unless the output shows a clear reason.
+        - For indentation-sensitive rewrites, use `content_lines` or `content_base64`; do not use heredoc for Python class/function bodies.
+        - Never repeat the exact same failed command. If the same error repeats, stop and summarize the blocker.
         [/Local Alpine continuation]
         """
         if !messages.isEmpty, messages[0]["role"] as? String == "system" {

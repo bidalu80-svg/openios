@@ -6,6 +6,12 @@ struct ClientWebSearchService: Sendable {
     private static let maxFetchedPages = 4
     private static let maxPageCharacters = 5_000
     private static let maxCombinedDocumentCharacters = 18_000
+    private static let searxngInstances = [
+        "https://search.inetol.net",
+        "https://searx.tiekoetter.com",
+        "https://searx.rhscz.eu",
+        "https://search.seddens.net"
+    ]
 
     func search(queries: [String], originalQuery: String?) async throws -> WebSearchResponse {
         let normalizedQueries = Self.unique(queries.map(Self.normalizedQuery))
@@ -14,6 +20,9 @@ struct ClientWebSearchService: Sendable {
         let outcomes = await withTaskGroup(of: [WebSearchResultItem].self) { group in
             for query in normalizedQueries.prefix(3) {
                 group.addTask {
+                    if let searxng = try? await Self.searchSearXNG(query: query), !searxng.isEmpty {
+                        return searxng
+                    }
                     if let rss = try? await Self.searchBingRSS(query: query), !rss.isEmpty {
                         return rss
                     }
@@ -114,6 +123,70 @@ struct ClientWebSearchService: Sendable {
         guard let url = components?.url else { return [] }
         let data = try await load(url)
         return parseBaiduHTML(decodeText(data))
+    }
+
+    private static func searchSearXNG(query: String) async throws -> [WebSearchResultItem] {
+        let configured = UserDefaults.standard.string(forKey: "searxngQueryURL")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let configuredBases = [configured].compactMap { value -> String? in
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        }
+        let bases = unique(configuredBases + searxngInstances)
+        var lastError: Error?
+
+        for base in bases.prefix(4) {
+            do {
+                let items = try await searchSearXNG(query: query, baseURL: base)
+                if !items.isEmpty { return items }
+            } catch {
+                lastError = error
+                continue
+            }
+        }
+
+        if let lastError { throw lastError }
+        return []
+    }
+
+    private static func searchSearXNG(query: String, baseURL: String) async throws -> [WebSearchResultItem] {
+        let trimmedBase = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let searchURL: String
+        if trimmedBase.localizedCaseInsensitiveContains("{query}") {
+            searchURL = trimmedBase
+                .replacingOccurrences(of: "{query}", with: query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query)
+                .replacingOccurrences(of: "{language}", with: "zh-CN")
+                .replacingOccurrences(of: "{format}", with: "json")
+        } else {
+            searchURL = "\(trimmedBase)/search"
+        }
+
+        var components = URLComponents(string: searchURL)
+        if !trimmedBase.localizedCaseInsensitiveContains("{query}") {
+            components?.queryItems = [
+                URLQueryItem(name: "q", value: query),
+                URLQueryItem(name: "format", value: "json"),
+                URLQueryItem(name: "language", value: "zh-CN"),
+                URLQueryItem(name: "safesearch", value: "1")
+            ]
+        }
+        guard let url = components?.url else { return [] }
+
+        let (data, _) = try await loadResponse(url, timeout: 10, resourceTimeout: 14)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = json["results"] as? [[String: Any]] else {
+            return []
+        }
+
+        return results.prefix(maxResultsPerQuery).compactMap { raw in
+            webSearchItem(
+                title: raw["title"] as? String,
+                link: (raw["url"] as? String) ?? (raw["link"] as? String),
+                snippet: (raw["content"] as? String)
+                    ?? (raw["snippet"] as? String)
+                    ?? (raw["description"] as? String)
+            )
+        }
     }
 
     private static func load(_ url: URL) async throws -> Data {

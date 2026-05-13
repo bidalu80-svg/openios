@@ -2503,13 +2503,17 @@ final class APIClient: @unchecked Sendable {
 
         let trimmedContext = context?.trimmingCharacters(in: .whitespacesAndNewlines)
         let systemPrompt = """
-        You rewrite a user's request into concise web search queries.
+        You rewrite a user's request into precise web search queries.
         Return only JSON, no markdown, no commentary.
         Output shape: {"queries":["query 1","query 2"]}
         Rules:
         - Generate 1 to \(maxQueries) queries.
-        - Make them short and search-engine friendly.
+        - Prefer exact keywords over a full natural-language sentence.
         - Preserve product names, version numbers, dates, and factual anchors.
+        - Include official/source terms when the user asks about products, APIs, releases, docs, prices, schedules, laws, or current events.
+        - For current/latest questions, include the current year or words like today/latest/current when relevant.
+        - If the request is Chinese but the topic is global/technical, include one English query and one Chinese query when useful.
+        - Remove filler phrases like "帮我搜", "查一下", "能不能", and keep only searchable nouns/constraints.
         - Do not repeat the same idea with only tiny wording changes.
         """
         let userPrompt = """

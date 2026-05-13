@@ -4,6 +4,31 @@ struct LocalAlpineAgentResult: Sendable {
     let didExecute: Bool
     let summary: String
     let interactiveRequest: LocalAlpineInteractiveRequest?
+    let commandResults: [LocalAlpineAgentCommandResult]
+
+    init(
+        didExecute: Bool,
+        summary: String,
+        interactiveRequest: LocalAlpineInteractiveRequest?,
+        commandResults: [LocalAlpineAgentCommandResult] = []
+    ) {
+        self.didExecute = didExecute
+        self.summary = summary
+        self.interactiveRequest = interactiveRequest
+        self.commandResults = commandResults
+    }
+}
+
+struct LocalAlpineAgentCommandResult: Sendable {
+    let command: String
+    let cwd: String
+    let exitCode: Int?
+    let outputPreview: String
+
+    var failed: Bool {
+        guard let exitCode else { return true }
+        return exitCode != 0
+    }
 }
 
 actor LocalAlpineAgentService {
@@ -53,6 +78,7 @@ actor LocalAlpineAgentService {
 
         let trimmedCommands = Array(commands.prefix(maxCommandsPerResponse))
         let skippedCount = max(0, commands.count - trimmedCommands.count)
+        var commandResults: [LocalAlpineAgentCommandResult] = []
 
         lines.insert("Local Alpine 执行结果", at: 0)
         lines.append("环境：内置 Alpine Linux，工作目录默认 `/mnt/iexa`")
@@ -67,6 +93,11 @@ actor LocalAlpineAgentService {
                 stepLines.append(writeResult.summary)
                 if let syntaxCheck = await pythonSyntaxCheck(for: writeResult.writtenPaths, cwd: effectiveCWD) {
                     stepLines.append(format(command: syntaxCheck.command, cwd: effectiveCWD, result: syntaxCheck.result))
+                    commandResults.append(Self.commandResult(
+                        command: syntaxCheck.command,
+                        cwd: effectiveCWD,
+                        result: syntaxCheck.result
+                    ))
                     if syntaxCheck.result.exitCode != 0 {
                         shouldRunShellCommand = false
                     }
@@ -90,15 +121,26 @@ actor LocalAlpineAgentService {
                         )
                     } else {
                         stepLines.append(format(command: shellCommand, cwd: effectiveCWD, result: result))
+                        commandResults.append(Self.commandResult(
+                            command: shellCommand,
+                            cwd: effectiveCWD,
+                            result: result
+                        ))
                         lines.append(stepLines.joined(separator: "\n\n"))
                         return LocalAlpineAgentResult(
                             didExecute: true,
                             summary: lines.joined(separator: "\n\n"),
-                            interactiveRequest: request
+                            interactiveRequest: request,
+                            commandResults: commandResults
                         )
                     }
                 }
                 stepLines.append(format(command: shellCommand, cwd: effectiveCWD, result: result))
+                commandResults.append(Self.commandResult(
+                    command: shellCommand,
+                    cwd: effectiveCWD,
+                    result: result
+                ))
             }
 
             if !stepLines.isEmpty {
@@ -110,7 +152,25 @@ actor LocalAlpineAgentService {
             lines.append("- 已跳过 \(skippedCount) 条多余命令，避免一次执行过多。")
         }
 
-        return LocalAlpineAgentResult(didExecute: true, summary: lines.joined(separator: "\n\n"), interactiveRequest: nil)
+        return LocalAlpineAgentResult(
+            didExecute: true,
+            summary: lines.joined(separator: "\n\n"),
+            interactiveRequest: nil,
+            commandResults: commandResults
+        )
+    }
+
+    private nonisolated static func commandResult(
+        command: String,
+        cwd: String,
+        result: LocalAlpineCommandResult
+    ) -> LocalAlpineAgentCommandResult {
+        LocalAlpineAgentCommandResult(
+            command: command.trimmingCharacters(in: .whitespacesAndNewlines),
+            cwd: cwd.trimmingCharacters(in: .whitespacesAndNewlines),
+            exitCode: result.exitCode,
+            outputPreview: String(result.output.prefix(2_000))
+        )
     }
 
     private func extractInstructionBlocks(from content: String) -> [String] {
@@ -207,12 +267,39 @@ actor LocalAlpineAgentService {
         guard let path = (dict["path"] as? String)
             ?? (dict["file"] as? String)
             ?? (dict["name"] as? String),
-            let content = (dict["content"] as? String)
-                ?? (dict["text"] as? String)
-                ?? (dict["body"] as? String) else {
+            let content = Self.writeFileContent(from: dict) else {
             return nil
         }
         return LocalAlpineAgentFile(path: path, content: content)
+    }
+
+    private nonisolated static func writeFileContent(from dict: [String: Any]) -> String? {
+        if let content = (dict["content"] as? String)
+            ?? (dict["text"] as? String)
+            ?? (dict["body"] as? String) {
+            return content
+        }
+
+        if let lines = (dict["content_lines"] as? [String])
+            ?? (dict["lines"] as? [String]) {
+            var content = lines.joined(separator: "\n")
+            let shouldAppendNewline = (dict["append_newline"] as? Bool)
+                ?? (dict["trailing_newline"] as? Bool)
+                ?? true
+            if shouldAppendNewline, !content.hasSuffix("\n") {
+                content += "\n"
+            }
+            return content
+        }
+
+        if let base64 = (dict["content_base64"] as? String)
+            ?? (dict["base64"] as? String),
+           let data = Data(base64Encoded: base64),
+           let content = String(data: data, encoding: .utf8) {
+            return content
+        }
+
+        return nil
     }
 
     private func writeFiles(_ files: [LocalAlpineAgentFile], cwd: String) async -> LocalAlpineWriteResult {
