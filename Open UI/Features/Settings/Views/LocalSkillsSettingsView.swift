@@ -148,21 +148,25 @@ private struct LocalSkillEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("基础") {
+                Section {
                     TextField("名称", text: $name)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     TextField("描述", text: $description, axis: .vertical)
                         .lineLimit(2...4)
                     Toggle("启用", isOn: $isEnabled)
+                } header: {
+                    Text("基础")
                 }
 
-                Section("内容") {
+                Section {
                     TextEditor(text: $content)
                         .font(.system(.body, design: .monospaced))
                         .frame(minHeight: 260)
                         .scrollContentBackground(.hidden)
                         .background(Color.clear)
+                } header: {
+                    Text("内容")
                 } footer: {
                     Text("写清楚什么时候使用、怎么执行、怎么验证。内容会作为系统上下文注入给模型。")
                 }
