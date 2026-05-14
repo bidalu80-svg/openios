@@ -58,6 +58,10 @@ enum LocalAlpinePythonWriteGuard {
         preparedContent = filled.content
         notes.append(contentsOf: filled.notes)
 
+        let completedTryBlocks = completeDanglingTryBlocks(in: preparedContent)
+        preparedContent = completedTryBlocks.content
+        notes.append(contentsOf: completedTryBlocks.notes)
+
         if let warning = indentationPreflightWarning(for: preparedContent) {
             return .failure("Python 缩进预检失败：\(warning)。请提交完整且缩进正确的源码，优先使用 code_lines/content_lines/content_base64。")
         }
@@ -292,6 +296,78 @@ enum LocalAlpinePythonWriteGuard {
         guard !insertedLineNumbers.isEmpty else { return (content, []) }
         let note = "已为缺失代码体的 Python 块自动补全 `pass`：第 \(insertedLineNumbers.prefix(12).map(String.init).joined(separator: ", ")) 行"
         return (lines.joined(separator: "\n"), [note])
+    }
+
+    private static func completeDanglingTryBlocks(in content: String) -> (content: String, notes: [String]) {
+        var lines = content.components(separatedBy: .newlines)
+        guard lines.contains(where: { blockKeyword(stripHorizontalWhitespace($0)) == "try" }) else {
+            return (content, [])
+        }
+
+        struct TryState {
+            let indent: Int
+            let line: Int
+            var hasHandler: Bool
+        }
+
+        var stack: [TryState] = []
+        var fixedTryLines: [Int] = []
+        var index = 0
+
+        while index < lines.count {
+            let rawLine = lines[index]
+            let text = stripHorizontalWhitespace(rawLine)
+            if text.isEmpty || text.hasPrefix("#") {
+                index += 1
+                continue
+            }
+
+            let indent = leadingIndentCount(rawLine)
+            if let last = stack.last,
+               indent == last.indent,
+               isTryHandlerKeyword(text) {
+                stack[stack.count - 1].hasHandler = true
+                index += 1
+                continue
+            }
+
+            while let last = stack.last, indent <= last.indent {
+                if !last.hasHandler {
+                    insertGenericTryHandler(into: &lines, at: index, indent: last.indent)
+                    fixedTryLines.append(last.line)
+                    index += 2
+                }
+                _ = stack.popLast()
+            }
+
+            if blockKeyword(text) == "try" {
+                stack.append(TryState(indent: indent, line: index + 1, hasHandler: false))
+            }
+
+            index += 1
+        }
+
+        while let last = stack.popLast() {
+            guard !last.hasHandler else { continue }
+            insertGenericTryHandler(into: &lines, at: lines.count, indent: last.indent)
+            fixedTryLines.append(last.line)
+        }
+
+        guard !fixedTryLines.isEmpty else { return (content, []) }
+        let note = "已为缺少 except/finally 的 Python try 块补全异常处理：第 \(fixedTryLines.prefix(12).map(String.init).joined(separator: ", ")) 行"
+        return (lines.joined(separator: "\n"), [note])
+    }
+
+    private static func insertGenericTryHandler(into lines: inout [String], at index: Int, indent: Int) {
+        let prefix = String(repeating: " ", count: indent)
+        let bodyPrefix = String(repeating: " ", count: indent + 4)
+        lines.insert(prefix + "except Exception as exc:", at: index)
+        lines.insert(bodyPrefix + "print(f\"Unhandled error: {exc}\")", at: index + 1)
+    }
+
+    private static func isTryHandlerKeyword(_ text: String) -> Bool {
+        let keyword = blockKeyword(text)
+        return keyword == "except" || keyword == "finally"
     }
 
     private static func startsPeerOrDedentKeyword(_ text: String) -> Bool {

@@ -373,6 +373,9 @@ jobs:
           rm -rf "$APP_PATH/PlugIns"
           rm -rf "$APP_PATH/Extensions"
           APP_BINARY="$APP_PATH/Iexa"
+          echo "Unsigned app binary before strip: $(stat -f%z "$APP_BINARY") bytes"
+          xcrun strip -S "$APP_BINARY"
+          echo "Unsigned app binary after strip:  $(stat -f%z "$APP_BINARY") bytes"
           if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
             echo "::error::Local Alpine iSH runtime was not linked into the unsigned app"
             exit 1
