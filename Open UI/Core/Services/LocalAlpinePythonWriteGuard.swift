@@ -36,10 +36,6 @@ enum LocalAlpinePythonWriteGuard {
             return .failure(message)
         }
 
-        if source == .content || source == .heredoc {
-            return .failure("为保证 Python 缩进，`.py` 写入只接受 `code_lines` / `content_lines` / `content_base64`；已拒绝 `\(source.displayName)` 写入。")
-        }
-
         guard !extracted.content.trimmingCharacters(in: .newlines).isEmpty else {
             return .failure("Python 文件内容为空")
         }
@@ -52,10 +48,10 @@ enum LocalAlpinePythonWriteGuard {
         }
 
         if let warning = indentationPreflightWarning(for: normalizedTabs) {
-            return .failure("Python 缩进预检失败：\(warning)")
+            notes.append("Python 缩进预检提示：\(warning)")
         }
         if let warning = structuralWarning(for: normalizedTabs) {
-            return .failure("Python 结构预检失败：\(warning)")
+            notes.append("Python 结构预检提示：\(warning)")
         }
 
         return .success(content: ensureTrailingNewline(normalizedTabs), notes: notes)

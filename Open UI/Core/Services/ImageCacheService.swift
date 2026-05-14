@@ -736,6 +736,21 @@ struct FallbackCachedAsyncImage<Content: View, Placeholder: View>: View {
 
     @State private var loadedImage: UIImage?
 
+    init(
+        urls: [URL],
+        authToken: String? = nil,
+        targetPixelSize: Int = 0,
+        @ViewBuilder content: @escaping (Image) -> Content,
+        @ViewBuilder placeholder: @escaping () -> Placeholder
+    ) {
+        self.urls = urls
+        self.authToken = authToken
+        self.targetPixelSize = targetPixelSize
+        self.content = content
+        self.placeholder = placeholder
+        _loadedImage = State(initialValue: Self.firstCachedImage(in: urls))
+    }
+
     var body: some View {
         Group {
             if let loadedImage {
@@ -745,32 +760,56 @@ struct FallbackCachedAsyncImage<Content: View, Placeholder: View>: View {
             }
         }
         .task(id: urls.map(\.absoluteString).joined(separator: "|")) {
-            loadedImage = nil
-
-            for url in urls {
-                if let cached = ImageCacheService.shared.cachedImageSync(for: url) {
-                    loadedImage = cached
-                    return
-                }
-            }
-
-            do {
-                try await Task.sleep(nanoseconds: 120_000_000)
-            } catch {
+            if let cached = Self.firstCachedImage(in: urls) {
+                loadedImage = cached
                 return
             }
+            loadedImage = nil
+            let candidateURLs = urls
+            let authToken = authToken
+            let targetPixelSize = targetPixelSize
 
-            for url in urls {
-                if let image = await ImageCacheService.shared.loadImage(
-                    from: url,
-                    authToken: authToken,
-                    targetPixelSize: targetPixelSize
-                ) {
-                    loadedImage = image
-                    return
+            await withTaskGroup(of: UIImage?.self) { group in
+                for url in candidateURLs.prefix(4) {
+                    group.addTask {
+                        await ImageCacheService.shared.loadImage(
+                            from: url,
+                            authToken: authToken,
+                            targetPixelSize: targetPixelSize
+                        )
+                    }
+                }
+
+                while let image = await group.next() {
+                    if let image {
+                        loadedImage = image
+                        group.cancelAll()
+                        return
+                    }
+                }
+
+                for url in candidateURLs.dropFirst(4) {
+                    if let image = await ImageCacheService.shared.loadImage(
+                        from: url,
+                        authToken: authToken,
+                        targetPixelSize: targetPixelSize
+                    ) {
+                        loadedImage = image
+                        return
+                    }
                 }
             }
         }
+    }
+
+    @MainActor
+    private static func firstCachedImage(in urls: [URL]) -> UIImage? {
+        for url in urls {
+            if let cached = ImageCacheService.shared.cachedImageSync(for: url) {
+                return cached
+            }
+        }
+        return nil
     }
 }
 
@@ -790,15 +829,15 @@ enum WebsiteFaviconResolver {
 
         let trimmedHost = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
         var urls: [URL] = []
-        append("https://www.google.com/s2/favicons?domain=\(trimmedHost)&sz=\(size)", to: &urls)
-        append("https://www.google.com/s2/favicons?domain=\(host)&sz=\(size)", to: &urls)
-        append("https://favicon.im/\(trimmedHost)?larger=true", to: &urls)
-        append("https://icon.horse/icon/\(trimmedHost)", to: &urls)
         if let siteIcon = components.url {
             urls.append(siteIcon)
         }
         append("https://icons.duckduckgo.com/ip3/\(trimmedHost).ico", to: &urls)
         append("https://icons.duckduckgo.com/ip3/\(host).ico", to: &urls)
+        append("https://www.google.com/s2/favicons?domain=\(trimmedHost)&sz=\(size)", to: &urls)
+        append("https://www.google.com/s2/favicons?domain=\(host)&sz=\(size)", to: &urls)
+        append("https://favicon.im/\(trimmedHost)?larger=true", to: &urls)
+        append("https://icon.horse/icon/\(trimmedHost)", to: &urls)
 
         var seen = Set<String>()
         return urls.filter { seen.insert($0.absoluteString).inserted }

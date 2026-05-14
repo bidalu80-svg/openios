@@ -371,7 +371,7 @@ actor LocalAlpineAgentService {
             return [LocalAlpineAgentCommand(
                 command: command,
                 cwd: dict["cwd"] as? String,
-                writeFiles: parseWriteFiles(from: dict["write_files"] ?? dict["files"])
+                writeFiles: parseWriteFilesForCommand(from: dict)
             )]
         }
 
@@ -379,11 +379,11 @@ actor LocalAlpineAgentService {
             return [LocalAlpineAgentCommand(
                 command: command,
                 cwd: dict["cwd"] as? String,
-                writeFiles: parseWriteFiles(from: dict["write_files"] ?? dict["files"])
+                writeFiles: parseWriteFilesForCommand(from: dict)
             )]
         }
 
-        let files = parseWriteFiles(from: dict["write_files"] ?? dict["files"])
+        let files = parseWriteFilesForCommand(from: dict)
         if !files.isEmpty {
             return [LocalAlpineAgentCommand(command: nil, cwd: dict["cwd"] as? String, writeFiles: files)]
         }
@@ -391,12 +391,24 @@ actor LocalAlpineAgentService {
         return []
     }
 
+    private func parseWriteFilesForCommand(from dict: [String: Any]) -> [LocalAlpineAgentFile] {
+        let nestedFiles = parseWriteFiles(from: Self.writeFilesObject(from: dict))
+        guard nestedFiles.isEmpty else { return nestedFiles }
+        return parseWriteFile(from: dict).map { [$0] } ?? []
+    }
+
+    private nonisolated static func writeFilesObject(from dict: [String: Any]) -> Any? {
+        dict["write_files"] ?? dict["write_file"] ?? dict["files"]
+    }
+
     private func parseWriteFiles(from object: Any?) -> [LocalAlpineAgentFile] {
         if let array = object as? [Any] {
-            return array.compactMap(parseWriteFile(from:))
+            return array.flatMap { parseWriteFiles(from: $0) }
         }
-        if let object {
-            return parseWriteFile(from: object).map { [$0] } ?? []
+        if let dict = object as? [String: Any] {
+            let nestedFiles = parseWriteFiles(from: Self.writeFilesObject(from: dict))
+            guard nestedFiles.isEmpty else { return nestedFiles }
+            return parseWriteFile(from: dict).map { [$0] } ?? []
         }
         return []
     }
@@ -405,7 +417,10 @@ actor LocalAlpineAgentService {
         guard let dict = object as? [String: Any] else { return nil }
         guard let path = (dict["path"] as? String)
             ?? (dict["file"] as? String)
-            ?? (dict["name"] as? String),
+            ?? (dict["name"] as? String)
+            ?? (dict["filename"] as? String)
+            ?? (dict["write_file"] as? String)
+            ?? (dict["target"] as? String),
             let payload = Self.writeFilePayload(from: dict) else {
             return nil
         }
@@ -415,10 +430,11 @@ actor LocalAlpineAgentService {
     private nonisolated static func writeFilePayload(
         from dict: [String: Any]
     ) -> (content: String, source: LocalAlpineAgentFileSource)? {
-        if let content = (dict["content"] as? String)
-            ?? (dict["text"] as? String)
-            ?? (dict["body"] as? String) {
-            return (content, .content)
+        if let base64 = (dict["content_base64"] as? String)
+            ?? (dict["base64"] as? String),
+           let data = Data(base64Encoded: base64),
+           let content = String(data: data, encoding: .utf8) {
+            return (content, .contentBase64)
         }
 
         if let lines = (dict["code_lines"] as? [String])
@@ -435,11 +451,12 @@ actor LocalAlpineAgentService {
             return (content, source)
         }
 
-        if let base64 = (dict["content_base64"] as? String)
-            ?? (dict["base64"] as? String),
-           let data = Data(base64Encoded: base64),
-           let content = String(data: data, encoding: .utf8) {
-            return (content, .contentBase64)
+        if let content = (dict["content"] as? String)
+            ?? (dict["contents"] as? String)
+            ?? (dict["text"] as? String)
+            ?? (dict["body"] as? String)
+            ?? (dict["code"] as? String) {
+            return (content, .content)
         }
 
         return nil
@@ -552,60 +569,70 @@ actor LocalAlpineAgentService {
             let astBeforeCommand = pythonASTValidationCommand(for: temporaryRuntimePath)
             let astBefore = await LocalAlpineTerminalService.shared.execute(command: astBeforeCommand, cwd: cwd)
             if astBefore.exitCode != 0 {
+                let diagnostic = await pythonLineNumberDiagnostic(for: temporaryRuntimePath, cwd: cwd)
                 try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
                 return failedPythonWriteOutcome(
                     target: target,
                     reason: "Python AST 校验失败，目标文件未覆盖",
                     command: astBeforeCommand,
-                    result: astBefore
+                    result: astBefore,
+                    diagnosticOutput: diagnostic?.output
                 )
             }
 
             let blackCommand = pythonBlackFormatCommand(for: temporaryRuntimePath)
             let black = await LocalAlpineTerminalService.shared.execute(command: blackCommand, cwd: cwd)
             if black.exitCode != 0 {
+                let diagnostic = await pythonLineNumberDiagnostic(for: temporaryRuntimePath, cwd: cwd)
                 try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
                 return failedPythonWriteOutcome(
                     target: target,
                     reason: "Black 自动格式化失败，目标文件未覆盖",
                     command: blackCommand,
-                    result: black
+                    result: black,
+                    diagnosticOutput: diagnostic?.output
                 )
             }
 
             let astAfterCommand = pythonASTValidationCommand(for: temporaryRuntimePath)
             let astAfter = await LocalAlpineTerminalService.shared.execute(command: astAfterCommand, cwd: cwd)
             if astAfter.exitCode != 0 {
+                let diagnostic = await pythonLineNumberDiagnostic(for: temporaryRuntimePath, cwd: cwd)
                 try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
                 return failedPythonWriteOutcome(
                     target: target,
-                    reason: "Black 格式化后二次 AST 校验失败，目标文件未覆盖",
+                    reason: "Python 二次 AST 校验失败，目标文件未覆盖",
                     command: astAfterCommand,
-                    result: astAfter
+                    result: astAfter,
+                    diagnosticOutput: diagnostic?.output
                 )
             }
 
             let compileCommand = "python3 -m py_compile \(shellSingleQuoted(temporaryRuntimePath))"
             let compile = await LocalAlpineTerminalService.shared.execute(command: compileCommand, cwd: cwd)
             if compile.exitCode != 0 {
+                let diagnostic = await pythonLineNumberDiagnostic(for: temporaryRuntimePath, cwd: cwd)
                 try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
                 return failedPythonWriteOutcome(
                     target: target,
                     reason: "Python 事务编译失败，目标文件未覆盖",
                     command: compileCommand,
-                    result: compile
+                    result: compile,
+                    diagnosticOutput: diagnostic?.output
                 )
             }
 
             let semanticCommand = pythonSemanticValidationCommand(for: temporaryRuntimePath)
             let semantic = await LocalAlpineTerminalService.shared.execute(command: semanticCommand, cwd: cwd)
             if semantic.exitCode != 0 {
+                let diagnostic = await pythonLineNumberDiagnostic(for: temporaryRuntimePath, cwd: cwd)
                 try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
                 return failedPythonWriteOutcome(
                     target: target,
                     reason: "Python 返回路径结构校验失败，目标文件未覆盖",
                     command: semanticCommand,
-                    result: semantic
+                    result: semantic,
+                    diagnosticOutput: diagnostic?.output
                 )
             }
 
@@ -618,7 +645,7 @@ actor LocalAlpineAgentService {
             try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
 
             var lines = [
-                "- `\(target)` (\(formattedData.count) B，Python 完整文件事务写入已通过 AST、Black、二次 AST、py_compile、返回路径校验，来源：\(source.displayName))"
+                "- `\(target)` (\(formattedData.count) B，Python 完整文件事务写入已通过 AST、Black 可用时格式化、二次 AST、py_compile、返回路径校验，来源：\(source.displayName))"
             ]
             lines.append(contentsOf: currentNotes.map { "  - \($0)" })
             return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: target, hadFailure: false)
@@ -772,31 +799,48 @@ actor LocalAlpineAgentService {
     private func pythonBlackFormatCommand(for runtimePath: String) -> String {
         """
         export PATH="$HOME/.local/bin:$PATH"
-        if ! command -v black >/dev/null 2>&1 && ! python3 -m black --version >/dev/null 2>&1; then
-          if ! python3 -m pip --version >/dev/null 2>&1 && command -v apk >/dev/null 2>&1; then
-            apk add --no-cache py3-pip
-          fi
-          python3 -m pip install --user black || python3 -m pip install --break-system-packages --user black
-        fi
         if command -v black >/dev/null 2>&1; then
           black --quiet \(shellSingleQuoted(runtimePath))
-        else
+        elif python3 -m black --version >/dev/null 2>&1; then
           python3 -m black --quiet \(shellSingleQuoted(runtimePath))
+        else
+          printf 'IEXA_BLACK_SKIPPED: black is not installed; continuing with ast.parse and py_compile\\n'
         fi
         """
+    }
+
+    private func pythonLineNumberDiagnostic(
+        for runtimePath: String,
+        cwd: String
+    ) async -> LocalAlpineCommandResult? {
+        let command = """
+        file=\(shellSingleQuoted(runtimePath))
+        printf '== candidate Python file with line numbers: %s ==\\n' "$file"
+        if [ -f "$file" ]; then
+          nl -ba "$file" | sed -n '1,220p'
+        else
+          printf 'missing: %s\\n' "$file"
+        fi
+        """
+        return await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
     }
 
     private func failedPythonWriteOutcome(
         target: String,
         reason: String,
         command: String,
-        result: LocalAlpineCommandResult
+        result: LocalAlpineCommandResult,
+        diagnosticOutput: String? = nil
     ) -> LocalAlpineProtectedWriteOutcome {
         var lines = ["- `\(target)` 写入已拒绝：\(reason)。"]
         lines.append("  - 验证命令：`\(command.trimmingCharacters(in: .whitespacesAndNewlines))`")
         let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
         if !output.isEmpty {
             lines.append("  - 输出：\(String(output.prefix(600)))")
+        }
+        if let diagnostic = diagnosticOutput?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !diagnostic.isEmpty {
+            lines.append("  - 候选文件定位：\(String(diagnostic.prefix(1_500)))")
         }
         return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: nil, hadFailure: true)
     }
@@ -852,7 +896,7 @@ actor LocalAlpineAgentService {
                     reason = "Python 内容无法正规化"
                 }
                 summaryLines.append("- `\(target)` 写入已拒绝：\(reason)")
-                summaryLines.append("  - 这个文件没有被覆盖。请改用 `write_files.code_lines` 或 `content_base64` 提交完整源码。")
+                summaryLines.append("  - 这个文件没有被覆盖。请提交完整源码；App 会先写入临时文件并用 AST/py_compile 校验，通过后才覆盖目标。")
                 hadFailure = true
                 continue
             }
@@ -1038,7 +1082,7 @@ actor LocalAlpineAgentService {
 
         This command writes a `.py` file through shell text redirection/heredoc (`cat`, `tee`, `printf`, `echo`, or `python - <<`). In this chat UI that path can corrupt leading spaces and cause Python IndentationError.
 
-        Use `iexa_alpine` JSON `write_files` with `code_lines`, `content_lines`, or `content_base64` for Python files. The app rejects Python `content`/heredoc writes, writes to a temporary file, validates with `ast.parse`, formats with Black, validates with `ast.parse` again, runs `python3 -m py_compile`, and blocks tuple-return functions that are directly unpacked but can fall through to `None` before overwriting the target.
+        Use `iexa_alpine` JSON `write_files` / `write_file` for Python files. The app accepts `code_lines`, `content_lines`, `content_base64`, and plain `content`, writes to a temporary file, validates with `ast.parse`, formats with Black when available, validates with `ast.parse` again, runs `python3 -m py_compile`, and blocks tuple-return functions that are directly unpacked but can fall through to `None` before overwriting the target.
         """
     }
 
