@@ -264,19 +264,6 @@ struct SkillsListView: View {
         return types
     }
 
-    private static var importDocumentTypes: [UTType] {
-        var types: [UTType] = []
-        if let markdown = UTType(filenameExtension: "md") {
-            types.append(markdown)
-        }
-        if let markdownLong = UTType(filenameExtension: "markdown") {
-            types.append(markdownLong)
-        }
-        types.append(.plainText)
-        types.append(.json)
-        return types
-    }
-
     // MARK: - Search Bar
 
     private var searchBar: some View {

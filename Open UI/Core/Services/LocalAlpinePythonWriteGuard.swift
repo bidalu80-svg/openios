@@ -23,16 +23,16 @@ enum LocalAlpinePythonWriteGuard {
         }
 
         let normalizedTabs = content.replacingOccurrences(of: "\t", with: "    ")
-        if let structuralWarning = structuralWarning(for: normalizedTabs) {
+        if let structureWarning = structuralWarning(for: normalizedTabs) {
             if let rebuilt = rebuildIndentation(normalizedTabs),
-               structuralWarning(for: rebuilt) == nil,
+               Self.structuralWarning(for: rebuilt) == nil,
                indentationPreflightWarning(for: rebuilt) == nil {
                 return .success(
                     content: ensureTrailingNewline(rebuilt),
-                    notes: ["已由写入模块重建 Python 缩进结构：\(structuralWarning)"]
+                    notes: ["已由写入模块重建 Python 缩进结构：\(structureWarning)"]
                 )
             }
-            return .failure("Python 结构预检失败：\(structuralWarning)")
+            return .failure("Python 结构预检失败：\(structureWarning)")
         }
 
         if let warning = indentationPreflightWarning(for: normalizedTabs) {
