@@ -116,7 +116,7 @@ actor LocalWorkspaceAgentService {
         if let files = dict["files"] as? [[String: Any]] {
             return files.compactMap { file in
                 guard let path = file["path"] as? String else { return nil }
-                let content = file["content"] as? String ?? ""
+                let content = Self.workspaceContentPayload(from: file) ?? ""
                 return WorkspaceOperation(action: .write, path: path, content: content)
             }
         }
@@ -129,12 +129,48 @@ actor LocalWorkspaceAgentService {
             ?? (dict["file"] as? String)
             ?? (dict["folder"] as? String)
             ?? "."
-        let content = (dict["content"] as? String)
-            ?? (dict["query"] as? String)
-            ?? (dict["pattern"] as? String)
-            ?? (dict["text"] as? String)
+        let content: String?
+        switch action {
+        case .write, .append:
+            content = Self.workspaceContentPayload(from: dict) ?? ""
+        case .search:
+            content = (dict["query"] as? String)
+                ?? (dict["pattern"] as? String)
+                ?? (dict["text"] as? String)
+                ?? (dict["content"] as? String)
+        default:
+            content = nil
+        }
 
         return [WorkspaceOperation(action: action, path: path, content: content)]
+    }
+
+    private nonisolated static func workspaceContentPayload(from dict: [String: Any]) -> String? {
+        if let base64 = (dict["content_base64"] as? String)
+            ?? (dict["base64"] as? String),
+           let data = Data(base64Encoded: base64),
+           let content = String(data: data, encoding: .utf8) {
+            return content
+        }
+
+        if let lines = (dict["content_lines"] as? [String])
+            ?? (dict["code_lines"] as? [String])
+            ?? (dict["lines"] as? [String]) {
+            var content = lines.joined(separator: "\n")
+            let shouldAppendNewline = (dict["append_newline"] as? Bool)
+                ?? (dict["trailing_newline"] as? Bool)
+                ?? true
+            if shouldAppendNewline, !content.hasSuffix("\n") {
+                content += "\n"
+            }
+            return content
+        }
+
+        return (dict["content"] as? String)
+            ?? (dict["contents"] as? String)
+            ?? (dict["text"] as? String)
+            ?? (dict["body"] as? String)
+            ?? (dict["code"] as? String)
     }
 
     private func execute(_ operation: WorkspaceOperation, root: URL) -> String {

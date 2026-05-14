@@ -193,7 +193,7 @@ actor LocalAlpineAgentService {
                     }
                 }
 
-                if let blockedOutput = unsafePythonFileWriteWarning(for: commandToExecute) {
+                if let blockedOutput = unsafeCodeFileWriteWarning(for: commandToExecute) {
                     let result = LocalAlpineCommandResult(
                         command: commandToExecute,
                         output: blockedOutput,
@@ -566,13 +566,25 @@ actor LocalAlpineAgentService {
                 destinationPath: split.directory
             )
 
+            let targetRuntimePath = runtimePath(forSharedPath: target)
             let astBeforeCommand = pythonASTValidationCommand(for: temporaryRuntimePath)
             let astBefore = await LocalAlpineTerminalService.shared.execute(command: astBeforeCommand, cwd: cwd)
             if astBefore.exitCode != 0 {
-                let diagnostic = await pythonLineNumberDiagnostic(for: temporaryRuntimePath, cwd: cwd)
+                let diagnostic = await pythonLineNumberDiagnostic(
+                    for: temporaryRuntimePath,
+                    targetRuntimePath: targetRuntimePath,
+                    cwd: cwd
+                )
+                let draftRuntimePath = await preserveFailedPythonDraft(
+                    temporaryPath: temporaryPath,
+                    fallbackData: currentData,
+                    target: target
+                )
                 try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
                 return failedPythonWriteOutcome(
                     target: target,
+                    targetRuntimePath: targetRuntimePath,
+                    failedDraftRuntimePath: draftRuntimePath,
                     reason: "Python AST 校验失败，目标文件未覆盖",
                     command: astBeforeCommand,
                     result: astBefore,
@@ -583,10 +595,21 @@ actor LocalAlpineAgentService {
             let blackCommand = pythonBlackFormatCommand(for: temporaryRuntimePath)
             let black = await LocalAlpineTerminalService.shared.execute(command: blackCommand, cwd: cwd)
             if black.exitCode != 0 {
-                let diagnostic = await pythonLineNumberDiagnostic(for: temporaryRuntimePath, cwd: cwd)
+                let diagnostic = await pythonLineNumberDiagnostic(
+                    for: temporaryRuntimePath,
+                    targetRuntimePath: targetRuntimePath,
+                    cwd: cwd
+                )
+                let draftRuntimePath = await preserveFailedPythonDraft(
+                    temporaryPath: temporaryPath,
+                    fallbackData: currentData,
+                    target: target
+                )
                 try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
                 return failedPythonWriteOutcome(
                     target: target,
+                    targetRuntimePath: targetRuntimePath,
+                    failedDraftRuntimePath: draftRuntimePath,
                     reason: "Black 自动格式化失败，目标文件未覆盖",
                     command: blackCommand,
                     result: black,
@@ -597,10 +620,21 @@ actor LocalAlpineAgentService {
             let astAfterCommand = pythonASTValidationCommand(for: temporaryRuntimePath)
             let astAfter = await LocalAlpineTerminalService.shared.execute(command: astAfterCommand, cwd: cwd)
             if astAfter.exitCode != 0 {
-                let diagnostic = await pythonLineNumberDiagnostic(for: temporaryRuntimePath, cwd: cwd)
+                let diagnostic = await pythonLineNumberDiagnostic(
+                    for: temporaryRuntimePath,
+                    targetRuntimePath: targetRuntimePath,
+                    cwd: cwd
+                )
+                let draftRuntimePath = await preserveFailedPythonDraft(
+                    temporaryPath: temporaryPath,
+                    fallbackData: currentData,
+                    target: target
+                )
                 try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
                 return failedPythonWriteOutcome(
                     target: target,
+                    targetRuntimePath: targetRuntimePath,
+                    failedDraftRuntimePath: draftRuntimePath,
                     reason: "Python 二次 AST 校验失败，目标文件未覆盖",
                     command: astAfterCommand,
                     result: astAfter,
@@ -611,10 +645,21 @@ actor LocalAlpineAgentService {
             let compileCommand = "python3 -m py_compile \(shellSingleQuoted(temporaryRuntimePath))"
             let compile = await LocalAlpineTerminalService.shared.execute(command: compileCommand, cwd: cwd)
             if compile.exitCode != 0 {
-                let diagnostic = await pythonLineNumberDiagnostic(for: temporaryRuntimePath, cwd: cwd)
+                let diagnostic = await pythonLineNumberDiagnostic(
+                    for: temporaryRuntimePath,
+                    targetRuntimePath: targetRuntimePath,
+                    cwd: cwd
+                )
+                let draftRuntimePath = await preserveFailedPythonDraft(
+                    temporaryPath: temporaryPath,
+                    fallbackData: currentData,
+                    target: target
+                )
                 try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
                 return failedPythonWriteOutcome(
                     target: target,
+                    targetRuntimePath: targetRuntimePath,
+                    failedDraftRuntimePath: draftRuntimePath,
                     reason: "Python 事务编译失败，目标文件未覆盖",
                     command: compileCommand,
                     result: compile,
@@ -625,10 +670,21 @@ actor LocalAlpineAgentService {
             let semanticCommand = pythonSemanticValidationCommand(for: temporaryRuntimePath)
             let semantic = await LocalAlpineTerminalService.shared.execute(command: semanticCommand, cwd: cwd)
             if semantic.exitCode != 0 {
-                let diagnostic = await pythonLineNumberDiagnostic(for: temporaryRuntimePath, cwd: cwd)
+                let diagnostic = await pythonLineNumberDiagnostic(
+                    for: temporaryRuntimePath,
+                    targetRuntimePath: targetRuntimePath,
+                    cwd: cwd
+                )
+                let draftRuntimePath = await preserveFailedPythonDraft(
+                    temporaryPath: temporaryPath,
+                    fallbackData: currentData,
+                    target: target
+                )
                 try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
                 return failedPythonWriteOutcome(
                     target: target,
+                    targetRuntimePath: targetRuntimePath,
+                    failedDraftRuntimePath: draftRuntimePath,
                     reason: "Python 返回路径结构校验失败，目标文件未覆盖",
                     command: semanticCommand,
                     result: semantic,
@@ -811,11 +867,14 @@ actor LocalAlpineAgentService {
 
     private func pythonLineNumberDiagnostic(
         for runtimePath: String,
+        targetRuntimePath: String,
         cwd: String
     ) async -> LocalAlpineCommandResult? {
         let command = """
         file=\(shellSingleQuoted(runtimePath))
-        printf '== candidate Python file with line numbers: %s ==\\n' "$file"
+        target=\(shellSingleQuoted(targetRuntimePath))
+        printf '== target Python file: %s ==\\n' "$target"
+        printf '== failed draft with line numbers: %s ==\\n' "$file"
         if [ -f "$file" ]; then
           nl -ba "$file" | sed -n '1,220p'
         else
@@ -825,14 +884,45 @@ actor LocalAlpineAgentService {
         return await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
     }
 
+    private func preserveFailedPythonDraft(
+        temporaryPath: String,
+        fallbackData: Data,
+        target: String
+    ) async -> String? {
+        let targetName = splitFilePath(target).fileName
+        let safeTargetName = targetName
+            .replacingOccurrences(of: "\\", with: "_")
+            .replacingOccurrences(of: "/", with: "_")
+        let draftName = ".iexa-failed-\(safeTargetName)-\(UUID().uuidString).py"
+        let draftPath = "/.iexa_failed_writes/\(draftName)"
+        do {
+            let data = (try? await LocalAlpineTerminalService.shared.readFile(path: temporaryPath)) ?? fallbackData
+            try await LocalAlpineTerminalService.shared.writeFile(
+                data: data,
+                fileName: draftName,
+                destinationPath: "/.iexa_failed_writes"
+            )
+            return runtimePath(forSharedPath: draftPath)
+        } catch {
+            return nil
+        }
+    }
+
     private func failedPythonWriteOutcome(
         target: String,
+        targetRuntimePath: String,
+        failedDraftRuntimePath: String?,
         reason: String,
         command: String,
         result: LocalAlpineCommandResult,
         diagnosticOutput: String? = nil
     ) -> LocalAlpineProtectedWriteOutcome {
         var lines = ["- `\(target)` 写入已拒绝：\(reason)。"]
+        lines.append("  - 目标 Python 文件：`\(targetRuntimePath)`")
+        if let failedDraftRuntimePath {
+            lines.append("  - 失败草稿已保留：`\(failedDraftRuntimePath)`")
+            lines.append("  - 下一步应读取失败草稿的完整行号内容，修正后用 `write_files` / `write_file` 覆盖目标 Python 文件。")
+        }
         lines.append("  - 验证命令：`\(command.trimmingCharacters(in: .whitespacesAndNewlines))`")
         let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
         if !output.isEmpty {
@@ -1075,30 +1165,41 @@ actor LocalAlpineAgentService {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
-    private func unsafePythonFileWriteWarning(for command: String) -> String? {
-        guard Self.commandWritesPythonThroughShellText(command) else { return nil }
+    private func unsafeCodeFileWriteWarning(for command: String) -> String? {
+        guard Self.commandWritesCodeThroughShellText(command) else { return nil }
         return """
-        Unsafe Python file write blocked.
+        Unsafe code file write blocked.
 
-        This command writes a `.py` file through shell text redirection/heredoc (`cat`, `tee`, `printf`, `echo`, or `python - <<`). In this chat UI that path can corrupt leading spaces and cause Python IndentationError.
+        This command writes a code or indentation-sensitive text file through shell text redirection/heredoc (`cat`, `tee`, `printf`, `echo`, or `python - <<`). In this chat UI that path can corrupt leading spaces, tabs, quotes, or multi-line blocks.
 
-        Use `iexa_alpine` JSON `write_files` / `write_file` for Python files. The app accepts `code_lines`, `content_lines`, `content_base64`, and plain `content`, writes to a temporary file, validates with `ast.parse`, formats with Black when available, validates with `ast.parse` again, runs `python3 -m py_compile`, and blocks tuple-return functions that are directly unpacked but can fall through to `None` before overwriting the target.
+        Use `iexa_alpine` JSON `write_files` / `write_file` with `code_lines`, `content_lines`, or `content_base64`. For Python files the app additionally writes transactionally, validates with `ast.parse`, formats with Black when available, validates again, runs `python3 -m py_compile`, and checks high-risk return paths before overwriting the target.
         """
     }
 
-    private nonisolated static func commandWritesPythonThroughShellText(_ command: String) -> Bool {
+    private nonisolated static func commandWritesCodeThroughShellText(_ command: String) -> Bool {
         let normalized = command.lowercased()
-        guard normalized.contains(".py") else { return false }
+        guard commandTargetsCodeOrIndentationSensitiveFile(normalized) else { return false }
 
         let patterns = [
-            #"(?is)\bcat\s+>+[^;&|]*\.py\b"#,
-            #"(?is)\bcat\s+<<[\s\S]{0,240}>+[^;&|]*\.py\b"#,
-            #"(?is)\btee\s+(?:-a\s+)?[^;&|]*\.py\b"#,
-            #"(?is)\b(?:printf|echo)\b[\s\S]{0,400}>+[^;&|]*\.py\b"#
+            #"(?is)\bcat\s+>+"#,
+            #"(?is)\bcat\s+<<[\s\S]{0,240}>+"#,
+            #"(?is)\btee\s+(?:-a\s+)?"#,
+            #"(?is)\b(?:printf|echo)\b[\s\S]{0,400}>+"#
         ]
 
         return patterns.contains { pattern in
             command.range(of: pattern, options: .regularExpression) != nil
+        }
+    }
+
+    private nonisolated static func commandTargetsCodeOrIndentationSensitiveFile(_ normalizedCommand: String) -> Bool {
+        let filePatterns = [
+            #"\.(py|pyw|js|jsx|ts|tsx|mjs|cjs|html|htm|css|scss|sass|swift|kt|kts|java|c|cc|cpp|cxx|h|hpp|cs|go|rs|rb|php|sh|bash|zsh|fish|pl|lua|r|sql|json|jsonl|yaml|yml|toml|xml|md|dockerfile|makefile)(?:['"\s;|&>]|$)"#,
+            #"(^|[/\s])makefile(?:['"\s;|&>]|$)"#,
+            #"(^|[/\s])dockerfile(?:['"\s;|&>]|$)"#
+        ]
+        return filePatterns.contains { pattern in
+            normalizedCommand.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
         }
     }
 
@@ -1167,24 +1268,58 @@ actor LocalAlpineAgentService {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
             let nsCombined = combined as NSString
             let range = NSRange(location: 0, length: nsCombined.length)
-            guard let match = regex.firstMatch(in: combined, range: range),
-                  match.numberOfRanges >= 2 else {
-                continue
+            let matches = regex.matches(in: combined, range: range)
+            for match in matches where match.numberOfRanges >= 2 {
+                let candidate = nsCombined.substring(with: match.range(at: 1))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !candidate.isEmpty else { continue }
+                let path = normalizedRuntimePythonPath(candidate, cwd: cwd)
+                if isUserPythonRuntimePath(path) {
+                    return path
+                }
             }
-
-            let candidate = nsCombined.substring(with: match.range(at: 1))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !candidate.isEmpty else { continue }
-            if candidate.hasPrefix("/") {
-                return candidate
-            }
-
-            let normalizedCWD = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
-            let base = normalizedCWD.isEmpty ? "/mnt/iexa" : normalizedCWD
-            return base.hasSuffix("/") ? base + candidate : base + "/" + candidate
         }
 
         return nil
+    }
+
+    private nonisolated static func normalizedRuntimePythonPath(_ path: String, cwd: String) -> String {
+        let cleaned = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        guard !cleaned.isEmpty else { return cleaned }
+        if cleaned.hasPrefix("/mnt/iexa/") {
+            return cleaned
+        }
+        if cleaned.hasPrefix("/usr/lib/python") || cleaned.hasPrefix("/usr/local/lib/python") {
+            return cleaned
+        }
+        if cleaned.hasPrefix("/") {
+            return "/mnt/iexa\(cleaned)"
+        }
+        let normalizedCWD = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        let base = normalizedCWD.isEmpty ? "/mnt/iexa" : normalizedCWD
+        return base.hasSuffix("/") ? base + cleaned : base + "/" + cleaned
+    }
+
+    private nonisolated static func isUserPythonRuntimePath(_ path: String) -> Bool {
+        let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        guard normalized.lowercased().hasSuffix(".py") else { return false }
+        if normalized.hasPrefix("/usr/lib/python") || normalized.hasPrefix("/usr/local/lib/python") {
+            return false
+        }
+        if normalized.hasPrefix("/mnt/iexa/usr/lib/python")
+            || normalized.hasPrefix("/mnt/iexa/usr/local/lib/python") {
+            return false
+        }
+        if normalized.contains("/site-packages/") || normalized.contains("/dist-packages/") {
+            return false
+        }
+        if normalized.contains("/.iexa-write-") || normalized.hasPrefix("/mnt/iexa/.iexa_failed_writes/") {
+            return false
+        }
+        return normalized.hasPrefix("/mnt/iexa/")
     }
 
     nonisolated static func visibleContent(from content: String) -> String {
