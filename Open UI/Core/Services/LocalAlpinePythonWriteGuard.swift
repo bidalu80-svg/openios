@@ -47,14 +47,18 @@ enum LocalAlpinePythonWriteGuard {
             notes.append("已将 Tab 统一替换为 4 个空格")
         }
 
-        if let warning = indentationPreflightWarning(for: normalizedTabs) {
-            notes.append("Python 缩进预检提示：\(warning)")
+        let repaired = repairFlatPythonBlocks(in: normalizedTabs)
+        let preparedContent = repaired.content
+        notes.append(contentsOf: repaired.notes)
+
+        if let warning = indentationPreflightWarning(for: preparedContent) {
+            return .failure("Python 缩进预检失败：\(warning)。请提交完整且缩进正确的源码，优先使用 code_lines/content_lines/content_base64。")
         }
-        if let warning = structuralWarning(for: normalizedTabs) {
+        if let warning = structuralWarning(for: preparedContent) {
             notes.append("Python 结构预检提示：\(warning)")
         }
 
-        return .success(content: ensureTrailingNewline(normalizedTabs), notes: notes)
+        return .success(content: ensureTrailingNewline(preparedContent), notes: notes)
     }
 
     private static func extractPythonCode(from content: String, source: Source) -> Extraction {
@@ -135,6 +139,94 @@ enum LocalAlpinePythonWriteGuard {
             "match ", "case "
         ]
         return starters.contains { lowered.hasPrefix($0) }
+    }
+
+    private static func repairFlatPythonBlocks(in content: String) -> (content: String, notes: [String]) {
+        let lines = content.components(separatedBy: .newlines)
+        guard lines.count >= 2 else { return (content, []) }
+
+        var repaired: [String] = []
+        var stack: [(indent: Int, childIndent: Int)] = []
+        var changedLines: [Int] = []
+        var previousSignificant: (indent: Int, text: String)?
+
+        for (offset, rawLine) in lines.enumerated() {
+            let lineNumber = offset + 1
+            let text = stripHorizontalWhitespace(rawLine)
+            guard !text.isEmpty, !text.hasPrefix("#") else {
+                repaired.append(rawLine)
+                continue
+            }
+
+            let originalIndent = leadingIndentCount(rawLine)
+            while let last = stack.last, originalIndent < last.indent {
+                stack.removeLast()
+            }
+
+            var desiredIndent = originalIndent
+            if let previous = previousSignificant,
+               lineOpensBlock(previous.text),
+               originalIndent <= previous.indent,
+               !startsPeerOrDedentKeyword(text),
+               isProbablyBlockBodyLine(text) {
+                desiredIndent = previous.indent + 4
+            } else if let active = stack.last,
+                      originalIndent == active.indent,
+                      !startsPeerOrDedentKeyword(text),
+                      isProbablyBlockBodyLine(text) {
+                desiredIndent = max(desiredIndent, active.childIndent)
+            }
+
+            if desiredIndent != originalIndent {
+                repaired.append(String(repeating: " ", count: desiredIndent) + text)
+                changedLines.append(lineNumber)
+            } else {
+                repaired.append(rawLine)
+            }
+
+            if lineOpensBlock(text) {
+                stack.append((indent: desiredIndent, childIndent: desiredIndent + 4))
+            } else {
+                while let last = stack.last, desiredIndent < last.childIndent {
+                    stack.removeLast()
+                }
+            }
+
+            previousSignificant = (desiredIndent, text)
+        }
+
+        guard !changedLines.isEmpty else { return (content, []) }
+        let note = "已在写入前自动修复明显缺失的 Python 块缩进：第 \(changedLines.prefix(12).map(String.init).joined(separator: ", ")) 行"
+        return (repaired.joined(separator: "\n"), [note])
+    }
+
+    private static func startsPeerOrDedentKeyword(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        return lowered.hasPrefix("elif ")
+            || lowered.hasPrefix("else:")
+            || lowered.hasPrefix("except")
+            || lowered.hasPrefix("finally:")
+            || lowered.hasPrefix("case ")
+    }
+
+    private static func isProbablyBlockBodyLine(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        if startsPeerOrDedentKeyword(text) { return false }
+        if lowered.hasPrefix("def ") || lowered.hasPrefix("class ") || lowered.hasPrefix("async def ") {
+            return true
+        }
+        let bodyPrefixes = [
+            "return", "raise", "yield", "await ", "print", "import ", "from ",
+            "if ", "for ", "while ", "with ", "async with ", "try:", "pass",
+            "break", "continue", "assert ", "del ", "global ", "nonlocal "
+        ]
+        if bodyPrefixes.contains(where: { lowered.hasPrefix($0) }) {
+            return true
+        }
+        if text.range(of: #"^[A-Za-z_][A-Za-z0-9_]*(\s*[:+\-*/%]?=|\s*\()"#, options: .regularExpression) != nil {
+            return true
+        }
+        return false
     }
 
     private static func structuralWarning(for content: String) -> String? {

@@ -1240,7 +1240,7 @@ final class ChatViewModel {
             }
             if localAlpineOutputHasPythonSyntaxIssue(content + "\n" + (rawResult ?? "")) {
                 lines.append("  required next action:")
-                lines.append(indentForSystemContext("Python syntax/indentation error detected. The next step must inspect the full file, then rewrite the complete corrected Python file with write_files/write_file using code_lines/content_lines/content_base64 or complete plain content. Do not output a partial patch or repeat only the same failed command."))
+                lines.append(indentForSystemContext("Python syntax/indentation error detected. The next step must inspect the full file, then rewrite the complete corrected Python file with write_files/write_file using code_lines/content_lines/content_base64. Do not use plain content for Python, output a partial patch, or repeat only the same failed command."))
             }
             return lines.joined(separator: "\n")
         }
@@ -1256,7 +1256,7 @@ final class ChatViewModel {
         - If result output is present, answer from that output as the source of truth.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
-        - If the latest result contains Python IndentationError or SyntaxError, the next action must inspect the full file, then emit one complete corrected Python file through `write_files` / `write_file` using `code_lines`, `content_lines`, `content_base64`, or complete plain `content`. Never output a partial patch or repeat only the same `py_compile` or run command.
+        - If the latest result contains Python IndentationError or SyntaxError, the next action must inspect the full file, then emit one complete corrected Python file through `write_files` / `write_file` using `code_lines`, `content_lines`, or `content_base64`. Never use plain `content` for Python, output a partial patch, or repeat only the same `py_compile` or run command.
         [/Local Alpine execution state]
         """
     }
@@ -1765,7 +1765,7 @@ final class ChatViewModel {
     private static func localAlpineInspectCommand(forPythonFile path: String?) -> String {
         let file = (path?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
             ? path!.trimmingCharacters(in: .whitespacesAndNewlines)
-            : "/mnt/iexa/simple_crawler.py"
+            : "/mnt/iexa/script.py"
         let quoted = "'" + file.replacingOccurrences(of: "'", with: "'\\''") + "'"
         return "printf '== file with line numbers ==\\n' && nl -ba \(quoted) | sed -n '1,160p'"
     }
@@ -4720,7 +4720,7 @@ final class ChatViewModel {
 
     private static func fallbackLocalAlpineBlockForAssistantCode(content: String, userText: String) -> String? {
         guard let code = firstRunnablePythonCodeBlock(in: content) else { return nil }
-        let fileName = suggestedPythonScriptName(for: userText)
+        let fileName = "script.py"
         let commandPath = shellQuoted(fileName)
         let lines = code.components(separatedBy: "\n")
         let object: [String: Any] = [
@@ -4768,14 +4768,6 @@ final class ChatViewModel {
             }
         }
         return nil
-    }
-
-    private static func suggestedPythonScriptName(for userText: String) -> String {
-        let normalized = userText.lowercased()
-        if normalized.contains("爬虫") || normalized.contains("spider") || normalized.contains("crawler") {
-            return "simple_crawler.py"
-        }
-        return "script.py"
     }
 
     private static func shellQuoted(_ value: String) -> String {
@@ -8033,7 +8025,7 @@ final class ChatViewModel {
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
-        - For scripts/projects, use `write_files` or `write_file` inside `iexa_alpine` to create files, then run a bounded verification command. For Python files, provide the complete file through `code_lines`, `content_lines`, `content_base64`, or plain `content`; the app writes Python transactionally through a temporary file, extracts markdown code blocks, replaces tabs with 4 spaces, validates with `ast.parse`, formats with Black when available, validates with `ast.parse` again, runs `py_compile`, and blocks high-risk tuple-return/unpack paths before overwriting the target.
+        - For scripts/projects, use `write_files` or `write_file` inside `iexa_alpine` to create files, then run a bounded verification command. For Python files, provide the complete file only through `code_lines`, `content_lines`, or `content_base64`; do not use plain `content` for Python because multiline JSON strings are the path that most often loses indentation. The app writes Python transactionally through a temporary file, extracts markdown code blocks, replaces tabs with 4 spaces, validates with `ast.parse`, formats with Black when available, validates with `ast.parse` again, runs `py_compile`, and blocks high-risk tuple-return/unpack paths before overwriting the target.
         - Do not use `cat > file <<EOF` for Python/JS/HTML/CSS bodies.
         - When fixing an existing Python file after a syntax/indentation error, first inspect the user project file named by `目标 Python 文件` or the preserved `失败草稿已保留` path, then rewrite the complete corrected target Python file with `write_files` / `write_file`. Do not inspect validator traceback files such as `/usr/lib/python.../ast.py`, and do not output partial patches, half-structured continuations, or "continue writing" fragments.
         - For indentation-sensitive files, prefer `code_lines` / `content_lines` (array of exact lines) or `content_base64` instead of heredoc shell text. This preserves leading spaces exactly.
@@ -10425,9 +10417,9 @@ final class ChatViewModel {
         - If the user interrupts with a question or taps stop, answer the question and wait. Do not resume automatic execution until the user explicitly asks to continue/fix/run.
         Strategy Switch:
         - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, complete-file rewrite, then verification.
-        - For Python indentation/syntax errors, inspect the user project file named by `目标 Python 文件` or the preserved `失败草稿已保留` path, then rewrite the complete corrected target `.py` file through `write_files` / `write_file` using `code_lines`, `content_lines`, `content_base64`, or complete plain `content`. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
+        - For Python indentation/syntax errors, inspect the user project file named by `目标 Python 文件` or the preserved `失败草稿已保留` path, then rewrite the complete corrected target `.py` file through `write_files` / `write_file` using `code_lines`, `content_lines`, or `content_base64`. Do not use plain `content` for Python and do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
         - If a failed draft path is present, read the draft to recover the exact attempted source, but write the corrected code back to the target Python file, not to the draft path.
-        - For indentation-sensitive rewrites, prefer `code_lines`, `content_lines`, or `content_base64`; complete plain `content` is also accepted and validated transactionally.
+        - For indentation-sensitive rewrites, use `code_lines`, `content_lines`, or `content_base64`; Python plain `content` is not allowed because it is the common indentation-loss path.
         - If a Python shell text write is blocked, immediately switch to `write_files` / `write_file` with a complete file body.
         [/Local Alpine continuation]
         """
