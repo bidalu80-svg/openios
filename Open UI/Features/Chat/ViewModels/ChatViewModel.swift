@@ -9978,15 +9978,10 @@ final class ChatViewModel {
         if laterMessages.contains(where: { $0.role == .assistant && !Self.isLocalAlpineAgentResult($0) }) {
             return false
         }
-        let resultText = (messages[resultIndex].content + "\n" + (messages[resultIndex].statusHistory.last?.description ?? ""))
-            .lowercased()
-        let incompleteMarkers = [
-            "退出码：`1`", "退出码：`2`", "退出码：`126`", "退出码：`127`", "退出码：`124`",
-            "not found", "error", "failed", "missing", "no such file", "traceback", "exception",
-            "command not found", "permission denied", "输入已取消", "存在错误输出",
-            "写入已拒绝", "写入失败", "缩进预检失败"
-        ]
-        if incompleteMarkers.contains(where: { resultText.contains($0.lowercased()) }) {
+        let resultText = Self.normalizedLocalAlpineResultTextForFollowUpCheck(
+            messages[resultIndex].content + "\n" + (messages[resultIndex].statusHistory.last?.description ?? "")
+        )
+        if Self.containsLocalAlpineFailureMarker(resultText) {
             return true
         }
         if let lastUser = messages.last(where: { $0.role == .user && !Self.isLocalAlpineAgentResult($0) }) {
@@ -10321,18 +10316,48 @@ final class ChatViewModel {
     }
 
     private static func localAlpineResultNeedsFollowUp(_ text: String) -> Bool {
-        let normalized = text.lowercased()
+        let normalized = normalizedLocalAlpineResultTextForFollowUpCheck(text)
         if normalized.contains("iexa_auto_repair_verified_success") {
             return false
         }
+        return containsLocalAlpineFailureMarker(normalized)
+    }
+
+    private static func normalizedLocalAlpineResultTextForFollowUpCheck(_ text: String) -> String {
+        var normalized = text.lowercased()
+        // Local Alpine may list this internal folder on success paths.
+        // Its name contains "failed", but that must not be treated as a task failure signal.
+        let harmlessTokens = [
+            ".iexa_failed_writes",
+            "/.iexa_failed_writes",
+            "iexa_failed_writes/"
+        ]
+        for token in harmlessTokens {
+            normalized = normalized.replacingOccurrences(of: token, with: ".iexa_draft_writes")
+        }
+        return normalized
+    }
+
+    private static func containsLocalAlpineFailureMarker(_ normalized: String) -> Bool {
         let markers = [
             "退出码：`1`", "退出码：`2`", "退出码：`126`", "退出码：`127`", "退出码：`124`",
-            "not found", "error", "failed", "missing", "no such file", "traceback", "exception",
+            "not found", "error", "missing", "no such file", "traceback", "exception",
             "command not found", "permission denied", "syntaxerror", "indentationerror",
             "module not found", "no module named", "输入已取消", "存在错误输出",
             "写入已拒绝", "写入失败", "缩进预检失败"
         ]
-        return markers.contains(where: { normalized.contains($0.lowercased()) })
+        if markers.contains(where: { normalized.contains($0.lowercased()) }) {
+            return true
+        }
+        let failureRegexes = [
+            #"\bfailed to\b"#,
+            #"\bcommand failed\b"#,
+            #"\bbuild failed\b"#,
+            #"\barchive failed\b"#
+        ]
+        return failureRegexes.contains {
+            normalized.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil
+        }
     }
 
     private func pollLocalAlpineContinuation(
