@@ -7795,12 +7795,12 @@ final class ChatViewModel {
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
-        - For scripts/projects, use `write_files` inside `iexa_alpine` to create files, then run a bounded verification command. For Python files, always provide the complete file through `code_lines` or `content_base64`; the app writes Python transactionally through a temporary file, extracts markdown code blocks, replaces tabs with 4 spaces, validates with `ast.parse`, formats with Black, validates with `ast.parse` again, and rejects the write before overwriting the target if any check fails.
+        - For scripts/projects, use `write_files` inside `iexa_alpine` to create files, then run a bounded verification command. For Python files, always provide the complete file through `code_lines`, `content_lines`, or `content_base64`; Python `content` and heredoc writes are rejected so leading spaces cannot be guessed or flattened. The app writes Python transactionally through a temporary file, extracts markdown code blocks, replaces tabs with 4 spaces, validates with `ast.parse`, formats with Black, validates with `ast.parse` again, runs `py_compile`, and blocks high-risk tuple-return/unpack paths before overwriting the target.
         - Do not use `cat > file <<EOF` for Python/JS/HTML/CSS bodies.
         - When fixing an existing Python file after a syntax/indentation error, first inspect the full file with line numbers, then rewrite the complete corrected Python file with `write_files`. Do not output partial patches, half-structured continuations, or "continue writing" fragments.
         - For indentation-sensitive files, prefer `code_lines` / `content_lines` (array of exact lines) or `content_base64` instead of heredoc shell text. This preserves leading spaces exactly.
-        - Use heredoc only for tiny one-off shell snippets. Never put long Python class/function bodies in heredoc if `write_files` can be used.
-        - After writing Python, run the requested script or a bounded verification command only after the app reports that AST, Black, second AST, and py_compile passed. If syntax or indentation fails, inspect the full file and return one complete corrected file.
+        - Use heredoc only for tiny one-off shell snippets. Never put Python class/function bodies in heredoc.
+        - After writing Python, run the requested script or a bounded verification command only after the app reports that AST, Black, second AST, py_compile, and return-path checks passed. If syntax or indentation fails, inspect the full file and return one complete corrected file.
         - If the user wants to test Python `input()` / shell `read` with their own text, do not invent sample stdin and do not pipe a fixed `printf` value. Leave the input/read command unpiped; the app will pause, ask the user for stdin, feed that exact text to the program, and append the real output.
         - For unattended tests where the user did not ask to type input themselves, avoid interactive prompts by using constants, command-line args, environment variables, or an explicit `printf 'value\n' | python3 script.py`.
         - For Node/Python dependency installs, use bounded commands and print versions/errors. Avoid background daemons unless the user explicitly asks.
@@ -9187,7 +9187,7 @@ final class ChatViewModel {
         \(Self.localAlpineInspectCommand(forPythonFile: runtimePath))
         ```
 
-        然后根据完整文件内容，返回完整 Python 文件内容；App 会在覆盖目标前自动执行 AST、Black、二次 AST 和 py_compile。
+        然后根据完整文件内容，返回完整 Python 文件内容；App 会在覆盖目标前自动执行 AST、Black、二次 AST、py_compile 和返回路径校验。
         """
 
         localAlpineAgentExecutedMessageIds.insert(attemptedMessageId)
@@ -9262,14 +9262,14 @@ final class ChatViewModel {
         必须先执行完整文件定位和完整文件修复：
         1. 读取带行号文件：`\(Self.localAlpineInspectCommand(forPythonFile: pythonFile))`
         2. 读取完整文件后，用 `write_files` 提交完整修复后的 Python 文件；禁止 partial patch、半结构代码和续写片段。
-        3. App 会在覆盖目标前自动执行 AST、Black、二次 AST 和 py_compile；通过后再运行脚本。
+        3. App 会在覆盖目标前自动执行 AST、Black、二次 AST、py_compile 和返回路径校验；通过后再运行脚本。
         """
         } else if failure.outputPreview.lowercased().contains("unsafe python file write blocked") {
             pythonRepairInstruction = """
 
         Python file write guard
         App 已拦截 `cat/tee/heredoc` 写入 Python 文件，因为这种写法在聊天 UI 中容易破坏缩进。
-        下一步必须改用 `iexa_alpine` JSON 的 `write_files`，并使用 `code_lines` 或 `content_base64` 提交完整 Python 文件；App 会自动提取代码块、AST 校验、Black 格式化、二次 AST 校验和 py_compile。
+        下一步必须改用 `iexa_alpine` JSON 的 `write_files`，并使用 `code_lines`、`content_lines` 或 `content_base64` 提交完整 Python 文件；App 会自动提取代码块、AST 校验、Black 格式化、二次 AST 校验、py_compile 和返回路径校验。
         """
         } else {
             pythonRepairInstruction = ""
@@ -10142,7 +10142,7 @@ final class ChatViewModel {
         - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, complete-file rewrite, then verification.
         - For Python indentation/syntax errors, inspect the full file with line numbers, then rewrite the complete corrected `.py` file through `write_files` using `code_lines` or `content_base64`. Do not output partial patches or half-structured continuations.
         - For indentation-sensitive rewrites, use `code_lines`, `content_lines`, or `content_base64`; do not use heredoc for Python class/function bodies.
-        - If a Python heredoc/cat write is blocked, immediately switch to `write_files` with `code_lines` or `content_base64`.
+        - If a Python heredoc/cat write is blocked, immediately switch to `write_files` with `code_lines`, `content_lines`, or `content_base64`.
         [/Local Alpine continuation]
         """
         if !messages.isEmpty, messages[0]["role"] as? String == "system" {

@@ -136,19 +136,6 @@ actor LocalAlpineAgentService {
                                 result: diagnostic.result
                             ))
                         }
-                        let repairs = await pythonSyntaxAutoRepair(
-                            command: syntaxCheck.command,
-                            output: syntaxCheck.result.output,
-                            cwd: effectiveCWD
-                        )
-                        for repair in repairs {
-                            stepLines.append(format(command: repair.command, cwd: effectiveCWD, result: repair.result))
-                            commandResults.append(Self.commandResult(
-                                command: repair.command,
-                                cwd: effectiveCWD,
-                                result: repair.result
-                            ))
-                        }
                         shouldRunShellCommand = false
                         stopRemainingCommands = true
                     }
@@ -195,19 +182,6 @@ actor LocalAlpineAgentService {
                                     command: diagnostic.command,
                                     cwd: effectiveCWD,
                                     result: diagnostic.result
-                                ))
-                            }
-                            let repairs = await pythonSyntaxAutoRepair(
-                                command: syntaxCheck.command,
-                                output: syntaxCheck.result.output,
-                                cwd: effectiveCWD
-                            )
-                            for repair in repairs {
-                                stepLines.append(format(command: repair.command, cwd: effectiveCWD, result: repair.result))
-                                commandResults.append(Self.commandResult(
-                                    command: repair.command,
-                                    cwd: effectiveCWD,
-                                    result: repair.result
                                 ))
                             }
                             commandToExecute = ""
@@ -295,19 +269,6 @@ actor LocalAlpineAgentService {
                         result: diagnostic.result
                     ))
                 }
-                let repairs = await pythonSyntaxAutoRepair(
-                    command: commandToExecute,
-                    output: result.output,
-                    cwd: effectiveCWD
-                )
-                for repair in repairs {
-                    stepLines.append(format(command: repair.command, cwd: effectiveCWD, result: repair.result))
-                    commandResults.append(Self.commandResult(
-                        command: repair.command,
-                        cwd: effectiveCWD,
-                        result: repair.result
-                    ))
-                }
             }
 
             if !stepLines.isEmpty {
@@ -335,7 +296,6 @@ actor LocalAlpineAgentService {
             let command = result.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return command != "write_files"
                 && command != "python_heredoc_write"
-                && !command.hasPrefix("iexa_auto_python_repair")
         }.count
     }
 
@@ -579,92 +539,89 @@ actor LocalAlpineAgentService {
         let temporaryName = ".iexa-write-\(UUID().uuidString).py"
         let temporaryPath = split.directory == "/" ? "/\(temporaryName)" : "\(split.directory)/\(temporaryName)"
         let temporaryRuntimePath = runtimePath(forSharedPath: temporaryPath)
-        var currentData = data
-        var currentNotes = notes
-        var didAttemptStructuralRepair = false
+        let currentData = data
+        let currentNotes = notes
 
         do {
-            while true {
-                try await LocalAlpineTerminalService.shared.writeFile(
-                    data: currentData,
-                    fileName: temporaryName,
-                    destinationPath: split.directory
-                )
+            try await LocalAlpineTerminalService.shared.writeFile(
+                data: currentData,
+                fileName: temporaryName,
+                destinationPath: split.directory
+            )
 
-                let astBeforeCommand = pythonASTValidationCommand(for: temporaryRuntimePath)
-                let astBefore = await LocalAlpineTerminalService.shared.execute(command: astBeforeCommand, cwd: cwd)
-                if astBefore.exitCode != 0 {
-                    if !didAttemptStructuralRepair,
-                       let currentContent = String(data: currentData, encoding: .utf8),
-                       let repaired = Self.repairFlattenedPythonIndentation(currentContent, force: true),
-                       repaired != currentContent,
-                       let repairedData = repaired.data(using: .utf8) {
-                        didAttemptStructuralRepair = true
-                        currentData = repairedData
-                        currentNotes.append("AST 校验失败后已自动重建 Python 缩进结构")
-                        try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-                        continue
-                    }
-
-                    try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-                    return failedPythonWriteOutcome(
-                        target: target,
-                        reason: "Python AST 校验失败，目标文件未覆盖",
-                        command: astBeforeCommand,
-                        result: astBefore
-                    )
-                }
-
-                let blackCommand = pythonBlackFormatCommand(for: temporaryRuntimePath)
-                let black = await LocalAlpineTerminalService.shared.execute(command: blackCommand, cwd: cwd)
-                if black.exitCode != 0 {
-                    try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-                    return failedPythonWriteOutcome(
-                        target: target,
-                        reason: "Black 自动格式化失败，目标文件未覆盖",
-                        command: blackCommand,
-                        result: black
-                    )
-                }
-
-                let astAfterCommand = pythonASTValidationCommand(for: temporaryRuntimePath)
-                let astAfter = await LocalAlpineTerminalService.shared.execute(command: astAfterCommand, cwd: cwd)
-                if astAfter.exitCode != 0 {
-                    try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-                    return failedPythonWriteOutcome(
-                        target: target,
-                        reason: "Black 格式化后二次 AST 校验失败，目标文件未覆盖",
-                        command: astAfterCommand,
-                        result: astAfter
-                    )
-                }
-
-                let compileCommand = "python3 -m py_compile \(shellSingleQuoted(temporaryRuntimePath))"
-                let compile = await LocalAlpineTerminalService.shared.execute(command: compileCommand, cwd: cwd)
-                if compile.exitCode != 0 {
-                    try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-                    return failedPythonWriteOutcome(
-                        target: target,
-                        reason: "Python 事务编译失败，目标文件未覆盖",
-                        command: compileCommand,
-                        result: compile
-                    )
-                }
-
-                let formattedData = try await LocalAlpineTerminalService.shared.readFile(path: temporaryPath)
-                try await LocalAlpineTerminalService.shared.writeFile(
-                    data: formattedData,
-                    fileName: split.fileName,
-                    destinationPath: split.directory
-                )
+            let astBeforeCommand = pythonASTValidationCommand(for: temporaryRuntimePath)
+            let astBefore = await LocalAlpineTerminalService.shared.execute(command: astBeforeCommand, cwd: cwd)
+            if astBefore.exitCode != 0 {
                 try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-
-                var lines = [
-                    "- `\(target)` (\(formattedData.count) B，Python 完整文件事务写入已通过 AST、Black、二次 AST、py_compile，来源：\(source.displayName))"
-                ]
-                lines.append(contentsOf: currentNotes.map { "  - \($0)" })
-                return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: target, hadFailure: false)
+                return failedPythonWriteOutcome(
+                    target: target,
+                    reason: "Python AST 校验失败，目标文件未覆盖",
+                    command: astBeforeCommand,
+                    result: astBefore
+                )
             }
+
+            let blackCommand = pythonBlackFormatCommand(for: temporaryRuntimePath)
+            let black = await LocalAlpineTerminalService.shared.execute(command: blackCommand, cwd: cwd)
+            if black.exitCode != 0 {
+                try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+                return failedPythonWriteOutcome(
+                    target: target,
+                    reason: "Black 自动格式化失败，目标文件未覆盖",
+                    command: blackCommand,
+                    result: black
+                )
+            }
+
+            let astAfterCommand = pythonASTValidationCommand(for: temporaryRuntimePath)
+            let astAfter = await LocalAlpineTerminalService.shared.execute(command: astAfterCommand, cwd: cwd)
+            if astAfter.exitCode != 0 {
+                try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+                return failedPythonWriteOutcome(
+                    target: target,
+                    reason: "Black 格式化后二次 AST 校验失败，目标文件未覆盖",
+                    command: astAfterCommand,
+                    result: astAfter
+                )
+            }
+
+            let compileCommand = "python3 -m py_compile \(shellSingleQuoted(temporaryRuntimePath))"
+            let compile = await LocalAlpineTerminalService.shared.execute(command: compileCommand, cwd: cwd)
+            if compile.exitCode != 0 {
+                try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+                return failedPythonWriteOutcome(
+                    target: target,
+                    reason: "Python 事务编译失败，目标文件未覆盖",
+                    command: compileCommand,
+                    result: compile
+                )
+            }
+
+            let semanticCommand = pythonSemanticValidationCommand(for: temporaryRuntimePath)
+            let semantic = await LocalAlpineTerminalService.shared.execute(command: semanticCommand, cwd: cwd)
+            if semantic.exitCode != 0 {
+                try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+                return failedPythonWriteOutcome(
+                    target: target,
+                    reason: "Python 返回路径结构校验失败，目标文件未覆盖",
+                    command: semanticCommand,
+                    result: semantic
+                )
+            }
+
+            let formattedData = try await LocalAlpineTerminalService.shared.readFile(path: temporaryPath)
+            try await LocalAlpineTerminalService.shared.writeFile(
+                data: formattedData,
+                fileName: split.fileName,
+                destinationPath: split.directory
+            )
+            try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+
+            var lines = [
+                "- `\(target)` (\(formattedData.count) B，Python 完整文件事务写入已通过 AST、Black、二次 AST、py_compile、返回路径校验，来源：\(source.displayName))"
+            ]
+            lines.append(contentsOf: currentNotes.map { "  - \($0)" })
+            return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: target, hadFailure: false)
         } catch {
             try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
             return LocalAlpineProtectedWriteOutcome(
@@ -678,6 +635,137 @@ actor LocalAlpineAgentService {
     private func pythonASTValidationCommand(for runtimePath: String) -> String {
         """
         python3 -c "import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')); print('IEXA_AST_PARSE_SUCCESS')" \(shellSingleQuoted(runtimePath))
+        """
+    }
+
+    private func pythonSemanticValidationCommand(for runtimePath: String) -> String {
+        """
+        python3 - \(shellSingleQuoted(runtimePath)) <<'PY'
+        import ast
+        import pathlib
+        import sys
+
+        path = pathlib.Path(sys.argv[1])
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+
+        def block_exits(statements):
+            for statement in statements:
+                if statement_exits(statement):
+                    return True
+            return False
+
+        def statement_exits(statement):
+            if isinstance(statement, (ast.Return, ast.Raise)):
+                return True
+            if isinstance(statement, ast.If):
+                return bool(statement.orelse) and block_exits(statement.body) and block_exits(statement.orelse)
+            if isinstance(statement, ast.Try):
+                if block_exits(statement.finalbody):
+                    return True
+                if not statement.handlers:
+                    return False
+                normal_path = block_exits(statement.body + statement.orelse)
+                handler_paths = all(block_exits(handler.body) for handler in statement.handlers)
+                return normal_path and handler_paths
+            return False
+
+        class ReturnCollector(ast.NodeVisitor):
+            def __init__(self):
+                self.returns = []
+
+            def visit_FunctionDef(self, node):
+                return
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Lambda(self, node):
+                return
+
+            def visit_Return(self, node):
+                self.returns.append(node)
+
+        class FunctionCollector(ast.NodeVisitor):
+            def __init__(self):
+                self.functions = {}
+
+            def visit_FunctionDef(self, node):
+                self._collect(node)
+                self.generic_visit(node)
+
+            def visit_AsyncFunctionDef(self, node):
+                self._collect(node)
+                self.generic_visit(node)
+
+            def _collect(self, node):
+                collector = ReturnCollector()
+                for statement in node.body:
+                    collector.visit(statement)
+                tuple_arities = {
+                    len(item.value.elts)
+                    for item in collector.returns
+                    if isinstance(item.value, ast.Tuple)
+                }
+                if tuple_arities:
+                    self.functions[node.name] = {
+                        "line": node.lineno,
+                        "arities": tuple_arities,
+                        "can_fall_through": not block_exits(node.body),
+                    }
+
+        def unpack_arity(target):
+            if isinstance(target, (ast.Tuple, ast.List)):
+                return len(target.elts)
+            return 0
+
+        def call_name(value):
+            if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+                return value.func.id
+            return None
+
+        class UnpackCollector(ast.NodeVisitor):
+            def __init__(self):
+                self.unpacks = {}
+
+            def _record(self, target, value, line):
+                arity = unpack_arity(target)
+                name = call_name(value)
+                if arity and name:
+                    self.unpacks.setdefault(name, []).append((line, arity))
+
+            def visit_Assign(self, node):
+                for target in node.targets:
+                    self._record(target, node.value, node.lineno)
+                self.generic_visit(node)
+
+            def visit_AnnAssign(self, node):
+                if node.value is not None:
+                    self._record(node.target, node.value, node.lineno)
+                self.generic_visit(node)
+
+        functions = FunctionCollector()
+        functions.visit(tree)
+        unpacks = UnpackCollector()
+        unpacks.visit(tree)
+
+        errors = []
+        for name, info in functions.functions.items():
+            if not info["can_fall_through"]:
+                continue
+            for line, arity in unpacks.unpacks.get(name, []):
+                if arity in info["arities"]:
+                    errors.append(
+                        f"{path}:{line}: function `{name}` is unpacked into {arity} values "
+                        f"but can fall through without returning a value; check indentation/return placement near line {info['line']}."
+                    )
+
+        if errors:
+            print("IEXA_PY_SEMANTIC_GUARD_FAILED")
+            for error in errors:
+                print(error)
+            sys.exit(3)
+
+        print("IEXA_PY_SEMANTIC_GUARD_SUCCESS")
+        PY
         """
     }
 
@@ -861,129 +949,6 @@ actor LocalAlpineAgentService {
         return (command, result)
     }
 
-    private func pythonSyntaxAutoRepair(
-        command: String,
-        output: String,
-        cwd: String
-    ) async -> [(command: String, result: LocalAlpineCommandResult)] {
-        guard Self.outputHasPythonSyntaxIssue(output),
-              let issueFile = Self.pythonFilePath(command: command, output: output, cwd: cwd) else {
-            return []
-        }
-
-        let sharedPath = resolvedFilePath(issueFile, cwd: cwd)
-        let runtimeFile = runtimePathForIssueFile(issueFile, sharedPath: sharedPath)
-
-        do {
-            let originalData = try await LocalAlpineTerminalService.shared.readFile(path: issueFile)
-            guard let original = String(data: originalData, encoding: .utf8),
-                  let repaired = Self.repairFlattenedPythonIndentation(original, force: true),
-                  repaired != original,
-                  let repairedData = repaired.data(using: .utf8) else {
-                return []
-            }
-
-            let split = splitFilePath(sharedPath)
-            try await LocalAlpineTerminalService.shared.writeFile(
-                data: repairedData,
-                fileName: split.fileName,
-                destinationPath: split.directory
-            )
-
-            var results: [(command: String, result: LocalAlpineCommandResult)] = []
-            let note = LocalAlpineCommandResult(
-                command: "iexa_auto_python_repair \(shellSingleQuoted(runtimeFile))",
-                output: """
-                已根据 SyntaxError/IndentationError 自动修复疑似被压平的 Python 缩进。
-                文件：\(runtimeFile)
-                下一步自动运行 py_compile 验证；如果验证失败，会恢复原文件。
-                """,
-                exitCode: 0,
-                interactiveRequest: nil
-            )
-            results.append((note.command, note))
-
-            let compileCommand = "python3 -m py_compile \(shellSingleQuoted(runtimeFile))"
-            let compile = await LocalAlpineTerminalService.shared.execute(command: compileCommand, cwd: cwd)
-            if compile.exitCode != 0 {
-                try? await LocalAlpineTerminalService.shared.writeFile(
-                    data: originalData,
-                    fileName: split.fileName,
-                    destinationPath: split.directory
-                )
-                let restored = LocalAlpineCommandResult(
-                    command: compileCommand,
-                    output: """
-                    \(compile.output)
-
-                    自动缩进修复未通过 py_compile，已恢复原文件，避免把错误内容越修越乱。
-                    """,
-                    exitCode: compile.exitCode,
-                    interactiveRequest: nil
-                )
-                results.append((compileCommand, restored))
-                return results
-            }
-
-            let verified = LocalAlpineCommandResult(
-                command: compileCommand,
-                output: compile.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? "IEXA_AUTO_REPAIR_PY_COMPILE_SUCCESS"
-                    : compile.output + "\nIEXA_AUTO_REPAIR_PY_COMPILE_SUCCESS",
-                exitCode: compile.exitCode,
-                interactiveRequest: compile.interactiveRequest
-            )
-            results.append((compileCommand, verified))
-
-            if let verificationCommand = postRepairVerificationCommand(originalCommand: command, runtimeFile: runtimeFile) {
-                let verification = await LocalAlpineTerminalService.shared.execute(command: verificationCommand, cwd: cwd)
-                let output = verification.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? (verification.exitCode == 0 ? "IEXA_AUTO_REPAIR_VERIFIED_SUCCESS" : "")
-                    : verification.output + (verification.exitCode == 0 ? "\nIEXA_AUTO_REPAIR_VERIFIED_SUCCESS" : "")
-                let wrapped = LocalAlpineCommandResult(
-                    command: verificationCommand,
-                    output: output,
-                    exitCode: verification.exitCode,
-                    interactiveRequest: verification.interactiveRequest
-                )
-                results.append((verificationCommand, wrapped))
-            }
-
-            return results
-        } catch {
-            return []
-        }
-    }
-
-    private func runtimePathForIssueFile(_ issueFile: String, sharedPath: String) -> String {
-        let normalized = issueFile.trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\\", with: "/")
-        if normalized == "/mnt/iexa" || normalized.hasPrefix("/mnt/iexa/") {
-            return normalized
-        }
-        return runtimePath(forSharedPath: sharedPath)
-    }
-
-    private func postRepairVerificationCommand(originalCommand: String, runtimeFile: String) -> String? {
-        let normalized = originalCommand
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-
-        if normalized.contains("&&") || normalized.contains(";") {
-            return originalCommand
-        }
-
-        if normalized.contains("-m py_compile") {
-            return "python3 \(shellSingleQuoted(runtimeFile))"
-        }
-
-        if normalized.contains("python") && normalized.contains(".py") {
-            return originalCommand
-        }
-
-        return nil
-    }
-
     private func format(command: String, cwd: String, result: LocalAlpineCommandResult) -> String {
         let output = truncated(result.output)
         let renderedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1073,7 +1038,7 @@ actor LocalAlpineAgentService {
 
         This command writes a `.py` file through shell text redirection/heredoc (`cat`, `tee`, `printf`, `echo`, or `python - <<`). In this chat UI that path can corrupt leading spaces and cause Python IndentationError.
 
-        Use `iexa_alpine` JSON `write_files` with `code_lines`, `content_lines`, or `content_base64` for Python files. Always provide the complete Python file content, not a partial patch. The app extracts markdown code blocks, replaces tabs with 4 spaces, validates with `ast.parse`, formats with Black, validates with `ast.parse` again, then runs `python3 -m py_compile` before overwriting the target.
+        Use `iexa_alpine` JSON `write_files` with `code_lines`, `content_lines`, or `content_base64` for Python files. The app rejects Python `content`/heredoc writes, writes to a temporary file, validates with `ast.parse`, formats with Black, validates with `ast.parse` again, runs `python3 -m py_compile`, and blocks tuple-return functions that are directly unpacked but can fall through to `None` before overwriting the target.
         """
     }
 
@@ -1093,10 +1058,6 @@ actor LocalAlpineAgentService {
         }
     }
 
-    private nonisolated static func pythonIndentationPreflightWarning(for content: String) -> String? {
-        LocalAlpinePythonWriteGuard.indentationPreflightWarning(for: content)
-    }
-
     private nonisolated static func preparePythonForProtectedWrite(
         _ content: String,
         source: LocalAlpineAgentFileSource
@@ -1107,14 +1068,6 @@ actor LocalAlpineAgentService {
         case .failure(let message):
             return .failure(message)
         }
-    }
-
-    private nonisolated static func pythonLineOpensBlock(_ text: String) -> Bool {
-        LocalAlpinePythonWriteGuard.lineOpensBlock(text)
-    }
-
-    private nonisolated static func repairFlattenedPythonIndentation(_ content: String, force: Bool = false) -> String? {
-        LocalAlpinePythonWriteGuard.repairFlattenedIndentation(content, force: force)
     }
 
     private nonisolated static func pythonHeredocWriteSpec(from line: String) -> PythonHeredocWriteSpec? {

@@ -36,6 +36,10 @@ enum LocalAlpinePythonWriteGuard {
             return .failure(message)
         }
 
+        if source == .content || source == .heredoc {
+            return .failure("为保证 Python 缩进，`.py` 写入只接受 `code_lines` / `content_lines` / `content_base64`；已拒绝 `\(source.displayName)` 写入。")
+        }
+
         guard !extracted.content.trimmingCharacters(in: .newlines).isEmpty else {
             return .failure("Python 文件内容为空")
         }
@@ -47,43 +51,11 @@ enum LocalAlpinePythonWriteGuard {
             notes.append("已将 Tab 统一替换为 4 个空格")
         }
 
-        if let structureWarning = structuralWarning(for: normalizedTabs) {
-            if let rebuilt = rebuildIndentation(normalizedTabs),
-               Self.structuralWarning(for: rebuilt) == nil,
-               indentationPreflightWarning(for: rebuilt) == nil {
-                return .success(
-                    content: ensureTrailingNewline(rebuilt),
-                    notes: notes + ["已由写入模块重建 Python 缩进结构：\(structureWarning)"]
-                )
-            }
-            return .failure("Python 结构预检失败：\(structureWarning)")
-        }
-
         if let warning = indentationPreflightWarning(for: normalizedTabs) {
-            if let rebuilt = rebuildIndentation(normalizedTabs),
-               structuralWarning(for: rebuilt) == nil,
-               indentationPreflightWarning(for: rebuilt) == nil {
-                return .success(
-                    content: ensureTrailingNewline(rebuilt),
-                    notes: notes + ["已由写入模块重建 Python 缩进结构：\(warning)"]
-                )
-            }
             return .failure("Python 缩进预检失败：\(warning)")
         }
-
-        if source == .content || source == .codeBlock,
-           normalizedTabs.components(separatedBy: .newlines).contains(where: { line in
-               let trimmed = line.trimmingCharacters(in: .whitespaces)
-               return lineOpensBlock(trimmed) && line.prefix { $0 == " " }.count == 0
-           }),
-           let rebuilt = rebuildIndentation(normalizedTabs),
-           rebuilt != normalizedTabs,
-           structuralWarning(for: rebuilt) == nil,
-           indentationPreflightWarning(for: rebuilt) == nil {
-            return .success(
-                content: ensureTrailingNewline(rebuilt),
-                notes: notes + ["普通文本已标准化为 4 空格 Python 缩进"]
-            )
+        if let warning = structuralWarning(for: normalizedTabs) {
+            return .failure("Python 结构预检失败：\(warning)")
         }
 
         return .success(content: ensureTrailingNewline(normalizedTabs), notes: notes)
@@ -133,10 +105,9 @@ enum LocalAlpinePythonWriteGuard {
     static func indentationPreflightWarning(for content: String) -> String? {
         let lines = content.components(separatedBy: .newlines)
         let significant = lines.enumerated().compactMap { index, rawLine -> (number: Int, indent: Int, text: String)? in
-            let text = rawLine.trimmingCharacters(in: .whitespaces)
+            let text = stripHorizontalWhitespace(rawLine)
             guard !text.isEmpty, !text.hasPrefix("#") else { return nil }
-            let indent = rawLine.prefix { $0 == " " || $0 == "\t" }.count
-            return (index + 1, indent, text)
+            return (index + 1, leadingIndentCount(rawLine), text)
         }
 
         guard significant.count >= 2 else { return nil }
@@ -159,11 +130,6 @@ enum LocalAlpinePythonWriteGuard {
         return nil
     }
 
-    static func repairFlattenedIndentation(_ content: String, force: Bool = false) -> String? {
-        guard force || indentationPreflightWarning(for: content) != nil else { return nil }
-        return rebuildIndentation(content)
-    }
-
     static func lineOpensBlock(_ text: String) -> Bool {
         guard text.hasSuffix(":") else { return false }
         let lowered = text.lowercased()
@@ -177,185 +143,50 @@ enum LocalAlpinePythonWriteGuard {
 
     private static func structuralWarning(for content: String) -> String? {
         let lines = content.components(separatedBy: .newlines)
-        var stack: [(keyword: String, indent: Int, line: Int)] = []
+        var activeBlocks: [(keyword: String, indent: Int, line: Int)] = []
 
         for (offset, rawLine) in lines.enumerated() {
             let lineNumber = offset + 1
-            let text = rawLine.trimmingCharacters(in: .whitespaces)
+            let text = stripHorizontalWhitespace(rawLine)
             guard !text.isEmpty, !text.hasPrefix("#") else { continue }
-            let indent = rawLine.prefix { $0 == " " || $0 == "\t" }.count
-
-            while let last = stack.last, indent < last.indent {
-                stack.removeLast()
-            }
+            let indent = leadingIndentCount(rawLine)
 
             let keyword = blockKeyword(text)
-            if keyword == "except" || keyword == "finally" {
-                while let last = stack.last, indent <= last.indent, last.keyword != "try" {
-                    stack.removeLast()
+            if keyword == "elif" || keyword == "else" || keyword == "except" || keyword == "finally" {
+                let allowed: [String]
+                switch keyword {
+                case "elif":
+                    allowed = ["if", "elif"]
+                case "else":
+                    allowed = ["if", "elif", "for", "while", "try", "except"]
+                case "except":
+                    allowed = ["try", "except"]
+                case "finally":
+                    allowed = ["try", "except", "else"]
+                default:
+                    allowed = []
                 }
-                guard stack.last?.keyword == "try", stack.last?.indent == indent else {
-                    return "第 \(lineNumber) 行 `\(firstToken(text))` 没有匹配到同级 try。"
+                let sameIndentHasPeer = activeBlocks.contains {
+                    $0.indent == indent && allowed.contains($0.keyword)
                 }
-            } else if keyword == "elif" || keyword == "else" {
-                while let last = stack.last,
-                      indent <= last.indent,
-                      !["if", "elif", "for", "while", "try", "except"].contains(last.keyword) {
-                    stack.removeLast()
-                }
-                guard let last = stack.last,
-                      last.indent == indent,
-                      ["if", "elif", "for", "while", "try", "except"].contains(last.keyword) else {
+                guard sameIndentHasPeer else {
                     return "第 \(lineNumber) 行 `\(firstToken(text))` 没有匹配到同级代码块。"
+                }
+                while let last = activeBlocks.last, indent < last.indent {
+                    activeBlocks.removeLast()
+                }
+            } else {
+                while let last = activeBlocks.last, indent <= last.indent {
+                    activeBlocks.removeLast()
                 }
             }
 
             if lineOpensBlock(text) {
-                stack.append((keyword, indent, lineNumber))
+                activeBlocks.append((keyword, indent, lineNumber))
             }
         }
+
         return nil
-    }
-
-    private static func rebuildIndentation(_ content: String) -> String? {
-        let rawLines = content.components(separatedBy: .newlines)
-        let meaningfulIndents = rawLines.compactMap { line -> Int? in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return nil }
-            return line.prefix { $0 == " " || $0 == "\t" }.count
-        }
-        guard !meaningfulIndents.isEmpty,
-              (meaningfulIndents.max() ?? 0) <= 12 else {
-            return nil
-        }
-
-        var output: [String] = []
-        var stack: [String] = []
-        var previousOpenedBlock = false
-        var pendingDecoratorIndent: Int?
-        var blankBefore = false
-
-        for rawLine in rawLines {
-            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty else {
-                output.append("")
-                blankBefore = true
-                continue
-            }
-
-            if trimmed.hasPrefix("#") {
-                output.append(String(repeating: " ", count: stack.count * 4) + trimmed)
-                blankBefore = false
-                continue
-            }
-
-            if blankBefore, stack.count > 1, shouldDedentAfterBlankLine(trimmed) {
-                stack.removeLast()
-            }
-
-            let rawIndent = rawLine.prefix { $0 == " " || $0 == "\t" }.count
-            let keyword = blockKeyword(trimmed)
-            if isTopLevelLine(trimmed, rawIndent: rawIndent, previousOpenedBlock: previousOpenedBlock) {
-                stack.removeAll()
-            } else if isBlockContinuation(keyword) {
-                alignContinuation(keyword, stack: &stack)
-            }
-
-            let indentLevel = pendingDecoratorIndent ?? stack.count
-            output.append(String(repeating: " ", count: indentLevel * 4) + trimmed)
-            pendingDecoratorIndent = nil
-
-            if trimmed.hasPrefix("@") {
-                pendingDecoratorIndent = indentLevel
-                previousOpenedBlock = false
-                blankBefore = false
-                continue
-            }
-
-            if lineOpensBlock(trimmed) {
-                stack.append(keyword)
-                previousOpenedBlock = true
-            } else {
-                previousOpenedBlock = false
-                if lineTerminatesCurrentBlock(trimmed), !stack.isEmpty {
-                    stack.removeLast()
-                }
-            }
-            blankBefore = false
-        }
-
-        let rebuilt = output.joined(separator: "\n")
-        guard rebuilt != content else { return nil }
-        return rebuilt
-    }
-
-    private static func alignContinuation(_ keyword: String, stack: inout [String]) {
-        switch keyword {
-        case "except", "finally":
-            while let last = stack.last, last != "try" {
-                stack.removeLast()
-            }
-            if stack.last == "try" {
-                stack.removeLast()
-            }
-        case "elif":
-            while let last = stack.last, last != "if" && last != "elif" {
-                stack.removeLast()
-            }
-            if stack.last == "if" || stack.last == "elif" {
-                stack.removeLast()
-            }
-        case "else":
-            while let last = stack.last,
-                  !["if", "elif", "for", "while", "try", "except"].contains(last) {
-                stack.removeLast()
-            }
-            if let last = stack.last,
-               ["if", "elif", "for", "while", "try", "except"].contains(last) {
-                stack.removeLast()
-            }
-        default:
-            break
-        }
-    }
-
-    private static func isTopLevelLine(_ text: String, rawIndent: Int, previousOpenedBlock: Bool) -> Bool {
-        guard rawIndent == 0, !previousOpenedBlock else { return false }
-        let lowered = text.lowercased()
-        return lowered.hasPrefix("import ")
-            || lowered.hasPrefix("from ")
-            || lowered.hasPrefix("def ")
-            || lowered.hasPrefix("async def ")
-            || lowered.hasPrefix("class ")
-            || lowered.hasPrefix("if __name__")
-            || lowered.hasPrefix("@")
-    }
-
-    private static func isBlockContinuation(_ keyword: String) -> Bool {
-        ["elif", "else", "except", "finally"].contains(keyword)
-    }
-
-    private static func shouldDedentAfterBlankLine(_ text: String) -> Bool {
-        let lowered = text.lowercased()
-        return lowered.hasPrefix("return")
-            || lowered.hasPrefix("yield")
-            || lowered.hasPrefix("raise ")
-            || lowered.hasPrefix("print(")
-            || lowered.contains(" = ")
-            || lowered.hasPrefix("result =")
-            || lowered.hasPrefix("elapsed =")
-            || lowered.hasPrefix("total =")
-            || lowered.hasPrefix("count =")
-    }
-
-    private static func lineTerminatesCurrentBlock(_ text: String) -> Bool {
-        let lowered = text.lowercased()
-        return lowered == "pass"
-            || lowered == "break"
-            || lowered == "continue"
-            || lowered.hasPrefix("return")
-            || lowered.hasPrefix("yield")
-            || lowered.hasPrefix("raise ")
     }
 
     private static func blockKeyword(_ text: String) -> String {
@@ -379,6 +210,14 @@ enum LocalAlpinePythonWriteGuard {
 
     private static func firstToken(_ text: String) -> String {
         text.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == ":" }).first.map(String.init) ?? text
+    }
+
+    private static func stripHorizontalWhitespace(_ line: String) -> String {
+        String(line.drop(while: { $0 == " " || $0 == "\t" }))
+    }
+
+    private static func leadingIndentCount(_ line: String) -> Int {
+        line.prefix { $0 == " " || $0 == "\t" }.count
     }
 
     private static func ensureTrailingNewline(_ content: String) -> String {
