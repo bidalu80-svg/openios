@@ -47,7 +47,10 @@ enum LocalAlpinePythonWriteGuard {
             notes.append("已将 Tab 统一替换为 4 个空格")
         }
 
-        let repaired = repairFlatPythonBlocks(in: normalizedTabs)
+        let normalizedIndents = normalizeTinyPythonIndents(in: normalizedTabs)
+        notes.append(contentsOf: normalizedIndents.notes)
+
+        let repaired = repairFlatPythonBlocks(in: normalizedIndents.content)
         var preparedContent = repaired.content
         notes.append(contentsOf: repaired.notes)
 
@@ -143,6 +146,36 @@ enum LocalAlpinePythonWriteGuard {
             "match ", "case "
         ]
         return starters.contains { lowered.hasPrefix($0) }
+    }
+
+    private static func normalizeTinyPythonIndents(in content: String) -> (content: String, notes: [String]) {
+        let lines = content.components(separatedBy: .newlines)
+        let significant = lines.compactMap { rawLine -> (indent: Int, text: String)? in
+            let text = stripHorizontalWhitespace(rawLine)
+            guard !text.isEmpty, !text.hasPrefix("#") else { return nil }
+            return (leadingIndentCount(rawLine), text)
+        }
+        guard significant.contains(where: { lineOpensBlock($0.text) }) else {
+            return (content, [])
+        }
+
+        let positiveIndents = Set(significant.map(\.indent).filter { $0 > 0 })
+        guard !positiveIndents.isEmpty,
+              positiveIndents.allSatisfy({ $0 <= 3 }) else {
+            return (content, [])
+        }
+
+        var changedLines: [Int] = []
+        let normalized = lines.enumerated().map { offset, rawLine in
+            let indent = leadingIndentCount(rawLine)
+            guard indent > 0, indent <= 3 else { return rawLine }
+            changedLines.append(offset + 1)
+            return String(repeating: " ", count: indent * 4) + stripHorizontalWhitespace(rawLine)
+        }
+
+        guard !changedLines.isEmpty else { return (content, []) }
+        let note = "已将疑似被压缩的 Python 缩进恢复为 4 空格层级：第 \(changedLines.prefix(12).map(String.init).joined(separator: ", ")) 行"
+        return (normalized.joined(separator: "\n"), [note])
     }
 
     private static func repairFlatPythonBlocks(in content: String) -> (content: String, notes: [String]) {

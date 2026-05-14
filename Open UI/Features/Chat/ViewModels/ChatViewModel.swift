@@ -279,6 +279,8 @@ final class ChatViewModel {
     private var localAlpineFailedCommands: [String: LocalAlpineAgentCommandFailure] = [:]
     private var localAlpineFailureSignatures: [String: Int] = [:]
     private var localAlpineBlockedRepeatCommands: [String: Int] = [:]
+    private var localAlpineFinalSummaryParentIds: Set<String> = []
+    private var localAlpineFinishedContinuationMessageIds: Set<String> = []
     private let localAlpineAgentMaxSteps = 10
     private let localAlpineContinuationMaxNoCommandRetries = 1
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
@@ -4719,10 +4721,12 @@ final class ChatViewModel {
     }
 
     private static func fallbackLocalAlpineBlockForAssistantCode(content: String, userText: String) -> String? {
-        guard let code = firstRunnablePythonCodeBlock(in: content) else { return nil }
+        guard let code = firstRunnablePythonCodeBlock(in: content),
+              let preparedCode = preparedRunnablePythonCode(code) else { return nil }
         let fileName = "script.py"
         let commandPath = shellQuoted(fileName)
-        let lines = code.components(separatedBy: "\n")
+        let arguments = firstURL(in: userText).map { " \(shellQuoted($0))" } ?? ""
+        let base64 = Data(preparedCode.utf8).base64EncodedString()
         let object: [String: Any] = [
             "iexa_alpine": [
                 [
@@ -4730,11 +4734,10 @@ final class ChatViewModel {
                     "write_files": [
                         [
                             "path": fileName,
-                            "code_lines": lines,
-                            "append_newline": true
+                            "content_base64": base64
                         ]
                     ],
-                    "command": "python3 -m py_compile \(commandPath) && python3 \(commandPath)"
+                    "command": "python3 -m py_compile \(commandPath) && python3 \(commandPath)\(arguments)"
                 ]
             ]
         ]
@@ -4745,6 +4748,118 @@ final class ChatViewModel {
         \(json)
         ```
         """
+    }
+
+    private static func normalizedLocalAlpineExecutableContent(from content: String) -> String? {
+        var normalizedBlocks: [Any] = []
+        for block in localAlpineInstructionBlocks(from: content) {
+            if let data = block.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data) {
+                var changed = false
+                let normalized = normalizedLocalAlpineObject(object, changed: &changed)
+                normalizedBlocks.append(contentsOf: localAlpineCommandObjects(fromNormalized: normalized))
+                continue
+            }
+
+            let shell = block.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !shell.isEmpty {
+                normalizedBlocks.append(["command": shell, "cwd": "/mnt/iexa"])
+            }
+        }
+        guard !normalizedBlocks.isEmpty else { return nil }
+
+        let object: [String: Any] = ["iexa_alpine": normalizedBlocks]
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return """
+        ```iexa_alpine
+        \(json)
+        ```
+        """
+    }
+
+    private static func localAlpineCommandObjects(fromNormalized object: Any) -> [Any] {
+        if let dict = object as? [String: Any],
+           let nested = dict["iexa_alpine"] ?? dict["commands"] {
+            return localAlpineCommandObjects(fromNormalized: nested)
+        }
+        if let array = object as? [Any] {
+            return array.flatMap { localAlpineCommandObjects(fromNormalized: $0) }
+        }
+        return [object]
+    }
+
+    private static func normalizedLocalAlpineObject(_ object: Any, changed: inout Bool) -> Any {
+        if let array = object as? [Any] {
+            return array.map { normalizedLocalAlpineObject($0, changed: &changed) }
+        }
+
+        guard var dict = object as? [String: Any] else { return object }
+        for key in Array(dict.keys) {
+            if let value = dict[key] {
+                dict[key] = normalizedLocalAlpineObject(value, changed: &changed)
+            }
+        }
+
+        guard let path = localAlpineWriteFilePath(from: dict),
+              path.lowercased().hasSuffix(".py"),
+              !hasStructuredLocalAlpinePayload(dict),
+              let plain = plainLocalAlpineContent(from: dict),
+              let prepared = preparedRunnablePythonCode(plain) else {
+            return dict
+        }
+
+        for key in ["content", "contents", "text", "body", "code"] {
+            dict.removeValue(forKey: key)
+        }
+        dict["content_base64"] = Data(prepared.utf8).base64EncodedString()
+        changed = true
+        return dict
+    }
+
+    private static func localAlpineWriteFilePath(from dict: [String: Any]) -> String? {
+        ((dict["path"] as? String)
+            ?? (dict["file"] as? String)
+            ?? (dict["name"] as? String)
+            ?? (dict["filename"] as? String)
+            ?? (dict["write_file"] as? String)
+            ?? (dict["target"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func hasStructuredLocalAlpinePayload(_ dict: [String: Any]) -> Bool {
+        dict["code_lines"] != nil
+            || dict["content_lines"] != nil
+            || dict["lines"] != nil
+            || dict["content_base64"] != nil
+            || dict["base64"] != nil
+    }
+
+    private static func plainLocalAlpineContent(from dict: [String: Any]) -> String? {
+        (dict["content"] as? String)
+            ?? (dict["contents"] as? String)
+            ?? (dict["text"] as? String)
+            ?? (dict["body"] as? String)
+            ?? (dict["code"] as? String)
+    }
+
+    private static func preparedRunnablePythonCode(_ code: String) -> String? {
+        switch LocalAlpinePythonWriteGuard.prepare(code, source: .codeBlock) {
+        case .success(let content, _):
+            return content
+        case .failure:
+            return nil
+        }
+    }
+
+    private static func firstURL(in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: #"https?://[^\s<>"')\]]+"#, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        guard let match = regex.firstMatch(in: text, range: fullRange) else { return nil }
+        return nsText.substring(with: match.range)
     }
 
     private static func firstRunnablePythonCodeBlock(in content: String) -> String? {
@@ -5147,6 +5262,8 @@ final class ChatViewModel {
         localAlpineFailedCommands.removeAll()
         localAlpineFailureSignatures.removeAll()
         localAlpineBlockedRepeatCommands.removeAll()
+        localAlpineFinalSummaryParentIds.removeAll()
+        localAlpineFinishedContinuationMessageIds.removeAll()
     }
 
     private func cancelLocalAlpineAgentLoop() {
@@ -9308,25 +9425,23 @@ final class ChatViewModel {
             appendLocalAlpineAgentLimitMessage(parentId: messageId)
             return
         }
-        let userRequestedExecution = conversation?.messages.last(where: {
+        let latestUserText = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
-        }).map { Self.isExplicitLocalAlpineRequest($0.content) } ?? false
+        })?.content
+        let userRequestedExecution = latestUserText.map(Self.isExplicitLocalAlpineRequest) ?? false
 
         let executableContent: String
-        if content.localizedCaseInsensitiveContains("iexa_alpine") {
-            executableContent = content
+        if userRequestedExecution,
+           let userText = latestUserText,
+           let fallback = Self.fallbackLocalAlpineBlockForAssistantCode(content: content, userText: userText) {
+            executableContent = fallback
+        } else if content.localizedCaseInsensitiveContains("iexa_alpine"),
+                  let normalized = Self.normalizedLocalAlpineExecutableContent(from: content) {
+            executableContent = normalized
         } else if message.metadata?["iexa_local_alpine_continuation"] == "true" {
             return
         } else if userRequestedExecution,
-                  let userText = conversation?.messages.last(where: {
-                      $0.role == .user && !Self.isLocalAlpineAgentResult($0)
-                  })?.content,
-                  let fallback = Self.fallbackLocalAlpineBlockForAssistantCode(content: content, userText: userText) {
-            executableContent = fallback
-        } else if userRequestedExecution,
-                  let userText = conversation?.messages.last(where: {
-                      $0.role == .user && !Self.isLocalAlpineAgentResult($0)
-                  })?.content,
+                  let userText = latestUserText,
                   let fallback = Self.fallbackLocalAlpineBlock(for: userText) {
             executableContent = fallback
         } else {
@@ -9934,10 +10049,12 @@ final class ChatViewModel {
     private func scheduleLocalAlpineFinalSummary(after resultMessageId: String) {
         guard terminalEnabled, selectedTerminalIsLocalAlpine else { return }
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
+        guard !localAlpineFinalSummaryParentIds.contains(resultMessageId) else { return }
         guard conversation?.messages.contains(where: {
             $0.metadata?["iexa_local_alpine_final_summary"] == resultMessageId
         }) != true else { return }
 
+        localAlpineFinalSummaryParentIds.insert(resultMessageId)
         localAlpineContinuationTask?.cancel()
         localAlpineContinuationTask = Task { [weak self] in
             await self?.startLocalAlpineContinuation(
@@ -10246,6 +10363,11 @@ final class ChatViewModel {
             }
             return
         }
+        guard !localAlpineFinishedContinuationMessageIds.contains(assistantMessageId) else {
+            cleanupStreaming()
+            return
+        }
+        localAlpineFinishedContinuationMessageIds.insert(assistantMessageId)
 
         let rawContent = content
         let doneDescription: String
