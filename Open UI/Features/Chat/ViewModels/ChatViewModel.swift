@@ -4698,6 +4698,14 @@ final class ChatViewModel {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         guard !normalized.isEmpty else { return false }
+        if (normalized.contains("脚本") || normalized.contains("script"))
+            && (normalized.contains("运行") || normalized.contains("执行") || normalized.contains("跑") || normalized.contains("run")) {
+            return true
+        }
+        if (normalized.contains("项目") || normalized.contains("project"))
+            && (normalized.contains("运行") || normalized.contains("执行") || normalized.contains("跑") || normalized.contains("run")) {
+            return true
+        }
         let terms = [
             "在终端执行", "在终端运行", "用终端执行", "用终端运行",
             "执行命令", "运行命令", "帮我执行", "帮我运行",
@@ -4708,6 +4716,70 @@ final class ChatViewModel {
             "run command", "execute command", "run script", "run project"
         ]
         return terms.contains { normalized.contains($0) }
+    }
+
+    private static func fallbackLocalAlpineBlockForAssistantCode(content: String, userText: String) -> String? {
+        guard let code = firstRunnablePythonCodeBlock(in: content) else { return nil }
+        let fileName = suggestedPythonScriptName(for: userText)
+        let commandPath = shellQuoted(fileName)
+        let lines = code.components(separatedBy: "\n")
+        let object: [String: Any] = [
+            "iexa_alpine": [
+                [
+                    "cwd": "/mnt/iexa",
+                    "write_files": [
+                        [
+                            "path": fileName,
+                            "code_lines": lines,
+                            "append_newline": true
+                        ]
+                    ],
+                    "command": "python3 -m py_compile \(commandPath) && python3 \(commandPath)"
+                ]
+            ]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return """
+        ```iexa_alpine
+        \(json)
+        ```
+        """
+    }
+
+    private static func firstRunnablePythonCodeBlock(in content: String) -> String? {
+        let nsContent = content as NSString
+        guard let regex = try? NSRegularExpression(
+            pattern: #"```([^\n`]*)\n([\s\S]*?)```"#,
+            options: [.caseInsensitive]
+        ) else { return nil }
+        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
+        for match in matches where match.numberOfRanges >= 3 {
+            let info = nsContent.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard info == "py" || info.contains("python") else { continue }
+            let body = nsContent.substring(with: match.range(at: 2))
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\n"))
+            if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return body
+            }
+        }
+        return nil
+    }
+
+    private static func suggestedPythonScriptName(for userText: String) -> String {
+        let normalized = userText.lowercased()
+        if normalized.contains("爬虫") || normalized.contains("spider") || normalized.contains("crawler") {
+            return "simple_crawler.py"
+        }
+        return "script.py"
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     private static func fallbackLocalAlpineBlock(for text: String) -> String? {
@@ -9253,6 +9325,12 @@ final class ChatViewModel {
             executableContent = content
         } else if message.metadata?["iexa_local_alpine_continuation"] == "true" {
             return
+        } else if userRequestedExecution,
+                  let userText = conversation?.messages.last(where: {
+                      $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+                  })?.content,
+                  let fallback = Self.fallbackLocalAlpineBlockForAssistantCode(content: content, userText: userText) {
+            executableContent = fallback
         } else if userRequestedExecution,
                   let userText = conversation?.messages.last(where: {
                       $0.role == .user && !Self.isLocalAlpineAgentResult($0)
