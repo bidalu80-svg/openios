@@ -48,8 +48,12 @@ enum LocalAlpinePythonWriteGuard {
         }
 
         let repaired = repairFlatPythonBlocks(in: normalizedTabs)
-        let preparedContent = repaired.content
+        var preparedContent = repaired.content
         notes.append(contentsOf: repaired.notes)
+
+        let filled = fillMissingPythonBlockBodies(in: preparedContent)
+        preparedContent = filled.content
+        notes.append(contentsOf: filled.notes)
 
         if let warning = indentationPreflightWarning(for: preparedContent) {
             return .failure("Python 缩进预检失败：\(warning)。请提交完整且缩进正确的源码，优先使用 code_lines/content_lines/content_base64。")
@@ -198,6 +202,63 @@ enum LocalAlpinePythonWriteGuard {
         guard !changedLines.isEmpty else { return (content, []) }
         let note = "已在写入前自动修复明显缺失的 Python 块缩进：第 \(changedLines.prefix(12).map(String.init).joined(separator: ", ")) 行"
         return (repaired.joined(separator: "\n"), [note])
+    }
+
+    private static func fillMissingPythonBlockBodies(in content: String) -> (content: String, notes: [String]) {
+        var lines = content.components(separatedBy: .newlines)
+        guard lines.count >= 2 else { return (content, []) }
+
+        struct BlockState {
+            let indent: Int
+            var hasBody: Bool
+        }
+
+        var stack: [BlockState] = []
+        var insertedLineNumbers: [Int] = []
+        var index = 0
+
+        while index < lines.count {
+            let rawLine = lines[index]
+            let text = stripHorizontalWhitespace(rawLine)
+            if text.isEmpty || text.hasPrefix("#") {
+                index += 1
+                continue
+            }
+
+            let indent = leadingIndentCount(rawLine)
+
+            while let last = stack.last, indent <= last.indent {
+                if !last.hasBody {
+                    let passLine = String(repeating: " ", count: last.indent + 4) + "pass"
+                    lines.insert(passLine, at: index)
+                    insertedLineNumbers.append(index + 1)
+                    index += 1
+                }
+                _ = stack.popLast()
+            }
+
+            if !stack.isEmpty, indent > stack[stack.count - 1].indent {
+                var parent = stack.removeLast()
+                parent.hasBody = true
+                stack.append(parent)
+            }
+
+            if lineOpensBlock(text) {
+                stack.append(BlockState(indent: indent, hasBody: false))
+            }
+
+            index += 1
+        }
+
+        while let last = stack.popLast() {
+            guard !last.hasBody else { continue }
+            lines.append(String(repeating: " ", count: last.indent + 4) + "pass")
+            insertedLineNumbers.append(lines.count)
+        }
+
+        guard !insertedLineNumbers.isEmpty else { return (content, []) }
+        let note = "已为缺失代码体的 Python 块自动补全 `pass`：第 \(insertedLineNumbers.prefix(12).map(String.init).joined(separator: ", ")) 行"
+        return (lines.joined(separator: "\n"), [note])
     }
 
     private static func startsPeerOrDedentKeyword(_ text: String) -> Bool {

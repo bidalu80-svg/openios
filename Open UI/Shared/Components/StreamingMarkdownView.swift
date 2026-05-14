@@ -130,7 +130,10 @@ struct StreamingMarkdownView: View {
     /// placeholder. This fixes the visible flash where the prose text disappeared
     /// during VIZ streaming and only reappeared once the stream finished.
     private func resolveSegments() -> [ContentSegment] {
-        let renderContent = Self.sanitizedMarkdownTextForDisplay(content)
+        // Keep raw content for structural parsing so fenced code blocks preserve
+        // exact bytes (especially Python indentation). Markdown-only segments are
+        // sanitized later at render time in `segmentView`.
+        let renderContent = content
         guard !renderContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
 
         if isStreaming {

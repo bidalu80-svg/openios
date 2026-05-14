@@ -488,6 +488,17 @@ actor LocalAlpineAgentService {
         let split = splitFilePath(target)
         let isPython = target.lowercased().hasSuffix(".py")
 
+        if isPython, file.source == .content {
+            return LocalAlpineProtectedWriteOutcome(
+                lines: [
+                    "- `\(target)` 写入已拒绝：Python 文件禁止使用 `content` 字段提交源码。",
+                    "  - 请改用 `code_lines` / `content_lines` / `content_base64` 提交完整文件，避免多行文本缩进在传输中被压平。"
+                ],
+                writtenPath: nil,
+                hadFailure: true
+            )
+        }
+
         let prepared: PythonWritePreparation
         if isPython {
             prepared = Self.preparePythonForProtectedWrite(file.content, source: file.source)
