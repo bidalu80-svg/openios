@@ -379,8 +379,11 @@ struct StreamingStatusView: View {
 
     @ViewBuilder
     private func webSearchFavicon(for urlString: String?, title: String, size: CGFloat) -> some View {
-        let faviconURL = urlString.flatMap(Self.faviconURL(for:))
-        CachedAsyncImage(url: faviconURL, targetPixelSize: Int(size * UIScreen.main.scale)) { image in
+        let targetPixelSize = Int(size * UIScreen.main.scale)
+        let faviconURLs = urlString
+            .map { WebsiteFaviconResolver.candidateURLs(for: $0, size: max(64, targetPixelSize)) }
+            ?? []
+        FallbackCachedAsyncImage(urls: faviconURLs, targetPixelSize: targetPixelSize) { image in
             image
                 .resizable()
                 .scaledToFill()
@@ -394,11 +397,6 @@ struct StreamingStatusView: View {
         .frame(width: size, height: size)
         .clipShape(Circle())
         .overlay(Circle().strokeBorder(theme.cardBorder.opacity(0.45), lineWidth: 0.5))
-    }
-
-    private static func faviconURL(for sourceURL: String) -> URL? {
-        guard let url = URL(string: sourceURL), let host = url.host, !host.isEmpty else { return nil }
-        return URL(string: "https://icons.duckduckgo.com/ip3/\(host).ico")
     }
 
     private func hostLabel(from urlString: String) -> String? {

@@ -549,7 +549,63 @@ struct StreamingMarkdownView: View {
                 withTemplate: ""
             )
         }
+        cleaned = compactBareLinks(in: cleaned)
         return cleaned
+    }
+
+    private static func compactBareLinks(in text: String) -> String {
+        let pattern = #"(?<![\]\(])https?://[^\s<>"']+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let nsText = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+        guard !matches.isEmpty else { return text }
+
+        var result = text
+        for match in matches.reversed() {
+            let raw = nsText.substring(with: match.range)
+            let (url, trailing) = splitTrailingPunctuation(from: raw)
+            guard !url.isEmpty,
+                  URL(string: url) != nil else { continue }
+            let title = compactLinkTitle(for: url)
+            let replacement = "[\(title) ↗](\(url))\(trailing)"
+            if let range = Range(match.range, in: result) {
+                result.replaceSubrange(range, with: replacement)
+            }
+        }
+        return result
+    }
+
+    private static func splitTrailingPunctuation(from raw: String) -> (url: String, trailing: String) {
+        var url = raw
+        var trailing = ""
+        while let last = url.last, ".,，。；;：:)）]】".contains(last) {
+            trailing.insert(last, at: trailing.startIndex)
+            url.removeLast()
+        }
+        return (url, trailing)
+    }
+
+    private static func compactLinkTitle(for rawURL: String) -> String {
+        guard let url = URL(string: rawURL) else { return "链接" }
+        let host = (url.host ?? "链接")
+            .replacingOccurrences(of: "^www\\.", with: "", options: .regularExpression)
+        let lowerHost = host.lowercased()
+        if lowerHost.contains("github.com") {
+            let parts = url.path.split(separator: "/").prefix(2).map(String.init)
+            if parts.count >= 2 { return "\(parts[1]) GitHub" }
+            return "GitHub"
+        }
+        if lowerHost.contains("douyin.com") || lowerHost.contains("iesdouyin.com") {
+            return "抖音视频"
+        }
+        if lowerHost.contains("snssdk.com") {
+            return "MP4 播放地址"
+        }
+        let name = host
+            .split(separator: ".")
+            .first
+            .map(String.init) ?? host
+        return name.isEmpty ? "链接" : name
     }
 
     static func removeProviderCitationArtifacts(from text: String) -> String {

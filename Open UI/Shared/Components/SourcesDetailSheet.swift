@@ -61,8 +61,11 @@ struct SourcesDetailSheet: View {
                     .background(theme.surfaceContainer)
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
 
-                if let url, let faviconURL = Self.faviconURL(for: url) {
-                    CachedAsyncImage(url: faviconURL, targetPixelSize: Int(18 * UIScreen.main.scale)) { image in
+                if let url {
+                    let size: CGFloat = 18
+                    let targetPixelSize = Int(size * UIScreen.main.scale)
+                    let faviconURLs = WebsiteFaviconResolver.candidateURLs(for: url, size: max(64, targetPixelSize))
+                    FallbackCachedAsyncImage(urls: faviconURLs, targetPixelSize: targetPixelSize) { image in
                         image
                             .resizable()
                             .scaledToFill()
@@ -71,7 +74,7 @@ struct SourcesDetailSheet: View {
                             .scaledFont(size: 12)
                             .foregroundStyle(theme.textTertiary)
                     }
-                    .frame(width: 18, height: 18)
+                    .frame(width: size, height: size)
                     .background(theme.surfaceContainer)
                     .clipShape(Circle())
                 } else {
@@ -137,10 +140,5 @@ struct SourcesDetailSheet: View {
 
     private func resolveURL(for source: ChatSourceReference) -> String? {
         source.resolvedURL
-    }
-
-    private static func faviconURL(for sourceURL: String) -> URL? {
-        guard let parsed = URL(string: sourceURL), let host = parsed.host, !host.isEmpty else { return nil }
-        return URL(string: "https://icons.duckduckgo.com/ip3/\(host).ico")
     }
 }

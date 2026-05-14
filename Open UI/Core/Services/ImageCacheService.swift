@@ -727,6 +727,100 @@ struct CachedAsyncImage<Content: View, Placeholder: View>: View {
     }
 }
 
+struct FallbackCachedAsyncImage<Content: View, Placeholder: View>: View {
+    let urls: [URL]
+    var authToken: String?
+    var targetPixelSize: Int
+    @ViewBuilder let content: (Image) -> Content
+    @ViewBuilder let placeholder: () -> Placeholder
+
+    @State private var loadedImage: UIImage?
+
+    var body: some View {
+        Group {
+            if let loadedImage {
+                content(Image(uiImage: loadedImage))
+            } else {
+                placeholder()
+            }
+        }
+        .task(id: urls.map(\.absoluteString).joined(separator: "|")) {
+            loadedImage = nil
+
+            for url in urls {
+                if let cached = ImageCacheService.shared.cachedImageSync(for: url) {
+                    loadedImage = cached
+                    return
+                }
+            }
+
+            do {
+                try await Task.sleep(nanoseconds: 120_000_000)
+            } catch {
+                return
+            }
+
+            for url in urls {
+                if let image = await ImageCacheService.shared.loadImage(
+                    from: url,
+                    authToken: authToken,
+                    targetPixelSize: targetPixelSize
+                ) {
+                    loadedImage = image
+                    return
+                }
+            }
+        }
+    }
+}
+
+enum WebsiteFaviconResolver {
+    static func candidateURLs(for sourceURL: String, size: Int = 64) -> [URL] {
+        guard let parsed = normalizedURL(from: sourceURL),
+              var components = URLComponents(url: parsed, resolvingAgainstBaseURL: false),
+              let host = components.host?.lowercased(),
+              !host.isEmpty else {
+            return []
+        }
+
+        components.scheme = components.scheme ?? "https"
+        components.path = "/favicon.ico"
+        components.query = nil
+        components.fragment = nil
+
+        let trimmedHost = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        var urls: [URL] = []
+        append("https://www.google.com/s2/favicons?domain=\(trimmedHost)&sz=\(size)", to: &urls)
+        append("https://www.google.com/s2/favicons?domain=\(host)&sz=\(size)", to: &urls)
+        append("https://favicon.im/\(trimmedHost)?larger=true", to: &urls)
+        append("https://icon.horse/icon/\(trimmedHost)", to: &urls)
+        if let siteIcon = components.url {
+            urls.append(siteIcon)
+        }
+        append("https://icons.duckduckgo.com/ip3/\(trimmedHost).ico", to: &urls)
+        append("https://icons.duckduckgo.com/ip3/\(host).ico", to: &urls)
+
+        var seen = Set<String>()
+        return urls.filter { seen.insert($0.absoluteString).inserted }
+    }
+
+    private static func normalizedURL(from raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let url = URL(string: trimmed), url.host != nil {
+            return url
+        }
+        return URL(string: "https://\(trimmed)")
+    }
+
+    private static func append(_ raw: String, to urls: inout [URL]) {
+        if let encoded = raw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+           let url = URL(string: encoded) {
+            urls.append(url)
+        }
+    }
+}
+
 // MARK: - Self-Signed Certificate Delegate
 
 /// `URLSessionDelegate` that accepts self-signed TLS certificates for a specific server host.

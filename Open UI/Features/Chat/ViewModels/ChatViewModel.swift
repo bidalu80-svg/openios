@@ -1348,7 +1348,9 @@ final class ChatViewModel {
                 ?? (dict["text"] as? String)
                 ?? (dict["body"] as? String) {
                 size = content.utf8.count
-            } else if let lines = (dict["content_lines"] as? [String]) ?? (dict["lines"] as? [String]) {
+            } else if let lines = (dict["code_lines"] as? [String])
+                ?? (dict["content_lines"] as? [String])
+                ?? (dict["lines"] as? [String]) {
                 size = lines.joined(separator: "\n").utf8.count
             } else if let base64 = (dict["content_base64"] as? String) ?? (dict["base64"] as? String) {
                 size = (base64.count * 3) / 4
@@ -1478,6 +1480,7 @@ final class ChatViewModel {
         let hasContent = dict["content"] != nil
             || dict["text"] != nil
             || dict["body"] != nil
+            || dict["code_lines"] != nil
             || dict["content_lines"] != nil
             || dict["lines"] != nil
             || dict["content_base64"] != nil
@@ -4755,6 +4758,9 @@ final class ChatViewModel {
 
     private func localAlpineRunningDescription(for command: String) -> String {
         let lowercased = command.lowercased()
+        if lowercased.contains("\"write_files\"") || lowercased.contains("\"files\"") {
+            return "正在写入文件并验证..."
+        }
         if lowercased.contains("apk add ")
             || lowercased.contains("apk upgrade")
             || lowercased.contains("apk fix") {
@@ -4767,6 +4773,23 @@ final class ChatViewModel {
             return "正在确认 Alpine 环境并执行命令..."
         }
         return "正在执行本地 Alpine 命令..."
+    }
+
+    private func localAlpineCompletedDescription(for result: LocalAlpineAgentResult) -> String {
+        var parts: [String] = []
+        if result.editedFileCount > 0 {
+            parts.append("已编辑 \(result.editedFileCount) 个文件")
+        }
+        if result.executedCommandCount > 0 {
+            parts.append("已运行 \(result.executedCommandCount) 条命令")
+        }
+        if parts.isEmpty {
+            parts.append("本地 Alpine 已完成")
+        }
+        if result.hadFailure {
+            parts.append("有错误")
+        }
+        return parts.joined(separator: "  ")
     }
 
     private func shouldLocalAlpineCheckDependencies(for lowercasedCommand: String) -> Bool {
@@ -7772,9 +7795,10 @@ final class ChatViewModel {
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
-        - For scripts/projects, use `write_files` inside `iexa_alpine` to create files, then run a bounded verification command. Do not use `cat > file <<EOF` for Python/JS/HTML/CSS bodies.
+        - For scripts/projects, use `write_files` inside `iexa_alpine` to create files, then run a bounded verification command. For Python files, prefer `code_lines` or `content_base64`; the app writes Python transactionally through a temporary file and rejects the write if `python3 -m py_compile` fails, so bad indentation must not be allowed to overwrite the target.
+        - Do not use `cat > file <<EOF` for Python/JS/HTML/CSS bodies.
         - When fixing an existing Python file after a syntax/indentation error, first inspect the exact lines (`nl -ba file.py | sed -n 'start,endp'`), then apply the smallest edit with a short Python/perl/sed patch or a purpose-built patch script. Do not use whole-file `write_files` as the first repair step.
-        - For indentation-sensitive files, prefer `content_lines` (array of exact lines) or `content_base64` instead of heredoc shell text. This preserves leading spaces exactly.
+        - For indentation-sensitive files, prefer `code_lines` / `content_lines` (array of exact lines) or `content_base64` instead of heredoc shell text. This preserves leading spaces exactly.
         - Use heredoc only for tiny one-off shell snippets. Never put long Python class/function bodies in heredoc if `write_files` can be used.
         - After writing Python, run `python3 -m py_compile file.py` before running it. If syntax or indentation fails, locate the exact bad block, patch only that block when practical, then verify again before summarizing.
         - If the user wants to test Python `input()` / shell `read` with their own text, do not invent sample stdin and do not pipe a fixed `printf` value. Leave the input/read command unpiped; the app will pause, ask the user for stdin, feed that exact text to the program, and append the real output.
@@ -7794,7 +7818,7 @@ final class ChatViewModel {
             {
               "cwd": "/mnt/iexa",
               "write_files": [
-                {"path": "hello.py", "content_lines": ["def main():", "    print('hello from Iexa Alpine')", "", "if __name__ == '__main__':", "    main()"]}
+                {"path": "hello.py", "code_lines": ["def main():", "    print('hello from Iexa Alpine')", "", "if __name__ == '__main__':", "    main()"]}
               ],
               "command": "python3 -m py_compile hello.py && python3 hello.py"
             }
@@ -9211,7 +9235,7 @@ final class ChatViewModel {
         }
         guard let repeated = result.commandResults
             .filter(\.failed)
-            .first(where: { (localAlpineFailureSignatures[Self.localAlpineFailureSignature($0)] ?? 0) >= 3 }) else {
+            .first(where: { (localAlpineFailureSignatures[Self.localAlpineFailureSignature($0)] ?? 0) >= 2 }) else {
             return false
         }
         appendLocalAlpineRepeatedErrorStopMessage(parentId: parentId, result: repeated)
@@ -9245,7 +9269,7 @@ final class ChatViewModel {
 
         Python file write guard
         App 已拦截 `cat/tee/heredoc` 写入 Python 文件，因为这种写法在聊天 UI 中容易破坏缩进。
-        下一步新建文件必须改用 `iexa_alpine` JSON 的 `write_files`，并使用 `content_lines` 或 `content_base64`；修复已有文件时先行号定位并用小 patch 修复，再执行 `python3 -m py_compile`。
+        下一步新建文件必须改用 `iexa_alpine` JSON 的 `write_files`，并使用 `code_lines` 或 `content_base64`；修复已有文件时先行号定位并用小 patch 修复，再执行 `python3 -m py_compile`。
         """
         } else {
             pythonRepairInstruction = ""
@@ -9591,7 +9615,7 @@ final class ChatViewModel {
 
         let doneStatus = localAlpineStatus(
             description: result.interactiveRequest == nil
-                ? (result.summary.contains("退出码：`0`") ? "本地 Alpine 执行完成" : "本地 Alpine 执行结束，存在错误输出")
+                ? localAlpineCompletedDescription(for: result)
                 : "本地 Alpine 输入已取消",
             done: true
         )
@@ -10117,8 +10141,8 @@ final class ChatViewModel {
         Strategy Switch:
         - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, patch the smallest broken block, then verification.
         - For Python indentation/syntax errors, first inspect the file with `nl -ba <file> | sed -n '1,160p'`, identify the exact broken line/block, patch only that section with a small Python/perl/sed patch, then run `python3 -m py_compile <file>` before running the script. Do not use `write_files` to rewrite the whole `.py` file as the first repair step.
-        - For indentation-sensitive rewrites, use `content_lines` or `content_base64`; do not use heredoc for Python class/function bodies.
-        - If a Python heredoc/cat write is blocked, immediately switch to `write_files` with `content_lines` or `content_base64`.
+        - For indentation-sensitive rewrites, use `code_lines`, `content_lines`, or `content_base64`; do not use heredoc for Python class/function bodies.
+        - If a Python heredoc/cat write is blocked, immediately switch to `write_files` with `code_lines` or `content_base64`.
         [/Local Alpine continuation]
         """
         if !messages.isEmpty, messages[0]["role"] as? String == "system" {

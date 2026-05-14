@@ -55,7 +55,7 @@ struct PythonCodeBlockView: View {
     }
 
     private var displayCode: String {
-        Self.repairFlattenedPythonIndentation(code) ?? code
+        Self.preparedCodeBlock(code) ?? code
     }
 
     // MARK: - Body
@@ -339,7 +339,15 @@ struct PythonCodeBlockView: View {
 
     private static func runCodeInLocalAlpine(code: String) async -> PythonExecutionResult {
         let fileName = "codeblock-\(UUID().uuidString.prefix(8)).py"
-        guard let data = code.data(using: .utf8) else {
+        guard let preparedCode = preparedCodeBlock(code) else {
+            return PythonExecutionResult(
+                status: .error,
+                stdout: "",
+                stderr: "Python 代码缩进/语法预检失败，已拒绝运行，避免把坏代码写入 Local Alpine。",
+                images: []
+            )
+        }
+        guard let data = preparedCode.data(using: .utf8) else {
             return PythonExecutionResult(
                 status: .error,
                 stdout: "",
@@ -365,6 +373,7 @@ struct PythonCodeBlockView: View {
 
         let command = "python3 -m py_compile '\(fileName)' && python3 '\(fileName)'"
         let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
+        try? await LocalAlpineTerminalService.shared.deleteItem(path: "/\(fileName)")
         let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
         if result.exitCode == 0 {
             return PythonExecutionResult(status: .success, stdout: output, stderr: "", images: [])
@@ -377,150 +386,13 @@ struct PythonCodeBlockView: View {
         )
     }
 
-    private static func repairFlattenedPythonIndentation(_ code: String) -> String? {
-        guard pythonIndentationPreflightWarning(for: code) != nil else { return nil }
-        let rawLines = code.components(separatedBy: .newlines)
-        let significantIndents = rawLines.compactMap { line -> Int? in
-            let text = line.trimmingCharacters(in: .whitespaces)
-            guard !text.isEmpty, !text.hasPrefix("#") else { return nil }
-            return line.prefix { $0 == " " || $0 == "\t" }.count
-        }
-        guard !significantIndents.isEmpty,
-              (significantIndents.max() ?? 0) <= 8 else {
+    private static func preparedCodeBlock(_ code: String) -> String? {
+        switch LocalAlpinePythonWriteGuard.prepare(code, source: .codeBlock) {
+        case .success(let content, _):
+            return content
+        case .failure:
             return nil
         }
-
-        var repaired: [String] = []
-        var indentLevel = 0
-        var previousOpenedBlock = false
-        var blankBefore = false
-
-        for rawLine in rawLines {
-            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty else {
-                repaired.append("")
-                blankBefore = true
-                continue
-            }
-
-            if trimmed.hasPrefix("#") {
-                repaired.append(String(repeating: " ", count: indentLevel * 4) + trimmed)
-                blankBefore = false
-                continue
-            }
-
-            let rawIndent = rawLine.prefix { $0 == " " || $0 == "\t" }.count
-            if blankBefore {
-                indentLevel = pythonIndentationLevelAfterBlankLine(current: indentLevel, text: trimmed)
-            }
-            if isLikelyTopLevelPythonLine(trimmed, rawIndent: rawIndent, previousOpenedBlock: previousOpenedBlock) {
-                indentLevel = 0
-            }
-            if pythonLineClosesBlock(trimmed), indentLevel > 0 {
-                indentLevel -= 1
-            }
-
-            repaired.append(String(repeating: " ", count: max(0, indentLevel) * 4) + trimmed)
-
-            if pythonLineOpensBlock(trimmed) {
-                indentLevel += 1
-                previousOpenedBlock = true
-            } else {
-                previousOpenedBlock = false
-                if pythonLineTerminatesCurrentBlock(trimmed), indentLevel > 0 {
-                    indentLevel -= 1
-                }
-            }
-            blankBefore = false
-        }
-
-        let joined = repaired.joined(separator: "\n")
-        guard joined != code,
-              pythonIndentationPreflightWarning(for: joined) == nil else {
-            return nil
-        }
-        return joined
-    }
-
-    private static func pythonIndentationPreflightWarning(for code: String) -> String? {
-        let significant = code.components(separatedBy: .newlines).enumerated().compactMap { index, rawLine -> (number: Int, indent: Int, text: String)? in
-            let text = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !text.isEmpty, !text.hasPrefix("#") else { return nil }
-            let indent = rawLine.prefix { $0 == " " || $0 == "\t" }.count
-            return (index + 1, indent, text)
-        }
-
-        guard significant.count >= 2 else { return nil }
-        for index in significant.indices.dropLast() {
-            let current = significant[index]
-            guard pythonLineOpensBlock(current.text) else { continue }
-            guard let next = significant[(index + 1)..<significant.endIndex].first else { continue }
-            if next.indent <= current.indent {
-                return "line \(current.number) opens a block but line \(next.number) is not indented"
-            }
-        }
-
-        let hasPythonBlocks = significant.contains { pythonLineOpensBlock($0.text) }
-        let maxIndent = significant.map { $0.indent }.max() ?? 0
-        if hasPythonBlocks, maxIndent == 1 {
-            return "python block indentation appears flattened"
-        }
-        return nil
-    }
-
-    private static func pythonLineOpensBlock(_ text: String) -> Bool {
-        guard text.hasSuffix(":") else { return false }
-        let lowered = text.lowercased()
-        let starters = [
-            "def ", "class ", "if ", "elif ", "else:", "for ", "while ",
-            "try:", "except", "finally:", "with ", "async def ", "async with ",
-            "match ", "case "
-        ]
-        return starters.contains { lowered.hasPrefix($0) }
-    }
-
-    private static func isLikelyTopLevelPythonLine(_ text: String, rawIndent: Int, previousOpenedBlock: Bool) -> Bool {
-        guard rawIndent == 0, !previousOpenedBlock else { return false }
-        let lowered = text.lowercased()
-        if lowered.hasPrefix("if __name__") { return true }
-        if lowered.hasPrefix("def ") || lowered.hasPrefix("class ") { return true }
-        if lowered.hasPrefix("import ") || lowered.hasPrefix("from ") { return true }
-        if lowered.hasPrefix("@") { return true }
-        return false
-    }
-
-    private static func pythonIndentationLevelAfterBlankLine(current: Int, text: String) -> Int {
-        guard current > 1 else { return current }
-        let lowered = text.lowercased()
-        if lowered.hasPrefix("return")
-            || lowered.hasPrefix("yield")
-            || lowered.hasPrefix("raise ")
-            || lowered.hasPrefix("print(")
-            || lowered.hasPrefix("result =")
-            || lowered.hasPrefix("total =")
-            || lowered.hasPrefix("count =") {
-            return 1
-        }
-        return current
-    }
-
-    private static func pythonLineClosesBlock(_ text: String) -> Bool {
-        let lowered = text.lowercased()
-        return lowered.hasPrefix("elif ")
-            || lowered.hasPrefix("else:")
-            || lowered.hasPrefix("except")
-            || lowered.hasPrefix("finally:")
-            || lowered.hasPrefix("case ")
-    }
-
-    private static func pythonLineTerminatesCurrentBlock(_ text: String) -> Bool {
-        let lowered = text.lowercased()
-        return lowered == "pass"
-            || lowered == "break"
-            || lowered == "continue"
-            || lowered.hasPrefix("return")
-            || lowered.hasPrefix("yield")
-            || lowered.hasPrefix("raise ")
     }
 }
 

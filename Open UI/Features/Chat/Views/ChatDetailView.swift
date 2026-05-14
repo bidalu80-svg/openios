@@ -2594,8 +2594,11 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func sourceFavicon(_ source: ChatSourceReference, size: CGFloat) -> some View {
-        let url = source.resolvedURL.flatMap(Self.faviconURL(for:))
-        CachedAsyncImage(url: url, targetPixelSize: Int(size * UIScreen.main.scale)) { image in
+        let targetPixelSize = Int(size * UIScreen.main.scale)
+        let urls = source.resolvedURL
+            .map { WebsiteFaviconResolver.candidateURLs(for: $0, size: max(64, targetPixelSize)) }
+            ?? []
+        FallbackCachedAsyncImage(urls: urls, targetPixelSize: targetPixelSize) { image in
             image
                 .resizable()
                 .scaledToFill()
@@ -2611,11 +2614,6 @@ struct ChatDetailView: View {
         .clipShape(Circle())
         .overlay(Circle().strokeBorder(theme.background.opacity(0.85), lineWidth: 1))
         .shadow(color: Color.black.opacity(0.08), radius: 2, y: 1)
-    }
-
-    private static func faviconURL(for sourceURL: String) -> URL? {
-        guard let parsed = URL(string: sourceURL), let host = parsed.host, !host.isEmpty else { return nil }
-        return URL(string: "https://icons.duckduckgo.com/ip3/\(host).ico")
     }
 
     // MARK: - Follow-Up Suggestions
