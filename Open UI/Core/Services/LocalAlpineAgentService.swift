@@ -579,38 +579,92 @@ actor LocalAlpineAgentService {
         let temporaryName = ".iexa-write-\(UUID().uuidString).py"
         let temporaryPath = split.directory == "/" ? "/\(temporaryName)" : "\(split.directory)/\(temporaryName)"
         let temporaryRuntimePath = runtimePath(forSharedPath: temporaryPath)
-        var lines: [String] = []
+        var currentData = data
+        var currentNotes = notes
+        var didAttemptStructuralRepair = false
 
         do {
-            try await LocalAlpineTerminalService.shared.writeFile(
-                data: data,
-                fileName: temporaryName,
-                destinationPath: split.directory
-            )
+            while true {
+                try await LocalAlpineTerminalService.shared.writeFile(
+                    data: currentData,
+                    fileName: temporaryName,
+                    destinationPath: split.directory
+                )
 
-            let compileCommand = "python3 -m py_compile \(shellSingleQuoted(temporaryRuntimePath))"
-            let compile = await LocalAlpineTerminalService.shared.execute(command: compileCommand, cwd: cwd)
-            if compile.exitCode != 0 {
-                try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-                let output = compile.output.trimmingCharacters(in: .whitespacesAndNewlines)
-                lines.append("- `\(target)` 写入已拒绝：Python 事务编译失败，目标文件未覆盖。")
-                lines.append("  - 验证命令：`\(compileCommand)`")
-                if !output.isEmpty {
-                    lines.append("  - 编译输出：\(String(output.prefix(600)))")
+                let astBeforeCommand = pythonASTValidationCommand(for: temporaryRuntimePath)
+                let astBefore = await LocalAlpineTerminalService.shared.execute(command: astBeforeCommand, cwd: cwd)
+                if astBefore.exitCode != 0 {
+                    if !didAttemptStructuralRepair,
+                       let currentContent = String(data: currentData, encoding: .utf8),
+                       let repaired = Self.repairFlattenedPythonIndentation(currentContent, force: true),
+                       repaired != currentContent,
+                       let repairedData = repaired.data(using: .utf8) {
+                        didAttemptStructuralRepair = true
+                        currentData = repairedData
+                        currentNotes.append("AST 校验失败后已自动重建 Python 缩进结构")
+                        try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+                        continue
+                    }
+
+                    try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+                    return failedPythonWriteOutcome(
+                        target: target,
+                        reason: "Python AST 校验失败，目标文件未覆盖",
+                        command: astBeforeCommand,
+                        result: astBefore
+                    )
                 }
-                return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: nil, hadFailure: true)
+
+                let blackCommand = pythonBlackFormatCommand(for: temporaryRuntimePath)
+                let black = await LocalAlpineTerminalService.shared.execute(command: blackCommand, cwd: cwd)
+                if black.exitCode != 0 {
+                    try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+                    return failedPythonWriteOutcome(
+                        target: target,
+                        reason: "Black 自动格式化失败，目标文件未覆盖",
+                        command: blackCommand,
+                        result: black
+                    )
+                }
+
+                let astAfterCommand = pythonASTValidationCommand(for: temporaryRuntimePath)
+                let astAfter = await LocalAlpineTerminalService.shared.execute(command: astAfterCommand, cwd: cwd)
+                if astAfter.exitCode != 0 {
+                    try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+                    return failedPythonWriteOutcome(
+                        target: target,
+                        reason: "Black 格式化后二次 AST 校验失败，目标文件未覆盖",
+                        command: astAfterCommand,
+                        result: astAfter
+                    )
+                }
+
+                let compileCommand = "python3 -m py_compile \(shellSingleQuoted(temporaryRuntimePath))"
+                let compile = await LocalAlpineTerminalService.shared.execute(command: compileCommand, cwd: cwd)
+                if compile.exitCode != 0 {
+                    try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+                    return failedPythonWriteOutcome(
+                        target: target,
+                        reason: "Python 事务编译失败，目标文件未覆盖",
+                        command: compileCommand,
+                        result: compile
+                    )
+                }
+
+                let formattedData = try await LocalAlpineTerminalService.shared.readFile(path: temporaryPath)
+                try await LocalAlpineTerminalService.shared.writeFile(
+                    data: formattedData,
+                    fileName: split.fileName,
+                    destinationPath: split.directory
+                )
+                try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+
+                var lines = [
+                    "- `\(target)` (\(formattedData.count) B，Python 完整文件事务写入已通过 AST、Black、二次 AST、py_compile，来源：\(source.displayName))"
+                ]
+                lines.append(contentsOf: currentNotes.map { "  - \($0)" })
+                return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: target, hadFailure: false)
             }
-
-            try await LocalAlpineTerminalService.shared.writeFile(
-                data: data,
-                fileName: split.fileName,
-                destinationPath: split.directory
-            )
-            try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-
-            lines.append("- `\(target)` (\(data.count) B，Python 事务写入已通过 py_compile，来源：\(source.displayName))")
-            lines.append(contentsOf: notes.map { "  - \($0)" })
-            return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: target, hadFailure: false)
         } catch {
             try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
             return LocalAlpineProtectedWriteOutcome(
@@ -619,6 +673,44 @@ actor LocalAlpineAgentService {
                 hadFailure: true
             )
         }
+    }
+
+    private func pythonASTValidationCommand(for runtimePath: String) -> String {
+        """
+        python3 -c "import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')); print('IEXA_AST_PARSE_SUCCESS')" \(shellSingleQuoted(runtimePath))
+        """
+    }
+
+    private func pythonBlackFormatCommand(for runtimePath: String) -> String {
+        """
+        export PATH="$HOME/.local/bin:$PATH"
+        if ! command -v black >/dev/null 2>&1 && ! python3 -m black --version >/dev/null 2>&1; then
+          if ! python3 -m pip --version >/dev/null 2>&1 && command -v apk >/dev/null 2>&1; then
+            apk add --no-cache py3-pip
+          fi
+          python3 -m pip install --user black || python3 -m pip install --break-system-packages --user black
+        fi
+        if command -v black >/dev/null 2>&1; then
+          black --quiet \(shellSingleQuoted(runtimePath))
+        else
+          python3 -m black --quiet \(shellSingleQuoted(runtimePath))
+        fi
+        """
+    }
+
+    private func failedPythonWriteOutcome(
+        target: String,
+        reason: String,
+        command: String,
+        result: LocalAlpineCommandResult
+    ) -> LocalAlpineProtectedWriteOutcome {
+        var lines = ["- `\(target)` 写入已拒绝：\(reason)。"]
+        lines.append("  - 验证命令：`\(command.trimmingCharacters(in: .whitespacesAndNewlines))`")
+        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !output.isEmpty {
+            lines.append("  - 输出：\(String(output.prefix(600)))")
+        }
+        return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: nil, hadFailure: true)
     }
 
     private func extractPythonHeredocWrites(from command: String, cwd: String) async -> LocalAlpineExtractedWriteResult? {
@@ -981,7 +1073,7 @@ actor LocalAlpineAgentService {
 
         This command writes a `.py` file through shell text redirection/heredoc (`cat`, `tee`, `printf`, `echo`, or `python - <<`). In this chat UI that path can corrupt leading spaces and cause Python IndentationError.
 
-        Use `iexa_alpine` JSON `write_files` with `code_lines`, `content_lines`, or `content_base64` for new Python files. The app transactionally compiles Python before overwriting the target. When fixing an existing file, inspect line numbers first and patch the smallest broken block, then run `python3 -m py_compile`.
+        Use `iexa_alpine` JSON `write_files` with `code_lines`, `content_lines`, or `content_base64` for Python files. Always provide the complete Python file content, not a partial patch. The app extracts markdown code blocks, replaces tabs with 4 spaces, validates with `ast.parse`, formats with Black, validates with `ast.parse` again, then runs `python3 -m py_compile` before overwriting the target.
         """
     }
 

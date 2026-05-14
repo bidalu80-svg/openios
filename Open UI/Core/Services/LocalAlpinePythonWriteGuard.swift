@@ -17,19 +17,43 @@ enum LocalAlpinePythonWriteGuard {
         case failure(String)
     }
 
+    private struct ExtractedCode {
+        let content: String
+        let notes: [String]
+    }
+
+    private enum Extraction {
+        case success(ExtractedCode)
+        case failure(String)
+    }
+
     static func prepare(_ content: String, source: Source) -> Preparation {
-        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let extracted: ExtractedCode
+        switch extractPythonCode(from: content, source: source) {
+        case .success(let value):
+            extracted = value
+        case .failure(let message):
+            return .failure(message)
+        }
+
+        guard !extracted.content.trimmingCharacters(in: .newlines).isEmpty else {
             return .failure("Python 文件内容为空")
         }
 
-        let normalizedTabs = content.replacingOccurrences(of: "\t", with: "    ")
+        let withoutOuterNewlines = extracted.content.trimmingCharacters(in: .newlines)
+        let normalizedTabs = withoutOuterNewlines.replacingOccurrences(of: "\t", with: "    ")
+        var notes = extracted.notes
+        if withoutOuterNewlines.contains("\t") {
+            notes.append("已将 Tab 统一替换为 4 个空格")
+        }
+
         if let structureWarning = structuralWarning(for: normalizedTabs) {
             if let rebuilt = rebuildIndentation(normalizedTabs),
                Self.structuralWarning(for: rebuilt) == nil,
                indentationPreflightWarning(for: rebuilt) == nil {
                 return .success(
                     content: ensureTrailingNewline(rebuilt),
-                    notes: ["已由写入模块重建 Python 缩进结构：\(structureWarning)"]
+                    notes: notes + ["已由写入模块重建 Python 缩进结构：\(structureWarning)"]
                 )
             }
             return .failure("Python 结构预检失败：\(structureWarning)")
@@ -41,7 +65,7 @@ enum LocalAlpinePythonWriteGuard {
                indentationPreflightWarning(for: rebuilt) == nil {
                 return .success(
                     content: ensureTrailingNewline(rebuilt),
-                    notes: ["已由写入模块重建 Python 缩进结构：\(warning)"]
+                    notes: notes + ["已由写入模块重建 Python 缩进结构：\(warning)"]
                 )
             }
             return .failure("Python 缩进预检失败：\(warning)")
@@ -58,11 +82,52 @@ enum LocalAlpinePythonWriteGuard {
            indentationPreflightWarning(for: rebuilt) == nil {
             return .success(
                 content: ensureTrailingNewline(rebuilt),
-                notes: ["普通文本已标准化为 4 空格 Python 缩进"]
+                notes: notes + ["普通文本已标准化为 4 空格 Python 缩进"]
             )
         }
 
-        return .success(content: ensureTrailingNewline(normalizedTabs), notes: [])
+        return .success(content: ensureTrailingNewline(normalizedTabs), notes: notes)
+    }
+
+    private static func extractPythonCode(from content: String, source: Source) -> Extraction {
+        guard content.range(of: #"(?m)^\s*```"#, options: .regularExpression) != nil else {
+            return .success(ExtractedCode(content: content.trimmingCharacters(in: .newlines), notes: []))
+        }
+
+        guard let regex = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)```"#) else {
+            return .failure("Python 代码块解析器不可用")
+        }
+
+        let nsContent = content as NSString
+        let fullRange = NSRange(location: 0, length: nsContent.length)
+        let matches = regex.matches(in: content, range: fullRange)
+        guard !matches.isEmpty else {
+            return .failure("检测到未闭合的 markdown 代码块，拒绝保存不完整 Python 文件")
+        }
+
+        var fallback: ExtractedCode?
+        for match in matches where match.numberOfRanges >= 3 {
+            let info = nsContent.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let body = nsContent.substring(with: match.range(at: 2))
+                .trimmingCharacters(in: .newlines)
+            let extracted = ExtractedCode(
+                content: body,
+                notes: ["已从 markdown 代码块提取 Python 源码，未保存回复说明文本"]
+            )
+            if fallback == nil {
+                fallback = extracted
+            }
+            if info.isEmpty || info == "python" || info == "py" || info.hasPrefix("python ") {
+                return .success(extracted)
+            }
+        }
+
+        if let fallback {
+            return .success(fallback)
+        }
+        return .failure("未找到可保存的 Python 代码块")
     }
 
     static func indentationPreflightWarning(for content: String) -> String? {
