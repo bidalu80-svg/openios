@@ -2,6 +2,12 @@ name: Build iOS IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      unsigned_only:
+        description: Build unsigned IPA only (skip signing/export path)
+        required: false
+        default: true
+        type: boolean
   push:
     branches:
       - main
@@ -26,6 +32,7 @@ jobs:
       IOS_BUNDLE_ID: ${{ secrets.IOS_BUNDLE_ID }}
       IOS_WIDGET_BUNDLE_ID: ${{ secrets.IOS_WIDGET_BUNDLE_ID }}
       IOS_EXPORT_METHOD: ${{ secrets.IOS_EXPORT_METHOD }}
+      IOS_FORCE_UNSIGNED: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.unsigned_only == 'true' && 'true' || 'false' }}
       KEYCHAIN_NAME: build.keychain
 
     steps:
@@ -50,6 +57,13 @@ jobs:
           IOS_WIDGET_PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.IOS_WIDGET_PROVISIONING_PROFILE_SPECIFIER }}
         run: |
           set -euo pipefail
+          if [ "${IOS_FORCE_UNSIGNED:-false}" = "true" ]; then
+            echo "HAS_SIGNING_SECRETS=false" >> "$GITHUB_ENV"
+            echo "HAS_WIDGET_SIGNING=false" >> "$GITHUB_ENV"
+            echo "unsigned_only=true; skipping signing/export path and forcing unsigned IPA fallback."
+            exit 0
+          fi
+
           missing=0
           for key in IOS_P12_BASE64 IOS_P12_PASSWORD IOS_MOBILEPROVISION_BASE64 IOS_TEAM_ID IOS_SIGNING_IDENTITY IOS_PROVISIONING_PROFILE_SPECIFIER; do
             if [ -z "${!key:-}" ]; then
@@ -324,7 +338,9 @@ jobs:
           strings "$APP_BINARY" | grep -q 'mount_root failed'
 
       - name: Export IPA
+        id: export_signed
         if: env.HAS_SIGNING_SECRETS == 'true' && steps.archive_signed.outcome == 'success'
+        continue-on-error: true
         run: |
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
@@ -332,7 +348,7 @@ jobs:
             -exportPath "$RUNNER_TEMP/exported"
 
       - name: Build unsigned fallback app
-        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outcome != 'success'
+        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outcome != 'success' || steps.export_signed.outcome != 'success'
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
           mkdir -p "$RUNNER_TEMP/exported" "$RUNNER_TEMP/unsigned-build-app" "$RUNNER_TEMP/unsigned-ipa/Payload"
@@ -368,9 +384,9 @@ jobs:
           /usr/bin/zip -qry "$RUNNER_TEMP/exported/Iexa-unsigned.ipa" Payload
 
       - name: Mark fallback artifact
-        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outcome != 'success'
+        if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outcome != 'success' || steps.export_signed.outcome != 'success'
         run: |
-          echo "Built unsigned IPA fallback because signing assets were unavailable or invalid." > "$RUNNER_TEMP/exported/README.txt"
+          echo "Built unsigned IPA fallback because signing was disabled, unavailable, or export failed." > "$RUNNER_TEMP/exported/README.txt"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
