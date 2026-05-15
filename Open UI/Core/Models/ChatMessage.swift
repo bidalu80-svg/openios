@@ -225,6 +225,7 @@ struct ChatMessage: Identifiable, Hashable, Sendable {
             && lhs.sources.count == rhs.sources.count
             && lhs.followUps.count == rhs.followUps.count
             && lhs.files.count == rhs.files.count
+            && Self.metadataSignature(lhs.metadata) == Self.metadataSignature(rhs.metadata)
             && lhs.error?.content == rhs.error?.content
             && lhs.versions.count == rhs.versions.count
             && (lhs.usage == nil) == (rhs.usage == nil)
@@ -236,7 +237,18 @@ struct ChatMessage: Identifiable, Hashable, Sendable {
         hasher.combine(isStreaming)
         hasher.combine(followUps.count)
         hasher.combine(files.count)
+        hasher.combine(Self.metadataSignature(metadata))
         hasher.combine(versions.count)
+    }
+
+    private static func metadataSignature(_ metadata: [String: String]?) -> Int {
+        guard let metadata else { return 0 }
+        var signature = metadata.count
+        for (key, value) in metadata {
+            signature &+= key.hashValue
+            signature &+= value.utf8.count
+        }
+        return signature
     }
 }
 
@@ -369,7 +381,7 @@ private struct AnyEncodable: Encodable {
 /// own content and metadata.
 struct ChatMessageVersion: Codable, Equatable, Hashable, Sendable {
     enum CodingKeys: String, CodingKey {
-        case id, content, timestamp, model, error, files, sources, followUps, usage, statusHistory
+        case id, content, timestamp, model, error, files, sources, followUps, usage, statusHistory, metadata
     }
 
     /// The sibling node's message ID in the history tree.
@@ -383,6 +395,7 @@ struct ChatMessageVersion: Codable, Equatable, Hashable, Sendable {
     var followUps: [String]
     var statusHistory: [ChatStatusUpdate]
     var usage: [String: Any]?
+    var metadata: [String: String]?
 
     init(
         id: String = UUID().uuidString,
@@ -394,7 +407,8 @@ struct ChatMessageVersion: Codable, Equatable, Hashable, Sendable {
         sources: [ChatSourceReference] = [],
         followUps: [String] = [],
         statusHistory: [ChatStatusUpdate] = [],
-        usage: [String: Any]? = nil
+        usage: [String: Any]? = nil,
+        metadata: [String: String]? = nil
     ) {
         self.id = id
         self.content = content
@@ -406,6 +420,7 @@ struct ChatMessageVersion: Codable, Equatable, Hashable, Sendable {
         self.followUps = followUps
         self.statusHistory = statusHistory
         self.usage = usage
+        self.metadata = metadata
     }
 
     init(from decoder: Decoder) throws {
@@ -419,6 +434,7 @@ struct ChatMessageVersion: Codable, Equatable, Hashable, Sendable {
         self.sources = (try? container.decode([ChatSourceReference].self, forKey: .sources)) ?? []
         self.followUps = (try? container.decode([String].self, forKey: .followUps)) ?? []
         self.statusHistory = (try? container.decode([ChatStatusUpdate].self, forKey: .statusHistory)) ?? []
+        self.metadata = try? container.decodeIfPresent([String: String].self, forKey: .metadata)
         if let usageData = try? container.decodeIfPresent(AnyCodableMap.self, forKey: .usage) {
             self.usage = usageData.value
         } else {
@@ -437,6 +453,7 @@ struct ChatMessageVersion: Codable, Equatable, Hashable, Sendable {
         try c.encode(sources, forKey: .sources)
         try c.encode(followUps, forKey: .followUps)
         try c.encode(statusHistory, forKey: .statusHistory)
+        try c.encodeIfPresent(metadata, forKey: .metadata)
         if let usage {
             try c.encode(AnyCodableMap(usage), forKey: .usage)
         }
@@ -451,6 +468,7 @@ struct ChatMessageVersion: Codable, Equatable, Hashable, Sendable {
             && lhs.files == rhs.files
             && lhs.sources == rhs.sources
             && lhs.followUps == rhs.followUps
+            && Self.metadataSignature(lhs.metadata) == Self.metadataSignature(rhs.metadata)
             && (lhs.usage == nil) == (rhs.usage == nil)
     }
 
@@ -463,7 +481,18 @@ struct ChatMessageVersion: Codable, Equatable, Hashable, Sendable {
         hasher.combine(files)
         hasher.combine(sources)
         hasher.combine(followUps)
+        hasher.combine(Self.metadataSignature(metadata))
         hasher.combine(usage != nil)
+    }
+
+    private static func metadataSignature(_ metadata: [String: String]?) -> Int {
+        guard let metadata else { return 0 }
+        var signature = metadata.count
+        for (key, value) in metadata {
+            signature &+= key.hashValue
+            signature &+= value.utf8.count
+        }
+        return signature
     }
 }
 

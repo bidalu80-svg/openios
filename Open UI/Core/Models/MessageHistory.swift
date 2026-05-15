@@ -13,7 +13,7 @@ import Foundation
 struct HistoryNode: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id, parentId, childrenIds, role, content, timestamp, model, done
-        case files, sources, followUps, statusHistory, error, usage, embeds, models
+        case files, sources, followUps, statusHistory, error, usage, embeds, models, metadata
     }
 
     var id: String
@@ -36,6 +36,8 @@ struct HistoryNode: Codable, Sendable {
     var embeds: [String]
     /// For user messages: the model IDs that were selected when this message was sent.
     var models: [String]
+    /// Client-local message metadata. Server serialization filters this to a safe allowlist.
+    var metadata: [String: String]?
 
     init(
         id: String = UUID().uuidString,
@@ -53,7 +55,8 @@ struct HistoryNode: Codable, Sendable {
         error: ChatMessageError? = nil,
         usage: [String: Any]? = nil,
         embeds: [String] = [],
-        models: [String] = []
+        models: [String] = [],
+        metadata: [String: String]? = nil
     ) {
         self.id = id
         self.parentId = parentId
@@ -71,6 +74,7 @@ struct HistoryNode: Codable, Sendable {
         self.usage = usage
         self.embeds = embeds
         self.models = models
+        self.metadata = metadata
     }
 
     init(from decoder: Decoder) throws {
@@ -95,6 +99,7 @@ struct HistoryNode: Codable, Sendable {
         }
         embeds = (try? c.decode([String].self, forKey: .embeds)) ?? []
         models = (try? c.decode([String].self, forKey: .models)) ?? []
+        metadata = try? c.decodeIfPresent([String: String].self, forKey: .metadata)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -117,6 +122,7 @@ struct HistoryNode: Codable, Sendable {
         }
         try c.encode(embeds, forKey: .embeds)
         try c.encode(models, forKey: .models)
+        try c.encodeIfPresent(metadata, forKey: .metadata)
     }
 
     // MARK: - Serialization
@@ -196,6 +202,13 @@ struct HistoryNode: Codable, Sendable {
 
         if let usage, !usage.isEmpty {
             dict["usage"] = usage
+        }
+
+        if let metadata {
+            let filtered = metadata.filter { $0.key.hasPrefix("iexa_local_alpine_") }
+            if !filtered.isEmpty {
+                dict["metadata"] = filtered
+            }
         }
 
         if !statusHistory.isEmpty {
@@ -286,7 +299,8 @@ struct MessageHistory: Codable, Sendable {
                     sources: sibNode.sources,
                     followUps: sibNode.followUps,
                     statusHistory: sibNode.statusHistory,
-                    usage: sibNode.usage
+                    usage: sibNode.usage,
+                    metadata: sibNode.metadata
                 )
 
                 // The tree is the source of truth for branching. Navigation between
@@ -314,6 +328,7 @@ struct MessageHistory: Codable, Sendable {
                 sources: node.sources,
                 statusHistory: node.statusHistory,
                 followUps: node.followUps,
+                metadata: node.metadata,
                 error: node.error,
                 versions: versions,
                 usage: node.usage,
@@ -531,6 +546,16 @@ struct MessageHistory: Codable, Sendable {
 
         let followUps = msg["followUps"] as? [String] ?? msg["follow_ups"] as? [String] ?? []
 
+        var metadata: [String: String] = [:]
+        if let rawMetadata = msg["metadata"] as? [String: Any] {
+            for (key, value) in rawMetadata {
+                if key.hasPrefix("iexa_local_alpine_"),
+                   let stringValue = value as? String {
+                    metadata[key] = stringValue
+                }
+            }
+        }
+
         // Parse embeds
         let embeds: [String] = {
             if let arr = msg["embeds"] as? [String] {
@@ -595,7 +620,8 @@ struct MessageHistory: Codable, Sendable {
             error: error,
             usage: usage,
             embeds: embeds,
-            models: models
+            models: models,
+            metadata: metadata.isEmpty ? nil : metadata
         )
     }
 }

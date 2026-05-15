@@ -4223,6 +4223,21 @@ private struct LocalAlpineResultCard: View {
 
     @Environment(\.theme) private var theme
     @State private var isExpanded = false
+    @State private var isWrittenFilesCardClosed = false
+    private let writtenFiles: [LocalAlpineWrittenFile]
+
+    init(
+        content: String,
+        metadata: [String: String]?,
+        isStreaming: Bool,
+        statusHistory: [ChatStatusUpdate]
+    ) {
+        self.content = content
+        self.metadata = metadata
+        self.isStreaming = isStreaming
+        self.statusHistory = statusHistory
+        self.writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata?["iexa_local_alpine_written_files"])
+    }
 
     private var parsed: ParsedLocalAlpineResult {
         ParsedLocalAlpineResult(content: content, metadata: metadata)
@@ -4271,6 +4286,14 @@ private struct LocalAlpineResultCard: View {
             }
             .buttonStyle(.plain)
 
+            if !writtenFiles.isEmpty && !isWrittenFilesCardClosed {
+                LocalAlpineWrittenFilesCard(files: writtenFiles) {
+                    withAnimation(MicroAnimation.snappy) {
+                        isWrittenFilesCardClosed = true
+                    }
+                }
+            }
+
             if isExpanded {
                 if !parsed.commandText.isEmpty {
                     LocalAlpineCodeSection(title: "命令", text: parsed.commandText, maxHeight: 140)
@@ -4279,6 +4302,257 @@ private struct LocalAlpineResultCard: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+private struct LocalAlpineWrittenFilesCard: View {
+    let files: [LocalAlpineWrittenFile]
+    let onClose: () -> Void
+
+    @Environment(\.theme) private var theme
+    @State private var isExpanded = false
+    @State private var selectedIndex = 0
+    @State private var didCopy = false
+    @State private var showFullCode = false
+    @State private var fullCode = ""
+    @State private var isLoadingFullCode = false
+
+    init(files: [LocalAlpineWrittenFile], onClose: @escaping () -> Void) {
+        self.files = files
+        self.onClose = onClose
+        _selectedIndex = State(initialValue: max(0, files.count - 1))
+    }
+
+    private var selectedFile: LocalAlpineWrittenFile? {
+        guard !files.isEmpty else { return nil }
+        return files[min(selectedIndex, files.count - 1)]
+    }
+
+    private var title: String {
+        if files.count == 1 {
+            return selectedFile?.fileName ?? "写入文件"
+        }
+        return "写入 \(files.count) 个文件"
+    }
+
+    private var subtitle: String {
+        guard let selectedFile else { return "已写入文件" }
+        let lines = selectedFile.lineCount
+        if files.count == 1 {
+            return "\(lines) 行 · \(selectedFile.byteCount) B"
+        }
+        return "\(selectedIndex + 1) / \(files.count) · \(selectedFile.fileName)"
+    }
+
+    private var previewLines: [String] {
+        selectedFile?.previewLines(limit: isExpanded ? 120 : 5) ?? []
+    }
+
+    private var previewHeight: CGFloat {
+        isExpanded ? 260 : 94
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+            codePreview
+            if isExpanded && files.count > 1 {
+                filePager
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.94))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.55 : 0.75), lineWidth: 0.8)
+        )
+        .sheet(isPresented: $showFullCode) {
+            if let selectedFile {
+                FullCodeView(code: fullCode, language: selectedFile.language)
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(theme.brandPrimary.opacity(theme.isDark ? 0.16 : 0.10))
+                    .frame(width: 34, height: 34)
+
+                Image(systemName: "doc.text")
+                    .scaledFont(size: 14, weight: .semibold)
+                    .foregroundStyle(theme.brandPrimary)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .scaledFont(size: 13, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(subtitle)
+                    .scaledFont(size: 11, weight: .medium)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                openFullCode()
+            } label: {
+                Image(systemName: isLoadingFullCode ? "hourglass" : "eye")
+                    .scaledFont(size: 13, weight: .semibold)
+                    .foregroundStyle(theme.textSecondary)
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .disabled(selectedFile == nil)
+
+            Button {
+                copyFullCode()
+            } label: {
+                Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                    .scaledFont(size: 13, weight: .semibold)
+                    .foregroundStyle(didCopy ? theme.success : theme.textSecondary)
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .disabled(selectedFile == nil)
+
+            Button {
+                withAnimation(MicroAnimation.snappy) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    .scaledFont(size: 12, weight: .semibold)
+                    .foregroundStyle(theme.textSecondary)
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                onClose()
+                Haptics.play(.light)
+            } label: {
+                Image(systemName: "xmark")
+                    .scaledFont(size: 11, weight: .semibold)
+                    .foregroundStyle(theme.textTertiary)
+                    .frame(width: 28, height: 30)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var codePreview: some View {
+        ScrollView(.vertical, showsIndicators: isExpanded) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(previewLines.enumerated()), id: \.offset) { _, line in
+                    Text(line.isEmpty ? " " : line)
+                        .scaledFont(size: 11, design: .monospaced)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                if let selectedFile,
+                   isExpanded,
+                   selectedFile.lineCount > previewLines.count {
+                    Text("... 预览已截断，复制和查看代码会使用完整内容")
+                        .scaledFont(size: 11, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                        .padding(.top, 6)
+                }
+            }
+            .padding(10)
+        }
+        .frame(maxHeight: previewHeight)
+        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.34 : 0.56))
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    private var filePager: some View {
+        HStack(spacing: 8) {
+            Button {
+                withAnimation(MicroAnimation.snappy) {
+                    selectedIndex = max(0, selectedIndex - 1)
+                }
+            } label: {
+                Image(systemName: "chevron.left")
+                    .scaledFont(size: 12, weight: .semibold)
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .disabled(selectedIndex == 0)
+
+            Text(selectedFile?.path ?? "")
+                .scaledFont(size: 11, weight: .medium, design: .monospaced)
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Spacer(minLength: 0)
+
+            Button {
+                withAnimation(MicroAnimation.snappy) {
+                    selectedIndex = min(files.count - 1, selectedIndex + 1)
+                }
+            } label: {
+                Image(systemName: "chevron.right")
+                    .scaledFont(size: 12, weight: .semibold)
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .disabled(selectedIndex >= files.count - 1)
+        }
+    }
+
+    private func openFullCode() {
+        guard let selectedFile, !isLoadingFullCode else { return }
+        isLoadingFullCode = true
+        Task {
+            let code = await loadFullCode(for: selectedFile)
+            await MainActor.run {
+                fullCode = code
+                isLoadingFullCode = false
+                showFullCode = true
+                Haptics.play(.light)
+            }
+        }
+    }
+
+    private func copyFullCode() {
+        guard let selectedFile else { return }
+        Task {
+            let code = await loadFullCode(for: selectedFile)
+            await MainActor.run {
+                UIPasteboard.general.string = code
+                Haptics.notify(.success)
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                    didCopy = true
+                }
+            }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await MainActor.run {
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                    didCopy = false
+                }
+            }
+        }
+    }
+
+    private func loadFullCode(for file: LocalAlpineWrittenFile) async -> String {
+        do {
+            let data = try await LocalAlpineTerminalService.shared.readFile(path: file.path)
+            return String(data: data, encoding: .utf8) ?? file.previewTailLines.joined(separator: "\n")
+        } catch {
+            return file.previewTailLines.joined(separator: "\n")
+        }
     }
 }
 

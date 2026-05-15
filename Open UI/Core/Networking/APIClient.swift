@@ -4665,7 +4665,8 @@ final class APIClient: @unchecked Sendable {
                 statusHistory: msg.statusHistory,
                 error: msg.error,
                 usage: msg.usage,
-                embeds: msg.embeds
+                embeds: msg.embeds,
+                metadata: msg.metadata
             )
             history.addNode(node)
             if let prevId = previousId {
@@ -4845,7 +4846,8 @@ final class APIClient: @unchecked Sendable {
             files: files,
             sources: sources,
             followUps: followUps,
-            statusHistory: statusHistory
+            statusHistory: statusHistory,
+            metadata: parseLocalMetadata(from: msg)
         )
     }
 
@@ -4905,6 +4907,25 @@ final class APIClient: @unchecked Sendable {
         }
 
         return message
+    }
+
+    private func parseLocalMetadata(from msg: [String: Any]) -> [String: String]? {
+        guard let raw = msg["metadata"] as? [String: Any] else { return nil }
+        var metadata: [String: String] = [:]
+        for (key, value) in raw {
+            if let stringValue = value as? String {
+                if key.hasPrefix("iexa_local_alpine_") {
+                    metadata[key] = stringValue
+                }
+            }
+        }
+        return metadata.isEmpty ? nil : metadata
+    }
+
+    private func persistableLocalMetadata(from metadata: [String: String]?) -> [String: String]? {
+        guard let metadata else { return nil }
+        let filtered = metadata.filter { $0.key.hasPrefix("iexa_local_alpine_") }
+        return filtered.isEmpty ? nil : filtered
     }
 
     private func parseSingleMessage(_ msg: [String: Any]) -> ChatMessage? {
@@ -5063,6 +5084,7 @@ final class APIClient: @unchecked Sendable {
             sources: sources,
             statusHistory: statusHistory,
             followUps: followUps,
+            metadata: parseLocalMetadata(from: msg),
             error: error,
             usage: usage,
             embeds: embeds
@@ -5195,6 +5217,10 @@ final class APIClient: @unchecked Sendable {
                 msgDict["usage"] = usage
             }
 
+            if let metadata = persistableLocalMetadata(from: msg.metadata) {
+                msgDict["metadata"] = metadata
+            }
+
             messagesMap[msg.id] = msgDict
 
             // Write version siblings into the history tree.
@@ -5223,6 +5249,9 @@ final class APIClient: @unchecked Sendable {
                         siblingDict["modelName"] = m
                         siblingDict["modelIdx"] = 0
                         siblingDict["done"] = true
+                    }
+                    if let metadata = persistableLocalMetadata(from: version.metadata) {
+                        siblingDict["metadata"] = metadata
                     }
                     if !version.files.isEmpty {
                         let filesArr = version.files.compactMap { file -> [String: Any]? in

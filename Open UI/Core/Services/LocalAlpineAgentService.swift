@@ -5,6 +5,7 @@ struct LocalAlpineAgentResult: Sendable {
     let summary: String
     let interactiveRequest: LocalAlpineInteractiveRequest?
     let commandResults: [LocalAlpineAgentCommandResult]
+    let writtenFiles: [LocalAlpineWrittenFile]
     let executedCommandCount: Int
     let editedFileCount: Int
     let hadFailure: Bool
@@ -14,6 +15,7 @@ struct LocalAlpineAgentResult: Sendable {
         summary: String,
         interactiveRequest: LocalAlpineInteractiveRequest?,
         commandResults: [LocalAlpineAgentCommandResult] = [],
+        writtenFiles: [LocalAlpineWrittenFile] = [],
         executedCommandCount: Int = 0,
         editedFileCount: Int = 0,
         hadFailure: Bool = false
@@ -22,9 +24,170 @@ struct LocalAlpineAgentResult: Sendable {
         self.summary = summary
         self.interactiveRequest = interactiveRequest
         self.commandResults = commandResults
+        self.writtenFiles = writtenFiles
         self.executedCommandCount = executedCommandCount
         self.editedFileCount = editedFileCount
         self.hadFailure = hadFailure
+    }
+}
+
+struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
+    let path: String
+    let source: String
+    let byteCount: Int
+    let lineCountValue: Int
+    let previewTailLines: [String]
+
+    init(
+        path: String,
+        content: String,
+        source: String,
+        byteCount: Int,
+        lineCountValue: Int? = nil
+    ) {
+        self.path = path
+        self.source = source
+        self.byteCount = byteCount
+        self.lineCountValue = lineCountValue ?? Self.countLines(in: content)
+        self.previewTailLines = Self.tailLines(in: content, limit: 120)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case path, content, source, byteCount, lineCountValue, previewTailLines
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        path = try container.decode(String.self, forKey: .path)
+        let legacyContent = (try? container.decode(String.self, forKey: .content)) ?? ""
+        source = (try? container.decode(String.self, forKey: .source)) ?? "unknown"
+        byteCount = (try? container.decode(Int.self, forKey: .byteCount))
+            ?? (legacyContent.data(using: .utf8)?.count ?? 0)
+        lineCountValue = (try? container.decode(Int.self, forKey: .lineCountValue))
+            ?? Self.countLines(in: legacyContent)
+        previewTailLines = (try? container.decode([String].self, forKey: .previewTailLines))
+            ?? Self.tailLines(in: legacyContent, limit: 120)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(path, forKey: .path)
+        try container.encode(source, forKey: .source)
+        try container.encode(byteCount, forKey: .byteCount)
+        try container.encode(lineCountValue, forKey: .lineCountValue)
+        try container.encode(previewTailLines, forKey: .previewTailLines)
+    }
+
+    var fileName: String {
+        let normalized = path.replacingOccurrences(of: "\\", with: "/")
+        return normalized.split(separator: "/").last.map(String.init) ?? path
+    }
+
+    var language: String {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        switch ext {
+        case "py": return "python"
+        case "js": return "javascript"
+        case "ts": return "typescript"
+        case "tsx": return "tsx"
+        case "jsx": return "jsx"
+        case "swift": return "swift"
+        case "json": return "json"
+        case "html", "htm": return "html"
+        case "css": return "css"
+        case "md", "markdown": return "markdown"
+        case "yml", "yaml": return "yaml"
+        case "toml": return "toml"
+        case "sh", "bash": return "bash"
+        default: return "text"
+        }
+    }
+
+    var lineCount: Int {
+        lineCountValue
+    }
+
+    private static func countLines(in content: String) -> Int {
+        if content.isEmpty { return 0 }
+        var count = 0
+        content.enumerateLines { _, _ in
+            count += 1
+        }
+        return count
+    }
+
+    func previewLines(limit: Int) -> [String] {
+        guard limit > 0 else { return [] }
+        if previewTailLines.count <= limit {
+            return previewTailLines
+        }
+        return Array(previewTailLines.suffix(limit))
+    }
+
+    private static func tailLines(in content: String, limit: Int) -> [String] {
+        guard limit > 0 else { return [] }
+        var buffer: [String] = []
+        buffer.reserveCapacity(limit)
+        var writeIndex = 0
+
+        content.enumerateLines { line, _ in
+            if buffer.count < limit {
+                buffer.append(line)
+            } else {
+                buffer[writeIndex] = line
+                writeIndex = (writeIndex + 1) % limit
+            }
+        }
+
+        guard buffer.count == limit, writeIndex != 0 else {
+            return buffer
+        }
+
+        var ordered: [String] = []
+        ordered.reserveCapacity(limit)
+        ordered.append(contentsOf: buffer[writeIndex...])
+        if writeIndex > 0 {
+            ordered.append(contentsOf: buffer[..<writeIndex])
+        }
+        return ordered
+    }
+
+    static func metadataString(for files: [LocalAlpineWrittenFile]) -> String? {
+        guard !files.isEmpty else { return nil }
+        let limitedFiles = files.prefix(8).map { file in
+            LocalAlpineWrittenFile(
+                path: file.path,
+                previewLines: file.previewTailLines,
+                source: file.source,
+                byteCount: file.byteCount,
+                lineCountValue: file.lineCount
+            )
+        }
+        guard let data = try? JSONEncoder().encode(Array(limitedFiles)) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func decodeMetadata(_ value: String?) -> [LocalAlpineWrittenFile] {
+        guard let value,
+              let data = value.data(using: .utf8),
+              let files = try? JSONDecoder().decode([LocalAlpineWrittenFile].self, from: data) else {
+            return []
+        }
+        return files
+    }
+
+    private init(
+        path: String,
+        previewLines: [String],
+        source: String,
+        byteCount: Int,
+        lineCountValue: Int
+    ) {
+        self.path = path
+        self.source = source
+        self.byteCount = byteCount
+        self.lineCountValue = lineCountValue
+        self.previewTailLines = Array(previewLines.suffix(120))
     }
 }
 
@@ -88,6 +251,7 @@ actor LocalAlpineAgentService {
         let trimmedCommands = Array(commands.prefix(maxCommandsPerResponse))
         let skippedCount = max(0, commands.count - trimmedCommands.count)
         var commandResults: [LocalAlpineAgentCommandResult] = []
+        var writtenFiles: [LocalAlpineWrittenFile] = []
         var editedFilePaths = Set<String>()
         var stopRemainingCommands = false
 
@@ -105,6 +269,7 @@ actor LocalAlpineAgentService {
                 let writeResult = await writeFiles(command.writeFiles, cwd: effectiveCWD)
                 stepLines.append(writeResult.summary)
                 writeResult.writtenPaths.forEach { editedFilePaths.insert($0) }
+                writtenFiles.append(contentsOf: writeResult.writtenFiles)
                 if writeResult.hadFailure {
                     let result = LocalAlpineCommandResult(
                         command: "write_files",
@@ -132,6 +297,7 @@ actor LocalAlpineAgentService {
                 if let extracted = await extractPythonHeredocWrites(from: commandToExecute, cwd: effectiveCWD) {
                     stepLines.append(extracted.summary)
                     extracted.writtenPaths.forEach { editedFilePaths.insert($0) }
+                    writtenFiles.append(contentsOf: extracted.writtenFiles)
                     if extracted.hadFailure {
                         let result = LocalAlpineCommandResult(
                             command: "python_heredoc_write",
@@ -188,6 +354,7 @@ actor LocalAlpineAgentService {
                             summary: lines.joined(separator: "\n\n"),
                             interactiveRequest: request,
                             commandResults: commandResults,
+                            writtenFiles: writtenFiles,
                             executedCommandCount: Self.actualCommandCount(commandResults),
                             editedFileCount: editedFilePaths.count,
                             hadFailure: commandResults.contains { $0.failed }
@@ -228,6 +395,7 @@ actor LocalAlpineAgentService {
             summary: lines.joined(separator: "\n\n"),
             interactiveRequest: nil,
             commandResults: commandResults,
+            writtenFiles: writtenFiles,
             executedCommandCount: Self.actualCommandCount(commandResults),
             editedFileCount: editedFilePaths.count,
             hadFailure: commandResults.contains { $0.failed }
@@ -408,12 +576,16 @@ actor LocalAlpineAgentService {
     private func writeFiles(_ files: [LocalAlpineAgentFile], cwd: String) async -> LocalAlpineWriteResult {
         var lines = ["写入文件（命令行直写）"]
         var writtenPaths: [String] = []
+        var writtenFiles: [LocalAlpineWrittenFile] = []
         var hadFailure = false
         for file in files.prefix(maxCommandsPerResponse) {
             let outcome = await writeProtectedFile(file, cwd: cwd)
             lines.append(contentsOf: outcome.lines)
             if let writtenPath = outcome.writtenPath {
                 writtenPaths.append(writtenPath)
+            }
+            if let writtenFile = outcome.writtenFile {
+                writtenFiles.append(writtenFile)
             }
             if outcome.hadFailure {
                 hadFailure = true
@@ -423,7 +595,12 @@ actor LocalAlpineAgentService {
         if skipped > 0 {
             lines.append("- 已跳过 \(skipped) 个多余文件，避免一次写入过多。")
         }
-        return LocalAlpineWriteResult(summary: lines.joined(separator: "\n"), writtenPaths: writtenPaths, hadFailure: hadFailure)
+        return LocalAlpineWriteResult(
+            summary: lines.joined(separator: "\n"),
+            writtenPaths: writtenPaths,
+            writtenFiles: writtenFiles,
+            hadFailure: hadFailure
+        )
     }
 
     private func writeProtectedFile(_ file: LocalAlpineAgentFile, cwd: String) async -> LocalAlpineProtectedWriteOutcome {
@@ -444,6 +621,7 @@ actor LocalAlpineAgentService {
             return LocalAlpineProtectedWriteOutcome(
                 lines: ["- `\(target)` 写入失败：内容不是有效 UTF-8"],
                 writtenPath: nil,
+                writtenFile: nil,
                 hadFailure: true
             )
         }
@@ -483,6 +661,12 @@ actor LocalAlpineAgentService {
             return LocalAlpineProtectedWriteOutcome(
                 lines: lines,
                 writtenPath: target,
+                writtenFile: LocalAlpineWrittenFile(
+                    path: target,
+                    content: content,
+                    source: source.displayName,
+                    byteCount: byteCount
+                ),
                 hadFailure: false
             )
         }
@@ -493,7 +677,7 @@ actor LocalAlpineAgentService {
         if !output.isEmpty {
             lines.append("  - 输出：\(String(output.prefix(1_000)))")
         }
-        return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: nil, hadFailure: true)
+        return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: nil, writtenFile: nil, hadFailure: true)
     }
 
     private func writeValidatedPythonFile(
@@ -508,6 +692,7 @@ actor LocalAlpineAgentService {
             return LocalAlpineProtectedWriteOutcome(
                 lines: ["- `\(target)` 写入失败：内容不是有效 UTF-8"],
                 writtenPath: nil,
+                writtenFile: nil,
                 hadFailure: true
             )
         }
@@ -724,7 +909,7 @@ actor LocalAlpineAgentService {
            !diagnostic.isEmpty {
             lines.append("  - 候选文件定位：\(String(diagnostic.prefix(1_500)))")
         }
-        return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: nil, hadFailure: true)
+        return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: nil, writtenFile: nil, hadFailure: true)
     }
 
     private func extractPythonHeredocWrites(from command: String, cwd: String) async -> LocalAlpineExtractedWriteResult? {
@@ -732,6 +917,7 @@ actor LocalAlpineAgentService {
         var remainingLines: [String] = []
         var summaryLines = ["写入 Python heredoc（保护通道）"]
         var writtenPaths: [String] = []
+        var writtenFiles: [LocalAlpineWrittenFile] = []
         var hadFailure = false
         var extractedCount = 0
         var index = 0
@@ -771,6 +957,9 @@ actor LocalAlpineAgentService {
             if let writtenPath = outcome.writtenPath {
                 writtenPaths.append(writtenPath)
             }
+            if let writtenFile = outcome.writtenFile {
+                writtenFiles.append(writtenFile)
+            }
             if outcome.hadFailure {
                 hadFailure = true
             }
@@ -781,6 +970,7 @@ actor LocalAlpineAgentService {
         return LocalAlpineExtractedWriteResult(
             summary: summaryLines.joined(separator: "\n"),
             writtenPaths: writtenPaths,
+            writtenFiles: writtenFiles,
             remainingCommand: remainingLines.joined(separator: "\n"),
             hadFailure: hadFailure
         )
@@ -1271,18 +1461,21 @@ private enum PythonWritePreparation {
 private struct LocalAlpineProtectedWriteOutcome {
     let lines: [String]
     let writtenPath: String?
+    let writtenFile: LocalAlpineWrittenFile?
     let hadFailure: Bool
 }
 
 private struct LocalAlpineWriteResult {
     let summary: String
     let writtenPaths: [String]
+    let writtenFiles: [LocalAlpineWrittenFile]
     let hadFailure: Bool
 }
 
 private struct LocalAlpineExtractedWriteResult {
     let summary: String
     let writtenPaths: [String]
+    let writtenFiles: [LocalAlpineWrittenFile]
     let remainingCommand: String
     let hadFailure: Bool
 }

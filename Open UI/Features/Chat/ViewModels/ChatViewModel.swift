@@ -510,6 +510,7 @@ final class ChatViewModel {
                 if !msg.sources.isEmpty { node.sources = msg.sources }
                 if !msg.statusHistory.isEmpty { node.statusHistory = msg.statusHistory }
                 if let error = msg.error { node.error = error }
+                if let metadata = msg.metadata { node.metadata = metadata }
                 if !msg.files.isEmpty {
                     let files = isOpenAICompatibleProvider ? msg.files : Self.serverPersistableFiles(msg.files)
                     if !files.isEmpty { node.files = files }
@@ -2305,7 +2306,8 @@ final class ChatViewModel {
                                     error: localLast.error,
                                     files: localLast.files,
                                     sources: localLast.sources,
-                                    followUps: localLast.followUps
+                                    followUps: localLast.followUps,
+                                    metadata: localLast.metadata
                                 )
                                 // Only add if we don't already have this version
                                 let isDuplicate = conversation?.messages[idx].versions.contains(where: {
@@ -2453,6 +2455,9 @@ final class ChatViewModel {
                 }
                 if local.followUps != serverMsg.followUps {
                     conversation!.messages[localIdx].followUps = serverMsg.followUps
+                }
+                if local.metadata != serverMsg.metadata {
+                    conversation!.messages[localIdx].metadata = serverMsg.metadata ?? local.metadata
                 }
                 if local.error != serverMsg.error {
                     conversation!.messages[localIdx].error = serverMsg.error
@@ -10353,7 +10358,8 @@ final class ChatViewModel {
             content: content,
             timestamp: message.timestamp,
             model: model,
-            done: true
+            done: true,
+            metadata: metadata
         )
         conversation?.messages.append(message)
         conversation?.history.addNode(node)
@@ -10619,13 +10625,18 @@ final class ChatViewModel {
         if let index = conversation?.messages.firstIndex(where: { $0.id == resultMessageId }) {
             var metadata = conversation?.messages[index].metadata ?? [:]
             metadata["iexa_local_alpine_raw_result"] = result.summary
+            if let writtenFiles = LocalAlpineWrittenFile.metadataString(for: result.writtenFiles) {
+                metadata["iexa_local_alpine_written_files"] = writtenFiles
+            }
             conversation?.messages[index].metadata = metadata
         }
+        let resultMetadata = conversation?.messages.first(where: { $0.id == resultMessageId })?.metadata
         recordLocalAlpineFailures(from: result)
         conversation?.history.updateNode(id: resultMessageId) { node in
             node.content = result.summary
             node.done = true
             node.statusHistory = [doneStatus]
+            node.metadata = resultMetadata
         }
 
         await persistLocalConversationIfNeeded()
