@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 import AVFoundation
 import AVKit
 import QuickLook
+import PDFKit
 import MarkdownView
 import os.log
 
@@ -163,6 +164,8 @@ struct ChatDetailView: View {
     @State private var downloadErrorMessage = ""
     /// URL for QuickLook in-app file preview (PDF, images, docs, etc.)
     @State private var previewFileURL: URL?
+    /// Message-level file preview sheet. Keeps sent files out of message text.
+    @State private var previewingMessageFile: MessageFilePreviewItem?
     /// URL for in-app webpage preview from assistant markdown links.
     @State private var previewWebURL: WebPreviewURL?
     /// Code preview from MarkdownView's eye button (fullscreen code view)
@@ -394,6 +397,10 @@ struct ChatDetailView: View {
         }
         .sheet(item: $previewWebURL) { item in
             InAppWebPreviewSheet(url: item.url)
+                .themed()
+        }
+        .sheet(item: $previewingMessageFile) { item in
+            MessageFilePreviewSheet(file: item.file, apiClient: dependencies.apiClient)
                 .themed()
         }
         // Prompt variable input sheet — shown when a selected prompt has {{variables}}
@@ -1403,12 +1410,21 @@ struct ChatDetailView: View {
     @ViewBuilder
     private func messageRow(message: ChatMessage, index: Int) -> some View {
         let isLastAssistant = message.role == .assistant && index == viewModel.messages.count - 1
+        let userTextIsEmpty = message.role == .user
+            && activeUserDisplayContent(for: message).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 0) {
 
             // ── Assistant header (avatar + model name) ──
             if message.role == .assistant && !isLocalAlpineResultMessage(message) {
                 assistantHeader(for: message)
+            }
+
+            if message.role == .user {
+                userAttachmentArea(for: message)
+                    .padding(.horizontal, Spacing.screenPadding)
+                    .padding(.top, Spacing.xs)
+                    .contextMenu { messageContextMenu(for: message) }
             }
 
             // ── Streaming status indicators ──
@@ -1420,7 +1436,9 @@ struct ChatDetailView: View {
             }
 
             // ── Message bubble / content ──
-            messageBubble(for: message, isLastAssistant: isLastAssistant)
+            if !userTextIsEmpty {
+                messageBubble(for: message, isLastAssistant: isLastAssistant)
+            }
 
             // ── Tool-generated images ──
             if message.role == .assistant && !message.isStreaming {
@@ -1642,48 +1660,8 @@ struct ChatDetailView: View {
     @ViewBuilder
     private func messageContent(for message: ChatMessage) -> some View {
         if message.role == .user {
-            // Resolve which user version to display
-            let userVIdx = activeUserVersionIndex[message.id] ?? -1
-            let displayContent: String = {
-                if userVIdx >= 0 && userVIdx < message.versions.count {
-                    return message.versions[userVIdx].content
-                }
-                return message.content
-            }()
-            let displayFiles: [ChatMessageFile] = {
-                if userVIdx >= 0 && userVIdx < message.versions.count {
-                    return message.versions[userVIdx].files
-                }
-                return message.files
-            }()
-
+            let displayContent = activeUserDisplayContent(for: message)
             VStack(alignment: .trailing, spacing: Spacing.sm) {
-                // Inline images inside the bubble
-                let imageFiles = displayFiles.filter {
-                    $0.type == "image" || ($0.contentType ?? "").hasPrefix("image/")
-                }
-                if !imageFiles.isEmpty {
-                    ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
-                        if let fileId = imageReference(for: file) {
-                            chatImageView(fileId: fileId, allowsEditing: false)
-                                .frame(maxWidth: 220, maxHeight: 220)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        }
-                    }
-                }
-
-                // Non-image file cards inside the bubble
-                let nonImageFiles = displayFiles.filter {
-                    !($0.type == "image" || ($0.contentType ?? "").hasPrefix("image/"))
-                        && $0.type != "collection"
-                        && $0.type != "folder"
-                }
-                if !nonImageFiles.isEmpty {
-                    ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
-                        fileAttachmentCard(file: file)
-                    }
-                }
-
                 // Text content
                 if !displayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     UserMessageContentView(content: displayContent)
@@ -2365,13 +2343,48 @@ struct ChatDetailView: View {
     // MARK: - User Attachment Images
 
     @ViewBuilder
+    private func userAttachmentArea(for message: ChatMessage) -> some View {
+        let files = activeUserDisplayFiles(for: message)
+        let imageFiles = files.filter { isImageFile($0) }
+        let nonImageFiles = files.filter {
+            !isImageFile($0)
+                && $0.type != "collection"
+                && $0.type != "folder"
+        }
+
+        if !imageFiles.isEmpty || !nonImageFiles.isEmpty {
+            VStack(alignment: .trailing, spacing: Spacing.xs) {
+                if !imageFiles.isEmpty {
+                    HStack(spacing: Spacing.sm) {
+                        Spacer(minLength: 64)
+                        ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
+                            if let fileId = imageReference(for: file) {
+                                chatImageView(fileId: fileId, allowsEditing: false)
+                                    .frame(
+                                        maxWidth: imageFiles.count == 1 ? 220 : 104,
+                                        maxHeight: imageFiles.count == 1 ? 220 : 104
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                            }
+                        }
+                    }
+                }
+                if !nonImageFiles.isEmpty {
+                    VStack(alignment: .trailing, spacing: Spacing.xs) {
+                        ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
+                            fileAttachmentCard(file: file)
+                        }
+                    }
+                    .frame(maxWidth: 280, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
     private func userAttachmentImages(for message: ChatMessage) -> some View {
-        let imageFiles = message.files.filter {
-            $0.type == "image" || ($0.contentType ?? "").hasPrefix("image/")
-        }
-        let nonImageFiles = message.files.filter {
-            !($0.type == "image" || ($0.contentType ?? "").hasPrefix("image/"))
-        }
+        let imageFiles = message.files.filter { isImageFile($0) }
+        let nonImageFiles = message.files.filter { !isImageFile($0) }
 
         VStack(alignment: .trailing, spacing: Spacing.xs) {
             if !imageFiles.isEmpty {
@@ -2411,6 +2424,22 @@ struct ChatDetailView: View {
         }
     }
 
+    private func activeUserDisplayContent(for message: ChatMessage) -> String {
+        let userVIdx = activeUserVersionIndex[message.id] ?? -1
+        if userVIdx >= 0 && userVIdx < message.versions.count {
+            return message.versions[userVIdx].content
+        }
+        return message.content
+    }
+
+    private func activeUserDisplayFiles(for message: ChatMessage) -> [ChatMessageFile] {
+        let userVIdx = activeUserVersionIndex[message.id] ?? -1
+        if userVIdx >= 0 && userVIdx < message.versions.count {
+            return message.versions[userVIdx].files
+        }
+        return message.files
+    }
+
     private func imageReference(for file: ChatMessageFile) -> String? {
         let candidates = [file.displayURL, file.url].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
         for candidate in candidates where !candidate.isEmpty {
@@ -2431,44 +2460,47 @@ struct ChatDetailView: View {
         return nil
     }
 
+    private func isImageFile(_ file: ChatMessageFile) -> Bool {
+        file.type == "image" || (file.contentType ?? "").hasPrefix("image/")
+    }
+
     private func fileAttachmentCard(file: ChatMessageFile) -> some View {
         let fileName = file.name ?? file.url ?? "File"
         let fileExt = (fileName as NSString).pathExtension.lowercased()
         let icon = fileIconName(for: fileExt)
 
         return Button {
-            if let fileId = file.url, !fileId.isEmpty {
-                if let remoteURL = URL(string: fileId),
-                   ["http", "https"].contains(remoteURL.scheme?.lowercased()) {
-                    Task { await downloadAndShareRemoteFile(url: remoteURL, suggestedName: fileName) }
-                } else {
-                    Task { await previewFileReference(fileId: fileId, fileName: fileName) }
-                }
-            }
+            previewingMessageFile = MessageFilePreviewItem(file: file)
         } label: {
             HStack(spacing: Spacing.sm) {
                 Image(systemName: icon)
-                    .scaledFont(size: 18)
+                    .scaledFont(size: 15, weight: .semibold)
                     .foregroundStyle(theme.brandPrimary)
-                    .frame(width: 32, height: 32)
+                    .frame(width: 30, height: 30)
                     .background(theme.brandPrimary.opacity(0.1))
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(fileName)
-                        .scaledFont(size: 14)
+                        .scaledFont(size: 13)
                         .fontWeight(.medium)
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text(fileExt.uppercased())
+                    Text(fileAttachmentSubtitle(for: file, fallbackExtension: fileExt))
                         .scaledFont(size: 12, weight: .medium)
                         .foregroundStyle(theme.textTertiary)
                 }
+
+                Spacer(minLength: 6)
+
+                Image(systemName: "chevron.right")
+                    .scaledFont(size: 11, weight: .semibold)
+                    .foregroundStyle(theme.textTertiary)
             }
             .padding(.horizontal, Spacing.sm)
-            .padding(.vertical, Spacing.sm)
-            .background(theme.surfaceContainer.opacity(0.6))
+            .padding(.vertical, 8)
+            .background(theme.surfaceContainer.opacity(0.78))
             .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
@@ -2537,9 +2569,9 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func messageFilesView(files: [ChatMessageFile]) -> some View {
-        let imageFiles = files.filter { $0.type == "image" || ($0.contentType ?? "").hasPrefix("image/") }
+        let imageFiles = files.filter { isImageFile($0) }
         let nonImageFiles = files.filter {
-            !($0.type == "image" || ($0.contentType ?? "").hasPrefix("image/"))
+            !isImageFile($0)
                 && $0.type != "collection"
                 && $0.type != "folder"
         }
@@ -2590,6 +2622,13 @@ struct ChatDetailView: View {
             .clipShape(Capsule())
         }
         .buttonStyle(.plain)
+    }
+
+    private func fileAttachmentSubtitle(for file: ChatMessageFile, fallbackExtension: String) -> String {
+        if let contentType = file.contentType, !contentType.isEmpty {
+            return contentType
+        }
+        return fallbackExtension.isEmpty ? "文件" : fallbackExtension.uppercased()
     }
 
     @ViewBuilder
@@ -4429,6 +4468,386 @@ struct UserMessageContentView: View {
         } else {
             SkillTaggedTextView(segments: segs)
         }
+    }
+}
+
+private struct MessageFilePreviewItem: Identifiable {
+    let id = UUID()
+    let file: ChatMessageFile
+}
+
+private struct MessageFilePreviewSheet: View {
+    let file: ChatMessageFile
+    let apiClient: APIClient?
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+    @State private var selectedTab: PreviewTab = .content
+    @State private var data: Data?
+    @State private var contentType: String?
+    @State private var textContent: String?
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+
+    private enum PreviewTab: CaseIterable, Hashable {
+        case content
+        case preview
+
+        var title: String {
+            switch self {
+            case .content: return "内容"
+            case .preview: return "预览"
+            }
+        }
+    }
+
+    private var fileName: String {
+        file.name ?? file.url ?? "File"
+    }
+
+    private var fileExtension: String {
+        (fileName as NSString).pathExtension.lowercased()
+    }
+
+    private var copyableText: String? {
+        guard let text = textContent?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else {
+            return nil
+        }
+        return text
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                header
+                Divider()
+                Picker("标签页", selection: $selectedTab) {
+                    ForEach(PreviewTab.allCases, id: \.self) { tab in
+                        Text(tab.title).tag(tab)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                Divider()
+
+                Group {
+                    if selectedTab == .content {
+                        contentTab
+                    } else {
+                        previewTab
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .background(theme.background)
+            .navigationTitle(fileName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                        .foregroundStyle(theme.brandPrimary)
+                }
+                if let copyableText {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button {
+                            UIPasteboard.general.string = copyableText
+                            Haptics.play(.light)
+                        } label: {
+                            Label("复制", systemImage: "doc.on.doc")
+                        }
+                        .foregroundStyle(theme.brandPrimary)
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .task { await loadFileIfNeeded() }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Image(systemName: iconName)
+                .scaledFont(size: 26, weight: .semibold)
+                .foregroundStyle(theme.brandPrimary)
+                .frame(width: 42, height: 42)
+                .background(theme.brandPrimary.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(fileName)
+                    .scaledFont(size: 14, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                HStack(spacing: 6) {
+                    Text(contentType ?? file.contentType ?? (fileExtension.isEmpty ? "文件" : fileExtension.uppercased()))
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                    if let data {
+                        Text("·")
+                            .scaledFont(size: 12)
+                            .foregroundStyle(theme.textTertiary)
+                        Text(ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file))
+                            .scaledFont(size: 12)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                    if isLoading {
+                        ProgressView().controlSize(.mini)
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    @ViewBuilder
+    private var contentTab: some View {
+        if isLoading {
+            ProgressView("正在加载内容…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .foregroundStyle(theme.textSecondary)
+        } else if let text = copyableText {
+            ScrollView {
+                Text(text)
+                    .scaledFont(size: 14)
+                    .foregroundStyle(theme.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+                    .textSelection(.enabled)
+            }
+        } else if let errorMessage {
+            ContentUnavailableView(
+                "无法加载内容",
+                systemImage: "exclamationmark.triangle",
+                description: Text(errorMessage)
+            )
+            .padding(.top, 40)
+        } else {
+            ContentUnavailableView(
+                "暂无文本内容",
+                systemImage: "doc.text",
+                description: Text("这个文件没有可复制的文本内容。")
+            )
+            .padding(.top, 40)
+        }
+    }
+
+    @ViewBuilder
+    private var previewTab: some View {
+        if isLoading {
+            ProgressView("正在加载预览…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .foregroundStyle(theme.textSecondary)
+        } else if let data, let image = UIImage(data: data), isImageLike {
+            GeometryReader { geo in
+                ScrollView([.horizontal, .vertical], showsIndicators: false) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(minWidth: geo.size.width, minHeight: geo.size.height)
+                }
+            }
+        } else if let data, let pdf = PDFDocument(data: data), fileExtension == "pdf" || contentType?.contains("pdf") == true {
+            MessagePDFKitView(document: pdf)
+        } else if let text = textContent, !text.isEmpty {
+            ScrollView {
+                Text(text)
+                    .font(.system(.body, design: .monospaced))
+                    .scaledFont(size: 13)
+                    .foregroundStyle(theme.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+                    .textSelection(.enabled)
+            }
+        } else {
+            ContentUnavailableView(
+                "无法预览",
+                systemImage: "eye.slash",
+                description: Text("这种文件类型暂不支持预览。")
+            )
+            .padding(.top, 40)
+        }
+    }
+
+    private var isImageLike: Bool {
+        file.type == "image"
+            || file.contentType?.hasPrefix("image/") == true
+            || contentType?.hasPrefix("image/") == true
+            || ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tiff"].contains(fileExtension)
+    }
+
+    private var iconName: String {
+        switch fileExtension {
+        case "pdf": return "doc.richtext"
+        case "doc", "docx", "txt", "md", "rtf": return "doc.text"
+        case "json", "yaml", "yml", "xml", "toml", "ini", "cfg": return "curlybraces"
+        case "csv", "xls", "xlsx": return "tablecells"
+        case "html", "htm", "css", "scss": return "globe"
+        case "zip", "tar", "gz", "rar", "7z": return "archivebox"
+        case "mp3", "wav", "m4a", "flac": return "waveform"
+        case "mp4", "mov", "avi", "mkv", "webm": return "film"
+        case "png", "jpg", "jpeg", "gif", "webp", "heic", "heif": return "photo"
+        case "js", "ts", "py", "swift", "dart", "java", "cpp", "c", "h", "rb", "go", "rs":
+            return "chevron.left.forwardslash.chevron.right"
+        default: return "doc"
+        }
+    }
+
+    @MainActor
+    private func loadFileIfNeeded() async {
+        guard data == nil else { return }
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+
+        do {
+            let extractedText = try await loadExtractedTextIfAvailable()
+            if let loaded = try await loadData() {
+                data = loaded.data
+                contentType = loaded.contentType
+                textContent = extractedText ?? decodedText(from: loaded.data, contentType: loaded.contentType)
+            } else {
+                textContent = extractedText
+                errorMessage = "缺少可读取的文件地址。"
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadExtractedTextIfAvailable() async throws -> String? {
+        guard let apiClient,
+              let fileId = fileReferenceCandidates.compactMap(serverFileId(from:)).first else {
+            return nil
+        }
+        let info = try await apiClient.getFileInfo(id: fileId)
+        if let data = info["data"] as? [String: Any],
+           let content = data["content"] as? String,
+           !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return content
+        }
+        return nil
+    }
+
+    private func loadData() async throws -> (data: Data, contentType: String?)? {
+        guard let ref = fileReferenceCandidates.first else {
+            return nil
+        }
+
+        if ref.hasPrefix("data:") {
+            return try dataURLPayload(ref)
+        }
+
+        if let url = URL(string: ref), url.isFileURL {
+            return (try Data(contentsOf: url), file.contentType)
+        }
+
+        if let apiClient, let fileId = serverFileId(from: ref) {
+            let (data, responseType) = try await apiClient.getFileContent(id: fileId)
+            return (data, responseType)
+        }
+
+        if let url = URL(string: ref),
+           ["http", "https"].contains(url.scheme?.lowercased()) {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            let responseType = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type")
+            return (data, responseType ?? file.contentType)
+        }
+
+        guard let apiClient else {
+            throw NSError(domain: "MessageFilePreview", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "尚未连接站点，无法加载文件。"
+            ])
+        }
+        let (data, responseType) = try await apiClient.getFileContent(id: ref)
+        return (data, responseType)
+    }
+
+    private var fileReferenceCandidates: [String] {
+        [file.displayURL, file.url]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func serverFileId(from ref: String) -> String? {
+        if ref.hasPrefix("data:") || ref.hasPrefix("file://") {
+            return nil
+        }
+        let parts = ref.split(separator: "/", omittingEmptySubsequences: true)
+        if let filesIndex = parts.firstIndex(of: "files"),
+           filesIndex + 1 < parts.endIndex {
+            return String(parts[filesIndex + 1])
+        }
+        if ref.contains("/") || ref.contains(":") {
+            return nil
+        }
+        return ref
+    }
+
+    private func dataURLPayload(_ value: String) throws -> (data: Data, contentType: String?) {
+        guard let comma = value.firstIndex(of: ",") else {
+            throw NSError(domain: "MessageFilePreview", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "文件 data URL 格式无效。"
+            ])
+        }
+        let header = String(value[..<comma])
+        let body = String(value[value.index(after: comma)...])
+        let mime = header
+            .replacingOccurrences(of: "data:", with: "")
+            .components(separatedBy: ";")
+            .first
+        if header.lowercased().contains(";base64") {
+            guard let data = Data(base64Encoded: body, options: .ignoreUnknownCharacters) else {
+                throw NSError(domain: "MessageFilePreview", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey: "文件 base64 内容无法解码。"
+                ])
+            }
+            return (data, mime)
+        }
+        let decoded = body.removingPercentEncoding ?? body
+        return (Data(decoded.utf8), mime)
+    }
+
+    private func decodedText(from data: Data, contentType: String?) -> String? {
+        let lowerType = (contentType ?? file.contentType ?? "").lowercased()
+        let textExtensions = [
+            "txt", "md", "csv", "json", "yaml", "yml", "xml", "html", "htm",
+            "css", "scss", "js", "ts", "py", "swift", "java", "c", "h", "cpp",
+            "go", "rs", "rb", "php", "sh", "ps1", "toml", "ini", "cfg", "log"
+        ]
+        guard lowerType.hasPrefix("text/")
+            || lowerType.contains("json")
+            || lowerType.contains("xml")
+            || textExtensions.contains(fileExtension) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .utf16)
+            ?? String(data: data, encoding: .isoLatin1)
+    }
+}
+
+private struct MessagePDFKitView: UIViewRepresentable {
+    let document: PDFDocument
+
+    func makeUIView(context: Context) -> PDFView {
+        let pdfView = PDFView()
+        pdfView.document = document
+        pdfView.autoScales = true
+        pdfView.displayMode = .singlePageContinuous
+        pdfView.displayDirection = .vertical
+        pdfView.backgroundColor = .systemBackground
+        return pdfView
+    }
+
+    func updateUIView(_ uiView: PDFView, context: Context) {
+        uiView.document = document
     }
 }
 

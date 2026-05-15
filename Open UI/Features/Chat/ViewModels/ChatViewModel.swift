@@ -250,6 +250,7 @@ final class ChatViewModel {
     private let webLinkContextResolver = WebLinkContextResolver()
     private var webLinkContextsByMessageId: [String: String] = [:]
     private var webSearchContextsByMessageId: [String: String] = [:]
+    private var attachmentContextsByMessageId: [String: String] = [:]
     private var hasFinishedStreaming = false
     /// Tracks the content length at the last `extractAndApplyTasksFromContent` call.
     /// Prevents the O(n) task-extraction scan from running on every single token;
@@ -3991,11 +3992,15 @@ final class ChatViewModel {
         inputText = ""
         attachments = []
 
-        let messageText: String = {
-            guard !inlineTextSnippets.isEmpty else { return currentText }
-            let joined = inlineTextSnippets.joined(separator: "\n\n")
-            if currentText.isEmpty { return joined }
-            return currentText + "\n\n" + joined
+        let messageText = currentText
+        let modelAttachmentContext = inlineTextSnippets
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        let modelPromptText: String = {
+            guard !modelAttachmentContext.isEmpty else { return messageText }
+            if messageText.isEmpty { return modelAttachmentContext }
+            return messageText + "\n\n" + modelAttachmentContext
         }()
 
         // Create user message - store file IDs (not base64) matching Flutter behavior
@@ -4058,7 +4063,10 @@ final class ChatViewModel {
 
         // Ensure conversation exists on server (skip for temporary chats)
         if conversation == nil {
-            let chatTitle = String(messageText.prefix(50))
+            let chatTitleSource = messageText.isEmpty
+                ? (messageFiles.first?.name ?? "文件")
+                : messageText
+            let chatTitle = String(chatTitleSource.prefix(50))
             var serverId: String?
             if !isTemporaryChat && !isOpenAICompatibleProvider {
                 do {
@@ -4137,16 +4145,20 @@ final class ChatViewModel {
         conversation?.history.currentId = assistantMessageId
         // ────────────────────────────────────────────────────────────────────
 
+        if !modelAttachmentContext.isEmpty {
+            attachmentContextsByMessageId[userMessage.id] = modelAttachmentContext
+        }
+
         await resolveWebLinkContextIfNeeded(
             userMessageId: userMessage.id,
             assistantMessageId: assistantMessageId,
-            text: messageText
+            text: modelPromptText
         )
 
         await resolveWebSearchContextIfNeeded(
             userMessageId: userMessage.id,
             assistantMessageId: assistantMessageId,
-            text: messageText,
+            text: modelPromptText,
             modelId: modelId,
             hasAttachments: !currentAttachments.isEmpty
         )
@@ -4155,7 +4167,7 @@ final class ChatViewModel {
         let imageCanvasInstructionMessageId = (imageGenerationEnabled
             || shouldUseDirectImageGeneration(modelId: modelId)
             || shouldPreferChatNativeImageGeneration(modelId: modelId))
-            && Self.looksLikeImageGenerationRequest(messageText)
+            && Self.looksLikeImageGenerationRequest(modelPromptText)
             ? userMessage.id
             : nil
         let apiMessages = await buildAPIMessagesAsync(
@@ -4187,7 +4199,7 @@ final class ChatViewModel {
             initialStatusHistory: initialStatusHistory,
             initialSources: initialSources
         )
-        await startRunLiveActivity(id: assistantMessageId, modelId: modelId, prompt: messageText)
+        await startRunLiveActivity(id: assistantMessageId, modelId: modelId, prompt: modelPromptText)
 
         if isOpenAICompatibleProvider {
             streamingTask = Task { [weak self] in
@@ -4197,7 +4209,7 @@ final class ChatViewModel {
 
                 do {
                     if self.shouldUseDirectVideoGeneration(modelId: modelId) {
-                        let videoPrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let videoPrompt = modelPromptText.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !videoPrompt.isEmpty else {
                             throw APIError.unknown(
                                 underlying: NSError(
@@ -4269,7 +4281,7 @@ final class ChatViewModel {
                                     )
                                 )
                             }
-                            let imagePrompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let imagePrompt = modelPromptText.trimmingCharacters(in: .whitespacesAndNewlines)
                             let requestedCanvasSize = Self.requestedImageCanvasSize(from: imagePrompt)
                             let requestedImageSize = Self.imageEndpointSize(for: requestedCanvasSize)
                             let imagePromptForAPI = Self.promptWithImageSizeInstruction(
@@ -9550,6 +9562,7 @@ final class ChatViewModel {
         }
 
         let extraContexts = [
+            attachmentContextsByMessageId[message.id],
             webLinkContextsByMessageId[message.id],
             webSearchContextsByMessageId[message.id]
         ]
