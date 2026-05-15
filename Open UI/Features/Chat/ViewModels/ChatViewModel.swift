@@ -8147,7 +8147,8 @@ final class ChatViewModel {
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
-        - For scripts/projects, use exact shell writes inside `iexa_alpine` to create files, then run a bounded verification command. For Python files, provide the complete file in one heredoc and keep indentation literal.
+        - For scripts/projects, prefer JSON `write_files` / `code_lines` inside `iexa_alpine` to create files, then run a bounded verification command. This preserves indentation better than raw shell text on some providers.
+        - If you use shell text instead of JSON, write Python files as one complete quoted heredoc and keep indentation literal.
         - When fixing an existing Python file after a syntax/indentation error, first inspect the user project file named by `目标 Python 文件` or the preserved `失败草稿已保留` path, then rewrite the complete corrected target Python file with a shell heredoc write. Do not inspect validator traceback files such as `/usr/lib/python.../ast.py`, and do not output partial patches, half-structured continuations, or "continue writing" fragments.
         - For indentation-sensitive files, prefer a shell heredoc with a quoted delimiter so leading spaces are preserved exactly.
         - Prefer a complete shell write for Python class/function bodies, then run the requested script or a bounded verification command.
@@ -8162,6 +8163,26 @@ final class ChatViewModel {
         To execute commands, include exactly one fenced block with language `iexa_alpine` containing POSIX shell commands. The app will run those commands locally on the device and append the real output. Do not output this block unless command execution is actually needed.
 
         Example:
+        ```iexa_alpine
+        {
+          "cwd": "/mnt/iexa",
+          "write_files": [
+            {
+              "path": "hello.py",
+              "code_lines": [
+                "def main():",
+                "    print('hello from Iexa Alpine')",
+                "",
+                "if __name__ == '__main__':",
+                "    main()"
+              ]
+            }
+          ],
+          "command": "python3 -m py_compile hello.py && python3 hello.py"
+        }
+        ```
+
+        Shell heredoc fallback:
         ```iexa_alpine
         cat /etc/alpine-release && uname -m && pwd
         cat > hello.py <<'PY'
@@ -11085,7 +11106,7 @@ final class ChatViewModel {
         - If the user interrupts with a question or taps stop, answer the question and wait. Do not resume automatic execution until the user explicitly asks to continue/fix/run.
         Strategy Switch:
         - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, complete-file rewrite, then verification.
-        - For Python indentation/syntax errors, inspect the user project file named by `目标 Python 文件` or the preserved `失败草稿已保留` path, then rewrite the complete corrected target `.py` file through a shell heredoc write. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
+        - For Python indentation/syntax errors, inspect the user project file named by `目标 Python 文件` or the preserved `失败草稿已保留` path, then rewrite the complete corrected target `.py` file through JSON `write_files` / `code_lines` or a complete quoted shell heredoc. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
         - If a failed draft path is present, read the draft to recover the exact attempted source, but write the corrected code back to the target Python file, not to the draft path.
         - For indentation-sensitive rewrites, prefer a quoted shell heredoc so leading spaces and tabs remain literal.
         - If a Python shell text write fails, switch to a different exact command-line write or inspect the command output before retrying.

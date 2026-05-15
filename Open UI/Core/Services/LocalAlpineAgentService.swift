@@ -129,6 +129,33 @@ actor LocalAlpineAgentService {
 
                 commandToExecute = Self.repairPythonHeredocBodies(in: commandToExecute)
                 commandToExecute = commandToExecute.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let extracted = await extractPythonHeredocWrites(from: commandToExecute, cwd: effectiveCWD) {
+                    stepLines.append(extracted.summary)
+                    extracted.writtenPaths.forEach { editedFilePaths.insert($0) }
+                    if extracted.hadFailure {
+                        let result = LocalAlpineCommandResult(
+                            command: "python_heredoc_write",
+                            output: extracted.summary,
+                            exitCode: 125,
+                            interactiveRequest: nil
+                        )
+                        commandResults.append(Self.commandResult(
+                            command: "python_heredoc_write",
+                            cwd: effectiveCWD,
+                            result: result
+                        ))
+                        shouldRunShellCommand = false
+                        stopRemainingCommands = true
+                    } else {
+                        commandToExecute = extracted.remainingCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+                guard shouldRunShellCommand else {
+                    if !stepLines.isEmpty {
+                        lines.append(stepLines.joined(separator: "\n\n"))
+                    }
+                    continue
+                }
                 guard !commandToExecute.isEmpty else {
                     if !stepLines.isEmpty {
                         lines.append(stepLines.joined(separator: "\n\n"))
@@ -700,8 +727,63 @@ actor LocalAlpineAgentService {
         return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: nil, hadFailure: true)
     }
 
-    private func extractPythonHeredocWrites(from _: String, cwd _: String) async -> LocalAlpineExtractedWriteResult? {
-        return nil
+    private func extractPythonHeredocWrites(from command: String, cwd: String) async -> LocalAlpineExtractedWriteResult? {
+        let commandLines = command.components(separatedBy: .newlines)
+        var remainingLines: [String] = []
+        var summaryLines = ["写入 Python heredoc（保护通道）"]
+        var writtenPaths: [String] = []
+        var hadFailure = false
+        var extractedCount = 0
+        var index = 0
+
+        while index < commandLines.count {
+            let line = commandLines[index]
+            guard let spec = Self.pythonHeredocWriteSpec(from: line) else {
+                remainingLines.append(line)
+                index += 1
+                continue
+            }
+
+            var bodyLines: [String] = []
+            var cursor = index + 1
+            var foundTerminator = false
+            while cursor < commandLines.count {
+                let candidate = commandLines[cursor]
+                if Self.isHeredocTerminator(candidate, marker: spec.marker) {
+                    foundTerminator = true
+                    break
+                }
+                bodyLines.append(candidate)
+                cursor += 1
+            }
+
+            guard foundTerminator else {
+                remainingLines.append(line)
+                index += 1
+                continue
+            }
+
+            extractedCount += 1
+            let content = bodyLines.joined(separator: "\n")
+            let file = LocalAlpineAgentFile(path: spec.path, content: content, source: .heredoc)
+            let outcome = await writeProtectedFile(file, cwd: cwd)
+            summaryLines.append(contentsOf: outcome.lines)
+            if let writtenPath = outcome.writtenPath {
+                writtenPaths.append(writtenPath)
+            }
+            if outcome.hadFailure {
+                hadFailure = true
+            }
+            index = cursor + 1
+        }
+
+        guard extractedCount > 0 else { return nil }
+        return LocalAlpineExtractedWriteResult(
+            summary: summaryLines.joined(separator: "\n"),
+            writtenPaths: writtenPaths,
+            remainingCommand: remainingLines.joined(separator: "\n"),
+            hadFailure: hadFailure
+        )
     }
 
     private nonisolated static func repairPythonHeredocBodies(in command: String) -> String {
