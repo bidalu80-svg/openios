@@ -202,8 +202,7 @@ public final class CodeHighlighter: @unchecked Sendable {
 
 public extension CodeHighlighter.HighlightMap {
     func apply(to content: String, with theme: MarkdownTheme) -> NSMutableAttributedString {
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = CodeViewConfiguration.codeLineSpacing
+        let paragraphStyle = codeParagraphStyle(for: theme)
 
         let plainTextColor = theme.colors.code
         let attributedContent: NSMutableAttributedString = .init(
@@ -228,8 +227,7 @@ public extension CodeHighlighter.HighlightMap {
     /// `charOffset` is the character index in the full string where `slice` begins.
     /// Only ranges that overlap the slice are applied, shifted by -charOffset.
     func apply(toSlice slice: String, charOffset: Int, with theme: MarkdownTheme) -> NSMutableAttributedString {
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = CodeViewConfiguration.codeLineSpacing
+        let paragraphStyle = codeParagraphStyle(for: theme)
 
         let plainTextColor = theme.colors.code
         let attributedContent: NSMutableAttributedString = .init(
@@ -259,4 +257,28 @@ public extension CodeHighlighter.HighlightMap {
         }
         return attributedContent
     }
+}
+
+private func codeParagraphStyle(for theme: MarkdownTheme, tabLength: Int = 4) -> NSMutableParagraphStyle {
+    let paragraphStyle = NSMutableParagraphStyle()
+    paragraphStyle.lineSpacing = CodeViewConfiguration.codeLineSpacing
+    let tabWidth = measuredTabWidth(tabLength: tabLength, theme: theme)
+    paragraphStyle.tabStops = (0 ..< 40).map { index in
+        NSTextTab(textAlignment: .natural, location: CGFloat(index) * tabWidth)
+    }
+    paragraphStyle.defaultTabInterval = tabWidth
+    return paragraphStyle
+}
+
+private func measuredTabWidth(tabLength: Int, theme: MarkdownTheme) -> CGFloat {
+    let spaces = String(repeating: " ", count: tabLength)
+    let maxSize = CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
+    let options: NSStringDrawingOptions = [.usesFontLeading, .usesLineFragmentOrigin]
+    let bounds = spaces.boundingRect(
+        with: maxSize,
+        options: options,
+        attributes: [.font: theme.fonts.code],
+        context: nil
+    )
+    return max(1, round(bounds.size.width))
 }

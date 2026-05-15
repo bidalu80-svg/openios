@@ -10555,7 +10555,9 @@ final class ChatViewModel {
         localAlpineNoCommandContinuationRetries = 0
         if repeatedLocalAlpineErrorShouldStop(after: result, parentId: resultMessageId) {
             localAlpineAgentStopRequested = true
-        } else if result.interactiveRequest == nil, !localAlpineAgentStopRequested {
+        } else if result.interactiveRequest == nil,
+                  !localAlpineAgentStopRequested,
+                  localAlpineResultNeedsFollowUp(after: resultMessageId) {
             scheduleLocalAlpineContinuationIfNeeded(after: resultMessageId, forceContinue: true)
         } else {
             localAlpineAgentStopRequested = true
@@ -11724,7 +11726,17 @@ final class ContentAccumulator: @unchecked Sendable {
 
     nonisolated func append(_ text: String) {
         lock.lock()
-        _content += text
+        if !_content.isEmpty, text == _content {
+            lock.unlock()
+            return
+        } else if !_content.isEmpty, text.hasPrefix(_content) {
+            // Some providers send cumulative content in a streaming field
+            // (often as a final `message.content`) instead of a true delta.
+            // Replacing prevents the completed answer from appearing twice.
+            _content = text
+        } else {
+            _content += text
+        }
         // Only enqueue a new MainActor Task if none is already in-flight.
         // The in-flight Task will read _content at execution time, so it will
         // always deliver the very latest accumulated text — even if many tokens

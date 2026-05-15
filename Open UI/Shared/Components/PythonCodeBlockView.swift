@@ -19,11 +19,12 @@ struct PythonCodeBlockView: View {
         case idle
         case loading        // Local runtime preparing
         case running        // Code executing
+        case waitingForInput // Code paused for stdin
         case done(result: PythonExecutionResult)
 
         static func == (lhs: RunState, rhs: RunState) -> Bool {
             switch (lhs, rhs) {
-            case (.idle, .idle), (.loading, .loading), (.running, .running): return true
+            case (.idle, .idle), (.loading, .loading), (.running, .running), (.waitingForInput, .waitingForInput): return true
             case (.done, .done): return true
             default: return false
             }
@@ -33,6 +34,8 @@ struct PythonCodeBlockView: View {
     @State private var runState: RunState = .idle
     @State private var codeCopied = false
     @State private var showFullCode = false
+    @State private var pendingInteractiveRequest: LocalAlpineInteractiveRequest?
+    @State private var pendingInteractiveInput = ""
 
     @Environment(\.theme) private var theme
     @Environment(\.colorScheme) private var colorScheme
@@ -73,6 +76,8 @@ struct PythonCodeBlockView: View {
                 loadingPanel
             } else if case .running = runState {
                 runningPanel
+            } else if case .waitingForInput = runState {
+                waitingInputPanel
             } else if case .done(let result) = runState {
                 outputPanel(result: result)
             }
@@ -84,6 +89,31 @@ struct PythonCodeBlockView: View {
         )
         .sheet(isPresented: $showFullCode) {
             FullCodeView(code: displayCode, language: "python")
+        }
+        .sheet(item: $pendingInteractiveRequest) { request in
+            ActionInputSheet(
+                request: ActionInputRequest(
+                    title: request.title,
+                    message: request.message,
+                    placeholder: request.placeholder,
+                    defaultValue: request.defaultValue
+                ),
+                text: $pendingInteractiveInput,
+                onConfirm: {
+                    let input = pendingInteractiveInput
+                    pendingInteractiveRequest = nil
+                    pendingInteractiveInput = ""
+                    continueInteractiveRun(input: input)
+                },
+                onCancel: {
+                    pendingInteractiveRequest = nil
+                    pendingInteractiveInput = ""
+                    cancelInteractiveRun()
+                }
+            )
+            .presentationDetents([.height(300)])
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled()
         }
     }
 
@@ -198,6 +228,29 @@ struct PythonCodeBlockView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(Color.primary.opacity(0.02))
+    }
+
+    private var waitingInputPanel: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "keyboard")
+                .scaledFont(size: 13, weight: .medium)
+                .foregroundStyle(.orange)
+            Text("等待输入…")
+                .scaledFont(size: 12, weight: .medium)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("填写") {
+                if let request = pendingInteractiveRequest {
+                    pendingInteractiveInput = request.defaultValue
+                    pendingInteractiveRequest = request
+                }
+            }
+            .scaledFont(size: 12, weight: .semibold)
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.orange.opacity(0.08))
     }
 
     // MARK: - Output Panel
@@ -320,15 +373,46 @@ struct PythonCodeBlockView: View {
     // MARK: - Run Action
 
     private func runCode() {
+        pendingInteractiveRequest = nil
+        pendingInteractiveInput = ""
+        executeCode(stdinInput: nil)
+    }
+
+    private func continueInteractiveRun(input: String) {
+        executeCode(stdinInput: input)
+    }
+
+    private func cancelInteractiveRun() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            runState = .done(result: PythonExecutionResult(
+                status: .error,
+                stdout: "",
+                stderr: "已取消输入，本次 Python 执行已停止。",
+                images: []
+            ))
+        }
+        Haptics.notify(.warning)
+    }
+
+    private func executeCode(stdinInput: String?) {
         runState = .running
         let codeToRun = Self.normalizedPythonCodeBlockSource(code)
         Task {
-            let result = await Self.runCodeInLocalAlpine(code: codeToRun)
+            let outcome = await Self.runCodeInLocalAlpine(code: codeToRun, stdinInput: stdinInput)
             await MainActor.run {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    self.runState = .done(result: result)
+                if let request = outcome.interactiveRequest {
+                    pendingInteractiveInput = request.defaultValue
+                    pendingInteractiveRequest = request
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        self.runState = .waitingForInput
+                    }
+                    Haptics.notify(.warning)
+                    return
                 }
-                if result.status == .success {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    self.runState = .done(result: outcome.result)
+                }
+                if outcome.result.status == .success {
                     Haptics.notify(.success)
                 } else {
                     Haptics.notify(.error)
@@ -337,16 +421,16 @@ struct PythonCodeBlockView: View {
         }
     }
 
-    private static func runCodeInLocalAlpine(code: String) async -> PythonExecutionResult {
+    private static func runCodeInLocalAlpine(code: String, stdinInput: String? = nil) async -> PythonCodeRunOutcome {
         let fileName = "codeblock-\(UUID().uuidString.prefix(8)).py"
         let source = normalizedPythonCodeBlockSource(code)
         guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return PythonExecutionResult(
+            return PythonCodeRunOutcome(result: PythonExecutionResult(
                 status: .error,
                 stdout: "",
                 stderr: "Python 代码为空，无法运行。",
                 images: []
-            )
+            ))
         }
         let marker = shellHereDocMarker(for: source)
         let body = source.hasSuffix("\n") ? source : source + "\n"
@@ -359,25 +443,31 @@ struct PythonCodeBlockView: View {
         rm -f \(quotedFile)
         exit $status
         """
-        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
+        let result = await LocalAlpineTerminalService.shared.execute(
+            command: command,
+            cwd: "/mnt/iexa",
+            stdinInput: stdinInput
+        )
+        if let interactiveRequest = result.interactiveRequest {
+            return PythonCodeRunOutcome(
+                result: PythonExecutionResult(status: .error, stdout: "", stderr: result.output, images: []),
+                interactiveRequest: interactiveRequest
+            )
+        }
         let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
         if result.exitCode == 0 {
-            return PythonExecutionResult(status: .success, stdout: output, stderr: "", images: [])
+            return PythonCodeRunOutcome(result: PythonExecutionResult(status: .success, stdout: output, stderr: "", images: []))
         }
-        return PythonExecutionResult(
+        return PythonCodeRunOutcome(result: PythonExecutionResult(
             status: .error,
             stdout: "",
             stderr: output.isEmpty ? "Local Alpine 执行失败，退出码：\(result.exitCode.map(String.init) ?? "unknown")" : output,
             images: []
-        )
+        ))
     }
 
     private static func normalizedPythonCodeBlockSource(_ code: String) -> String {
-        let prepared = LocalAlpinePythonWriteGuard.normalizeGeneratedPython(
-            code,
-            source: .codeBlock
-        )
-        return codeBlockSource(prepared.content)
+        codeBlockSource(code)
     }
 
     private static func codeBlockSource(_ code: String) -> String {
@@ -401,6 +491,16 @@ struct PythonCodeBlockView: View {
             marker = "\(prefix)_\(suffix)"
         }
         return marker
+    }
+}
+
+private struct PythonCodeRunOutcome {
+    let result: PythonExecutionResult
+    let interactiveRequest: LocalAlpineInteractiveRequest?
+
+    init(result: PythonExecutionResult, interactiveRequest: LocalAlpineInteractiveRequest? = nil) {
+        self.result = result
+        self.interactiveRequest = interactiveRequest
     }
 }
 
