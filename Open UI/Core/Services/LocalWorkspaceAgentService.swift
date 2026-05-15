@@ -185,7 +185,7 @@ actor LocalWorkspaceAgentService {
                 let url = try resolvePath(operation.path, root: root, allowRoot: false)
                 let parent = url.deletingLastPathComponent()
                 try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
-                let content = operation.content ?? ""
+                let content = preparedContent(operation.content ?? "", for: operation.path)
                 try Data(content.utf8).write(to: url, options: .atomic)
                 return "- 已写入文件 `\(operation.path)`（\(content.utf8.count) B）"
 
@@ -193,7 +193,7 @@ actor LocalWorkspaceAgentService {
                 let url = try resolvePath(operation.path, root: root, allowRoot: false)
                 let parent = url.deletingLastPathComponent()
                 try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
-                let content = operation.content ?? ""
+                let content = preparedContent(operation.content ?? "", for: operation.path)
                 if fileManager.fileExists(atPath: url.path) {
                     let handle = try FileHandle(forWritingTo: url)
                     handle.seekToEndOfFile()
@@ -247,6 +247,14 @@ actor LocalWorkspaceAgentService {
         } catch {
             return "- `\(operation.path)` 执行失败：\(error.localizedDescription)"
         }
+    }
+
+    private nonisolated func preparedContent(_ content: String, for path: String) -> String {
+        guard path.lowercased().hasSuffix(".py") else { return content }
+        return LocalAlpinePythonWriteGuard.normalizeGeneratedPython(
+            content,
+            source: .content
+        ).content
     }
 
     nonisolated static func visibleContent(from content: String) -> String {

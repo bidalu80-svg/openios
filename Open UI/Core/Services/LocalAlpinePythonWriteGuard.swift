@@ -72,9 +72,17 @@ enum LocalAlpinePythonWriteGuard {
         var prepared = normalizeNewlines(extracted.content).trimmingCharacters(in: .newlines)
         var notes = extracted.notes
 
+        let tabRepair = normalizeLeadingTabs(in: prepared)
+        prepared = tabRepair.content
+        notes.append(contentsOf: tabRepair.notes)
+
         let tinyIndentRepair = normalizeTinyPythonIndents(in: prepared)
         prepared = tinyIndentRepair.content
         notes.append(contentsOf: tinyIndentRepair.notes)
+
+        let indentWidthRepair = normalizeIndentWidthToFourSpaces(in: prepared)
+        prepared = indentWidthRepair.content
+        notes.append(contentsOf: indentWidthRepair.notes)
 
         let blockBodyRepair = repairFlatPythonBlocks(in: prepared)
         prepared = blockBodyRepair.content
@@ -163,6 +171,38 @@ enum LocalAlpinePythonWriteGuard {
         return starters.contains { lowered.hasPrefix($0) }
     }
 
+    private static func normalizeLeadingTabs(in content: String) -> (content: String, notes: [String]) {
+        let lines = content.components(separatedBy: .newlines)
+        var changedLines: [Int] = []
+
+        let normalized = lines.enumerated().map { offset, rawLine in
+            var prefix = ""
+            var index = rawLine.startIndex
+            var changed = false
+
+            while index < rawLine.endIndex {
+                let character = rawLine[index]
+                if character == "\t" {
+                    prefix += "    "
+                    changed = true
+                } else if character == " " {
+                    prefix.append(character)
+                } else {
+                    break
+                }
+                index = rawLine.index(after: index)
+            }
+
+            guard changed else { return rawLine }
+            changedLines.append(offset + 1)
+            return prefix + String(rawLine[index...])
+        }
+
+        guard !changedLines.isEmpty else { return (content, []) }
+        let note = "已按 VS Code/Python 默认设置将行首 Tab 转换为 4 个空格：第 \(changedLines.prefix(12).map(String.init).joined(separator: ", ")) 行"
+        return (normalized.joined(separator: "\n"), [note])
+    }
+
     private static func normalizeTinyPythonIndents(in content: String) -> (content: String, notes: [String]) {
         let lines = content.components(separatedBy: .newlines)
         let significant = lines.compactMap { rawLine -> (indent: Int, text: String)? in
@@ -199,19 +239,139 @@ enum LocalAlpinePythonWriteGuard {
         return (normalized.joined(separator: "\n"), [note])
     }
 
+    private static func normalizeIndentWidthToFourSpaces(in content: String) -> (content: String, notes: [String]) {
+        let lines = content.components(separatedBy: .newlines)
+        let significantIndents = lines.compactMap { rawLine -> Int? in
+            let text = stripHorizontalWhitespace(rawLine)
+            guard !text.isEmpty, !text.hasPrefix("#") else { return nil }
+            let indent = leadingIndentCount(rawLine)
+            return indent > 0 ? indent : nil
+        }
+
+        let positiveIndents = Array(Set(significantIndents)).sorted()
+        guard let minIndent = positiveIndents.first,
+              positiveIndents.contains(where: { $0 % 4 != 0 }) else {
+            return (content, [])
+        }
+
+        let unit = positiveIndents.reduce(minIndent) { gcd($0, $1) }
+        guard unit > 0,
+              unit == minIndent,
+              unit != 4,
+              unit <= 3,
+              positiveIndents.allSatisfy({ $0 % unit == 0 }) else {
+            return (content, [])
+        }
+
+        var changedLines: [Int] = []
+        let normalized = lines.enumerated().map { offset, rawLine in
+            let indent = leadingIndentCount(rawLine)
+            guard indent > 0, indent % unit == 0 else { return rawLine }
+            let mappedIndent = (indent / unit) * 4
+            guard mappedIndent != indent else { return rawLine }
+            changedLines.append(offset + 1)
+            return String(repeating: " ", count: mappedIndent) + stripHorizontalWhitespace(rawLine)
+        }
+
+        guard !changedLines.isEmpty else { return (content, []) }
+        let note = "已按 VS Code/Python 默认设置将 \(unit) 空格缩进转换为 4 空格层级：第 \(changedLines.prefix(12).map(String.init).joined(separator: ", ")) 行"
+        return (normalized.joined(separator: "\n"), [note])
+    }
+
+    private static func gcd(_ lhs: Int, _ rhs: Int) -> Int {
+        var a = abs(lhs)
+        var b = abs(rhs)
+        while b != 0 {
+            let remainder = a % b
+            a = b
+            b = remainder
+        }
+        return a
+    }
+
     private static func repairFlatPythonBlocks(in content: String) -> (content: String, notes: [String]) {
         let lines = content.components(separatedBy: .newlines)
         guard lines.count >= 2 else { return (content, []) }
 
         struct ActiveBlock {
+            let rawIndent: Int
             let indent: Int
+            let keyword: String
+            let openedByFlatRepair: Bool
             var hasRepairedBody: Bool
+            var hasNativeIndentedBody: Bool
+        }
+
+        struct SignificantLine {
+            let rawIndent: Int
+            let indent: Int
+            let text: String
+            let opensBlock: Bool
+            let isTerminating: Bool
+        }
+
+        func matchingPeerBlock(for text: String, in stack: [ActiveBlock]) -> (index: Int, indent: Int, keepMatchedBlock: Bool)? {
+            let keyword = blockKeyword(text)
+            let allowed: [String]
+            switch keyword {
+            case "elif":
+                allowed = ["if", "elif"]
+            case "else":
+                allowed = ["if", "elif", "for", "while", "try", "except"]
+            case "except":
+                allowed = ["try", "except"]
+            case "finally":
+                allowed = ["try", "except", "else"]
+            case "case":
+                allowed = ["case", "match"]
+            default:
+                return nil
+            }
+
+            for index in stack.indices.reversed() where allowed.contains(stack[index].keyword) {
+                if keyword == "case", stack[index].keyword == "match" {
+                    return (index, stack[index].indent + 4, true)
+                }
+                return (index, stack[index].indent, false)
+            }
+            return nil
+        }
+
+        func shouldCloseFlatBlock(
+            _ active: ActiveBlock,
+            before text: String,
+            originalIndent: Int,
+            previous: SignificantLine?
+        ) -> Bool {
+            guard originalIndent <= active.rawIndent else { return false }
+            let lowered = text.lowercased()
+            if lowered.hasPrefix("if __name__") || lowered.hasPrefix("class ") {
+                return true
+            }
+            if lowered.hasPrefix("def ") || lowered.hasPrefix("async def ") {
+                if active.keyword == "class" {
+                    return active.hasNativeIndentedBody
+                        || (active.hasRepairedBody && previous?.isTerminating == true)
+                }
+                return true
+            }
+            return false
+        }
+
+        func markNearestParentBody(for desiredIndent: Int, originalIndent: Int, in stack: inout [ActiveBlock]) {
+            guard let index = stack.indices.reversed().first(where: { desiredIndent > stack[$0].indent }) else {
+                return
+            }
+            stack[index].hasRepairedBody = true
+            if originalIndent > stack[index].rawIndent {
+                stack[index].hasNativeIndentedBody = true
+            }
         }
 
         var repaired: [String] = []
         var stack: [ActiveBlock] = []
         var changedLines: [Int] = []
-        var previousSignificant: (indent: Int, text: String)?
+        var previousSignificant: SignificantLine?
 
         for (offset, rawLine) in lines.enumerated() {
             let lineNumber = offset + 1
@@ -222,38 +382,53 @@ enum LocalAlpinePythonWriteGuard {
             }
 
             let originalIndent = leadingIndentCount(rawLine)
-            while let last = stack.last, originalIndent < last.indent {
+            while let last = stack.last, originalIndent < last.rawIndent {
                 stack.removeLast()
             }
 
             var desiredIndent = originalIndent
-            var handledPeer = false
+            var openedByFlatRepair = false
 
             if startsPeerOrDedentKeyword(text) {
-                while let active = stack.last, originalIndent <= active.indent {
-                    desiredIndent = active.indent
-                    stack.removeLast()
-                    handledPeer = true
-                    break
+                if let peer = matchingPeerBlock(for: text, in: stack) {
+                    desiredIndent = peer.indent
+                    let removalStart = peer.keepMatchedBlock ? peer.index + 1 : peer.index
+                    if removalStart < stack.endIndex {
+                        stack.removeSubrange(removalStart..<stack.endIndex)
+                    }
+                    openedByFlatRepair = desiredIndent != originalIndent
                 }
             }
 
-            if !handledPeer {
-                while let active = stack.last, originalIndent <= active.indent {
-                    if isLikelyFlatRepairBoundary(text, originalIndent: originalIndent, blockIndent: active.indent) {
+            if !startsPeerOrDedentKeyword(text) || desiredIndent == originalIndent {
+                if let previousSignificant,
+                   previousSignificant.opensBlock,
+                   originalIndent <= previousSignificant.rawIndent {
+                    desiredIndent = previousSignificant.indent + 4
+                    openedByFlatRepair = true
+                } else {
+                    while let active = stack.last,
+                          shouldCloseFlatBlock(active, before: text, originalIndent: originalIndent, previous: previousSignificant) {
                         stack.removeLast()
-                        continue
                     }
 
-                    let followsOpener = previousSignificant.map {
-                        lineOpensBlock($0.text) && $0.indent == active.indent
-                    } ?? false
+                    while let active = stack.last,
+                          active.openedByFlatRepair,
+                          active.hasRepairedBody,
+                          previousSignificant?.isTerminating == true,
+                          originalIndent <= active.rawIndent,
+                          !startsPeerOrDedentKeyword(text),
+                          !shouldCloseFlatBlock(active, before: text, originalIndent: originalIndent, previous: previousSignificant) {
+                        stack.removeLast()
+                    }
 
-                    if followsOpener || (active.hasRepairedBody && isProbablyBlockBodyLine(text)) {
+                    if let active = stack.last,
+                       originalIndent <= active.rawIndent,
+                       active.hasRepairedBody,
+                       isProbablyBlockBodyLine(text) {
                         desiredIndent = active.indent + 4
-                        stack[stack.count - 1].hasRepairedBody = true
+                        openedByFlatRepair = true
                     }
-                    break
                 }
             }
 
@@ -264,11 +439,26 @@ enum LocalAlpinePythonWriteGuard {
                 repaired.append(rawLine)
             }
 
+            markNearestParentBody(for: desiredIndent, originalIndent: originalIndent, in: &stack)
+
             if lineOpensBlock(text) {
-                stack.append(ActiveBlock(indent: desiredIndent, hasRepairedBody: false))
+                stack.append(ActiveBlock(
+                    rawIndent: originalIndent,
+                    indent: desiredIndent,
+                    keyword: blockKeyword(text),
+                    openedByFlatRepair: openedByFlatRepair,
+                    hasRepairedBody: false,
+                    hasNativeIndentedBody: false
+                ))
             }
 
-            previousSignificant = (desiredIndent, text)
+            previousSignificant = SignificantLine(
+                rawIndent: originalIndent,
+                indent: desiredIndent,
+                text: text,
+                opensBlock: lineOpensBlock(text),
+                isTerminating: isTerminatingStatement(text)
+            )
         }
 
         guard !changedLines.isEmpty else { return (content, []) }
@@ -283,6 +473,15 @@ enum LocalAlpinePythonWriteGuard {
             || lowered.hasPrefix("class ")
             || lowered.hasPrefix("async def ")
             || lowered.hasPrefix("if __name__")
+    }
+
+    private static func isTerminatingStatement(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        return lowered == "pass"
+            || lowered.hasPrefix("return")
+            || lowered.hasPrefix("raise")
+            || lowered.hasPrefix("break")
+            || lowered.hasPrefix("continue")
     }
 
     private static func fillMissingPythonBlockBodies(in content: String) -> (content: String, notes: [String]) {
@@ -437,7 +636,8 @@ enum LocalAlpinePythonWriteGuard {
         if bodyPrefixes.contains(where: { lowered.hasPrefix($0) }) {
             return true
         }
-        if text.range(of: #"^[A-Za-z_][A-Za-z0-9_]*(\s*[:+\-*/%]?=|\s*\()"#, options: .regularExpression) != nil {
+        let assignableOrCallable = #"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]]+\])*(\s*[:+\-*/%]?=|\s*\()"#
+        if text.range(of: assignableOrCallable, options: .regularExpression) != nil {
             return true
         }
         return false

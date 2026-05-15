@@ -467,13 +467,11 @@ struct PythonCodeBlockView: View {
     }
 
     private static func normalizedPythonCodeBlockSource(_ code: String) -> String {
-        codeBlockSource(code)
-    }
-
-    private static func codeBlockSource(_ code: String) -> String {
-        let normalizedNewlines = code.replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        return normalizedNewlines.trimmingCharacters(in: .newlines)
+        let prepared = LocalAlpinePythonWriteGuard.normalizeGeneratedPython(
+            code,
+            source: .codeBlock
+        )
+        return prepared.content.trimmingCharacters(in: .newlines)
     }
 
     private static func shellSingleQuoted(_ value: String) -> String {
