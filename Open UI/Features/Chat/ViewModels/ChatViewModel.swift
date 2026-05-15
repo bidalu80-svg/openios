@@ -1084,6 +1084,15 @@ final class ChatViewModel {
         return [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif", ".svg"].contains { lower.contains($0) }
     }
 
+    private static func isLocalOnlyFileReference(_ value: String?) -> Bool {
+        guard let value, !value.isEmpty else { return false }
+        let lower = value.lowercased()
+        return lower.hasPrefix("local-inline:")
+            || lower.hasPrefix("local-binary:")
+            || lower.hasPrefix("data:")
+            || lower.hasPrefix("file://")
+    }
+
     private static func preservingInlineImageFiles(
         local: [ChatMessageFile],
         incoming: [ChatMessageFile]
@@ -1120,6 +1129,9 @@ final class ChatViewModel {
 
     private static func serverPersistableFiles(_ files: [ChatMessageFile]) -> [ChatMessageFile] {
         files.compactMap { file in
+            if isLocalOnlyFileReference(file.url) {
+                return nil
+            }
             if isImageFile(file)
                 && (file.url?.hasPrefix("data:image/") == true
                     || file.url?.hasPrefix("file://") == true) {
@@ -1269,6 +1281,29 @@ final class ChatViewModel {
         - If the latest result contains Python IndentationError or SyntaxError, the next action must inspect the full file, then emit one complete corrected Python file through a shell heredoc write inside `iexa_alpine`. Keep the file body complete and exact; do not output a partial patch or repeat only the same `py_compile` or run command.
         [/Local Alpine execution state]
         """
+    }
+
+    private func inlineTextDisplayFile(for attachment: ChatAttachment, data: Data) -> ChatMessageFile {
+        let text = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .unicode)
+            ?? String(data: data, encoding: .utf16)
+            ?? String(data: data, encoding: .isoLatin1)
+            ?? ""
+        let preview = text.count > 120_000 ? String(text.prefix(120_000)) + "\n\n[Preview truncated]" : text
+        let contentType = inlineTextContentType(for: attachment.name)
+        let previewData = preview.data(using: .utf8) ?? data
+        return ChatMessageFile(
+            type: "file",
+            url: "local-inline:\(attachment.id.uuidString)",
+            name: attachment.name,
+            contentType: contentType,
+            displayURL: "data:\(contentType);base64,\(previewData.base64EncodedString())"
+        )
+    }
+
+    private func inlineTextContentType(for name: String) -> String {
+        let detected = mimeType(for: name)
+        return detected == "application/octet-stream" ? "text/plain" : detected
     }
 
     private static func clippedForSystemContext(_ text: String, maxCharacters: Int) -> String {
@@ -3857,6 +3892,7 @@ final class ChatViewModel {
         // somehow don't have a file ID yet (e.g., audio transcription text files).
         var fileRefs: [[String: Any]] = []
         var inlineImageFiles: [ChatMessageFile] = []
+        var inlineTextFiles: [ChatMessageFile] = []
         var inlineTextSnippets: [String] = []
         var fallbackUploadFailure: String?
         for attachment in currentAttachments {
@@ -3912,6 +3948,7 @@ final class ChatViewModel {
                 ))
             } else if let data = attachment.data, canSendAttachmentInline(attachment) {
                 inlineTextSnippets.append(inlineTextContext(for: attachment, data: data))
+                inlineTextFiles.append(inlineTextDisplayFile(for: attachment, data: data))
             } else if isOpenAICompatibleProvider, let data = attachment.data, attachment.type == .file {
                 inlineTextSnippets.append(inlineBinaryContext(for: attachment, data: data))
                 fileRefs.append([
@@ -4037,6 +4074,7 @@ final class ChatViewModel {
         for inlineImage in inlineImageFiles where inlineImage.url?.hasPrefix("data:image/") == true {
             messageFiles.append(inlineImage)
         }
+        messageFiles.append(contentsOf: inlineTextFiles)
         // Also store knowledge items (collection/folder/file) on the user message
         // so they persist in conversation history and appear on reload.
         for knowledgeItem in currentKnowledgeItems {
@@ -9697,7 +9735,7 @@ final class ChatViewModel {
                 if !nonImageFiles.isEmpty {
                     msgDict["files"] = nonImageFiles.compactMap { f -> [String: Any]? in
                         guard let id = f.url else { return nil }
-                        guard !id.hasPrefix("local-binary:") else { return nil }
+                        guard !Self.isLocalOnlyFileReference(id) else { return nil }
                         return ["type": "file", "id": id, "url": id]
                     }
                 }
@@ -9712,7 +9750,7 @@ final class ChatViewModel {
                 if !message.files.isEmpty {
                     msgDict["files"] = message.files.compactMap { f -> [String: Any]? in
                         guard let id = f.url else { return nil }
-                        guard !id.hasPrefix("local-binary:") else { return nil }
+                        guard !Self.isLocalOnlyFileReference(id) else { return nil }
                         return ["type": f.type ?? "file", "id": id, "url": id]
                     }
                 } else if !message.attachmentIds.isEmpty {
