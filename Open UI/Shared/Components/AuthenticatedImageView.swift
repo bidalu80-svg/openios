@@ -13,6 +13,7 @@ struct AuthenticatedImageView: View {
     @State private var loadedImage: UIImage?
     @State private var isLoading = true
     @State private var hasError = false
+    @State private var imageIsRevealed = false
     @State private var showFullScreen = false
     @State private var saveState: SaveState = .idle
     /// Incrementing trigger to force `.task` re-evaluation on retry.
@@ -21,6 +22,7 @@ struct AuthenticatedImageView: View {
     @State private var retryTrigger: Int = 0
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private enum SaveState {
         case idle
@@ -55,6 +57,8 @@ struct AuthenticatedImageView: View {
                     Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
+                        .opacity(imageIsRevealed ? 1 : 0)
+                        .scaleEffect(imageIsRevealed || reduceMotion ? 1 : 0.985)
                         .onTapGesture {
                             showFullScreen = true
                         }
@@ -93,14 +97,7 @@ struct AuthenticatedImageView: View {
                             }
                         }
                 } else if isLoading {
-                    RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
-                        .fill(theme.surfaceContainer)
-                        .frame(height: placeholderHeight)
-                        .overlay(
-                            ProgressView()
-                                .controlSize(.regular)
-                                .tint(theme.brandPrimary)
-                        )
+                    imageLoadingPlaceholder
                 } else if hasError {
                     // Tap-to-retry error state — tapping bumps the retryTrigger
                     // which causes the `.task(id:)` to re-fire and attempt loading again.
@@ -159,6 +156,7 @@ struct AuthenticatedImageView: View {
                 .padding(8)
             }
         }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: imageIsRevealed)
         // Combine fileId + retryTrigger so that:
         // 1. A new fileId triggers a fresh load (normal case)
         // 2. Incrementing retryTrigger forces a retry for the same fileId (tap-to-retry / foreground recovery)
@@ -184,6 +182,40 @@ struct AuthenticatedImageView: View {
     /// Prevents the view from jumping between 0 → 200 → actual image height
     /// which causes scroll position shifts (bouncing).
     private var placeholderHeight: CGFloat { 200 }
+
+    private var imageLoadingPlaceholder: some View {
+        RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
+            .fill(theme.shimmerBase.opacity(theme.isDark ? 0.72 : 0.82))
+            .frame(height: placeholderHeight)
+            .overlay {
+                LinearGradient(
+                    colors: [
+                        theme.shimmerBase.opacity(0.12),
+                        theme.shimmerHighlight.opacity(theme.isDark ? 0.18 : 0.42),
+                        theme.shimmerBase.opacity(0.16)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
+            .overlay(alignment: .bottomLeading) {
+                VStack(alignment: .leading, spacing: 8) {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(theme.shimmerHighlight.opacity(theme.isDark ? 0.20 : 0.55))
+                        .frame(width: 84, height: 7)
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(theme.shimmerHighlight.opacity(theme.isDark ? 0.14 : 0.34))
+                        .frame(width: 48, height: 7)
+                }
+                .padding(16)
+            }
+            .overlay {
+                Image(systemName: "photo")
+                    .scaledFont(size: 24, weight: .medium)
+                    .foregroundStyle(theme.textTertiary.opacity(0.16))
+            }
+            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+    }
 
     /// Maximum number of automatic retry attempts before showing the error state.
     /// Each attempt uses exponential backoff (1s, 2s, 4s) to avoid hammering
@@ -222,34 +254,26 @@ struct AuthenticatedImageView: View {
 
     private func loadImage() async {
         if let cached = Self.imageCache.object(forKey: fileId as NSString) {
-            loadedImage = cached
-            isLoading = false
-            hasError = false
+            setLoadedImage(cached, animated: false)
             return
         }
 
         if let inlineImage = Self.inlineDataImage(from: fileId) {
             Self.imageCache.setObject(inlineImage, forKey: fileId as NSString)
-            loadedImage = inlineImage
-            isLoading = false
-            hasError = false
+            setLoadedImage(inlineImage)
             return
         }
 
         if let localURL = Self.localImageURL(from: fileId) {
             if let cached = Self.imageCache.object(forKey: fileId as NSString) {
-                loadedImage = cached
-                isLoading = false
-                hasError = false
+                setLoadedImage(cached, animated: false)
                 return
             }
             do {
                 let data = try Data(contentsOf: localURL)
                 if let image = UIImage(data: data) {
                     Self.imageCache.setObject(image, forKey: fileId as NSString, cost: data.count)
-                    loadedImage = image
-                    isLoading = false
-                    hasError = false
+                    setLoadedImage(image)
                     return
                 }
             } catch {
@@ -268,9 +292,7 @@ struct AuthenticatedImageView: View {
                 authToken: authTokenForRemoteURL(remoteURL)
             )
             if let image {
-                loadedImage = image
-                hasError = false
-                isLoading = false
+                setLoadedImage(image)
             } else {
                 hasError = true
                 isLoading = false
@@ -284,7 +306,7 @@ struct AuthenticatedImageView: View {
         // scroll position jumps when scrolling up through a LazyVStack.
         if let cached = Self.imageCache.object(forKey: fileId as NSString) {
             if loadedImage !== cached {
-                loadedImage = cached
+                setLoadedImage(cached, animated: false)
             }
             isLoading = false
             hasError = false
@@ -318,9 +340,7 @@ struct AuthenticatedImageView: View {
                     // Cache for future scroll-backs
                     let cost = data.count
                     Self.imageCache.setObject(uiImage, forKey: fileId as NSString, cost: cost)
-                    loadedImage = uiImage
-                    hasError = false
-                    isLoading = false
+                    setLoadedImage(uiImage)
                     return
                 }
             } catch {
@@ -336,6 +356,23 @@ struct AuthenticatedImageView: View {
         // All retries exhausted — show tap-to-retry error state
         hasError = true
         isLoading = false
+    }
+
+    private func setLoadedImage(_ image: UIImage, animated: Bool = true) {
+        if animated && !reduceMotion {
+            imageIsRevealed = false
+            loadedImage = image
+            hasError = false
+            isLoading = false
+            withAnimation(.easeOut(duration: 0.22)) {
+                imageIsRevealed = true
+            }
+        } else {
+            imageIsRevealed = true
+            loadedImage = image
+            hasError = false
+            isLoading = false
+        }
     }
 
     private static func inlineDataImage(from dataURL: String) -> UIImage? {
