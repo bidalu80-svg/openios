@@ -80,18 +80,6 @@ enum LocalAlpinePythonWriteGuard {
         prepared = tabRepair.content
         notes.append(contentsOf: tabRepair.notes)
 
-        let tinyIndentRepair = normalizeTinyPythonIndents(in: prepared)
-        prepared = tinyIndentRepair.content
-        notes.append(contentsOf: tinyIndentRepair.notes)
-
-        let indentWidthRepair = normalizeIndentWidthToFourSpaces(in: prepared)
-        prepared = indentWidthRepair.content
-        notes.append(contentsOf: indentWidthRepair.notes)
-
-        let blockBodyRepair = repairFlatPythonBlocks(in: prepared)
-        prepared = blockBodyRepair.content
-        notes.append(contentsOf: blockBodyRepair.notes)
-
         return (ensureTrailingNewline(prepared), notes)
     }
 

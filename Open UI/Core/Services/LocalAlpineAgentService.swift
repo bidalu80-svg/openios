@@ -209,6 +209,7 @@ actor LocalAlpineAgentService {
     private let maxCommandsPerResponse = 12
     private let maxOutputCharactersPerCommand = 20_000
     private let defaultCWD = "/mnt/iexa"
+    private var pythonFormatterBootstrapAttempted = false
 
     private init() {}
 
@@ -292,7 +293,6 @@ actor LocalAlpineAgentService {
                shouldRunShellCommand {
                 var commandToExecute = shellCommand
 
-                commandToExecute = Self.repairPythonHeredocBodies(in: commandToExecute)
                 commandToExecute = commandToExecute.trimmingCharacters(in: .whitespacesAndNewlines)
                 if let extracted = await extractPythonHeredocWrites(from: commandToExecute, cwd: effectiveCWD) {
                     stepLines.append(extracted.summary)
@@ -625,6 +625,16 @@ actor LocalAlpineAgentService {
                 hadFailure: true
             )
         }
+        if target.lowercased().hasSuffix(".py") {
+            return await writeValidatedPythonFile(
+                data: data,
+                target: target,
+                split: splitFilePath(target),
+                cwd: cwd,
+                source: file.source,
+                notes: notes
+            )
+        }
         return await writeFileThroughShell(
             content: content,
             byteCount: data.count,
@@ -683,10 +693,10 @@ actor LocalAlpineAgentService {
     private func writeValidatedPythonFile(
         data: Data,
         target: String,
-        split _: (directory: String, fileName: String),
+        split: (directory: String, fileName: String),
         cwd: String,
         source: LocalAlpineAgentFileSource,
-        notes _: [String]
+        notes: [String]
     ) async -> LocalAlpineProtectedWriteOutcome {
         guard let content = String(data: data, encoding: .utf8) else {
             return LocalAlpineProtectedWriteOutcome(
@@ -696,13 +706,169 @@ actor LocalAlpineAgentService {
                 hadFailure: true
             )
         }
-        return await writeFileThroughShell(
+        let temporaryPath = "\(split.directory == "/" ? "" : split.directory)/.iexa-write-\(UUID().uuidString)-\(split.fileName)"
+        let draft = await writeFileThroughShell(
             content: content,
             byteCount: data.count,
-            target: target,
+            target: temporaryPath,
             cwd: cwd,
-            source: source
+            source: source,
+            notes: notes
         )
+        guard !draft.hadFailure else { return draft }
+
+        let runtimeDraftPath = runtimePath(forSharedPath: temporaryPath)
+        let runtimeTargetPath = runtimePath(forSharedPath: target)
+        let compileCommand = "python3 -m py_compile \(shellSingleQuoted(runtimeDraftPath))"
+        let compileResult = await LocalAlpineTerminalService.shared.execute(command: compileCommand, cwd: cwd)
+        guard compileResult.exitCode == 0 else {
+            let diagnostic = await pythonLineNumberDiagnostic(
+                for: runtimeDraftPath,
+                targetRuntimePath: runtimeTargetPath,
+                cwd: cwd
+            )
+            return failedPythonWriteOutcome(
+                target: target,
+                targetRuntimePath: runtimeTargetPath,
+                failedDraftRuntimePath: runtimeDraftPath,
+                reason: "Python 语法检查失败，已阻止覆盖目标文件",
+                command: compileCommand,
+                result: compileResult,
+                diagnosticOutput: diagnostic?.output
+            )
+        }
+
+        var writeNotes = notes
+        let bootstrapResult = await ensurePythonFormatterAvailable(cwd: cwd)
+        if bootstrapResult.installed {
+            writeNotes.append("已在 Local Alpine 中安装 Python 格式化器依赖，后续写入会直接复用。")
+        }
+        if let bootstrapNote = bootstrapResult.note {
+            writeNotes.append(bootstrapNote)
+        }
+        let formatterCommand = pythonFormatterCommand(for: runtimeDraftPath)
+        let formatterResult = await LocalAlpineTerminalService.shared.execute(command: formatterCommand, cwd: cwd)
+        if formatterResult.output.contains("IEXA_PY_FORMATTER_USED") {
+            writeNotes.append("已在临时文件中执行可用的 Python 格式化器，并在格式化后再次通过语法检查。")
+        }
+
+        let postFormatCompileResult = await LocalAlpineTerminalService.shared.execute(command: compileCommand, cwd: cwd)
+        guard postFormatCompileResult.exitCode == 0 else {
+            let diagnostic = await pythonLineNumberDiagnostic(
+                for: runtimeDraftPath,
+                targetRuntimePath: runtimeTargetPath,
+                cwd: cwd
+            )
+            return failedPythonWriteOutcome(
+                target: target,
+                targetRuntimePath: runtimeTargetPath,
+                failedDraftRuntimePath: runtimeDraftPath,
+                reason: "Python 格式化后语法检查失败，已阻止覆盖目标文件",
+                command: compileCommand,
+                result: postFormatCompileResult,
+                diagnosticOutput: diagnostic?.output
+            )
+        }
+
+        let formattedData = (try? await LocalAlpineTerminalService.shared.readFile(path: temporaryPath)) ?? data
+        let formattedContent = String(data: formattedData, encoding: .utf8) ?? content
+
+        let moveCommand = """
+        mkdir -p \(shellSingleQuoted(runtimePath(forSharedPath: split.directory)))
+        mv \(shellSingleQuoted(runtimeDraftPath)) \(shellSingleQuoted(runtimeTargetPath))
+        """
+        let moveResult = await LocalAlpineTerminalService.shared.execute(command: moveCommand, cwd: cwd)
+        guard moveResult.exitCode == 0 else {
+            return LocalAlpineProtectedWriteOutcome(
+                lines: ["- `\(target)` 写入失败：验证通过但移动临时文件失败：\(String(moveResult.output.prefix(1_000)))"],
+                writtenPath: nil,
+                writtenFile: nil,
+                hadFailure: true
+            )
+        }
+
+        var lines = ["- `\(target)` (\(formattedData.count) B，Python 验证后写入，来源：\(source.displayName))"]
+        lines.append(contentsOf: writeNotes.map { "  - \($0)" })
+        return LocalAlpineProtectedWriteOutcome(
+            lines: lines,
+            writtenPath: target,
+            writtenFile: LocalAlpineWrittenFile(
+                path: target,
+                content: formattedContent,
+                source: source.displayName,
+                byteCount: formattedData.count
+            ),
+            hadFailure: false
+        )
+    }
+
+    private func ensurePythonFormatterAvailable(cwd: String) async -> (installed: Bool, note: String?) {
+        if pythonFormatterBootstrapAttempted {
+            return (false, nil)
+        }
+        pythonFormatterBootstrapAttempted = true
+
+        let command = """
+        if command -v black >/dev/null 2>&1; then
+          echo IEXA_PY_FORMATTER_READY
+          exit 0
+        fi
+        if ! command -v python3 >/dev/null 2>&1; then
+          apk update >/dev/null 2>&1 && apk add --no-cache python3 py3-pip >/dev/null 2>&1 || exit 0
+        fi
+        python3 -m pip --version >/dev/null 2>&1 || apk add --no-cache py3-pip >/dev/null 2>&1 || exit 0
+        python3 -m pip install --no-cache-dir black >/dev/null 2>&1 || exit 0
+        if command -v black >/dev/null 2>&1; then
+          echo IEXA_PY_FORMATTER_BOOTSTRAPPED
+        fi
+        """
+
+        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
+        let output = result.output
+        if output.contains("IEXA_PY_FORMATTER_BOOTSTRAPPED") {
+            return (true, nil)
+        }
+        if output.contains("IEXA_PY_FORMATTER_READY") {
+            return (false, nil)
+        }
+        return (false, "当前 Local Alpine 里还没有 `black`，本次将仅做语法验证。")
+    }
+
+    private func pythonFormatterCommand(for runtimePath: String) -> String {
+        """
+        python3 - \(shellSingleQuoted(runtimePath)) <<'PY'
+        import subprocess
+        import sys
+
+        path = sys.argv[1]
+        formatters = [
+            ("black", "black", [sys.executable, "-m", "black", "-q", path]),
+            ("autopep8", "autopep8", [sys.executable, "-m", "autopep8", "--in-place", path]),
+        ]
+
+        for label, module, command in formatters:
+            probe = subprocess.run(
+                [sys.executable, "-c", f"import {module}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if probe.returncode != 0:
+                continue
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=20,
+            )
+            if result.returncode == 0:
+                print(f"IEXA_PY_FORMATTER_USED {label}")
+                sys.exit(0)
+            print(f"IEXA_PY_FORMATTER_FAILED {label}: {result.stdout[:800]}")
+
+        print("IEXA_PY_FORMATTER_SKIPPED")
+        PY
+        """
     }
 
     private func pythonASTValidationCommand(for runtimePath: String) -> String {
