@@ -545,7 +545,9 @@ final class APIClient: @unchecked Sendable {
 
     private static func imageOnlyCompatibleModels() -> [AIModel] {
         let entries: [(id: String, name: String)] = [
+            ("gpt-5.4", "GPT-5.4"),
             ("gpt-image-1", "GPT Image"),
+            ("gpt-image-2", "GPT Image 2"),
             ("dall-e-3", "DALL-E 3"),
             ("flux-kontext-pro", "Flux Kontext Pro"),
             ("qwen-image", "Qwen Image"),
@@ -733,17 +735,31 @@ final class APIClient: @unchecked Sendable {
                 "input": prompt
             ]
         ]
+        let responsesPath = "/responses"
+        let responsesBodyVariants = responsesImageGenerationBodyVariants(
+            prompt: prompt,
+            model: model,
+            size: size
+        )
         let paths = [
             "/images/generations",
             "/image/generations",
             "/images/generate",
             "/image/generate",
+            responsesPath,
             chatCompletionsPath
         ]
 
         var lastError: Error?
         for path in paths {
-            let variants = path == chatCompletionsPath ? chatBodyVariants : imageBodyVariants
+            let variants: [[String: Any]]
+            if path == chatCompletionsPath {
+                variants = chatBodyVariants
+            } else if path == responsesPath {
+                variants = responsesBodyVariants
+            } else {
+                variants = imageBodyVariants
+            }
             for requestBody in variants {
                 do {
                     let payload = try await requestAnyJSON(
@@ -765,9 +781,7 @@ final class APIClient: @unchecked Sendable {
                     )
                 } catch {
                     lastError = error
-                    let apiError = APIError.from(error)
-                    if case .httpError(let statusCode, _, _) = apiError,
-                       [400, 404, 405, 422].contains(statusCode) {
+                    if shouldTryNextImageEndpoint(after: error) {
                         continue
                     }
                     throw error
@@ -783,6 +797,113 @@ final class APIClient: @unchecked Sendable {
             ),
             data: nil
         )
+    }
+
+    private func responsesImageGenerationBodyVariants(
+        prompt: String,
+        model: String,
+        size: String,
+        imageData: Data? = nil,
+        fileName: String = "image.png"
+    ) -> [[String: Any]] {
+        var tool: [String: Any] = [
+            "type": "image_generation",
+            "action": "auto"
+        ]
+        if !size.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           size != "auto" {
+            tool["size"] = size
+        }
+
+        var content: [[String: Any]] = [
+            ["type": "input_text", "text": prompt]
+        ]
+        if let imageData {
+            let dataURL = "data:\(mimeType(for: fileName));base64,\(imageData.base64EncodedString())"
+            content.append(["type": "input_image", "image_url": dataURL])
+        }
+
+        var variants: [[String: Any]] = [
+            [
+                "model": model,
+                "input": [["role": "user", "content": content]],
+                "tools": [tool]
+            ]
+        ]
+
+        if imageData == nil {
+            variants.append([
+                "model": model,
+                "input": prompt,
+                "tools": [tool]
+            ])
+        }
+
+        return variants
+    }
+
+    private func generateImageViaResponses(
+        prompt: String,
+        model: String,
+        size: String,
+        imageData: Data? = nil,
+        fileName: String = "image.png"
+    ) async throws -> String {
+        let variants = responsesImageGenerationBodyVariants(
+            prompt: prompt,
+            model: model,
+            size: size,
+            imageData: imageData,
+            fileName: fileName
+        )
+        var lastError: Error?
+        for requestBody in variants {
+            do {
+                let payload = try await requestAnyJSON(
+                    path: "/responses",
+                    method: .post,
+                    body: requestBody,
+                    timeout: 300
+                )
+                if let imageReference = firstImageReference(in: payload) {
+                    return imageReference
+                }
+                lastError = APIError.responseDecoding(
+                    underlying: NSError(
+                        domain: "APIClient",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "Responses 图片生成接口没有返回图片地址。"]
+                    ),
+                    data: nil
+                )
+            } catch {
+                lastError = error
+                if shouldTryNextImageEndpoint(after: error) {
+                    continue
+                }
+                throw error
+            }
+        }
+
+        throw APIError.responseDecoding(
+            underlying: NSError(
+                domain: "APIClient",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: lastError?.localizedDescription ?? "Responses 图片生成接口没有返回图片地址。"]
+            ),
+            data: nil
+        )
+    }
+
+    private func shouldTryNextImageEndpoint(after error: Error) -> Bool {
+        switch APIError.from(error) {
+        case .httpError(let statusCode, _, _):
+            return [400, 404, 405, 422].contains(statusCode)
+        case .responseDecoding:
+            return true
+        default:
+            return false
+        }
     }
 
     func generateVideo(
@@ -864,33 +985,59 @@ final class APIClient: @unchecked Sendable {
         fileName: String = "image.png",
         size: String = "1024x1024"
     ) async throws -> String {
-        let json = try await network.uploadMultipart(
-            path: "/images/edits",
-            fileData: imageData,
-            fileName: fileName,
-            mimeType: mimeType(for: fileName),
-            fieldName: "image",
-            additionalFields: [
-                "model": model,
-                "prompt": prompt,
-                "n": "1",
-                "size": size
-            ],
-            timeout: 300
-        )
+        var lastError: Error?
+        do {
+            let json = try await network.uploadMultipart(
+                path: "/images/edits",
+                fileData: imageData,
+                fileName: fileName,
+                mimeType: mimeType(for: fileName),
+                fieldName: "image",
+                additionalFields: [
+                    "model": model,
+                    "prompt": prompt,
+                    "n": "1",
+                    "size": size
+                ],
+                timeout: 300
+            )
 
-        if let imageReference = firstImageReference(in: json) {
-            return imageReference
+            if let imageReference = firstImageReference(in: json) {
+                return imageReference
+            }
+            lastError = APIError.responseDecoding(
+                underlying: NSError(
+                    domain: "APIClient",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
+                ),
+                data: nil
+            )
+        } catch {
+            guard shouldTryNextImageEndpoint(after: error) else {
+                throw error
+            }
+            lastError = error
         }
 
-        throw APIError.responseDecoding(
-            underlying: NSError(
-                domain: "APIClient",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
-            ),
-            data: Data()
-        )
+        do {
+            return try await generateImageViaResponses(
+                prompt: prompt,
+                model: model,
+                size: size,
+                imageData: imageData,
+                fileName: fileName
+            )
+        } catch {
+            throw APIError.responseDecoding(
+                underlying: NSError(
+                    domain: "APIClient",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: error.localizedDescription.isEmpty ? (lastError?.localizedDescription ?? "改图接口没有返回图片地址。") : error.localizedDescription]
+                ),
+                data: nil
+            )
+        }
     }
 
     private func firstImageReference(in value: Any?) -> String? {

@@ -422,6 +422,7 @@ struct ServerConnectionView: View {
         .fullScreenCover(isPresented: $viewModel.showProxyAuthChallenge) {
             ProxyAuthView(
                 serverURL: viewModel.serverURL,
+                allowsManualCompletion: viewModel.isDirectWebSessionLogin,
                 onSuccess: { cookies, userAgent in
                     viewModel.resumeAfterProxyAuth(cookies, userAgent: userAgent)
                 },

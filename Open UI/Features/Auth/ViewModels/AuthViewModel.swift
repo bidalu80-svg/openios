@@ -67,6 +67,8 @@ final class AuthViewModel {
     var showProxyAuthChallenge: Bool = false
     /// The normalized URL pending connection after a proxy auth challenge is solved.
     private var pendingProxyAuthURL: String?
+    /// True when the WebView sign-in is for a third-party site account rather than an Iexa auth proxy.
+    var isDirectWebSessionLogin: Bool = false
     /// The OAuth provider key selected by the user (e.g. "google", "microsoft").
     /// Set before navigating to `.ssoLogin` so SSOAuthView can load the provider URL directly.
     var selectedSSOProvider: String?
@@ -565,7 +567,10 @@ final class AuthViewModel {
 
         // Fallback path: non-Iexa native server endpoint in OpenAI-compatible mode.
         guard !trimmedAPIKey.isEmpty else {
-            errorMessage = "这个地址不像 Iexa 原生服务器。如果是 OpenAI/Gemini/Claude 兼容 API，请填写 API Key。"
+            pendingProxyAuthURL = resolvedURL
+            isDirectWebSessionLogin = true
+            showProxyAuthChallenge = true
+            errorMessage = nil
             isConnecting = false
             return
         }
@@ -1366,7 +1371,71 @@ final class AuthViewModel {
         serverURL = urlString
         pendingProxyAuthURL = nil
 
-        Task { await connectSkippingProxyCheck(normalizedURL: urlString, proxyAuthCookies: cookies, userAgent: userAgent) }
+        if isDirectWebSessionLogin {
+            isDirectWebSessionLogin = false
+            Task {
+                await connectUsingWebSessionCookies(
+                    normalizedURL: urlString,
+                    cookies: cookies,
+                    userAgent: userAgent
+                )
+            }
+        } else {
+            Task { await connectSkippingProxyCheck(normalizedURL: urlString, proxyAuthCookies: cookies, userAgent: userAgent) }
+        }
+    }
+
+    private func connectUsingWebSessionCookies(
+        normalizedURL: String,
+        cookies: [String: String],
+        userAgent: String
+    ) async {
+        guard let url = URL(string: normalizedURL), url.host != nil else {
+            errorMessage = "Invalid URL after site sign-in."
+            return
+        }
+
+        isConnecting = true
+        errorMessage = nil
+
+        var customHeaders: [String: String] = [:]
+        if !userAgent.isEmpty {
+            customHeaders["User-Agent"] = userAgent
+        }
+
+        let config = ServerConfig(
+            name: url.host ?? "Provider",
+            url: normalizedURL,
+            providerType: .openAICompatible,
+            customHeaders: customHeaders,
+            lastConnected: .now,
+            isActive: true,
+            allowSelfSignedCertificates: allowSelfSignedCerts,
+            proxyAuthCookies: cookies,
+            isAuthProxyProtected: true,
+            proxyAuthPortalURL: normalizedURL,
+            lastUserName: localUserName.isEmpty ? url.host : localUserName,
+            lastAuthType: .sso,
+            hasActiveSession: true
+        )
+
+        let client = APIClient(serverConfig: config)
+        do {
+            _ = try await client.getModels()
+        } catch {
+            logger.warning("Web session provider saved without model preflight: \(error.localizedDescription)")
+        }
+
+        serverConfigStore.addServer(config)
+        if let saved = serverConfigStore.server(forURL: normalizedURL) {
+            serverConfigStore.setActiveServer(id: saved.id)
+        }
+        dependencies?.refreshServices()
+        currentUser = directProviderUser(for: config)
+        cacheCurrentUser()
+        phase = .authenticated
+        markOnboardingSeen()
+        isConnecting = false
     }
 
     /// Connects to a server directly, skipping the proxy health check.
@@ -1464,6 +1533,7 @@ final class AuthViewModel {
     func dismissProxyAuthChallenge() {
         showProxyAuthChallenge = false
         pendingProxyAuthURL = nil
+        isDirectWebSessionLogin = false
         isConnecting = false
         errorMessage = "Sign in cancelled. Please try again."
     }

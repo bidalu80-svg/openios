@@ -16,13 +16,19 @@ import os.log
 ///    (no health polling needed — redirect back = auth complete)
 struct ProxyAuthWebView: UIViewRepresentable {
     let serverURL: String
+    var allowsManualCompletion = false
     /// Called with all captured cookies (name→value) and the webView's User-Agent
     /// once the proxy auth is detected as complete.
     let onSuccess: ([String: String], String) -> Void
     let onFailed: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(serverURL: serverURL, onSuccess: onSuccess, onFailed: onFailed)
+        Coordinator(
+            serverURL: serverURL,
+            allowsManualCompletion: allowsManualCompletion,
+            onSuccess: onSuccess,
+            onFailed: onFailed
+        )
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -40,6 +46,7 @@ struct ProxyAuthWebView: UIViewRepresentable {
             + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
         context.coordinator.webView = webView
+        context.coordinator.beginManualCaptureObservation()
 
         if let url = URL(string: serverURL) {
             webView.load(URLRequest(url: url))
@@ -54,6 +61,7 @@ struct ProxyAuthWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         let serverURL: String
+        let allowsManualCompletion: Bool
         let onSuccess: ([String: String], String) -> Void
         let onFailed: () -> Void
         weak var webView: WKWebView?
@@ -70,16 +78,29 @@ struct ProxyAuthWebView: UIViewRepresentable {
 
         init(
             serverURL: String,
+            allowsManualCompletion: Bool,
             onSuccess: @escaping ([String: String], String) -> Void,
             onFailed: @escaping () -> Void
         ) {
             self.serverURL = serverURL
+            self.allowsManualCompletion = allowsManualCompletion
             self.onSuccess = onSuccess
             self.onFailed = onFailed
         }
 
         deinit {
             timeoutTimer?.invalidate()
+            NotificationCenter.default.removeObserver(self)
+        }
+
+        func beginManualCaptureObservation() {
+            guard allowsManualCompletion else { return }
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleManualCapture),
+                name: .captureCurrentProxyAuthSession,
+                object: nil
+            )
         }
 
         // MARK: - Navigation Delegate
@@ -204,6 +225,10 @@ struct ProxyAuthWebView: UIViewRepresentable {
                 }
             }
         }
+
+        @objc private func handleManualCapture() {
+            captureSessionAndSucceed()
+        }
     }
 }
 
@@ -215,6 +240,7 @@ struct ProxyAuthWebView: UIViewRepresentable {
 /// and resumes the connection automatically.
 struct ProxyAuthView: View {
     let serverURL: String
+    var allowsManualCompletion = false
     /// Called with all captured cookies and the webView's User-Agent on success.
     let onSuccess: ([String: String], String) -> Void
     let onDismiss: () -> Void
@@ -228,6 +254,7 @@ struct ProxyAuthView: View {
             ZStack(alignment: .top) {
                 ProxyAuthWebView(
                     serverURL: serverURL,
+                    allowsManualCompletion: allowsManualCompletion,
                     onSuccess: { cookies, userAgent in
                         isWaiting = false
                         onSuccess(cookies, userAgent)
@@ -244,7 +271,7 @@ struct ProxyAuthView: View {
                         HStack(spacing: Spacing.sm) {
                             ProgressView()
                                 .tint(theme.brandPrimary)
-                            Text("Sign in to continue — your login will be detected automatically.")
+                            Text(allowsManualCompletion ? "登录完成后点右上角“完成”。" : "Sign in to continue — your login will be detected automatically.")
                                 .scaledFont(size: 12, weight: .medium)
                                 .foregroundStyle(theme.textSecondary)
                         }
@@ -265,6 +292,13 @@ struct ProxyAuthView: View {
                         onDismiss()
                     }
                 }
+                if allowsManualCompletion {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("完成") {
+                            NotificationCenter.default.post(name: .captureCurrentProxyAuthSession, object: nil)
+                        }
+                    }
+                }
             }
             .alert("Sign In Timed Out", isPresented: $didFail) {
                 Button("Try Again") {
@@ -279,4 +313,8 @@ struct ProxyAuthView: View {
             }
         }
     }
+}
+
+extension Notification.Name {
+    static let captureCurrentProxyAuthSession = Notification.Name("captureCurrentProxyAuthSession")
 }
