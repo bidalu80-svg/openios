@@ -120,97 +120,12 @@ actor LocalAlpineAgentService {
                     shouldRunShellCommand = false
                     stopRemainingCommands = true
                 }
-                if let syntaxCheck = await pythonSyntaxCheck(for: writeResult.writtenPaths, cwd: effectiveCWD) {
-                    stepLines.append(format(command: syntaxCheck.command, cwd: effectiveCWD, result: syntaxCheck.result))
-                    commandResults.append(Self.commandResult(
-                        command: syntaxCheck.command,
-                        cwd: effectiveCWD,
-                        result: syntaxCheck.result
-                    ))
-                    if syntaxCheck.result.exitCode != 0 {
-                        if let diagnostic = await pythonSyntaxDiagnostic(for: writeResult.writtenPaths, cwd: effectiveCWD) {
-                            stepLines.append(format(command: diagnostic.command, cwd: effectiveCWD, result: diagnostic.result))
-                            commandResults.append(Self.commandResult(
-                                command: diagnostic.command,
-                                cwd: effectiveCWD,
-                                result: diagnostic.result
-                            ))
-                        }
-                        shouldRunShellCommand = false
-                        stopRemainingCommands = true
-                    }
-                }
             }
 
             if let shellCommand = command.command?.trimmingCharacters(in: .whitespacesAndNewlines),
                !shellCommand.isEmpty,
                shouldRunShellCommand {
                 var commandToExecute = shellCommand
-
-                if let extractedWrite = await extractPythonHeredocWrites(from: shellCommand, cwd: effectiveCWD) {
-                    var extractedFilesPassedSyntaxCheck = true
-                    stepLines.append(extractedWrite.summary)
-                    extractedWrite.writtenPaths.forEach { editedFilePaths.insert($0) }
-                    if extractedWrite.hadFailure {
-                        extractedFilesPassedSyntaxCheck = false
-                        let result = LocalAlpineCommandResult(
-                            command: "python_heredoc_write",
-                            output: extractedWrite.summary,
-                            exitCode: 125,
-                            interactiveRequest: nil
-                        )
-                        commandResults.append(Self.commandResult(
-                            command: "python_heredoc_write",
-                            cwd: effectiveCWD,
-                            result: result
-                        ))
-                        commandToExecute = ""
-                        stopRemainingCommands = true
-                    }
-                    if let syntaxCheck = await pythonSyntaxCheck(for: extractedWrite.writtenPaths, cwd: effectiveCWD) {
-                        stepLines.append(format(command: syntaxCheck.command, cwd: effectiveCWD, result: syntaxCheck.result))
-                        commandResults.append(Self.commandResult(
-                            command: syntaxCheck.command,
-                            cwd: effectiveCWD,
-                            result: syntaxCheck.result
-                        ))
-                        if syntaxCheck.result.exitCode != 0 {
-                            extractedFilesPassedSyntaxCheck = false
-                            if let diagnostic = await pythonSyntaxDiagnostic(for: extractedWrite.writtenPaths, cwd: effectiveCWD) {
-                                stepLines.append(format(command: diagnostic.command, cwd: effectiveCWD, result: diagnostic.result))
-                                commandResults.append(Self.commandResult(
-                                    command: diagnostic.command,
-                                    cwd: effectiveCWD,
-                                    result: diagnostic.result
-                                ))
-                            }
-                            commandToExecute = ""
-                            stopRemainingCommands = true
-                        }
-                    }
-                    if extractedFilesPassedSyntaxCheck {
-                        commandToExecute = extractedWrite.remainingCommand
-                    }
-                }
-
-                if let blockedOutput = unsafeCodeFileWriteWarning(for: commandToExecute) {
-                    let result = LocalAlpineCommandResult(
-                        command: commandToExecute,
-                        output: blockedOutput,
-                        exitCode: 125,
-                        interactiveRequest: nil
-                    )
-                    stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
-                    commandResults.append(Self.commandResult(
-                        command: commandToExecute,
-                        cwd: effectiveCWD,
-                        result: result
-                    ))
-                    if !stepLines.isEmpty {
-                        lines.append(stepLines.joined(separator: "\n\n"))
-                    }
-                    continue
-                }
 
                 commandToExecute = commandToExecute.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !commandToExecute.isEmpty else {
@@ -463,7 +378,7 @@ actor LocalAlpineAgentService {
     }
 
     private func writeFiles(_ files: [LocalAlpineAgentFile], cwd: String) async -> LocalAlpineWriteResult {
-        var lines = ["写入文件"]
+        var lines = ["写入文件（命令行直写）"]
         var writtenPaths: [String] = []
         var hadFailure = false
         for file in files.prefix(maxCommandsPerResponse) {
@@ -485,209 +400,83 @@ actor LocalAlpineAgentService {
 
     private func writeProtectedFile(_ file: LocalAlpineAgentFile, cwd: String) async -> LocalAlpineProtectedWriteOutcome {
         let target = resolvedFilePath(file.path, cwd: cwd)
-        let split = splitFilePath(target)
-        let isPython = target.lowercased().hasSuffix(".py")
-
-        let prepared: PythonWritePreparation
-        if isPython {
-            prepared = Self.preparePythonForProtectedWrite(file.content, source: file.source)
-            if case .failure(let message) = prepared {
-                return LocalAlpineProtectedWriteOutcome(
-                    lines: [
-                        "- `\(target)` 写入已拒绝：\(message)",
-                        "  - 目标文件没有被覆盖。请提交能通过 Python 编译的完整源码；`code_lines` / `content_lines` / `content_base64` 会更稳定地保留缩进。"
-                    ],
-                    writtenPath: nil,
-                    hadFailure: true
-                )
-            }
-        } else {
-            prepared = .success(content: file.content, notes: [])
-        }
-
-        guard case .success(let content, let notes) = prepared,
-              let data = content.data(using: .utf8) else {
+        let content = file.content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        guard let data = content.data(using: .utf8) else {
             return LocalAlpineProtectedWriteOutcome(
                 lines: ["- `\(target)` 写入失败：内容不是有效 UTF-8"],
                 writtenPath: nil,
                 hadFailure: true
             )
         }
+        return await writeFileThroughShell(
+            content: content,
+            byteCount: data.count,
+            target: target,
+            cwd: cwd,
+            source: file.source
+        )
+    }
 
-        if isPython {
-            return await writeValidatedPythonFile(
-                data: data,
-                target: target,
-                split: split,
-                cwd: cwd,
-                source: file.source,
-                notes: notes
-            )
-        }
+    private func writeFileThroughShell(
+        content: String,
+        byteCount: Int,
+        target: String,
+        cwd: String,
+        source: LocalAlpineAgentFileSource
+    ) async -> LocalAlpineProtectedWriteOutcome {
+        let split = splitFilePath(target)
+        let runtimeTarget = runtimePath(forSharedPath: target)
+        let runtimeDirectory = runtimePath(forSharedPath: split.directory)
+        let marker = Self.shellHereDocMarker(for: content)
+        let body = content.hasSuffix("\n") ? content : content + "\n"
+        let command = """
+        mkdir -p \(shellSingleQuoted(runtimeDirectory))
+        cat > \(shellSingleQuoted(runtimeTarget)) <<'\(marker)'
+        \(body)\(marker)
+        """
 
-        do {
-            try await LocalAlpineTerminalService.shared.writeFile(
-                data: data,
-                fileName: split.fileName,
-                destinationPath: split.directory
-            )
+        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
+        if result.exitCode == 0 {
             return LocalAlpineProtectedWriteOutcome(
-                lines: ["- `\(target)` (\(data.count) B，来源：\(file.source.displayName))"],
+                lines: ["- `\(target)` (\(byteCount) B，命令行写入，来源：\(source.displayName))"],
                 writtenPath: target,
                 hadFailure: false
             )
-        } catch {
-            return LocalAlpineProtectedWriteOutcome(
-                lines: ["- `\(target)` 写入失败：\(error.localizedDescription)"],
-                writtenPath: nil,
-                hadFailure: true
-            )
         }
+
+        let exit = result.exitCode.map(String.init) ?? "unknown"
+        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        var lines = ["- `\(target)` 命令行写入失败：退出码 \(exit)"]
+        if !output.isEmpty {
+            lines.append("  - 输出：\(String(output.prefix(1_000)))")
+        }
+        return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: nil, hadFailure: true)
     }
 
     private func writeValidatedPythonFile(
         data: Data,
         target: String,
-        split: (directory: String, fileName: String),
+        split _: (directory: String, fileName: String),
         cwd: String,
         source: LocalAlpineAgentFileSource,
-        notes: [String]
+        notes _: [String]
     ) async -> LocalAlpineProtectedWriteOutcome {
-        let temporaryName = ".iexa-write-\(UUID().uuidString).py"
-        let temporaryPath = split.directory == "/" ? "/\(temporaryName)" : "\(split.directory)/\(temporaryName)"
-        let temporaryRuntimePath = runtimePath(forSharedPath: temporaryPath)
-        let currentData = data
-        let currentNotes = notes
-
-        do {
-            try await LocalAlpineTerminalService.shared.writeFile(
-                data: currentData,
-                fileName: temporaryName,
-                destinationPath: split.directory
-            )
-
-            let targetRuntimePath = runtimePath(forSharedPath: target)
-            let astBeforeCommand = pythonASTValidationCommand(for: temporaryRuntimePath)
-            let astBefore = await LocalAlpineTerminalService.shared.execute(command: astBeforeCommand, cwd: cwd)
-            if astBefore.exitCode != 0 {
-                let diagnostic = await pythonLineNumberDiagnostic(
-                    for: temporaryRuntimePath,
-                    targetRuntimePath: targetRuntimePath,
-                    cwd: cwd
-                )
-                let draftRuntimePath = await preserveFailedPythonDraft(
-                    temporaryPath: temporaryPath,
-                    fallbackData: currentData,
-                    target: target
-                )
-                try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-                return failedPythonWriteOutcome(
-                    target: target,
-                    targetRuntimePath: targetRuntimePath,
-                    failedDraftRuntimePath: draftRuntimePath,
-                    reason: "Python AST 校验失败，目标文件未覆盖",
-                    command: astBeforeCommand,
-                    result: astBefore,
-                    diagnosticOutput: diagnostic?.output
-                )
-            }
-
-            let astAfterCommand = pythonASTValidationCommand(for: temporaryRuntimePath)
-            let astAfter = await LocalAlpineTerminalService.shared.execute(command: astAfterCommand, cwd: cwd)
-            if astAfter.exitCode != 0 {
-                let diagnostic = await pythonLineNumberDiagnostic(
-                    for: temporaryRuntimePath,
-                    targetRuntimePath: targetRuntimePath,
-                    cwd: cwd
-                )
-                let draftRuntimePath = await preserveFailedPythonDraft(
-                    temporaryPath: temporaryPath,
-                    fallbackData: currentData,
-                    target: target
-                )
-                try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-                return failedPythonWriteOutcome(
-                    target: target,
-                    targetRuntimePath: targetRuntimePath,
-                    failedDraftRuntimePath: draftRuntimePath,
-                    reason: "Python 二次 AST 校验失败，目标文件未覆盖",
-                    command: astAfterCommand,
-                    result: astAfter,
-                    diagnosticOutput: diagnostic?.output
-                )
-            }
-
-            let compileCommand = "python3 -m py_compile \(shellSingleQuoted(temporaryRuntimePath))"
-            let compile = await LocalAlpineTerminalService.shared.execute(command: compileCommand, cwd: cwd)
-            if compile.exitCode != 0 {
-                let diagnostic = await pythonLineNumberDiagnostic(
-                    for: temporaryRuntimePath,
-                    targetRuntimePath: targetRuntimePath,
-                    cwd: cwd
-                )
-                let draftRuntimePath = await preserveFailedPythonDraft(
-                    temporaryPath: temporaryPath,
-                    fallbackData: currentData,
-                    target: target
-                )
-                try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-                return failedPythonWriteOutcome(
-                    target: target,
-                    targetRuntimePath: targetRuntimePath,
-                    failedDraftRuntimePath: draftRuntimePath,
-                    reason: "Python 事务编译失败，目标文件未覆盖",
-                    command: compileCommand,
-                    result: compile,
-                    diagnosticOutput: diagnostic?.output
-                )
-            }
-
-            let semanticCommand = pythonSemanticValidationCommand(for: temporaryRuntimePath)
-            let semantic = await LocalAlpineTerminalService.shared.execute(command: semanticCommand, cwd: cwd)
-            if semantic.exitCode != 0 {
-                let diagnostic = await pythonLineNumberDiagnostic(
-                    for: temporaryRuntimePath,
-                    targetRuntimePath: targetRuntimePath,
-                    cwd: cwd
-                )
-                let draftRuntimePath = await preserveFailedPythonDraft(
-                    temporaryPath: temporaryPath,
-                    fallbackData: currentData,
-                    target: target
-                )
-                try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-                return failedPythonWriteOutcome(
-                    target: target,
-                    targetRuntimePath: targetRuntimePath,
-                    failedDraftRuntimePath: draftRuntimePath,
-                    reason: "Python 返回路径结构校验失败，目标文件未覆盖",
-                    command: semanticCommand,
-                    result: semantic,
-                    diagnosticOutput: diagnostic?.output
-                )
-            }
-
-            let formattedData = try await LocalAlpineTerminalService.shared.readFile(path: temporaryPath)
-            try await LocalAlpineTerminalService.shared.writeFile(
-                data: formattedData,
-                fileName: split.fileName,
-                destinationPath: split.directory
-            )
-            try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
-
-            var lines = [
-                "- `\(target)` (\(formattedData.count) B，Python 完整文件事务写入已通过 AST、py_compile、返回路径校验，来源：\(source.displayName))"
-            ]
-            lines.append(contentsOf: currentNotes.map { "  - \($0)" })
-            return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: target, hadFailure: false)
-        } catch {
-            try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+        guard let content = String(data: data, encoding: .utf8) else {
             return LocalAlpineProtectedWriteOutcome(
-                lines: ["- `\(target)` 写入失败：\(error.localizedDescription)"],
+                lines: ["- `\(target)` 写入失败：内容不是有效 UTF-8"],
                 writtenPath: nil,
                 hadFailure: true
             )
         }
+        return await writeFileThroughShell(
+            content: content,
+            byteCount: data.count,
+            target: target,
+            cwd: cwd,
+            source: source
+        )
     }
 
     private func pythonASTValidationCommand(for runtimePath: String) -> String {
@@ -883,7 +672,7 @@ actor LocalAlpineAgentService {
         lines.append("  - 目标 Python 文件：`\(targetRuntimePath)`")
         if let failedDraftRuntimePath {
             lines.append("  - 失败草稿已保留：`\(failedDraftRuntimePath)`")
-            lines.append("  - 下一步应读取失败草稿的完整行号内容，修正后用 `write_files` / `write_file` 覆盖目标 Python 文件。")
+            lines.append("  - 下一步应读取失败草稿的完整行号内容，修正后用 shell heredoc 覆盖目标 Python 文件。")
         }
         lines.append("  - 验证命令：`\(command.trimmingCharacters(in: .whitespacesAndNewlines))`")
         let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -897,95 +686,8 @@ actor LocalAlpineAgentService {
         return LocalAlpineProtectedWriteOutcome(lines: lines, writtenPath: nil, hadFailure: true)
     }
 
-    private func extractPythonHeredocWrites(from command: String, cwd: String) async -> LocalAlpineExtractedWriteResult? {
-        let commandLines = command.components(separatedBy: .newlines)
-        var remainingLines: [String] = []
-        var summaryLines = ["写入文件（已自动保护 Python 缩进）"]
-        var writtenPaths: [String] = []
-        var hadFailure = false
-        var extractedCount = 0
-        var index = 0
-
-        while index < commandLines.count {
-            let line = commandLines[index]
-            guard let spec = Self.pythonHeredocWriteSpec(from: line) else {
-                remainingLines.append(line)
-                index += 1
-                continue
-            }
-
-            extractedCount += 1
-            index += 1
-            var bodyLines: [String] = []
-            var foundTerminator = false
-            while index < commandLines.count {
-                let candidate = commandLines[index]
-                if Self.isHeredocTerminator(candidate, marker: spec.marker) {
-                    foundTerminator = true
-                    index += 1
-                    break
-                }
-                bodyLines.append(candidate)
-                index += 1
-            }
-
-            guard foundTerminator else {
-                return nil
-            }
-
-            let target = resolvedFilePath(spec.path, cwd: cwd)
-            let split = splitFilePath(target)
-            var content = bodyLines.joined(separator: "\n")
-            if !content.hasSuffix("\n") {
-                content += "\n"
-            }
-            let prepared = Self.preparePythonForProtectedWrite(content, source: .heredoc)
-            guard case .success(let preparedContent, let prepareNotes) = prepared else {
-                let reason: String
-                if case .failure(let message) = prepared {
-                    reason = message
-                } else {
-                    reason = "Python 内容无法正规化"
-                }
-                summaryLines.append("- `\(target)` 写入已拒绝：\(reason)")
-                summaryLines.append("  - 这个文件没有被覆盖。请提交完整源码；App 会先写入临时文件并用 AST/py_compile 校验，通过后才覆盖目标。")
-                hadFailure = true
-                continue
-            }
-            content = preparedContent
-            guard let data = content.data(using: .utf8) else {
-                summaryLines.append("- `\(target)` 写入失败：内容不是有效 UTF-8")
-                hadFailure = true
-                continue
-            }
-
-            let outcome = await writeValidatedPythonFile(
-                data: data,
-                target: target,
-                split: split,
-                cwd: cwd,
-                source: .heredoc,
-                notes: prepareNotes
-            )
-            summaryLines.append(contentsOf: outcome.lines)
-            if outcome.writtenPath != nil {
-                writtenPaths.append(target)
-            }
-            if outcome.hadFailure {
-                hadFailure = true
-            }
-        }
-
-        guard extractedCount > 0 else { return nil }
-        let remainingCommand = writtenPaths.count == extractedCount
-            ? remainingLines.joined(separator: "\n")
-            : ""
-        return LocalAlpineExtractedWriteResult(
-            summary: summaryLines.joined(separator: "\n"),
-            writtenPaths: writtenPaths,
-            remainingCommand: remainingCommand,
-            hadFailure: hadFailure
-        )
+    private func extractPythonHeredocWrites(from _: String, cwd _: String) async -> LocalAlpineExtractedWriteResult? {
+        return nil
     }
 
     private func pythonSyntaxCheck(for paths: [String], cwd: String) async -> (command: String, result: LocalAlpineCommandResult)? {
@@ -1127,15 +829,21 @@ actor LocalAlpineAgentService {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
-    private func unsafeCodeFileWriteWarning(for command: String) -> String? {
-        guard Self.commandWritesCodeThroughShellText(command) else { return nil }
-        return """
-        Unsafe code file write blocked.
+    private nonisolated static func shellHereDocMarker(for content: String, prefix: String = "IEXA_WRITE") -> String {
+        var marker = prefix
+        var suffix = 0
+        let lines = Set(content.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        })
+        while lines.contains(marker) {
+            suffix += 1
+            marker = "\(prefix)_\(suffix)"
+        }
+        return marker
+    }
 
-        This command writes a code or indentation-sensitive text file through shell text redirection/heredoc (`cat`, `tee`, `printf`, `echo`, or `python - <<`). In this chat UI that path can corrupt leading spaces, tabs, quotes, or multi-line blocks.
-
-        Use `iexa_alpine` JSON `write_files` / `write_file`. For Python files the app writes transactionally, validates with `ast.parse`, runs `python3 -m py_compile`, and checks high-risk return paths before overwriting the target. `code_lines`, `content_lines`, or `content_base64` are raw structured payloads and are not passed through Markdown extraction or indentation repair.
-        """
+    private func unsafeCodeFileWriteWarning(for _: String) -> String? {
+        return nil
     }
 
     private nonisolated static func commandWritesCodeThroughShellText(_ command: String) -> Bool {
@@ -1178,14 +886,9 @@ actor LocalAlpineAgentService {
 
     private nonisolated static func preparePythonForProtectedWrite(
         _ content: String,
-        source: LocalAlpineAgentFileSource
+        source _: LocalAlpineAgentFileSource
     ) -> PythonWritePreparation {
-        switch LocalAlpinePythonWriteGuard.prepare(content, source: source.guardSource) {
-        case .success(let content, let notes):
-            return .success(content: content, notes: notes)
-        case .failure(let message):
-            return .failure(message)
-        }
+        return .success(content: content, notes: [])
     }
 
     private nonisolated static func pythonHeredocWriteSpec(from line: String) -> PythonHeredocWriteSpec? {
@@ -1400,16 +1103,6 @@ private enum LocalAlpineAgentFileSource: Equatable {
         case .contentLines: return "content_lines"
         case .contentBase64: return "content_base64"
         case .heredoc: return "heredoc"
-        }
-    }
-
-    var guardSource: LocalAlpinePythonWriteGuard.Source {
-        switch self {
-        case .content: return .content
-        case .codeLines: return .codeLines
-        case .contentLines: return .contentLines
-        case .contentBase64: return .contentBase64
-        case .heredoc: return .heredoc
         }
     }
 }

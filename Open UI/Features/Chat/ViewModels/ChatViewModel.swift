@@ -1249,7 +1249,7 @@ final class ChatViewModel {
             }
             if localAlpineOutputHasPythonSyntaxIssue(content + "\n" + (rawResult ?? "")) {
                 lines.append("  required next action:")
-                lines.append(indentForSystemContext("Python syntax/indentation error detected. The next step must inspect the full file, then rewrite the complete corrected Python file with write_files/write_file. Prefer code_lines/content_lines/content_base64 for exact indentation; do not output a partial patch or repeat only the same failed command."))
+                lines.append(indentForSystemContext("Python syntax/indentation error detected. The next step must inspect the full file, then rewrite the complete corrected Python file with a shell heredoc write in iexa_alpine. Keep the file body complete and exact; do not output a partial patch or repeat only the same failed command."))
             }
             return lines.joined(separator: "\n")
         }
@@ -1265,7 +1265,7 @@ final class ChatViewModel {
         - If result output is present, answer from that output as the source of truth.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
-        - If the latest result contains Python IndentationError or SyntaxError, the next action must inspect the full file, then emit one complete corrected Python file through `write_files` / `write_file`. Prefer `code_lines`, `content_lines`, or `content_base64` for exact indentation; do not output a partial patch or repeat only the same `py_compile` or run command.
+        - If the latest result contains Python IndentationError or SyntaxError, the next action must inspect the full file, then emit one complete corrected Python file through a shell heredoc write inside `iexa_alpine`. Keep the file body complete and exact; do not output a partial patch or repeat only the same `py_compile` or run command.
         [/Local Alpine execution state]
         """
     }
@@ -4740,36 +4740,24 @@ final class ChatViewModel {
 
     private static func fallbackLocalAlpineBlockForAssistantCode(content: String, userText: String) -> String? {
         guard let code = firstRunnablePythonCodeBlock(in: content),
-              let preparedCode = preparedRunnablePythonCode(code) else { return nil }
+              let preparedCode = normalizedPythonSourceForShell(code) else { return nil }
         let fileName = "script.py"
         let commandPath = shellQuoted(fileName)
         let arguments = firstURL(in: userText).map { " \(shellQuoted($0))" } ?? ""
-        let base64 = Data(preparedCode.utf8).base64EncodedString()
-        let object: [String: Any] = [
-            "iexa_alpine": [
-                [
-                    "cwd": "/mnt/iexa",
-                    "write_files": [
-                        [
-                            "path": fileName,
-                            "content_base64": base64
-                        ]
-                    ],
-                    "command": "python3 -m py_compile \(commandPath) && python3 \(commandPath)\(arguments)"
-                ]
-            ]
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
-              let json = String(data: data, encoding: .utf8) else { return nil }
+        let marker = shellHereDocMarker(for: preparedCode)
+        let body = preparedCode.hasSuffix("\n") ? preparedCode : preparedCode + "\n"
         return """
         ```iexa_alpine
-        \(json)
+        cat > \(commandPath) <<'\(marker)'
+        \(body)\(marker)
+        python3 -m py_compile \(commandPath) && python3 \(commandPath)\(arguments)
         ```
         """
     }
 
     private static func normalizedLocalAlpineExecutableContent(from content: String) -> String? {
         var normalizedBlocks: [Any] = []
+        var shellBlocks: [String] = []
         for block in localAlpineInstructionBlocks(from: content) {
             if let data = block.data(using: .utf8),
                let object = try? JSONSerialization.jsonObject(with: data) {
@@ -4781,9 +4769,17 @@ final class ChatViewModel {
 
             let shell = block.trimmingCharacters(in: .whitespacesAndNewlines)
             if !shell.isEmpty {
-                normalizedBlocks.append(["command": shell, "cwd": "/mnt/iexa"])
+                shellBlocks.append(shell)
             }
         }
+        if !shellBlocks.isEmpty, normalizedBlocks.isEmpty {
+            return """
+            ```iexa_alpine
+            \(shellBlocks.joined(separator: "\n\n"))
+            ```
+            """
+        }
+        normalizedBlocks.append(contentsOf: shellBlocks.map { ["command": $0, "cwd": "/mnt/iexa"] })
         guard !normalizedBlocks.isEmpty else { return nil }
 
         let object: [String: Any] = ["iexa_alpine": normalizedBlocks]
@@ -4818,20 +4814,6 @@ final class ChatViewModel {
                 dict[key] = normalizedLocalAlpineObject(value, changed: &changed)
             }
         }
-
-        guard let path = localAlpineWriteFilePath(from: dict),
-              path.lowercased().hasSuffix(".py"),
-              !hasStructuredLocalAlpinePayload(dict),
-              let plain = plainLocalAlpineContent(from: dict),
-              let prepared = preparedRunnablePythonCode(plain) else {
-            return dict
-        }
-
-        for key in ["content", "contents", "text", "body", "code"] {
-            dict.removeValue(forKey: key)
-        }
-        dict["content_base64"] = Data(prepared.utf8).base64EncodedString()
-        changed = true
         return dict
     }
 
@@ -4861,13 +4843,23 @@ final class ChatViewModel {
             ?? (dict["code"] as? String)
     }
 
-    private static func preparedRunnablePythonCode(_ code: String) -> String? {
-        switch LocalAlpinePythonWriteGuard.prepare(code, source: .codeBlock) {
-        case .success(let content, _):
-            return content
-        case .failure:
-            return nil
+    private static func normalizedPythonSourceForShell(_ code: String) -> String? {
+        let normalized = code
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .trimmingCharacters(in: .newlines)
+        return normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : normalized
+    }
+
+    private static func shellHereDocMarker(for content: String, prefix: String = "IEXA_PY") -> String {
+        var marker = prefix
+        var suffix = 0
+        let lines = Set(content.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+        while lines.contains(marker) {
+            suffix += 1
+            marker = "\(prefix)_\(suffix)"
         }
+        return marker
     }
 
     private static func firstURL(in text: String) -> String? {
@@ -4912,19 +4904,9 @@ final class ChatViewModel {
         guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         guard shouldSendRawTextDirectlyToLocalAlpine(command) else { return nil }
 
-        let object: [String: Any] = [
-            "iexa_alpine": [
-                [
-                    "command": command,
-                    "cwd": "/mnt/iexa"
-                ]
-            ]
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
-              let json = String(data: data, encoding: .utf8) else { return nil }
         return """
         ```iexa_alpine
-        \(json)
+        \(command)
         ```
         """
     }
@@ -5122,7 +5104,12 @@ final class ChatViewModel {
         if lowercased.contains("\"write_files\"")
             || lowercased.contains("\"write_file\"")
             || lowercased.contains("\"files\"") {
-            return "正在写入文件并验证..."
+            return "正在写入文件并执行..."
+        }
+        if lowercased.contains("cat >")
+            || lowercased.contains("tee ")
+            || lowercased.contains("<<'") {
+            return "正在用命令行写入文件并执行..."
         }
         if lowercased.contains("apk add ")
             || lowercased.contains("apk upgrade")
@@ -8128,7 +8115,7 @@ final class ChatViewModel {
           ]
         }
         ```
-        For code or indentation-sensitive text, prefer `content_lines`, `code_lines`, or `content_base64`; avoid shell heredocs and avoid squeezing multiline code into a single escaped JSON string. For multi-file projects, write all connected files in the same workspace block so the UI, styles, scripts, imports, and dependencies stay linked.
+        For `iexa_workspace` JSON operations, prefer `content_lines`, `code_lines`, or `content_base64` so indentation stays intact. If Local Alpine terminal mode is handling the files instead, write them with a quoted shell heredoc. For multi-file projects, write all connected files together so the UI, styles, scripts, imports, and dependencies stay linked.
         If the user asks to run/check/verify the project after writing files and Local Alpine terminal mode is available, also emit a bounded `iexa_alpine` block in the same answer for the concrete verification command.
         """
     }
@@ -8160,12 +8147,11 @@ final class ChatViewModel {
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
-        - For scripts/projects, use `write_files` or `write_file` inside `iexa_alpine` to create files, then run a bounded verification command. For Python files, provide the complete file and prefer `code_lines`, `content_lines`, or `content_base64` when exact indentation matters. The app writes structured Python payloads transactionally and raw through a temporary file, validates with `ast.parse`, runs `py_compile`, and blocks high-risk tuple-return/unpack paths before overwriting the target. Plain `content` / heredoc compatibility may extract markdown fences; structured payloads do not.
-        - Do not use `cat > file <<EOF` for Python/JS/HTML/CSS bodies.
-        - When fixing an existing Python file after a syntax/indentation error, first inspect the user project file named by `目标 Python 文件` or the preserved `失败草稿已保留` path, then rewrite the complete corrected target Python file with `write_files` / `write_file`. Do not inspect validator traceback files such as `/usr/lib/python.../ast.py`, and do not output partial patches, half-structured continuations, or "continue writing" fragments.
-        - For indentation-sensitive files, prefer `code_lines` / `content_lines` (array of exact lines) or `content_base64` instead of heredoc shell text. This preserves leading spaces exactly.
-        - Prefer `write_files` / `write_file` for Python class/function bodies. If a Python heredoc is emitted, the app will try to extract and validate it transactionally, but structured JSON writes are more reliable.
-        - After writing Python, run the requested script or a bounded verification command only after the app reports that AST, py_compile, and return-path checks passed. If syntax or indentation fails, inspect the full file and return one complete corrected file.
+        - For scripts/projects, use exact shell writes inside `iexa_alpine` to create files, then run a bounded verification command. For Python files, provide the complete file in one heredoc and keep indentation literal.
+        - When fixing an existing Python file after a syntax/indentation error, first inspect the user project file named by `目标 Python 文件` or the preserved `失败草稿已保留` path, then rewrite the complete corrected target Python file with a shell heredoc write. Do not inspect validator traceback files such as `/usr/lib/python.../ast.py`, and do not output partial patches, half-structured continuations, or "continue writing" fragments.
+        - For indentation-sensitive files, prefer a shell heredoc with a quoted delimiter so leading spaces are preserved exactly.
+        - Prefer a complete shell write for Python class/function bodies, then run the requested script or a bounded verification command.
+        - After writing Python, run the requested script or a bounded verification command. If syntax or indentation fails, inspect the full file and return one complete corrected file.
         - If the user wants to test Python `input()` / shell `read` with their own text, do not invent sample stdin and do not pipe a fixed `printf` value. Leave the input/read command unpiped; the app will pause, ask the user for stdin, feed that exact text to the program, and append the real output.
         - For unattended tests where the user did not ask to type input themselves, avoid interactive prompts by using constants, command-line args, environment variables, or an explicit `printf 'value\n' | python3 script.py`.
         - For Node/Python dependency installs, use bounded commands and print versions/errors. Avoid background daemons unless the user explicitly asks.
@@ -8173,22 +8159,19 @@ final class ChatViewModel {
         - After the app appends a Local Alpine execution result, continue from that real output: if the task is not done, emit the next bounded `iexa_alpine` block; if an error appears, fix and rerun; if the task is done, give a concise final summary of what you changed, what command verified it, and any remaining limitation. Do not stop after one command unless the output proves the task is complete.
         - If the user asks an interruption/meta question such as "为什么不修复", "怎么还报错", "你不会修复吗", "什么问题", or asks to stop, do not emit `iexa_alpine`; explain the latest result and wait for an explicit continue/fix/run request.
 
-        To execute commands, include exactly one fenced block with language `iexa_alpine` containing JSON. The app will run those commands locally on the device and append the real output. Do not output this block unless command execution is actually needed.
+        To execute commands, include exactly one fenced block with language `iexa_alpine` containing POSIX shell commands. The app will run those commands locally on the device and append the real output. Do not output this block unless command execution is actually needed.
 
         Example:
         ```iexa_alpine
-        {
-          "iexa_alpine": [
-            {"command": "cat /etc/alpine-release && uname -m && pwd", "cwd": "/mnt/iexa"},
-            {
-              "cwd": "/mnt/iexa",
-              "write_files": [
-                {"path": "hello.py", "code_lines": ["def main():", "    print('hello from Iexa Alpine')", "", "if __name__ == '__main__':", "    main()"]}
-              ],
-              "command": "python3 -m py_compile hello.py && python3 hello.py"
-            }
-          ]
-        }
+        cat /etc/alpine-release && uname -m && pwd
+        cat > hello.py <<'PY'
+        def main():
+            print('hello from Iexa Alpine')
+
+        if __name__ == '__main__':
+            main()
+        PY
+        python3 -m py_compile hello.py && python3 hello.py
         ```
         """
     }
@@ -9330,7 +9313,23 @@ final class ChatViewModel {
     }
 
     private func shouldResolveWebSearchContext(for text: String) -> Bool {
-        false
+        if webSearchEnabled { return true }
+
+        let normalized = text
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+
+        let explicitSearchTerms = [
+            "联网搜索", "联网查", "上网搜索", "上网查", "网络搜索", "搜索一下", "搜一下",
+            "帮我搜", "帮我查", "查一下", "查查看", "实时搜索", "实时查询",
+            "最新", "今天", "今日", "现在", "目前", "刚刚", "新闻", "热搜",
+            "能联网", "可以联网", "能搜索", "可以搜索", "联网吗", "搜索吗",
+            "web search", "search the web", "internet search", "browse", "browser",
+            "google", "bing", "latest", "today", "current", "news"
+        ]
+        return explicitSearchTerms.contains { normalized.contains($0) }
     }
 
     private func isWebSearchCapabilityQuestion(_ text: String) -> Bool {
@@ -10107,64 +10106,10 @@ final class ChatViewModel {
     }
 
     private func appendLocalAlpinePythonInspectionGuardIfNeeded(
-        attemptedMessageId: String,
-        content: String
+        attemptedMessageId _: String,
+        content _: String
     ) -> String? {
-        guard let latestIssue = latestLocalAlpinePythonSyntaxIssue() else { return nil }
-        let commands = Self.localAlpineCommands(in: content)
-        guard !commands.isEmpty else { return nil }
-
-        let writesPython = commands.contains { command in
-            command.writeFilePaths.contains {
-                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasSuffix(".py")
-            }
-        }
-        let syntaxCheckOnly = commands.contains { command in
-            Self.localAlpineCommandIsPythonSyntaxCheckOnly(command.command)
-        }
-        let inspectsSystemPython = commands.contains { command in
-            Self.localAlpineCommandInspectsSystemPythonFile(command.command)
-        }
-        guard writesPython || syntaxCheckOnly || inspectsSystemPython else { return nil }
-        guard !commands.contains(where: {
-            Self.localAlpineCommandInspectsPythonFile($0.command)
-                && !Self.localAlpineCommandInspectsSystemPythonFile($0.command)
-        }) else {
-            return nil
-        }
-
-        let inspectPath = latestIssue.path
-            ?? commands.flatMap(\.writeFilePaths).first(where: {
-                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasSuffix(".py")
-            })
-        let runtimePath = inspectPath.map {
-            Self.localAlpineRuntimePath(for: $0, cwd: latestIssue.cwd ?? "/mnt/iexa")
-        }
-        let targetPath = latestIssue.targetPath.map {
-            Self.localAlpineRuntimePath(for: $0, cwd: latestIssue.cwd ?? "/mnt/iexa")
-        }
-        let targetInstruction = targetPath.map {
-            "\n        修复后必须写回目标 Python 文件：`\($0)`。不要覆盖 Python 标准库，也不要把失败草稿路径当成最终文件。"
-        } ?? ""
-
-        let content = """
-        Local Alpine 执行结果
-
-        已拦截这一步，避免重复执行坏掉的 Python 文件。
-
-        上一轮是真实 Python 缩进/语法错误。下一步必须先读取完整带行号代码，再用 `write_files` / `write_file` 输出完整修复后的 `.py` 文件；不要输出 partial patch，也不要只重复 `py_compile`。\(targetInstruction)
-
-        必须先执行：
-
-        ```bash
-        \(Self.localAlpineInspectCommand(forPythonFile: runtimePath))
-        ```
-
-        然后根据完整文件内容，返回完整 Python 文件内容；App 会在覆盖目标前自动执行 AST、py_compile 和返回路径校验。
-        """
-
-        localAlpineAgentExecutedMessageIds.insert(attemptedMessageId)
-        return appendLocalAlpineSystemResult(parentId: attemptedMessageId, content: content)
+        return nil
     }
 
     private func latestLocalAlpinePythonSyntaxIssue() -> (path: String?, targetPath: String?, cwd: String?)? {
@@ -10236,16 +10181,15 @@ final class ChatViewModel {
         已检测到 Python 缩进/语法错误。下一步禁止只重复 `py_compile` 或直接运行脚本。
         必须先执行完整文件定位和完整文件修复：
         1. 读取带行号文件：`\(Self.localAlpineInspectCommand(forPythonFile: pythonFile))`
-        2. 读取完整文件后，用 `write_files` / `write_file` 提交完整修复后的 Python 文件；禁止 partial patch、半结构代码和续写片段。
-        3. App 会在覆盖目标前自动执行 AST、py_compile 和返回路径校验；通过后再运行脚本。
+        2. 读取完整文件后，用带引号分隔符的 shell heredoc 写回完整 Python 文件；禁止 partial patch、半结构代码和续写片段。
+        3. 写回后直接运行 `python3 -m py_compile` 和脚本验证。
         """
         } else if failure.outputPreview.lowercased().contains("unsafe python file write blocked")
             || failure.outputPreview.lowercased().contains("unsafe code file write blocked") {
             pythonRepairInstruction = """
 
-        Code file write guard
-        App 已拦截 `cat/tee/heredoc` 写入代码或缩进敏感文件，因为这种写法在聊天 UI 中容易破坏缩进、Tab、引号或多行块。
-        下一步必须改用 `iexa_alpine` JSON 的 `write_files` / `write_file` 提交完整文件；`code_lines`、`content_lines` 或 `content_base64` 更适合保留缩进。Python 文件还会自动执行 AST、py_compile 和返回路径校验。
+        Code file write retry
+        之前的写入命令被旧保护层拦过。现在 shell 写入已允许，下一步应改用带引号分隔符的 heredoc 写完整文件，并运行实际验证命令。
         """
         } else {
             pythonRepairInstruction = ""
@@ -10491,14 +10435,6 @@ final class ChatViewModel {
 
         let hasExecutableBlocks = await LocalAlpineAgentService.shared.hasExecutableBlocks(in: content)
         guard hasExecutableBlocks else { return }
-
-        if let guardMessageId = appendLocalAlpinePythonInspectionGuardIfNeeded(
-            attemptedMessageId: messageId,
-            content: content
-        ) {
-            scheduleLocalAlpineContinuationIfNeeded(after: guardMessageId, forceContinue: true)
-            return
-        }
 
         if let repeatedFailure = repeatedLocalAlpineFailure(for: content) {
             let guardMessageId = appendLocalAlpineRepeatedCommandMessage(parentId: messageId, failure: repeatedFailure)
@@ -11145,10 +11081,10 @@ final class ChatViewModel {
         - If the user interrupts with a question or taps stop, answer the question and wait. Do not resume automatic execution until the user explicitly asks to continue/fix/run.
         Strategy Switch:
         - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, complete-file rewrite, then verification.
-        - For Python indentation/syntax errors, inspect the user project file named by `目标 Python 文件` or the preserved `失败草稿已保留` path, then rewrite the complete corrected target `.py` file through `write_files` / `write_file`. Prefer `code_lines`, `content_lines`, or `content_base64` for exact indentation and do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
+        - For Python indentation/syntax errors, inspect the user project file named by `目标 Python 文件` or the preserved `失败草稿已保留` path, then rewrite the complete corrected target `.py` file through a shell heredoc write. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
         - If a failed draft path is present, read the draft to recover the exact attempted source, but write the corrected code back to the target Python file, not to the draft path.
-        - For indentation-sensitive rewrites, prefer `code_lines`, `content_lines`, or `content_base64`; plain `content` is allowed if it is a complete valid Python file, but it is easier for providers to damage indentation in escaped multiline JSON strings.
-        - If a Python shell text write is blocked, immediately switch to `write_files` / `write_file` with a complete file body.
+        - For indentation-sensitive rewrites, prefer a quoted shell heredoc so leading spaces and tabs remain literal.
+        - If a Python shell text write fails, switch to a different exact command-line write or inspect the command output before retrying.
         [/Local Alpine continuation]
         """
         if !messages.isEmpty, messages[0]["role"] as? String == "system" {

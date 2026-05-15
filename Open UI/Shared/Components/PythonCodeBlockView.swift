@@ -348,33 +348,18 @@ struct PythonCodeBlockView: View {
                 images: []
             )
         }
-        guard let data = source.data(using: .utf8) else {
-            return PythonExecutionResult(
-                status: .error,
-                stdout: "",
-                stderr: "代码不是有效 UTF-8，无法写入 Local Alpine。",
-                images: []
-            )
-        }
-
-        do {
-            try await LocalAlpineTerminalService.shared.writeFile(
-                data: data,
-                fileName: fileName,
-                destinationPath: "/"
-            )
-        } catch {
-            return PythonExecutionResult(
-                status: .error,
-                stdout: "",
-                stderr: "写入 Local Alpine 临时文件失败：\(error.localizedDescription)",
-                images: []
-            )
-        }
-
-        let command = "python3 -m py_compile '\(fileName)' && python3 '\(fileName)'"
+        let marker = shellHereDocMarker(for: source)
+        let body = source.hasSuffix("\n") ? source : source + "\n"
+        let quotedFile = shellSingleQuoted(fileName)
+        let command = """
+        cat > \(quotedFile) <<'\(marker)'
+        \(body)\(marker)
+        python3 -m py_compile \(quotedFile) && python3 \(quotedFile)
+        status=$?
+        rm -f \(quotedFile)
+        exit $status
+        """
         let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
-        try? await LocalAlpineTerminalService.shared.deleteItem(path: "/\(fileName)")
         let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
         if result.exitCode == 0 {
             return PythonExecutionResult(status: .success, stdout: output, stderr: "", images: [])
@@ -391,6 +376,23 @@ struct PythonCodeBlockView: View {
         let normalizedNewlines = code.replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
         return normalizedNewlines.trimmingCharacters(in: .newlines)
+    }
+
+    private static func shellSingleQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    private static func shellHereDocMarker(for content: String, prefix: String = "IEXA_PY") -> String {
+        var marker = prefix
+        var suffix = 0
+        let lines = Set(content.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        })
+        while lines.contains(marker) {
+            suffix += 1
+            marker = "\(prefix)_\(suffix)"
+        }
+        return marker
     }
 }
 
