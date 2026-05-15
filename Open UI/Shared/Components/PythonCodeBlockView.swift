@@ -91,13 +91,9 @@ struct PythonCodeBlockView: View {
             FullCodeView(code: displayCode, language: "python")
         }
         .sheet(item: $pendingInteractiveRequest) { request in
+            let actionRequest = Self.actionInputRequest(for: request, code: displayCode)
             ActionInputSheet(
-                request: ActionInputRequest(
-                    title: request.title,
-                    message: request.message,
-                    placeholder: request.placeholder,
-                    defaultValue: request.defaultValue
-                ),
+                request: actionRequest,
                 text: $pendingInteractiveInput,
                 onConfirm: {
                     let input = pendingInteractiveInput
@@ -394,6 +390,49 @@ struct PythonCodeBlockView: View {
         Haptics.notify(.warning)
     }
 
+    private static func actionInputRequest(
+        for request: LocalAlpineInteractiveRequest,
+        code: String
+    ) -> ActionInputRequest {
+        let inputCount = pythonInputCallCount(in: code)
+        guard inputCount > 1 else {
+            return ActionInputRequest(
+                title: request.title,
+                message: request.message,
+                placeholder: request.placeholder,
+                defaultValue: request.defaultValue
+            )
+        }
+
+        let example = interactiveInputExample(for: code, inputCount: inputCount)
+        return ActionInputRequest(
+            title: "需要输入 \(inputCount) 行",
+            message: "这段 Python 会连续调用 \(inputCount) 次 input()。请一次性填写所有输入，每个 input() 对应一行；如果是菜单循环，最后一行填写退出选项。",
+            placeholder: example,
+            defaultValue: request.defaultValue
+        )
+    }
+
+    private static func pythonInputCallCount(in code: String) -> Int {
+        let pattern = #"(?m)(?<![A-Za-z0-9_])(?:input|raw_input)\s*\("#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return 0
+        }
+        let range = NSRange(code.startIndex..<code.endIndex, in: code)
+        return regex.numberOfMatches(in: code, range: range)
+    }
+
+    private static func interactiveInputExample(for code: String, inputCount: Int) -> String {
+        let lowercased = code.lowercased()
+        if lowercased.contains("while true") || lowercased.contains("while 1") {
+            return "例如：\n1\n张三\n95\n5"
+        }
+        if inputCount >= 3 {
+            return "例如：\n1\n张三\n95"
+        }
+        return "例如：\n张三\n95"
+    }
+
     private func executeCode(stdinInput: String?) {
         runState = .running
         let codeToRun = Self.normalizedPythonCodeBlockSource(code)
@@ -456,7 +495,8 @@ struct PythonCodeBlockView: View {
         }
         let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
         if result.exitCode == 0 {
-            return PythonCodeRunOutcome(result: PythonExecutionResult(status: .success, stdout: output, stderr: "", images: []))
+            let visibleOutput = userVisibleSuccessOutput(from: output)
+            return PythonCodeRunOutcome(result: PythonExecutionResult(status: .success, stdout: visibleOutput, stderr: "", images: []))
         }
         return PythonCodeRunOutcome(result: PythonExecutionResult(
             status: .error,
@@ -464,6 +504,25 @@ struct PythonCodeBlockView: View {
             stderr: output.isEmpty ? "Local Alpine 执行失败，退出码：\(result.exitCode.map(String.init) ?? "unknown")" : output,
             images: []
         ))
+    }
+
+    private static func userVisibleSuccessOutput(from output: String) -> String {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || isLocalAlpineNoOutputDiagnostic(trimmed) {
+            return """
+            运行成功，但代码没有产生输出。
+
+            Python 只有执行 print()/日志输出/图像显示时才会在这里显示结果；仅定义变量、列表、函数或类不会自动显示计算结果。
+            """
+        }
+        return trimmed
+    }
+
+    private static func isLocalAlpineNoOutputDiagnostic(_ output: String) -> Bool {
+        output.range(
+            of: #"(?is)^Local Alpine command exited without output\.\s*pid=\d+\s+shell=[^\s]+\s+cwd=[^\s]+$"#,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func normalizedPythonCodeBlockSource(_ code: String) -> String {

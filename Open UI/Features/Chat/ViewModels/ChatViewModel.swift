@@ -8153,6 +8153,8 @@ final class ChatViewModel {
         - For indentation-sensitive files, prefer a shell heredoc with a quoted delimiter so leading spaces are preserved exactly.
         - Prefer a complete shell write for Python class/function bodies, then run the requested script or a bounded verification command.
         - After writing Python, run the requested script or a bounded verification command. If syntax or indentation fails, inspect the full file and return one complete corrected file.
+        - When generating runnable Python examples for a code block, include a small `main()` call or explicit `print()` statements so the Run button can show a real result; code that only defines variables/functions/classes will execute successfully but produce no output.
+        - Avoid interactive Python menu loops unless the user explicitly asks for input-driven behavior. If multiple `input()` calls are necessary, tell the user to provide one stdin line per prompt when the app asks for input.
         - If the user wants to test Python `input()` / shell `read` with their own text, do not invent sample stdin and do not pipe a fixed `printf` value. Leave the input/read command unpiped; the app will pause, ask the user for stdin, feed that exact text to the program, and append the real output.
         - For unattended tests where the user did not ask to type input themselves, avoid interactive prompts by using constants, command-line args, environment variables, or an explicit `printf 'value\n' | python3 script.py`.
         - For Node/Python dependency installs, use bounded commands and print versions/errors. Avoid background daemons unless the user explicitly asks.
@@ -10582,18 +10584,25 @@ final class ChatViewModel {
                   !localAlpineAgentStopRequested,
                   localAlpineResultNeedsFollowUp(after: resultMessageId) {
             scheduleLocalAlpineContinuationIfNeeded(after: resultMessageId, forceContinue: true)
+        } else if result.interactiveRequest == nil,
+                  !localAlpineAgentStopRequested {
+            if !scheduleLocalAlpineFinalSummary(after: resultMessageId) {
+                localAlpineAgentStopRequested = true
+            }
         } else {
             localAlpineAgentStopRequested = true
         }
     }
 
-    private func scheduleLocalAlpineFinalSummary(after resultMessageId: String) {
-        guard terminalEnabled, selectedTerminalIsLocalAlpine else { return }
-        guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
-        guard !localAlpineFinalSummaryParentIds.contains(resultMessageId) else { return }
+    @discardableResult
+    private func scheduleLocalAlpineFinalSummary(after resultMessageId: String) -> Bool {
+        guard terminalEnabled, selectedTerminalIsLocalAlpine else { return false }
+        guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return false }
+        guard !localAlpineFinalSummaryParentIds.contains(resultMessageId) else { return false }
         guard conversation?.messages.contains(where: {
             $0.metadata?["iexa_local_alpine_final_summary"] == resultMessageId
-        }) != true else { return }
+        }) != true else { return false }
+        guard !hasLaterNonResultAssistant(after: resultMessageId) else { return false }
 
         localAlpineFinalSummaryParentIds.insert(resultMessageId)
         localAlpineContinuationTask?.cancel()
@@ -10603,6 +10612,19 @@ final class ChatViewModel {
                 forceContinue: true,
                 finalSummaryOnly: true
             )
+        }
+        return true
+    }
+
+    private func hasLaterNonResultAssistant(after messageId: String) -> Bool {
+        guard let messages = conversation?.messages,
+              let index = messages.firstIndex(where: { $0.id == messageId }) else {
+            return false
+        }
+        let nextIndex = messages.index(after: index)
+        guard nextIndex < messages.endIndex else { return false }
+        return messages[nextIndex...].contains {
+            $0.role == .assistant && !Self.isLocalAlpineAgentResult($0)
         }
     }
 
