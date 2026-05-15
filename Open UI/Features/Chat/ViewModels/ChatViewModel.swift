@@ -10092,7 +10092,9 @@ final class ChatViewModel {
             }
         }
 
-        if commands.contains(where: \.hasWriteFiles) {
+        if commands.contains(where: {
+            $0.hasWriteFiles || Self.localAlpineCommandWritesCodeWithHeredoc($0.command)
+        }) {
             return nil
         }
 
