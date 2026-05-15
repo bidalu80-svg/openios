@@ -72,6 +72,10 @@ enum LocalAlpinePythonWriteGuard {
         var prepared = normalizeNewlines(extracted.content).trimmingCharacters(in: .newlines)
         var notes = extracted.notes
 
+        let mojibakeRepair = repairCommonUTF8Mojibake(in: prepared)
+        prepared = mojibakeRepair.content
+        notes.append(contentsOf: mojibakeRepair.notes)
+
         let tabRepair = normalizeLeadingTabs(in: prepared)
         prepared = tabRepair.content
         notes.append(contentsOf: tabRepair.notes)
@@ -201,6 +205,33 @@ enum LocalAlpinePythonWriteGuard {
         guard !changedLines.isEmpty else { return (content, []) }
         let note = "已按 VS Code/Python 默认设置将行首 Tab 转换为 4 个空格：第 \(changedLines.prefix(12).map(String.init).joined(separator: ", ")) 行"
         return (normalized.joined(separator: "\n"), [note])
+    }
+
+    private static func repairCommonUTF8Mojibake(in content: String) -> (content: String, notes: [String]) {
+        guard looksLikeUTF8Mojibake(content),
+              let latin1Data = content.data(using: .isoLatin1),
+              let repaired = String(data: latin1Data, encoding: .utf8),
+              repaired != content,
+              repaired.unicodeScalars.contains(where: { $0.value > 0x7F }) else {
+            return (content, [])
+        }
+
+        return (repaired, ["已自动修复疑似 UTF-8 被按 Latin-1 解码造成的中文乱码。"])
+    }
+
+    private static func looksLikeUTF8Mojibake(_ content: String) -> Bool {
+        let suspiciousMarkers = ["Ã", "Â", "â", "ä", "å", "æ", "ç", "è", "é", "ï"]
+        let markerCount = suspiciousMarkers.reduce(0) { count, marker in
+            count + content.components(separatedBy: marker).count - 1
+        }
+        guard markerCount >= 3 else { return false }
+
+        let commonUTF8LeadPattern = #"(?s).*[ÃÂâäåæçèéï][\u0080-\u00BF].*"#
+        return content.range(of: commonUTF8LeadPattern, options: .regularExpression) != nil
+            || content.contains("å­")
+            || content.contains("ç¬")
+            || content.contains("é¡")
+            || content.contains("æ")
     }
 
     private static func normalizeTinyPythonIndents(in content: String) -> (content: String, notes: [String]) {
