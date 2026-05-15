@@ -127,6 +127,7 @@ actor LocalAlpineAgentService {
                shouldRunShellCommand {
                 var commandToExecute = shellCommand
 
+                commandToExecute = Self.repairPythonHeredocBodies(in: commandToExecute)
                 commandToExecute = commandToExecute.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !commandToExecute.isEmpty else {
                     if !stepLines.isEmpty {
@@ -400,9 +401,18 @@ actor LocalAlpineAgentService {
 
     private func writeProtectedFile(_ file: LocalAlpineAgentFile, cwd: String) async -> LocalAlpineProtectedWriteOutcome {
         let target = resolvedFilePath(file.path, cwd: cwd)
-        let content = file.content
+        var content = file.content
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
+        var notes: [String] = []
+        if target.lowercased().hasSuffix(".py") {
+            let prepared = LocalAlpinePythonWriteGuard.normalizeGeneratedPython(
+                content,
+                source: file.source.guardSource
+            )
+            content = prepared.content
+            notes = prepared.notes
+        }
         guard let data = content.data(using: .utf8) else {
             return LocalAlpineProtectedWriteOutcome(
                 lines: ["- `\(target)` 写入失败：内容不是有效 UTF-8"],
@@ -415,7 +425,8 @@ actor LocalAlpineAgentService {
             byteCount: data.count,
             target: target,
             cwd: cwd,
-            source: file.source
+            source: file.source,
+            notes: notes
         )
     }
 
@@ -424,7 +435,8 @@ actor LocalAlpineAgentService {
         byteCount: Int,
         target: String,
         cwd: String,
-        source: LocalAlpineAgentFileSource
+        source: LocalAlpineAgentFileSource,
+        notes: [String] = []
     ) async -> LocalAlpineProtectedWriteOutcome {
         let split = splitFilePath(target)
         let runtimeTarget = runtimePath(forSharedPath: target)
@@ -439,8 +451,10 @@ actor LocalAlpineAgentService {
 
         let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
         if result.exitCode == 0 {
+            var lines = ["- `\(target)` (\(byteCount) B，命令行写入，来源：\(source.displayName))"]
+            lines.append(contentsOf: notes.map { "  - \($0)" })
             return LocalAlpineProtectedWriteOutcome(
-                lines: ["- `\(target)` (\(byteCount) B，命令行写入，来源：\(source.displayName))"],
+                lines: lines,
                 writtenPath: target,
                 hadFailure: false
             )
@@ -688,6 +702,56 @@ actor LocalAlpineAgentService {
 
     private func extractPythonHeredocWrites(from _: String, cwd _: String) async -> LocalAlpineExtractedWriteResult? {
         return nil
+    }
+
+    private nonisolated static func repairPythonHeredocBodies(in command: String) -> String {
+        let commandLines = command.components(separatedBy: .newlines)
+        var repairedLines: [String] = []
+        var index = 0
+
+        while index < commandLines.count {
+            let line = commandLines[index]
+            guard let spec = pythonHeredocWriteSpec(from: line) else {
+                repairedLines.append(line)
+                index += 1
+                continue
+            }
+
+            var bodyLines: [String] = []
+            var cursor = index + 1
+            var foundTerminator = false
+            while cursor < commandLines.count {
+                let candidate = commandLines[cursor]
+                if isHeredocTerminator(candidate, marker: spec.marker) {
+                    foundTerminator = true
+                    break
+                }
+                bodyLines.append(candidate)
+                cursor += 1
+            }
+
+            guard foundTerminator else {
+                repairedLines.append(line)
+                index += 1
+                continue
+            }
+
+            let prepared = LocalAlpinePythonWriteGuard.normalizeGeneratedPython(
+                bodyLines.joined(separator: "\n"),
+                source: .heredoc
+            ).content
+            var preparedLines = prepared.components(separatedBy: "\n")
+            if prepared.hasSuffix("\n"), preparedLines.last == "" {
+                preparedLines.removeLast()
+            }
+
+            repairedLines.append(line)
+            repairedLines.append(contentsOf: preparedLines)
+            repairedLines.append(commandLines[cursor])
+            index = cursor + 1
+        }
+
+        return repairedLines.joined(separator: "\n")
     }
 
     private func pythonSyntaxCheck(for paths: [String], cwd: String) async -> (command: String, result: LocalAlpineCommandResult)? {
@@ -1103,6 +1167,16 @@ private enum LocalAlpineAgentFileSource: Equatable {
         case .contentLines: return "content_lines"
         case .contentBase64: return "content_base64"
         case .heredoc: return "heredoc"
+        }
+    }
+
+    var guardSource: LocalAlpinePythonWriteGuard.Source {
+        switch self {
+        case .content: return .content
+        case .codeLines: return .codeLines
+        case .contentLines: return .contentLines
+        case .contentBase64: return .contentBase64
+        case .heredoc: return .heredoc
         }
     }
 }

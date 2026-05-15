@@ -391,6 +391,10 @@ final class APIClient: @unchecked Sendable {
     // MARK: - Models
 
     func getModels() async throws -> [AIModel] {
+        if providerType == .openAICompatible {
+            return try await getOpenAICompatibleModels()
+        }
+
         if providerType == .anthropic {
             do {
                 let models = try await fetchModels(path: modelsPath)
@@ -404,6 +408,27 @@ final class APIClient: @unchecked Sendable {
         }
 
         return try await fetchModels(path: modelsPath)
+    }
+
+    private func getOpenAICompatibleModels() async throws -> [AIModel] {
+        do {
+            let models = try await fetchModels(path: modelsPath)
+            if !models.isEmpty {
+                return models
+            }
+            if let fallbackModels = try await fetchImageOnlyFallbackModels() {
+                return fallbackModels
+            }
+            return models
+        } catch {
+            guard Self.canProbeImageOnlyModels(after: error) else {
+                throw error
+            }
+            if let fallbackModels = try await fetchImageOnlyFallbackModels() {
+                return fallbackModels
+            }
+            throw error
+        }
     }
 
     private func fetchModels(path: String) async throws -> [AIModel] {
@@ -428,6 +453,118 @@ final class APIClient: @unchecked Sendable {
         }
 
         return []
+    }
+
+    private func fetchImageOnlyFallbackModels() async throws -> [AIModel]? {
+        guard providerType == .openAICompatible else { return nil }
+
+        var sawAuthFailure: Error?
+        for path in Self.imageGenerationProbePaths {
+            do {
+                _ = try await requestAnyJSON(
+                    path: path,
+                    method: .post,
+                    body: Self.imageGenerationProbeBody(),
+                    timeout: 30
+                )
+                return Self.imageOnlyCompatibleModels()
+            } catch {
+                let apiError = APIError.from(error)
+                if apiError.requiresReauth {
+                    sawAuthFailure = error
+                    break
+                }
+                if Self.isImageGenerationValidationResponse(apiError) {
+                    return Self.imageOnlyCompatibleModels()
+                }
+                if !Self.canContinueImageProbe(after: apiError) {
+                    break
+                }
+            }
+        }
+
+        if let sawAuthFailure {
+            throw sawAuthFailure
+        }
+        return nil
+    }
+
+    private static let imageGenerationProbePaths = [
+        "/images/generations",
+        "/image/generations",
+        "/images/generate",
+        "/image/generate"
+    ]
+
+    private static func imageGenerationProbeBody() -> [String: Any] {
+        [
+            "prompt": "",
+            "size": "1x1",
+            "n": 1,
+            "count": 1,
+            "stream": false
+        ]
+    }
+
+    private static func canProbeImageOnlyModels(after error: Error) -> Bool {
+        let apiError = APIError.from(error)
+        switch apiError {
+        case .httpError(let statusCode, _, _):
+            return [404, 405].contains(statusCode)
+        case .responseDecoding:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func canContinueImageProbe(after apiError: APIError) -> Bool {
+        switch apiError {
+        case .httpError(let statusCode, _, _):
+            return [400, 404, 405, 422].contains(statusCode)
+        case .responseDecoding:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isImageGenerationValidationResponse(_ apiError: APIError) -> Bool {
+        guard case .httpError(let statusCode, let message, _) = apiError,
+              [400, 422].contains(statusCode) else {
+            return false
+        }
+        let lowercased = (message ?? "").lowercased()
+        if lowercased.contains("invalid_api_key")
+            || lowercased.contains("unauthorized")
+            || lowercased.contains("forbidden") {
+            return false
+        }
+        return true
+    }
+
+    private static func imageOnlyCompatibleModels() -> [AIModel] {
+        let entries: [(id: String, name: String)] = [
+            ("gpt-image-1", "GPT Image"),
+            ("dall-e-3", "DALL-E 3"),
+            ("flux-kontext-pro", "Flux Kontext Pro"),
+            ("qwen-image", "Qwen Image"),
+            ("image-generation", "Image Generation")
+        ]
+        return entries.map { entry in
+            AIModel(
+                id: entry.id,
+                name: entry.name,
+                description: "图片生成兼容模型。当前站点未提供标准 /models 列表，Iexa 会直接调用图片生成接口。",
+                isMultimodal: true,
+                supportsStreaming: false,
+                capabilities: ["image_generation": "true"],
+                defaultFeatureIds: ["image_generation"],
+                builtinTools: ["image_generation": true],
+                tags: ["Image", "OpenAI-Compatible"],
+                connectionType: "image-only"
+            )
+        }
     }
 
     private static func canUseDefaultAnthropicModels(after error: Error) -> Bool {
@@ -540,13 +677,38 @@ final class APIClient: @unchecked Sendable {
             "n": 1,
             "size": size
         ]
+        let countBody = baseBody.merging([
+            "count": 1,
+            "stream": false,
+            "moderation": "auto"
+        ]) { _, new in new }
+        let promptOnlyBody: [String: Any] = [
+            "prompt": prompt,
+            "n": 1,
+            "size": size
+        ]
+        let promptOnlyCountBody = promptOnlyBody.merging([
+            "count": 1,
+            "stream": false,
+            "moderation": "auto"
+        ]) { _, new in new }
         let imageBodyVariants: [[String: Any]] = [
             baseBody,
+            countBody,
             baseBody.merging(["response_format": "url"]) { _, new in new },
             baseBody.merging(["response_format": "b64_json"]) { _, new in new },
             baseBody.merging(["input": prompt]) { _, new in new },
             [
                 "model": model,
+                "input": prompt,
+                "n": 1,
+                "size": size
+            ],
+            promptOnlyBody,
+            promptOnlyCountBody,
+            promptOnlyBody.merging(["response_format": "url"]) { _, new in new },
+            promptOnlyBody.merging(["response_format": "b64_json"]) { _, new in new },
+            [
                 "input": prompt,
                 "n": 1,
                 "size": size

@@ -52,6 +52,37 @@ enum LocalAlpinePythonWriteGuard {
         return .success(content: ensureTrailingNewline(preparedContent), notes: extracted.notes)
     }
 
+    static func normalizeGeneratedPython(_ content: String, source: Source) -> (content: String, notes: [String]) {
+        let extracted: ExtractedCode
+        switch source {
+        case .codeLines, .contentLines, .contentBase64:
+            extracted = ExtractedCode(content: normalizeNewlines(content), notes: [])
+        case .content, .heredoc, .codeBlock:
+            switch extractPythonCode(from: content, source: source) {
+            case .success(let value):
+                extracted = value
+            case .failure:
+                extracted = ExtractedCode(
+                    content: normalizeNewlines(content).trimmingCharacters(in: .newlines),
+                    notes: []
+                )
+            }
+        }
+
+        var prepared = normalizeNewlines(extracted.content).trimmingCharacters(in: .newlines)
+        var notes = extracted.notes
+
+        let tinyIndentRepair = normalizeTinyPythonIndents(in: prepared)
+        prepared = tinyIndentRepair.content
+        notes.append(contentsOf: tinyIndentRepair.notes)
+
+        let blockBodyRepair = repairFlatPythonBlocks(in: prepared)
+        prepared = blockBodyRepair.content
+        notes.append(contentsOf: blockBodyRepair.notes)
+
+        return (ensureTrailingNewline(prepared), notes)
+    }
+
     private static func extractPythonCode(from content: String, source: Source) -> Extraction {
         guard content.range(of: #"(?m)^\s*```"#, options: .regularExpression) != nil else {
             return .success(ExtractedCode(content: normalizeNewlines(content).trimmingCharacters(in: .newlines), notes: []))
@@ -149,12 +180,18 @@ enum LocalAlpinePythonWriteGuard {
             return (content, [])
         }
 
+        let indentLevels = positiveIndents.sorted()
+        var indentMap: [Int: Int] = [:]
+        for (offset, indent) in indentLevels.enumerated() {
+            indentMap[indent] = (offset + 1) * 4
+        }
+
         var changedLines: [Int] = []
         let normalized = lines.enumerated().map { offset, rawLine in
             let indent = leadingIndentCount(rawLine)
-            guard indent > 0, indent <= 3 else { return rawLine }
+            guard let mappedIndent = indentMap[indent] else { return rawLine }
             changedLines.append(offset + 1)
-            return String(repeating: " ", count: indent * 4) + stripHorizontalWhitespace(rawLine)
+            return String(repeating: " ", count: mappedIndent) + stripHorizontalWhitespace(rawLine)
         }
 
         guard !changedLines.isEmpty else { return (content, []) }
@@ -166,8 +203,13 @@ enum LocalAlpinePythonWriteGuard {
         let lines = content.components(separatedBy: .newlines)
         guard lines.count >= 2 else { return (content, []) }
 
+        struct ActiveBlock {
+            let indent: Int
+            var hasRepairedBody: Bool
+        }
+
         var repaired: [String] = []
-        var stack: [(indent: Int, childIndent: Int)] = []
+        var stack: [ActiveBlock] = []
         var changedLines: [Int] = []
         var previousSignificant: (indent: Int, text: String)?
 
@@ -185,17 +227,34 @@ enum LocalAlpinePythonWriteGuard {
             }
 
             var desiredIndent = originalIndent
-            if let previous = previousSignificant,
-               lineOpensBlock(previous.text),
-               originalIndent <= previous.indent,
-               !startsPeerOrDedentKeyword(text),
-               isProbablyBlockBodyLine(text) {
-                desiredIndent = previous.indent + 4
-            } else if let active = stack.last,
-                      originalIndent == active.indent,
-                      !startsPeerOrDedentKeyword(text),
-                      isProbablyBlockBodyLine(text) {
-                desiredIndent = max(desiredIndent, active.childIndent)
+            var handledPeer = false
+
+            if startsPeerOrDedentKeyword(text) {
+                while let active = stack.last, originalIndent <= active.indent {
+                    desiredIndent = active.indent
+                    stack.removeLast()
+                    handledPeer = true
+                    break
+                }
+            }
+
+            if !handledPeer {
+                while let active = stack.last, originalIndent <= active.indent {
+                    if isLikelyFlatRepairBoundary(text, originalIndent: originalIndent, blockIndent: active.indent) {
+                        stack.removeLast()
+                        continue
+                    }
+
+                    let followsOpener = previousSignificant.map {
+                        lineOpensBlock($0.text) && $0.indent == active.indent
+                    } ?? false
+
+                    if followsOpener || (active.hasRepairedBody && isProbablyBlockBodyLine(text)) {
+                        desiredIndent = active.indent + 4
+                        stack[stack.count - 1].hasRepairedBody = true
+                    }
+                    break
+                }
             }
 
             if desiredIndent != originalIndent {
@@ -206,11 +265,7 @@ enum LocalAlpinePythonWriteGuard {
             }
 
             if lineOpensBlock(text) {
-                stack.append((indent: desiredIndent, childIndent: desiredIndent + 4))
-            } else {
-                while let last = stack.last, desiredIndent < last.childIndent {
-                    stack.removeLast()
-                }
+                stack.append(ActiveBlock(indent: desiredIndent, hasRepairedBody: false))
             }
 
             previousSignificant = (desiredIndent, text)
@@ -219,6 +274,15 @@ enum LocalAlpinePythonWriteGuard {
         guard !changedLines.isEmpty else { return (content, []) }
         let note = "已在写入前自动修复明显缺失的 Python 块缩进：第 \(changedLines.prefix(12).map(String.init).joined(separator: ", ")) 行"
         return (repaired.joined(separator: "\n"), [note])
+    }
+
+    private static func isLikelyFlatRepairBoundary(_ text: String, originalIndent: Int, blockIndent: Int) -> Bool {
+        guard originalIndent <= blockIndent else { return false }
+        let lowered = text.lowercased()
+        return lowered.hasPrefix("def ")
+            || lowered.hasPrefix("class ")
+            || lowered.hasPrefix("async def ")
+            || lowered.hasPrefix("if __name__")
     }
 
     private static func fillMissingPythonBlockBodies(in content: String) -> (content: String, notes: [String]) {

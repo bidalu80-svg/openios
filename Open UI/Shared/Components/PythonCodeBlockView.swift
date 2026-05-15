@@ -55,7 +55,7 @@ struct PythonCodeBlockView: View {
     }
 
     private var displayCode: String {
-        Self.codeBlockSource(code)
+        Self.normalizedPythonCodeBlockSource(code)
     }
 
     // MARK: - Body
@@ -321,7 +321,7 @@ struct PythonCodeBlockView: View {
 
     private func runCode() {
         runState = .running
-        let codeToRun = Self.codeBlockSource(code)
+        let codeToRun = Self.normalizedPythonCodeBlockSource(code)
         Task {
             let result = await Self.runCodeInLocalAlpine(code: codeToRun)
             await MainActor.run {
@@ -339,7 +339,7 @@ struct PythonCodeBlockView: View {
 
     private static func runCodeInLocalAlpine(code: String) async -> PythonExecutionResult {
         let fileName = "codeblock-\(UUID().uuidString.prefix(8)).py"
-        let source = codeBlockSource(code)
+        let source = normalizedPythonCodeBlockSource(code)
         guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return PythonExecutionResult(
                 status: .error,
@@ -370,6 +370,14 @@ struct PythonCodeBlockView: View {
             stderr: output.isEmpty ? "Local Alpine 执行失败，退出码：\(result.exitCode.map(String.init) ?? "unknown")" : output,
             images: []
         )
+    }
+
+    private static func normalizedPythonCodeBlockSource(_ code: String) -> String {
+        let prepared = LocalAlpinePythonWriteGuard.normalizeGeneratedPython(
+            code,
+            source: .codeBlock
+        )
+        return codeBlockSource(prepared.content)
     }
 
     private static func codeBlockSource(_ code: String) -> String {
