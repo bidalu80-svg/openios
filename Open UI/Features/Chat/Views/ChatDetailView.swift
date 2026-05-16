@@ -3781,25 +3781,16 @@ private struct ImageGenerationPlaceholderView: View {
 
                     RadialGradient(
                         colors: [
-                            Color.white.opacity(theme.isDark ? 0.22 : 0.62),
+                            Color.white.opacity(theme.isDark ? 0.12 : 0.22),
                             Color.white.opacity(0.02)
                         ],
-                        center: UnitPoint(x: 0.28 + 0.46 * effectivePhase,
-                                          y: 0.18 + 0.38 * (1 - effectivePhase)),
+                        center: UnitPoint(
+                            x: 0.34 + 0.22 * effectivePhase,
+                            y: 0.26 + 0.18 * (1 - effectivePhase)
+                        ),
                         startRadius: 20,
                         endRadius: 260
                     )
-
-                    LinearGradient(
-                        colors: [
-                            .clear,
-                            Color.white.opacity(theme.isDark ? 0.18 : 0.36),
-                            .clear
-                        ],
-                        startPoint: UnitPoint(x: 0.05, y: 0.10 + 0.30 * effectivePhase),
-                        endPoint: UnitPoint(x: 0.95, y: 0.90 - 0.24 * effectivePhase)
-                    )
-                    .blur(radius: 18)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
