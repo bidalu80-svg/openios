@@ -4317,12 +4317,9 @@ private struct LocalAlpineWrittenFilesCard: View {
     let onClose: () -> Void
 
     @Environment(\.theme) private var theme
-    @State private var isExpanded = false
     @State private var selectedIndex = 0
-    @State private var didCopy = false
-    @State private var showFullCode = false
-    @State private var fullCode = ""
-    @State private var isLoadingFullCode = false
+    @State private var codeCache: [String: String] = [:]
+    @State private var loadingPaths: Set<String> = []
 
     init(files: [LocalAlpineWrittenFile], onClose: @escaping () -> Void) {
         self.files = files
@@ -4337,37 +4334,46 @@ private struct LocalAlpineWrittenFilesCard: View {
 
     private var title: String {
         if files.count == 1 {
-            return selectedFile?.fileName ?? "写入文件"
+            return selectedFile?.fileName ?? "已写入文件"
         }
-        return "写入 \(files.count) 个文件"
+        return "已写入 \(files.count) 个文件"
     }
 
     private var subtitle: String {
         guard let selectedFile else { return "已写入文件" }
         let lines = selectedFile.lineCount
         if files.count == 1 {
-            return "\(lines) 行 · \(selectedFile.byteCount) B"
+            return "\(selectedFile.path) · \(lines) 行 · \(selectedFile.byteCount) B"
         }
-        return "\(selectedIndex + 1) / \(files.count) · \(selectedFile.fileName)"
+        return "\(selectedIndex + 1) / \(files.count) · \(selectedFile.path)"
     }
 
-    private var previewLines: [String] {
-        selectedFile?.previewLines(limit: isExpanded ? 120 : 5) ?? []
+    private var displayCode: String {
+        guard let selectedFile else { return "" }
+        if let cached = codeCache[selectedFile.path], !cached.isEmpty {
+            return cached
+        }
+        return selectedFile.previewTailLines.joined(separator: "\n")
     }
 
-    private var previewText: String {
-        previewLines.joined(separator: "\n")
+    private var fencedCodeMarkdown: String {
+        guard let selectedFile else { return "" }
+        let code = displayCode
+        let fence = code.contains("```") ? "````" : "```"
+        let body = code.isEmpty ? " " : code
+        return "\(fence)\(selectedFile.language)\n\(body)\n\(fence)"
     }
 
-    private var previewHeight: CGFloat {
-        isExpanded ? 260 : 94
+    private var isLoadingCurrentFile: Bool {
+        guard let selectedFile else { return false }
+        return loadingPaths.contains(selectedFile.path)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
             codePreview
-            if isExpanded && files.count > 1 {
+            if files.count > 1 {
                 filePager
             }
         }
@@ -4380,31 +4386,23 @@ private struct LocalAlpineWrittenFilesCard: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.55 : 0.75), lineWidth: 0.8)
         )
-        .sheet(isPresented: $showFullCode) {
-            if let selectedFile {
-                FullCodeView(code: fullCode, language: selectedFile.language)
-            }
+        .task(id: selectedFile?.path) {
+            await ensureSelectedFileCodeLoaded()
         }
     }
 
     private var header: some View {
         HStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(theme.brandPrimary.opacity(theme.isDark ? 0.16 : 0.10))
-                    .frame(width: 34, height: 34)
-
-                Image(systemName: "doc.text")
-                    .scaledFont(size: 14, weight: .semibold)
-                    .foregroundStyle(theme.brandPrimary)
-            }
+            Image(systemName: "doc.text")
+                .scaledFont(size: 14, weight: .semibold)
+                .foregroundStyle(theme.brandPrimary)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .scaledFont(size: 13, weight: .semibold)
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
-                    .truncationMode(.middle)
+                    .truncationMode(.tail)
                 Text(subtitle)
                     .scaledFont(size: 11, weight: .medium)
                     .foregroundStyle(theme.textSecondary)
@@ -4414,39 +4412,10 @@ private struct LocalAlpineWrittenFilesCard: View {
 
             Spacer(minLength: 0)
 
-            Button {
-                openFullCode()
-            } label: {
-                Image(systemName: isLoadingFullCode ? "hourglass" : "eye")
-                    .scaledFont(size: 13, weight: .semibold)
-                    .foregroundStyle(theme.textSecondary)
-                    .frame(width: 30, height: 30)
+            if isLoadingCurrentFile {
+                ProgressView()
+                    .controlSize(.mini)
             }
-            .buttonStyle(.plain)
-            .disabled(selectedFile == nil)
-
-            Button {
-                copyFullCode()
-            } label: {
-                Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
-                    .scaledFont(size: 13, weight: .semibold)
-                    .foregroundStyle(didCopy ? theme.success : theme.textSecondary)
-                    .frame(width: 30, height: 30)
-            }
-            .buttonStyle(.plain)
-            .disabled(selectedFile == nil)
-
-            Button {
-                withAnimation(MicroAnimation.snappy) {
-                    isExpanded.toggle()
-                }
-            } label: {
-                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                    .scaledFont(size: 12, weight: .semibold)
-                    .foregroundStyle(theme.textSecondary)
-                    .frame(width: 30, height: 30)
-            }
-            .buttonStyle(.plain)
 
             Button {
                 onClose()
@@ -4463,18 +4432,13 @@ private struct LocalAlpineWrittenFilesCard: View {
 
     private var codePreview: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HighlightedSourceView(
-                code: previewText.isEmpty ? " " : previewText,
-                language: selectedFile?.language ?? "text",
-                truncate: false,
-                maxHeight: previewHeight
+            StreamingMarkdownView(
+                content: fencedCodeMarkdown,
+                isStreaming: false
             )
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
 
-            if let selectedFile,
-               isExpanded,
-               selectedFile.lineCount > previewLines.count {
-                Text("... 预览已截断，复制和查看代码会使用完整内容")
+            if isLoadingCurrentFile {
+                Text("正在加载完整代码，卡片会自动切回之前那套输出样式…")
                     .scaledFont(size: 11, weight: .medium)
                     .foregroundStyle(theme.textTertiary)
                     .padding(.top, 2)
@@ -4518,38 +4482,16 @@ private struct LocalAlpineWrittenFilesCard: View {
         }
     }
 
-    private func openFullCode() {
-        guard let selectedFile, !isLoadingFullCode else { return }
-        isLoadingFullCode = true
-        Task {
-            let code = await loadFullCode(for: selectedFile)
-            await MainActor.run {
-                fullCode = code
-                isLoadingFullCode = false
-                showFullCode = true
-                Haptics.play(.light)
-            }
-        }
-    }
-
-    private func copyFullCode() {
+    @MainActor
+    private func ensureSelectedFileCodeLoaded() async {
         guard let selectedFile else { return }
-        Task {
-            let code = await loadFullCode(for: selectedFile)
-            await MainActor.run {
-                UIPasteboard.general.string = code
-                Haptics.notify(.success)
-                withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
-                    didCopy = true
-                }
-            }
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            await MainActor.run {
-                withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
-                    didCopy = false
-                }
-            }
+        if codeCache[selectedFile.path] != nil || loadingPaths.contains(selectedFile.path) {
+            return
         }
+        loadingPaths.insert(selectedFile.path)
+        let code = await loadFullCode(for: selectedFile)
+        codeCache[selectedFile.path] = code
+        loadingPaths.remove(selectedFile.path)
     }
 
     private func loadFullCode(for file: LocalAlpineWrittenFile) async -> String {

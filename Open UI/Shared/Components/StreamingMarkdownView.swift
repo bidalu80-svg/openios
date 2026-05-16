@@ -1006,16 +1006,7 @@ struct StreamingMarkdownView: View {
             || code.contains("\"iexa_alpine\"") {
             return true
         }
-
-        let compactLanguages: Set<String> = [
-            "json", "jsonc", "text", "txt", "log", "output", "stdout", "stderr"
-        ]
-        guard compactLanguages.contains(normalized) else { return false }
-
-        let lineCount = code.reduce(1) { count, character in
-            character == "\n" ? count + 1 : count
-        }
-        return code.count > 900 || lineCount > 18
+        return false
     }
 
     private func looksLikeSVG(_ code: String) -> Bool {
