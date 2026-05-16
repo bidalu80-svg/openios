@@ -4823,6 +4823,22 @@ final class ChatViewModel {
         """
     }
 
+    private static func fallbackLocalAlpineBlockForLatestAssistantCode(
+        messages: [ChatMessage],
+        excludingMessageId: String? = nil,
+        userText: String
+    ) -> String? {
+        for message in messages.reversed() {
+            guard message.role == .assistant else { continue }
+            if let excludingMessageId, message.id == excludingMessageId { continue }
+            if isLocalAlpineAgentResult(message) || isLocalWorkspaceAgentResult(message) { continue }
+            if let fallback = fallbackLocalAlpineBlockForAssistantCode(content: message.content, userText: userText) {
+                return fallback
+            }
+        }
+        return nil
+    }
+
     private static func normalizedLocalAlpineExecutableContent(from content: String) -> String? {
         var normalizedBlocks: [Any] = []
         var shellBlocks: [String] = []
@@ -10167,6 +10183,15 @@ final class ChatViewModel {
         if userRequestedExecution,
            let userText = latestUserText,
            let fallback = Self.fallbackLocalAlpineBlockForAssistantCode(content: content, userText: userText) {
+            executableContent = fallback
+        } else if userRequestedExecution,
+                  let userText = latestUserText,
+                  let messages = conversation?.messages,
+                  let fallback = Self.fallbackLocalAlpineBlockForLatestAssistantCode(
+                    messages: messages,
+                    excludingMessageId: messageId,
+                    userText: userText
+                  ) {
             executableContent = fallback
         } else if content.localizedCaseInsensitiveContains("iexa_alpine"),
                   let normalized = Self.normalizedLocalAlpineExecutableContent(from: content) {

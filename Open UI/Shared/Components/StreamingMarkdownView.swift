@@ -552,6 +552,7 @@ struct StreamingMarkdownView: View {
                 withTemplate: ""
             )
         }
+        cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(cleaned)
         cleaned = compactBareLinks(in: cleaned)
         return cleaned
     }
@@ -1039,6 +1040,63 @@ struct StreamingMarkdownView: View {
     }
 }
 
+enum InlineDataPayloadSanitizer {
+    private static let inlineDataURIPattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"data:((?:image|audio|video)/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/=_\-\s]{256,})"#,
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static let base64FieldPatterns: [NSRegularExpression] = [
+        try! NSRegularExpression(
+            pattern: #"("(?:(?:b64_json)|(?:base64)|(?:image_base64)|(?:imageBase64)|(?:content_base64))"\s*:\s*")([A-Za-z0-9+/=_\-\s]{256,})(")"#,
+            options: [.caseInsensitive]
+        ),
+        try! NSRegularExpression(
+            pattern: #"((?m)^[A-Za-z0-9+/=]{1024,}\s*$)"#,
+            options: []
+        )
+    ]
+
+    static func sanitizedDisplayText(_ text: String) -> String {
+        guard text.contains("base64") || text.contains("data:image") || text.contains("data:video") || text.contains("data:audio") else {
+            return text
+        }
+
+        var cleaned = text
+
+        if let pattern = inlineDataURIPattern {
+            cleaned = pattern.stringByReplacingMatches(
+                in: cleaned,
+                options: [],
+                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                withTemplate: "data:$1;base64,<已隐藏超长Base64内容>"
+            )
+        }
+
+        if base64FieldPatterns.count >= 1 {
+            cleaned = base64FieldPatterns[0].stringByReplacingMatches(
+                in: cleaned,
+                options: [],
+                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                withTemplate: "$1<已隐藏超长Base64内容>$3"
+            )
+        }
+
+        if base64FieldPatterns.count >= 2 {
+            cleaned = base64FieldPatterns[1].stringByReplacingMatches(
+                in: cleaned,
+                options: [],
+                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                withTemplate: "<已隐藏超长Base64内容>"
+            )
+        }
+
+        return cleaned
+    }
+}
+
 // MARK: - Standard Code Block
 
 private struct StandardCodeBlockView: View {
@@ -1054,10 +1112,13 @@ private struct StandardCodeBlockView: View {
         return value.isEmpty ? "text" : value
     }
 
+    private var visibleCode: String {
+        InlineDataPayloadSanitizer.sanitizedDisplayText(code.trimmingCharacters(in: .newlines))
+    }
+
     private var fencedCodeMarkdown: String {
-        let trimmed = code.trimmingCharacters(in: .newlines)
-        let fence = trimmed.contains("```") ? "````" : "```"
-        let body = trimmed.isEmpty ? " " : trimmed
+        let fence = visibleCode.contains("```") ? "````" : "```"
+        let body = visibleCode.isEmpty ? " " : visibleCode
         return "\(fence)\(displayLanguage)\n\(body)\n\(fence)"
     }
 

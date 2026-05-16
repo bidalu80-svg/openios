@@ -41,9 +41,13 @@ struct PythonCodeBlockView: View {
         Self.displayablePythonCode(code)
     }
 
+    private var visibleCode: String {
+        InlineDataPayloadSanitizer.sanitizedDisplayText(displayCode)
+    }
+
     private var fencedCodeMarkdown: String {
-        let fence = displayCode.contains("```") ? "````" : "```"
-        let body = displayCode.isEmpty ? " " : displayCode
+        let fence = visibleCode.contains("```") ? "````" : "```"
+        let body = visibleCode.isEmpty ? " " : visibleCode
         return "\(fence)python\n\(body)\n\(fence)"
     }
 
@@ -240,6 +244,8 @@ struct PythonCodeBlockView: View {
 
     @ViewBuilder
     private func outputPanel(result: PythonExecutionResult) -> some View {
+        let visibleStdout = InlineDataPayloadSanitizer.sanitizedDisplayText(result.stdout)
+        let visibleStderr = InlineDataPayloadSanitizer.sanitizedDisplayText(result.stderr)
         VStack(alignment: .leading, spacing: 0) {
             Divider()
                 .overlay(Color.primary.opacity(0.08))
@@ -271,9 +277,9 @@ struct PythonCodeBlockView: View {
                 .overlay(Color.primary.opacity(0.08))
 
             // stdout
-            if !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if !visibleStdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 ScrollView(.vertical) {
-                    Text(result.stdout)
+                    Text(visibleStdout)
                         .scaledFont(size: 12, design: .monospaced)
                         .foregroundStyle(.primary)
                         .lineSpacing(2)
@@ -286,11 +292,11 @@ struct PythonCodeBlockView: View {
             }
 
             // stderr
-            if !result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if !visibleStderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Divider()
                     .overlay(Color.primary.opacity(0.06))
                 ScrollView(.vertical) {
-                    Text(result.stderr)
+                    Text(visibleStderr)
                         .scaledFont(size: 12, design: .monospaced)
                         .foregroundStyle(.red)
                         .lineSpacing(2)
@@ -336,8 +342,8 @@ struct PythonCodeBlockView: View {
             }
 
             // Empty output
-            if result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-               result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            if visibleStdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+               visibleStderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
                result.images.isEmpty {
                 HStack {
                     Text("（无输出）")
