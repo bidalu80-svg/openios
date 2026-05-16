@@ -3746,8 +3746,6 @@ private struct ImageGenerationPlaceholderView: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var colorPhase: CGFloat = 0
-    @State private var sweepPhase: CGFloat = -1
-    @State private var secondarySweepPhase: CGFloat = -1.25
 
     private var effectivePhase: CGFloat {
         reduceMotion ? 0.18 : colorPhase
@@ -3811,7 +3809,6 @@ private struct ImageGenerationPlaceholderView: View {
             }
             .aspectRatio(1, contentMode: .fit)
             .frame(maxWidth: 340)
-            .overlay(sweepOverlay)
             .shadow(color: Color.black.opacity(theme.isDark ? 0.18 : 0.06), radius: 16, y: 8)
             .padding(.top, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3819,12 +3816,6 @@ private struct ImageGenerationPlaceholderView: View {
                 guard !reduceMotion else { return }
                 withAnimation(.linear(duration: 5.6).repeatForever(autoreverses: false)) {
                     colorPhase = 1
-                }
-                withAnimation(.linear(duration: 2.15).repeatForever(autoreverses: false)) {
-                    sweepPhase = 1.15
-                }
-                withAnimation(.linear(duration: 3.45).delay(0.65).repeatForever(autoreverses: false)) {
-                    secondarySweepPhase = 1.10
                 }
             }
     }
@@ -3835,79 +3826,6 @@ private struct ImageGenerationPlaceholderView: View {
             startPoint: UnitPoint(x: 0.10 + 0.74 * effectivePhase, y: 0.08),
             endPoint: UnitPoint(x: 0.92 - 0.62 * effectivePhase, y: 0.96)
         )
-    }
-
-    private var sweepOverlay: some View {
-        GeometryReader { geometry in
-            let width = geometry.size.width
-            let height = geometry.size.height
-            let sweepWidth = max(width * 0.26, 88)
-            let travel = width + height + sweepWidth * 2
-
-            ZStack {
-                scanBeam(
-                    phase: reduceMotion ? 0.42 : sweepPhase,
-                    width: sweepWidth,
-                    travel: travel,
-                    opacity: theme.isDark ? 0.96 : 1.0,
-                    blur: 8,
-                    rotation: -12
-                )
-                scanBeam(
-                    phase: reduceMotion ? 0.70 : secondarySweepPhase,
-                    width: sweepWidth * 0.72,
-                    travel: travel,
-                    opacity: theme.isDark ? 0.32 : 0.42,
-                    blur: 15,
-                    rotation: -12
-                )
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .allowsHitTesting(false)
-    }
-
-    private func scanBeam(
-        phase: CGFloat,
-        width: CGFloat,
-        travel: CGFloat,
-        opacity: Double,
-        blur: CGFloat,
-        rotation: Double
-    ) -> some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    .clear,
-                    Color.cyan.opacity(theme.isDark ? 0.10 : 0.16),
-                    Color.white.opacity(theme.isDark ? 0.30 : 0.48),
-                    Color.white.opacity(theme.isDark ? 0.82 : 0.96),
-                    Color(red: 1.0, green: 0.72, blue: 0.92).opacity(theme.isDark ? 0.26 : 0.42),
-                    Color.yellow.opacity(theme.isDark ? 0.08 : 0.16),
-                    .clear
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: width)
-            .blur(radius: blur)
-
-            LinearGradient(
-                colors: [
-                    .clear,
-                    Color.white.opacity(theme.isDark ? 0.42 : 0.72),
-                    .clear
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: max(width * 0.18, 18))
-            .blur(radius: 2.5)
-        }
-        .offset(x: -travel * 0.44 + phase * travel, y: 0)
-        .rotationEffect(.degrees(rotation))
-        .blendMode(.screen)
-        .opacity(opacity)
     }
 
     private func hueOffset(_ hue: Double, _ offset: Double) -> Double {
