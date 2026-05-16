@@ -4355,6 +4355,10 @@ private struct LocalAlpineWrittenFilesCard: View {
         selectedFile?.previewLines(limit: isExpanded ? 120 : 5) ?? []
     }
 
+    private var previewText: String {
+        previewLines.joined(separator: "\n")
+    }
+
     private var previewHeight: CGFloat {
         isExpanded ? 260 : 94
     }
@@ -4458,29 +4462,24 @@ private struct LocalAlpineWrittenFilesCard: View {
     }
 
     private var codePreview: some View {
-        ScrollView(.vertical, showsIndicators: isExpanded) {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(previewLines.enumerated()), id: \.offset) { _, line in
-                    Text(line.isEmpty ? " " : line)
-                        .scaledFont(size: 11, design: .monospaced)
-                        .foregroundStyle(theme.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                }
-                if let selectedFile,
-                   isExpanded,
-                   selectedFile.lineCount > previewLines.count {
-                    Text("... 预览已截断，复制和查看代码会使用完整内容")
-                        .scaledFont(size: 11, weight: .medium)
-                        .foregroundStyle(theme.textTertiary)
-                        .padding(.top, 6)
-                }
+        VStack(alignment: .leading, spacing: 6) {
+            HighlightedSourceView(
+                code: previewText.isEmpty ? " " : previewText,
+                language: selectedFile?.language ?? "text",
+                truncate: false,
+                maxHeight: previewHeight
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+            if let selectedFile,
+               isExpanded,
+               selectedFile.lineCount > previewLines.count {
+                Text("... 预览已截断，复制和查看代码会使用完整内容")
+                    .scaledFont(size: 11, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+                    .padding(.top, 2)
             }
-            .padding(10)
         }
-        .frame(maxHeight: previewHeight)
-        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.34 : 0.56))
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
     }
 
     private var filePager: some View {

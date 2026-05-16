@@ -250,6 +250,10 @@ struct ChatCompletionRequest: Sendable {
     /// presence together triggers the Redis async-task queue (~60s delay).
     /// Pipe model responses are streamed directly from the HTTP response body.
     var isPipeModel: Bool = false
+    /// Some OpenAI-compatible providers reject `messages[*].role == "system"`
+    /// with a 400 (for example MiniMax returns `invalid message role: system`).
+    /// When this flag is false, system entries are downgraded before serialisation.
+    var supportsSystemRoleInMessages: Bool = true
     var skillIds: [String]?
     var toolIds: [String]?
     var filterIds: [String]?
@@ -371,10 +375,16 @@ struct ChatCompletionRequest: Sendable {
     }
     /// Serialises the request to a minimal OpenAI-compatible JSON dictionary.
     func toOpenAICompatibleJSON() -> [String: Any] {
+        let shouldDowngradeSystemRole = !supportsSystemRoleInMessages
+            || Self.openAICompatibleModelRejectsSystemRole(model)
+        let serializedMessages = shouldDowngradeSystemRole
+            ? Self.openAICompatibleMessagesConvertingSystemToUser(messages)
+            : messages
+
         var data: [String: Any] = [
             "stream": stream,
             "model": model,
-            "messages": messages
+            "messages": serializedMessages
         ]
         if let files, !files.isEmpty { data["files"] = files }
         if let streamOptions, !streamOptions.isEmpty {
@@ -445,6 +455,47 @@ struct ChatCompletionRequest: Sendable {
             data["system"] = systemParts.joined(separator: "\n\n")
         }
         return data
+    }
+
+    private static func openAICompatibleModelRejectsSystemRole(_ model: String) -> Bool {
+        let lowercased = model.lowercased()
+        return lowercased.contains("minimax")
+            || lowercased.contains("abab")
+    }
+
+    private static func openAICompatibleMessagesConvertingSystemToUser(
+        _ messages: [[String: Any]]
+    ) -> [[String: Any]] {
+        messages.map { message in
+            guard let role = (message["role"] as? String)?.lowercased(),
+                  role == "system" else {
+                return message
+            }
+
+            var converted = message
+            converted["role"] = "user"
+            converted["content"] = openAICompatibleUserContextContent(from: message["content"])
+            return converted
+        }
+    }
+
+    private static func openAICompatibleUserContextContent(from content: Any?) -> Any {
+        let prefix = "System context:\n"
+
+        if let text = content as? String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "System context." : prefix + trimmed
+        }
+
+        if var parts = content as? [[String: Any]] {
+            parts.insert([
+                "type": "text",
+                "text": prefix
+            ], at: 0)
+            return parts
+        }
+
+        return "System context."
     }
 
     private static func anthropicContentBlock(from part: [String: Any]) -> [String: Any]? {

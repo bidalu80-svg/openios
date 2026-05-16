@@ -426,3 +426,352 @@ enum LocalAlpinePythonWriteGuard {
             .replacingOccurrences(of: "\r", with: "\n")
     }
 }
+
+enum LocalCodeWriteGuard {
+    struct Result: Sendable {
+        let content: String
+        let notes: [String]
+    }
+
+    static func language(forPath path: String) -> String {
+        switch fileExtension(forPath: path) {
+        case "py": return "python"
+        case "js": return "javascript"
+        case "ts": return "typescript"
+        case "tsx": return "tsx"
+        case "jsx": return "jsx"
+        case "swift": return "swift"
+        case "json", "jsonc": return "json"
+        case "html", "htm": return "html"
+        case "css": return "css"
+        case "scss": return "scss"
+        case "less": return "less"
+        case "md", "markdown": return "markdown"
+        case "yml", "yaml": return "yaml"
+        case "toml": return "toml"
+        case "sh", "bash", "zsh": return "bash"
+        case "xml": return "xml"
+        case "sql": return "sql"
+        case "rb": return "ruby"
+        case "php": return "php"
+        case "java": return "java"
+        case "kt", "kts": return "kotlin"
+        case "go": return "go"
+        case "rs": return "rust"
+        case "c": return "c"
+        case "cc", "cpp", "cxx", "hpp", "h": return "cpp"
+        case "cs": return "csharp"
+        case "lua": return "lua"
+        default: return "text"
+        }
+    }
+
+    static func normalizeGeneratedCode(_ content: String, path: String) -> Result {
+        let ext = fileExtension(forPath: path)
+        var working = normalizeNewlines(content)
+        var notes: [String] = []
+
+        if working.hasPrefix("\u{FEFF}") {
+            working.removeFirst()
+            notes.append("已移除 UTF-8 BOM。")
+        }
+
+        if shouldStripOuterCodeFence(forExtension: ext),
+           let extracted = extractSingleFencedCodeBlock(from: working) {
+            working = extracted
+            notes.append("已从 markdown 代码块提取可写入源码。")
+        }
+
+        guard isCodeLikeExtension(ext) else {
+            return Result(content: working, notes: deduplicated(notes))
+        }
+
+        let tabRepair = normalizeLeadingTabs(
+            in: working,
+            spacesPerTab: indentationWidth(forExtension: ext)
+        )
+        working = tabRepair.content
+        notes.append(contentsOf: tabRepair.notes)
+
+        if let braceRepair = repairCollapsedBraceIndentationIfNeeded(working, fileExtension: ext) {
+            working = braceRepair.content
+            notes.append(contentsOf: braceRepair.notes)
+        }
+
+        if ext == "json",
+           let prettyJSON = prettyPrintedJSON(from: working),
+           prettyJSON != working {
+            working = prettyJSON
+            notes.append("JSON 文件已按内置格式化器重排。")
+        }
+
+        if !working.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            working = ensureTrailingNewline(working.trimmingCharacters(in: .newlines))
+        }
+
+        return Result(content: working, notes: deduplicated(notes))
+    }
+
+    private static func fileExtension(forPath path: String) -> String {
+        ((path as NSString).pathExtension).lowercased()
+    }
+
+    private static func shouldStripOuterCodeFence(forExtension ext: String) -> Bool {
+        isCodeLikeExtension(ext) && !["md", "markdown", "txt"].contains(ext)
+    }
+
+    private static func isCodeLikeExtension(_ ext: String) -> Bool {
+        [
+            "py", "js", "ts", "tsx", "jsx", "swift", "json", "jsonc",
+            "html", "htm", "css", "scss", "less",
+            "yml", "yaml", "toml",
+            "sh", "bash", "zsh",
+            "xml", "sql", "rb", "php", "java", "kt", "kts",
+            "go", "rs", "c", "cc", "cpp", "cxx", "hpp", "h", "cs",
+            "lua"
+        ].contains(ext)
+    }
+
+    private static func indentationWidth(forExtension ext: String) -> Int {
+        switch ext {
+        case "json", "jsonc", "yml", "yaml", "html", "htm", "xml", "css", "scss", "less":
+            return 2
+        default:
+            return 4
+        }
+    }
+
+    private static func extractSingleFencedCodeBlock(from content: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?is)^\s*```[^\n`]*\n([\s\S]*?)\n?```\s*$"#
+        ) else {
+            return nil
+        }
+        let nsContent = content as NSString
+        let range = NSRange(location: 0, length: nsContent.length)
+        guard let match = regex.firstMatch(in: content, range: range),
+              match.numberOfRanges >= 2 else {
+            return nil
+        }
+        return nsContent.substring(with: match.range(at: 1))
+    }
+
+    private static func normalizeLeadingTabs(
+        in content: String,
+        spacesPerTab: Int
+    ) -> (content: String, notes: [String]) {
+        let lines = content.components(separatedBy: .newlines)
+        var changedLines: [Int] = []
+
+        let normalized = lines.enumerated().map { offset, rawLine in
+            var prefix = ""
+            var index = rawLine.startIndex
+            var changed = false
+
+            while index < rawLine.endIndex {
+                let character = rawLine[index]
+                if character == "\t" {
+                    prefix += String(repeating: " ", count: spacesPerTab)
+                    changed = true
+                } else if character == " " {
+                    prefix.append(character)
+                } else {
+                    break
+                }
+                index = rawLine.index(after: index)
+            }
+
+            guard changed else { return rawLine }
+            changedLines.append(offset + 1)
+            return prefix + String(rawLine[index...])
+        }
+
+        guard !changedLines.isEmpty else { return (content, []) }
+        let listedLines = changedLines.prefix(12).map(String.init).joined(separator: ", ")
+        let note = "已将行首 Tab 转为 \(spacesPerTab) 个空格：第 \(listedLines) 行"
+        return (normalized.joined(separator: "\n"), [note])
+    }
+
+    private static func repairCollapsedBraceIndentationIfNeeded(
+        _ content: String,
+        fileExtension ext: String
+    ) -> (content: String, notes: [String])? {
+        guard supportsBraceIndentRepair(ext) else { return nil }
+
+        let meaningfulLines = content
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard meaningfulLines.count >= 4 else { return nil }
+
+        let leadingWidths = meaningfulLines.map { line in
+            line.prefix { $0 == " " || $0 == "\t" }.count
+        }
+        guard let maxLeading = leadingWidths.max(), maxLeading <= 1 else { return nil }
+        guard meaningfulLines.contains(where: {
+            $0.contains("{") || $0.contains("}") || $0.contains("[") || $0.contains("]")
+        }) else {
+            return nil
+        }
+
+        let rebuilt = rebuildBraceIndentation(from: content)
+        guard rebuilt != content else { return nil }
+        return (
+            content: ensureTrailingNewline(rebuilt.trimmingCharacters(in: .newlines)),
+            notes: ["检测到括号风格代码缩进几乎全部丢失，客户端已按内置缩进规则重排。"]
+        )
+    }
+
+    private static func supportsBraceIndentRepair(_ ext: String) -> Bool {
+        [
+            "js", "ts", "tsx", "jsx", "swift", "json", "jsonc",
+            "css", "scss", "less", "java", "kt", "kts",
+            "go", "rs", "c", "cc", "cpp", "cxx", "hpp", "h", "cs", "php"
+        ].contains(ext)
+    }
+
+    private static func rebuildBraceIndentation(from content: String) -> String {
+        let lines = content.components(separatedBy: "\n")
+        var indent = 0
+        var rebuilt: [String] = []
+
+        for rawLine in lines {
+            let stripped = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !stripped.isEmpty else {
+                rebuilt.append("")
+                continue
+            }
+
+            let leadingClosers = leadingBraceCloserCount(in: stripped)
+            let lineIndent = max(0, indent - leadingClosers)
+            rebuilt.append(String(repeating: " ", count: lineIndent * 4) + stripped)
+
+            let counts = braceCounts(in: stripped)
+            indent = max(0, indent + counts.opens - counts.closes)
+        }
+
+        return rebuilt.joined(separator: "\n")
+    }
+
+    private static func leadingBraceCloserCount(in line: String) -> Int {
+        var count = 0
+        for character in line {
+            if character == "}" || character == "]" {
+                count += 1
+            } else if character == " " || character == "\t" {
+                continue
+            } else {
+                break
+            }
+        }
+        return count
+    }
+
+    private static func braceCounts(in line: String) -> (opens: Int, closes: Int) {
+        var opens = 0
+        var closes = 0
+        var insideSingleQuote = false
+        var insideDoubleQuote = false
+        var escaped = false
+        let characters = Array(line)
+        var index = 0
+
+        while index < characters.count {
+            let character = characters[index]
+
+            if escaped {
+                escaped = false
+                index += 1
+                continue
+            }
+
+            if character == "\\" {
+                escaped = true
+                index += 1
+                continue
+            }
+
+            if insideSingleQuote {
+                if character == "'" { insideSingleQuote = false }
+                index += 1
+                continue
+            }
+
+            if insideDoubleQuote {
+                if character == "\"" { insideDoubleQuote = false }
+                index += 1
+                continue
+            }
+
+            if character == "'" {
+                insideSingleQuote = true
+                index += 1
+                continue
+            }
+
+            if character == "\"" {
+                insideDoubleQuote = true
+                index += 1
+                continue
+            }
+
+            if character == "#" {
+                break
+            }
+
+            if character == "/",
+               index + 1 < characters.count,
+               characters[index + 1] == "/" {
+                break
+            }
+
+            switch character {
+            case "{", "[":
+                opens += 1
+            case "}", "]":
+                closes += 1
+            default:
+                break
+            }
+
+            index += 1
+        }
+
+        return (opens, closes)
+    }
+
+    private static func prettyPrintedJSON(from content: String) -> String? {
+        guard let data = content.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data, options: []),
+              let prettyData = try? JSONSerialization.data(
+                withJSONObject: object,
+                options: [.prettyPrinted]
+              ),
+              var pretty = String(data: prettyData, encoding: .utf8) else {
+            return nil
+        }
+
+        if !pretty.hasSuffix("\n") {
+            pretty += "\n"
+        }
+        return pretty
+    }
+
+    private static func normalizeNewlines(_ content: String) -> String {
+        content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+    }
+
+    private static func ensureTrailingNewline(_ content: String) -> String {
+        content.hasSuffix("\n") ? content : content + "\n"
+    }
+
+    private static func deduplicated(_ notes: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for note in notes where seen.insert(note).inserted {
+            result.append(note)
+        }
+        return result
+    }
+}

@@ -84,23 +84,7 @@ struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
     }
 
     var language: String {
-        let ext = (fileName as NSString).pathExtension.lowercased()
-        switch ext {
-        case "py": return "python"
-        case "js": return "javascript"
-        case "ts": return "typescript"
-        case "tsx": return "tsx"
-        case "jsx": return "jsx"
-        case "swift": return "swift"
-        case "json": return "json"
-        case "html", "htm": return "html"
-        case "css": return "css"
-        case "md", "markdown": return "markdown"
-        case "yml", "yaml": return "yaml"
-        case "toml": return "toml"
-        case "sh", "bash": return "bash"
-        default: return "text"
-        }
+        LocalCodeWriteGuard.language(forPath: fileName)
     }
 
     var lineCount: Int {
@@ -591,12 +575,23 @@ actor LocalAlpineAgentService {
                 source: file.source
             )
         }
+
+        let normalized = LocalCodeWriteGuard.normalizeGeneratedCode(content, path: target)
+        guard let normalizedData = normalized.content.data(using: .utf8) else {
+            return LocalAlpineProtectedWriteOutcome(
+                lines: ["- `\(target)` 写入失败：格式化后内容不是有效 UTF-8"],
+                writtenPath: nil,
+                writtenFile: nil,
+                hadFailure: true
+            )
+        }
+
         return await writeFileBytes(
-            data: data,
-            content: content,
+            data: normalizedData,
+            content: normalized.content,
             target: target,
             source: file.source,
-            notes: []
+            notes: normalized.notes
         )
     }
 

@@ -185,9 +185,15 @@ actor LocalWorkspaceAgentService {
                 let url = try resolvePath(operation.path, root: root, allowRoot: false)
                 let parent = url.deletingLastPathComponent()
                 try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
-                let content = preparedContent(operation.content ?? "", for: operation.path)
-                try Data(content.utf8).write(to: url, options: .atomic)
-                return "- 已写入文件 `\(operation.path)`（\(content.utf8.count) B）"
+                let prepared = preparedWriteContent(operation.content ?? "", for: operation.path)
+                try Data(prepared.content.utf8).write(to: url, options: .atomic)
+                if prepared.notes.isEmpty {
+                    return "- 已写入文件 `\(operation.path)`（\(prepared.content.utf8.count) B）"
+                }
+                return ([
+                    "- 已写入文件 `\(operation.path)`（\(prepared.content.utf8.count) B）",
+                    prepared.notes.map { "  - \($0)" }.joined(separator: "\n")
+                ]).joined(separator: "\n")
 
             case .append:
                 let url = try resolvePath(operation.path, root: root, allowRoot: false)
@@ -247,6 +253,10 @@ actor LocalWorkspaceAgentService {
         } catch {
             return "- `\(operation.path)` 执行失败：\(error.localizedDescription)"
         }
+    }
+
+    private nonisolated func preparedWriteContent(_ content: String, for path: String) -> LocalCodeWriteGuard.Result {
+        LocalCodeWriteGuard.normalizeGeneratedCode(content, path: path)
     }
 
     private nonisolated func preparedContent(_ content: String, for _: String) -> String {
