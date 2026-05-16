@@ -4376,7 +4376,7 @@ final class ChatViewModel {
                             ) ?? imageReference
                             self.updateAssistantMessage(
                                 id: assistantMessageId,
-                                content: "已生成图片",
+                                content: "",
                                 isStreaming: false
                             )
                             self.attachGeneratedImageFile(
@@ -8111,6 +8111,12 @@ final class ChatViewModel {
 
     private static func localizedGenerationError(_ error: Error) -> String {
         let apiError = APIError.from(error)
+        if apiError.requiresReauth {
+            return apiError.errorDescription ?? "登录已过期，请重新登录。"
+        }
+        if apiError.isConnectivityError {
+            return apiError.errorDescription ?? error.localizedDescription
+        }
         return cleanedProviderErrorMessage(apiError.serverDetail ?? error.localizedDescription)
             ?? apiError.errorDescription
             ?? error.localizedDescription
@@ -8132,6 +8138,16 @@ final class ChatViewModel {
             return "提供方返回了错误响应，请检查当前模型和提供方配置后重试。"
         }
         return nil
+    }
+
+    @MainActor
+    private func stopLocalAlpineAutoContinuationForAuthenticationFailure() {
+        localAlpineAgentStopRequested = true
+        localAlpineAutoExecutionPaused = true
+        localAlpineContinuationTask?.cancel()
+        localAlpineContinuationTask = nil
+        cancelLocalAlpineInput()
+        localAlpineNoCommandContinuationRetries = 0
     }
 
     private static func firstRegexCapture(in text: String, pattern: String) -> String? {
@@ -10975,11 +10991,27 @@ final class ChatViewModel {
                 }
             } catch {
                 if !Task.isCancelled {
+                    let apiError = APIError.from(error)
+                    let continuationStatus: [ChatStatusUpdate]?
+                    if apiError.requiresReauth {
+                        self.stopLocalAlpineAutoContinuationForAuthenticationFailure()
+                        continuationStatus = [
+                            ChatStatusUpdate(
+                                action: "local_alpine_agent",
+                                description: "登录已过期，已停止自动续跑",
+                                done: true,
+                                occurredAt: .now
+                            )
+                        ]
+                    } else {
+                        continuationStatus = nil
+                    }
                     let message = Self.localizedGenerationError(error)
                     self.updateAssistantMessage(
                         id: assistantMessageId,
                         content: acc.content,
                         isStreaming: false,
+                        statusHistory: continuationStatus,
                         error: ChatMessageError(content: message)
                     )
                     self.cleanupStreaming()
@@ -11647,9 +11679,9 @@ final class ChatViewModel {
         }
         let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty, hasRenderableImage {
-            conversation?.messages[index].content = "已生成图片"
+            conversation?.messages[index].content = ""
             conversation?.history.updateNode(id: messageId) { node in
-                node.content = "已生成图片"
+                node.content = ""
                 node.files = message.files
                 node.done = true
             }
@@ -11770,10 +11802,10 @@ final class ChatViewModel {
             let mostlyRequestJSON = startsLikeRawJSON
                 && (cleaned.contains("\"prompt\"") || cleaned.contains("\"size\"") || cleaned.contains("\"model\""))
             if cleaned.isEmpty || mostlyRequestJSON {
-                return "已生成图片"
+                return ""
             }
             if cleaned.range(of: #"^https?://\S+$"#, options: .regularExpression) != nil {
-                return "已生成图片"
+                return ""
             }
         }
 
