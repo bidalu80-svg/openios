@@ -71,7 +71,7 @@ actor LocalWorkspaceAgentService {
             let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
             for match in matches where match.numberOfRanges >= 3 {
                 let info = nsContent.substring(with: match.range(at: 1)).lowercased()
-                let body = nsContent.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let body = nsContent.substring(with: match.range(at: 2)).trimmingCharacters(in: .newlines)
                 if info.contains("iexa_workspace")
                     || (info.trimmingCharacters(in: .whitespacesAndNewlines) == "json" && body.contains("\"iexa_workspace\"")) {
                     blocks.append(body)
@@ -82,7 +82,7 @@ actor LocalWorkspaceAgentService {
         if let tagRegex = try? NSRegularExpression(pattern: #"<iexa_workspace>([\s\S]*?)</iexa_workspace>"#, options: [.caseInsensitive]) {
             let matches = tagRegex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
             for match in matches where match.numberOfRanges >= 2 {
-                blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines))
+                blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .newlines))
             }
         }
 

@@ -3744,58 +3744,64 @@ private struct IsolatedStreamingStatus: View {
 
 private struct ImageGenerationPlaceholderView: View {
     @Environment(\.theme) private var theme
-    @State private var isAnimating = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var colorPhase: CGFloat = 0
     @State private var sweepPhase: CGFloat = -1
+    @State private var secondarySweepPhase: CGFloat = -1.25
 
-    private var baseColors: [Color] {
-        if isAnimating {
-            return [
-                Color(red: 0.91, green: 0.96, blue: 1.00),
-                Color(red: 0.99, green: 0.90, blue: 0.96),
-                Color(red: 1.00, green: 0.95, blue: 0.86),
-                Color(red: 0.90, green: 0.88, blue: 1.00)
-            ]
-        }
+    private var effectivePhase: CGFloat {
+        reduceMotion ? 0.18 : colorPhase
+    }
+
+    private var basePalette: [Color] {
+        let hue = Double(effectivePhase)
         return [
-            Color(red: 1.00, green: 0.92, blue: 0.88),
-            Color(red: 0.96, green: 0.88, blue: 1.00),
-            Color(red: 0.90, green: 0.95, blue: 1.00),
-            Color(red: 1.00, green: 0.90, blue: 0.95)
+            Color(hue: hueOffset(hue, 0.54), saturation: 0.34, brightness: theme.isDark ? 0.72 : 1.00),
+            Color(hue: hueOffset(hue, 0.88), saturation: 0.30, brightness: theme.isDark ? 0.78 : 1.00),
+            Color(hue: hueOffset(hue, 0.12), saturation: 0.36, brightness: theme.isDark ? 0.76 : 1.00),
+            Color(hue: hueOffset(hue, 0.27), saturation: 0.28, brightness: theme.isDark ? 0.70 : 0.98),
+            Color(hue: hueOffset(hue, 0.67), saturation: 0.26, brightness: theme.isDark ? 0.74 : 1.00)
         ]
     }
 
     var body: some View {
         RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .fill(
-                LinearGradient(
-                    colors: baseColors.map { $0.opacity(theme.isDark ? 0.86 : 0.78) },
-                    startPoint: isAnimating ? .topTrailing : .bottomLeading,
-                    endPoint: isAnimating ? .bottomLeading : .topTrailing
-                )
-            )
+            .fill(backgroundFill)
             .overlay {
                 ZStack {
+                    AngularGradient(
+                        gradient: Gradient(colors: basePalette.map { $0.opacity(theme.isDark ? 0.48 : 0.46) }),
+                        center: UnitPoint(
+                            x: CGFloat(0.50 + 0.14 * sin(Double(effectivePhase) * .pi * 2)),
+                            y: CGFloat(0.48 + 0.12 * cos(Double(effectivePhase) * .pi * 2))
+                        ),
+                        startAngle: .degrees(Double(effectivePhase) * 360),
+                        endAngle: .degrees(Double(effectivePhase) * 360 + 360)
+                    )
+                    .blur(radius: 22)
+                    .opacity(theme.isDark ? 0.70 : 0.82)
+
                     RadialGradient(
                         colors: [
-                            Color.white.opacity(theme.isDark ? 0.28 : 0.52),
+                            Color.white.opacity(theme.isDark ? 0.22 : 0.62),
                             Color.white.opacity(0.02)
                         ],
-                        center: isAnimating ? .topTrailing : .bottomLeading,
+                        center: UnitPoint(x: 0.28 + 0.46 * effectivePhase,
+                                          y: 0.18 + 0.38 * (1 - effectivePhase)),
                         startRadius: 20,
                         endRadius: 260
                     )
+
                     LinearGradient(
                         colors: [
                             .clear,
-                            Color.white.opacity(theme.isDark ? 0.22 : 0.42),
+                            Color.white.opacity(theme.isDark ? 0.18 : 0.36),
                             .clear
                         ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+                        startPoint: UnitPoint(x: 0.05, y: 0.10 + 0.30 * effectivePhase),
+                        endPoint: UnitPoint(x: 0.95, y: 0.90 - 0.24 * effectivePhase)
                     )
-                    .rotationEffect(.degrees(isAnimating ? 10 : -12))
-                    .offset(x: isAnimating ? 190 : -190, y: isAnimating ? 34 : -34)
-                    .blur(radius: 22)
+                    .blur(radius: 18)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
@@ -3810,40 +3816,103 @@ private struct ImageGenerationPlaceholderView: View {
             .padding(.top, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
             .onAppear {
-                isAnimating = true
-                withAnimation(.linear(duration: 2.8).repeatForever(autoreverses: false)) {
-                    sweepPhase = 1
+                guard !reduceMotion else { return }
+                withAnimation(.linear(duration: 5.6).repeatForever(autoreverses: false)) {
+                    colorPhase = 1
+                }
+                withAnimation(.linear(duration: 2.15).repeatForever(autoreverses: false)) {
+                    sweepPhase = 1.15
+                }
+                withAnimation(.linear(duration: 3.45).delay(0.65).repeatForever(autoreverses: false)) {
+                    secondarySweepPhase = 1.10
                 }
             }
+    }
+
+    private var backgroundFill: LinearGradient {
+        LinearGradient(
+            colors: basePalette.map { $0.opacity(theme.isDark ? 0.84 : 0.76) },
+            startPoint: UnitPoint(x: 0.10 + 0.74 * effectivePhase, y: 0.08),
+            endPoint: UnitPoint(x: 0.92 - 0.62 * effectivePhase, y: 0.96)
+        )
     }
 
     private var sweepOverlay: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
-            let sweepWidth = max(width * 0.18, 72)
+            let height = geometry.size.height
+            let sweepWidth = max(width * 0.26, 88)
+            let travel = width + height + sweepWidth * 2
 
+            ZStack {
+                scanBeam(
+                    phase: reduceMotion ? 0.42 : sweepPhase,
+                    width: sweepWidth,
+                    travel: travel,
+                    opacity: theme.isDark ? 0.96 : 1.0,
+                    blur: 8,
+                    rotation: -12
+                )
+                scanBeam(
+                    phase: reduceMotion ? 0.70 : secondarySweepPhase,
+                    width: sweepWidth * 0.72,
+                    travel: travel,
+                    opacity: theme.isDark ? 0.32 : 0.42,
+                    blur: 15,
+                    rotation: -12
+                )
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .allowsHitTesting(false)
+    }
+
+    private func scanBeam(
+        phase: CGFloat,
+        width: CGFloat,
+        travel: CGFloat,
+        opacity: Double,
+        blur: CGFloat,
+        rotation: Double
+    ) -> some View {
+        ZStack {
             LinearGradient(
                 colors: [
                     .clear,
-                    Color.white.opacity(theme.isDark ? 0.08 : 0.12),
-                    Color.white.opacity(theme.isDark ? 0.26 : 0.42),
-                    Color.white.opacity(theme.isDark ? 0.78 : 0.96),
-                    Color.white.opacity(theme.isDark ? 0.26 : 0.42),
-                    Color.white.opacity(theme.isDark ? 0.08 : 0.12),
+                    Color.cyan.opacity(theme.isDark ? 0.10 : 0.16),
+                    Color.white.opacity(theme.isDark ? 0.30 : 0.48),
+                    Color.white.opacity(theme.isDark ? 0.82 : 0.96),
+                    Color(red: 1.0, green: 0.72, blue: 0.92).opacity(theme.isDark ? 0.26 : 0.42),
+                    Color.yellow.opacity(theme.isDark ? 0.08 : 0.16),
                     .clear
                 ],
                 startPoint: .leading,
                 endPoint: .trailing
             )
-            .frame(width: sweepWidth)
-            .offset(x: -sweepWidth + sweepPhase * (width + sweepWidth * 2))
-            .rotationEffect(.degrees(-8))
-            .blur(radius: 11)
-            .blendMode(.screen)
-            .opacity(theme.isDark ? 0.92 : 1.0)
+            .frame(width: width)
+            .blur(radius: blur)
+
+            LinearGradient(
+                colors: [
+                    .clear,
+                    Color.white.opacity(theme.isDark ? 0.42 : 0.72),
+                    .clear
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: max(width * 0.18, 18))
+            .blur(radius: 2.5)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .allowsHitTesting(false)
+        .offset(x: -travel * 0.44 + phase * travel, y: 0)
+        .rotationEffect(.degrees(rotation))
+        .blendMode(.screen)
+        .opacity(opacity)
+    }
+
+    private func hueOffset(_ hue: Double, _ offset: Double) -> Double {
+        let value = hue + offset
+        return value - floor(value)
     }
 }
 
@@ -4618,11 +4687,12 @@ private struct ParsedLocalAlpineResult {
     let hasNonZeroExit: Bool
 
     init(content: String, metadata: [String: String]?) {
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let boundaryTrimmed = content.trimmingCharacters(in: .newlines)
+        let searchable = boundaryTrimmed.trimmingCharacters(in: .whitespacesAndNewlines)
         let commandFromMetadata = metadata?["iexa_local_alpine_display_command"]
             ?? ""
-        let commandBlocks = Self.codeBlocks(in: trimmed, preferredLanguage: "bash").joined(separator: "\n\n---\n\n")
-        let textBlocks = Self.codeBlocks(in: trimmed, preferredLanguage: "text").joined(separator: "\n\n---\n\n")
+        let commandBlocks = Self.codeBlocks(in: boundaryTrimmed, preferredLanguage: "bash").joined(separator: "\n\n---\n\n")
+        let textBlocks = Self.codeBlocks(in: boundaryTrimmed, preferredLanguage: "text").joined(separator: "\n\n---\n\n")
 
         commandText = Self.clip(
             commandFromMetadata.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -4630,11 +4700,11 @@ private struct ParsedLocalAlpineResult {
                 : commandFromMetadata,
             limit: 8_000
         )
-        outputText = Self.clip(textBlocks.isEmpty ? trimmed : textBlocks, limit: 20_000)
+        outputText = Self.clip(textBlocks.isEmpty ? boundaryTrimmed : textBlocks, limit: 20_000)
         let metadataHasCommand = !commandFromMetadata.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        commandCount = max(Self.headingCount(in: trimmed, heading: "命令"), metadataHasCommand ? 1 : 0)
-        editedFileCount = Self.editedFileCount(in: trimmed)
-        hasNonZeroExit = Self.containsNonZeroExit(in: trimmed)
+        commandCount = max(Self.headingCount(in: searchable, heading: "命令"), metadataHasCommand ? 1 : 0)
+        editedFileCount = Self.editedFileCount(in: searchable)
+        hasNonZeroExit = Self.containsNonZeroExit(in: searchable)
     }
 
     func streamingSummary(statusDetail: String) -> String {
@@ -4667,7 +4737,7 @@ private struct ParsedLocalAlpineResult {
         var blocks: [String] = []
         for match in matches where match.numberOfRanges >= 3 {
             let language = nsContent.substring(with: match.range(at: 1)).lowercased()
-            let body = nsContent.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let body = nsContent.substring(with: match.range(at: 2)).trimmingCharacters(in: .newlines)
             if language.contains(preferredLanguage) {
                 blocks.append(body)
             }
@@ -4705,7 +4775,7 @@ private struct ParsedLocalAlpineResult {
     }
 
     private static func clip(_ text: String, limit: Int) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = text.trimmingCharacters(in: .newlines)
         guard trimmed.count > limit else { return trimmed }
         return String(trimmed.prefix(limit)) + "\n...（内容过长，已折叠）"
     }
@@ -4813,11 +4883,11 @@ private struct MessageFilePreviewSheet: View {
     }
 
     private var copyableText: String? {
-        guard let text = textContent?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !text.isEmpty else {
+        guard let textContent,
+              !textContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
-        return text
+        return textContent
     }
 
     var body: some View {

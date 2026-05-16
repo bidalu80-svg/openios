@@ -8217,7 +8217,7 @@ final class ChatViewModel {
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
         - For scripts/projects, prefer JSON `write_files` / `code_lines` inside `iexa_alpine` to create files, then run a bounded verification command. This keeps file bytes under the tool protocol instead of relying on chat rendering.
-        - For Python files, send the complete intended file content through `write_files`. The app writes the received content as-is, then reports syntax validation as a warning/result instead of formatting or blocking the write.
+        - For Python files, send the complete intended file content through `write_files`. The app runs a small built-in Python formatter before writing: it normalizes newlines/tabs/common mojibake and repairs obviously collapsed indentation, then validates syntax in Local Alpine.
         - When fixing an existing Python file after a syntax/indentation error, rewrite the complete corrected target Python file with `iexa_alpine` JSON `write_files`. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
         - Prefer complete structured Python writes for class/function bodies, then run the requested script or a bounded verification command.
         - After writing Python, run the requested script or a bounded verification command. If syntax or indentation fails, return one complete corrected file through `write_files`; do not try to fix only the reported line.
@@ -11129,7 +11129,7 @@ final class ChatViewModel {
             "not found", "error", "missing", "no such file", "traceback", "exception",
             "command not found", "permission denied", "syntaxerror", "indentationerror",
             "module not found", "no module named", "输入已取消", "存在错误输出",
-            "写入已拒绝", "写入失败", "缩进预检失败"
+            "写入已拒绝", "写入失败", "缩进预检失败", "语法校验失败"
         ]
         if markers.contains(where: { normalized.contains($0.lowercased()) }) {
             return true

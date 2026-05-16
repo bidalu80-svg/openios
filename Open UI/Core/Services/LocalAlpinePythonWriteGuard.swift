@@ -33,7 +33,7 @@ enum LocalAlpinePythonWriteGuard {
         case .codeLines, .contentLines, .contentBase64:
             extracted = ExtractedCode(
                 content: normalizeNewlines(content),
-                notes: ["结构化 Python 源码已按完整文件写入，随后会执行 black 整体格式化。"]
+                notes: ["结构化 Python 源码已按完整文件写入，并交给内置 Python 格式化器做安全归一化。"]
             )
         case .content, .heredoc, .codeBlock:
             switch extractPythonCode(from: content, source: source) {
@@ -81,6 +81,18 @@ enum LocalAlpinePythonWriteGuard {
         notes.append(contentsOf: tabRepair.notes)
 
         return (ensureTrailingNewline(prepared), notes)
+    }
+
+    static func repairCollapsedIndentationIfNeeded(_ content: String) -> (content: String, notes: [String])? {
+        let normalized = normalizeNewlines(content).trimmingCharacters(in: .newlines)
+        guard looksCollapsedIndentation(normalized) else { return nil }
+
+        let repaired = rebuildIndentation(from: normalized)
+        guard repaired != normalized else { return nil }
+        return (
+            ensureTrailingNewline(repaired),
+            ["检测到 Python 块缩进被压扁，客户端已按冒号块/def/class/else 结构自动恢复 4 空格缩进。"]
+        )
     }
 
     private static func extractPythonCode(from content: String, source: Source) -> Extraction {
@@ -154,6 +166,227 @@ enum LocalAlpinePythonWriteGuard {
         guard !changedLines.isEmpty else { return (content, []) }
         let note = "已按 VS Code/Python 默认设置将行首 Tab 转换为 4 个空格：第 \(changedLines.prefix(12).map(String.init).joined(separator: ", ")) 行"
         return (normalized.joined(separator: "\n"), [note])
+    }
+
+    private static func looksCollapsedIndentation(_ content: String) -> Bool {
+        let meaningfulLines = content
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard meaningfulLines.count >= 4 else { return false }
+        let colonLines = meaningfulLines.filter {
+            let trimmed = $0.trimmingCharacters(in: .whitespaces)
+            return trimmed.hasSuffix(":")
+                && !trimmed.hasPrefix("#")
+                && !trimmed.hasPrefix("case ")
+        }
+        guard !colonLines.isEmpty else { return false }
+
+        let leadingWidths = meaningfulLines.map { line -> Int in
+            line.prefix { $0 == " " || $0 == "\t" }.count
+        }
+        guard let maxLeading = leadingWidths.max(), maxLeading <= 1 else { return false }
+
+        for index in 0..<(meaningfulLines.count - 1) {
+            let current = meaningfulLines[index].trimmingCharacters(in: .whitespaces)
+            let next = meaningfulLines[index + 1]
+            guard current.hasSuffix(":") else { continue }
+            let nextLeading = next.prefix { $0 == " " || $0 == "\t" }.count
+            if nextLeading <= leadingWidths[index] {
+                return true
+            }
+        }
+        return false
+    }
+
+    private enum PythonBlockKind: Equatable {
+        case `class`
+        case function
+        case `if`
+        case `try`
+        case other
+    }
+
+    private static func rebuildIndentation(from content: String) -> String {
+        let rawLines = content.components(separatedBy: "\n")
+        var rebuilt: [String] = []
+        var stack: [PythonBlockKind] = []
+        var continuationClosers: [Character] = []
+        var blankRun = 0
+        var previousOpenedBlock = false
+
+        for rawLine in rawLines {
+            let stripped = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !stripped.isEmpty else {
+                rebuilt.append("")
+                blankRun += 1
+                previousOpenedBlock = false
+                continue
+            }
+
+            let continuationDepth = continuationDepthForIndent(line: stripped, stack: continuationClosers)
+            let isContinuationLine = continuationDepth > 0 || startsWithClosingDelimiter(stripped)
+
+            if !isContinuationLine {
+                if startsAlwaysTopLevel(stripped) || (blankRun >= 2 && startsLikelyTopLevel(stripped)) {
+                    stack.removeAll()
+                } else if startsDefinition(stripped) {
+                    collapseToDefinitionParent(&stack)
+                } else if stripped.hasPrefix("elif ") {
+                    popUntilContinuationParent(&stack, matching: .if, fallback: .other)
+                } else if stripped.hasPrefix("except") || stripped.hasPrefix("finally:") {
+                    popUntilContinuationParent(&stack, matching: .try, fallback: .other)
+                } else if stripped.hasPrefix("else:") {
+                    popUntilContinuationParent(&stack, matching: nearestElseParent(in: stack), fallback: .other)
+                } else if startsNewIfSibling(stripped, previousOpenedBlock: previousOpenedBlock, stack: stack) {
+                    _ = stack.popLast()
+                }
+            }
+
+            rebuilt.append(String(repeating: " ", count: (stack.count + continuationDepth) * 4) + stripped)
+
+            if !isContinuationLine && opensPythonBlock(stripped) {
+                stack.append(blockKind(for: stripped))
+            }
+            updateContinuationClosers(&continuationClosers, with: stripped)
+            previousOpenedBlock = opensPythonBlock(stripped)
+            blankRun = 0
+        }
+
+        return rebuilt.joined(separator: "\n").trimmingCharacters(in: .newlines)
+    }
+
+    private static func startsLikelyTopLevel(_ line: String) -> Bool {
+        startsDefinition(line) || line.hasPrefix("if __name__")
+    }
+
+    private static func startsAlwaysTopLevel(_ line: String) -> Bool {
+        line.hasPrefix("if __name__")
+    }
+
+    private static func startsDefinition(_ line: String) -> Bool {
+        line.hasPrefix("def ")
+            || line.hasPrefix("async def ")
+            || line.hasPrefix("class ")
+    }
+
+    private static func startsNewIfSibling(
+        _ line: String,
+        previousOpenedBlock: Bool,
+        stack: [PythonBlockKind]
+    ) -> Bool {
+        line.hasPrefix("if ")
+            && previousOpenedBlock == false
+            && stack.last == .if
+    }
+
+    private static func collapseToDefinitionParent(_ stack: inout [PythonBlockKind]) {
+        let keepClass = stack.lastIndex(of: .class)
+        if let keepClass, keepClass == 0 {
+            stack = [.class]
+        } else {
+            stack.removeAll()
+        }
+    }
+
+    private static func popUntilContinuationParent(
+        _ stack: inout [PythonBlockKind],
+        matching kind: PythonBlockKind,
+        fallback: PythonBlockKind
+    ) {
+        guard stack.contains(kind) else {
+            if stack.last == fallback {
+                _ = stack.popLast()
+            }
+            return
+        }
+        while let last = stack.last {
+            stack.removeLast()
+            if last == kind { break }
+        }
+    }
+
+    private static func nearestElseParent(in stack: [PythonBlockKind]) -> PythonBlockKind {
+        for kind in stack.reversed() where kind == .if || kind == .try {
+            return kind
+        }
+        return .other
+    }
+
+    private static func continuationDepthForIndent(line: String, stack: [Character]) -> Int {
+        var depth = stack.count
+        for character in line {
+            guard isClosingDelimiter(character) else { break }
+            depth = max(0, depth - 1)
+        }
+        return depth
+    }
+
+    private static func startsWithClosingDelimiter(_ line: String) -> Bool {
+        guard let first = line.first else { return false }
+        return isClosingDelimiter(first)
+    }
+
+    private static func updateContinuationClosers(_ stack: inout [Character], with line: String) {
+        var quote: Character?
+        var escaped = false
+
+        for character in line {
+            if escaped {
+                escaped = false
+                continue
+            }
+            if character == "\\" {
+                escaped = true
+                continue
+            }
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                }
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character
+                continue
+            }
+            if character == "#" {
+                break
+            }
+            if let closer = closerForOpeningDelimiter(character) {
+                stack.append(closer)
+            } else if isClosingDelimiter(character) {
+                if stack.last == character {
+                    _ = stack.popLast()
+                } else if !stack.isEmpty {
+                    _ = stack.popLast()
+                }
+            }
+        }
+    }
+
+    private static func closerForOpeningDelimiter(_ character: Character) -> Character? {
+        switch character {
+        case "(": return ")"
+        case "[": return "]"
+        case "{": return "}"
+        default: return nil
+        }
+    }
+
+    private static func isClosingDelimiter(_ character: Character) -> Bool {
+        character == ")" || character == "]" || character == "}"
+    }
+
+    private static func opensPythonBlock(_ line: String) -> Bool {
+        line.hasSuffix(":") && !line.hasPrefix("#")
+    }
+
+    private static func blockKind(for line: String) -> PythonBlockKind {
+        if line.hasPrefix("class ") { return .class }
+        if line.hasPrefix("def ") || line.hasPrefix("async def ") { return .function }
+        if line.hasPrefix("if ") || line.hasPrefix("elif ") { return .if }
+        if line.hasPrefix("try:") { return .try }
+        return .other
     }
 
     private static func repairCommonUTF8Mojibake(in content: String) -> (content: String, notes: [String]) {

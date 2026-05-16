@@ -400,7 +400,7 @@ actor LocalAlpineAgentService {
             let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
             for match in matches where match.numberOfRanges >= 3 {
                 let info = nsContent.substring(with: match.range(at: 1)).lowercased()
-                let body = nsContent.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let body = nsContent.substring(with: match.range(at: 2)).trimmingCharacters(in: .newlines)
                 if info.contains("iexa_alpine")
                     || (info.trimmingCharacters(in: .whitespacesAndNewlines) == "json" && body.contains("\"iexa_alpine\"")) {
                     blocks.append(body)
@@ -411,7 +411,7 @@ actor LocalAlpineAgentService {
         if let tagRegex = try? NSRegularExpression(pattern: #"<iexa_alpine>([\s\S]*?)</iexa_alpine>"#, options: [.caseInsensitive]) {
             let matches = tagRegex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
             for match in matches where match.numberOfRanges >= 2 {
-                blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines))
+                blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .newlines))
             }
         }
 
@@ -614,7 +614,7 @@ actor LocalAlpineAgentService {
                 fileName: split.fileName,
                 destinationPath: split.directory
             )
-            var lines = ["- `\(target)` (\(data.count) B，原样写入，来源：\(source.displayName))"]
+            var lines = ["- `\(target)` (\(data.count) B，已写入，来源：\(source.displayName))"]
             lines.append(contentsOf: notes.map { "  - \($0)" })
             return LocalAlpineProtectedWriteOutcome(
                 lines: lines,
@@ -651,12 +651,30 @@ actor LocalAlpineAgentService {
                 hadFailure: true
             )
         }
+
+        var formatted = LocalAlpinePythonWriteGuard.normalizeGeneratedPython(
+            content,
+            source: source.pythonGuardSource
+        )
+        if let repaired = LocalAlpinePythonWriteGuard.repairCollapsedIndentationIfNeeded(formatted.content) {
+            formatted.content = repaired.content
+            formatted.notes.append(contentsOf: repaired.notes)
+        }
+        guard let formattedData = formatted.content.data(using: .utf8) else {
+            return LocalAlpineProtectedWriteOutcome(
+                lines: ["- `\(target)` 写入失败：Python 格式化后内容不是有效 UTF-8"],
+                writtenPath: nil,
+                writtenFile: nil,
+                hadFailure: true
+            )
+        }
+
         let directWrite = await writeFileBytes(
-            data: data,
-            content: content,
+            data: formattedData,
+            content: formatted.content,
             target: target,
             source: source,
-            notes: ["Python 文件已按收到内容原样写入；未格式化、未重排缩进。"]
+            notes: ["Python 文件已通过内置格式化器写入；会保留语义并自动修复换行、Tab、常见乱码和明显被压扁的缩进。"] + formatted.notes
         )
         guard !directWrite.hadFailure else { return directWrite }
 
@@ -669,7 +687,7 @@ actor LocalAlpineAgentService {
             lines.append("  - Python 语法校验通过。")
         } else {
             let output = validationResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            lines.append("  - Python 语法校验未通过，但文件已保留。")
+            lines.append("  - Python 语法校验失败，文件已保留；需要继续修复后再运行。")
             if !output.isEmpty {
                 lines.append("    - 输出：\(String(output.prefix(1_000)))")
             }
@@ -1048,6 +1066,16 @@ private enum LocalAlpineAgentFileSource: Equatable {
         case .contentLines: return "content_lines"
         case .contentBase64: return "content_base64"
         case .heredoc: return "heredoc"
+        }
+    }
+
+    var pythonGuardSource: LocalAlpinePythonWriteGuard.Source {
+        switch self {
+        case .content: return .content
+        case .codeLines: return .codeLines
+        case .contentLines: return .contentLines
+        case .contentBase64: return .contentBase64
+        case .heredoc: return .heredoc
         }
     }
 }
