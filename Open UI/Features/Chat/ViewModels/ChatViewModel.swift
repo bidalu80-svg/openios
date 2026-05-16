@@ -1263,7 +1263,7 @@ final class ChatViewModel {
             }
             if localAlpineOutputHasPythonSyntaxIssue(content + "\n" + (rawResult ?? "")) {
                 lines.append("  required next action:")
-                lines.append(indentForSystemContext("Python syntax/indentation error detected. The next step must rewrite the complete corrected Python file through iexa_alpine JSON write_files using code_lines or content_base64, then run black/py_compile/requested command. Keep the file body complete and exact; do not output a partial patch, heredoc fragment, or repeat only the same failed command."))
+                lines.append(indentForSystemContext("Python syntax/indentation error detected. Rewrite the complete corrected Python file through iexa_alpine JSON write_files, preserving the file body exactly, then run a bounded verification command. Do not repeat only the same failed command."))
             }
             return lines.joined(separator: "\n")
         }
@@ -1279,7 +1279,7 @@ final class ChatViewModel {
         - If result output is present, answer from that output as the source of truth.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
-        - If the latest result contains Python IndentationError, SyntaxError, or black parse failure, the next action must emit one complete corrected Python file through `iexa_alpine` JSON `write_files` using `code_lines` or `content_base64`, then run black/py_compile/requested command. Keep the file body complete and exact; do not output a partial patch, heredoc fragment, or repeat only the same `py_compile` or run command.
+        - If the latest result contains Python IndentationError or SyntaxError, emit one complete corrected Python file through `iexa_alpine` JSON `write_files`, then run a bounded verification command. Keep the file body complete and exact; do not repeat only the same failed command.
         [/Local Alpine execution state]
         """
     }
@@ -8184,7 +8184,7 @@ final class ChatViewModel {
           ]
         }
         ```
-        For `iexa_workspace` JSON operations, prefer `content_lines`, `code_lines`, or `content_base64` so indentation stays intact. If Local Alpine terminal mode is handling Python files, use `iexa_alpine` JSON `write_files` with `code_lines` or `content_base64`; do not use raw shell heredoc for Python unless explicitly debugging an existing shell command. For multi-file projects, write all connected files together so the UI, styles, scripts, imports, and dependencies stay linked.
+        For `iexa_workspace` JSON operations, prefer `content_lines`, `code_lines`, or `content_base64` so indentation stays intact. If Local Alpine terminal mode is handling files, prefer `iexa_alpine` JSON `write_files` for exact file content, then verify with a bounded command. For multi-file projects, write all connected files together so the UI, styles, scripts, imports, and dependencies stay linked.
         If the user asks to run/check/verify the project after writing files and Local Alpine terminal mode is available, also emit a bounded `iexa_alpine` block in the same answer for the concrete verification command.
         """
     }
@@ -8216,13 +8216,11 @@ final class ChatViewModel {
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
-        - For scripts/projects, prefer JSON `write_files` / `code_lines` inside `iexa_alpine` to create files, then run a bounded verification command. This preserves indentation better than raw shell text on some providers.
-        - For Python files, use a complete `write_files` entry with `code_lines` or `content_base64`. Do not use `content` strings, partial patches, or raw heredocs for Python unless the user explicitly asks to debug shell writing itself.
-        - Python formatting is whole-file only: the app writes the complete draft, runs `black` on that whole file, then runs `py_compile`, and only then moves it into place. `black` cannot repair code that is not parseable Python, so your emitted complete file must already have valid block structure before formatting.
-        - When fixing an existing Python file after a syntax/indentation/black parse error, rewrite the complete corrected target Python file with `iexa_alpine` JSON `write_files` using `code_lines` or `content_base64`. Do not inspect validator traceback files such as `/usr/lib/python.../ast.py`, and do not output partial patches, half-structured continuations, heredoc fragments, or "continue writing" fragments.
-        - For non-Python indentation-sensitive files, a quoted shell heredoc is acceptable. For Python, use structured complete-file `write_files`.
+        - For scripts/projects, prefer JSON `write_files` / `code_lines` inside `iexa_alpine` to create files, then run a bounded verification command. This keeps file bytes under the tool protocol instead of relying on chat rendering.
+        - For Python files, send the complete intended file content through `write_files`. The app writes the received content as-is, then reports syntax validation as a warning/result instead of formatting or blocking the write.
+        - When fixing an existing Python file after a syntax/indentation error, rewrite the complete corrected target Python file with `iexa_alpine` JSON `write_files`. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
         - Prefer complete structured Python writes for class/function bodies, then run the requested script or a bounded verification command.
-        - After writing Python, run the requested script or a bounded verification command. If black, syntax, or indentation fails, return one complete corrected file through `write_files`; do not try to fix only the reported line.
+        - After writing Python, run the requested script or a bounded verification command. If syntax or indentation fails, return one complete corrected file through `write_files`; do not try to fix only the reported line.
         - Use normal UTF-8 text in generated files. If visible Chinese text is needed, write the real Chinese characters, never mojibake such as `æå` or `é¡µé¢`.
         - Format Python with VS Code/Python defaults: 4 spaces per block level, no tabs, and aligned continuation indentation inside dictionaries, function calls, lists, and multi-line arguments.
         - When generating runnable Python examples for a code block, include a small `main()` call or explicit `print()` statements so the Run button can show a real result; code that only defines variables/functions/classes will execute successfully but produce no output.
@@ -8257,7 +8255,7 @@ final class ChatViewModel {
         }
         ```
 
-        Shell heredoc fallback for non-Python or explicit shell-write debugging:
+        Shell heredoc fallback for explicit shell-write debugging:
         ```iexa_alpine
         cat /etc/alpine-release && uname -m && pwd
         cat > note.txt <<'EOF'
@@ -10273,11 +10271,11 @@ final class ChatViewModel {
             pythonRepairInstruction = """
 
         Python syntax/indentation guard
-        已检测到 Python 缩进/语法错误。下一步禁止只重复 `py_compile` 或直接运行脚本。
+        已检测到 Python 缩进/语法错误。下一步不要只重复同一个失败命令。
         必须先执行完整文件定位和完整文件修复：
         1. 读取带行号文件：`\(Self.localAlpineInspectCommand(forPythonFile: pythonFile))`
-        2. 读取完整文件后，用 `iexa_alpine` JSON `write_files` 的 `code_lines` 或 `content_base64` 写回完整 Python 文件；禁止 partial patch、半结构代码、heredoc 片段和续写片段。
-        3. 写回后直接运行 `python3 -m py_compile` 和脚本验证。
+        2. 读取完整文件后，用 `iexa_alpine` JSON `write_files` 写回完整 Python 文件，内容必须完整准确。
+        3. 写回后直接运行脚本或一个有界验证命令。
         """
         } else if failure.outputPreview.lowercased().contains("unsafe python file write blocked")
             || failure.outputPreview.lowercased().contains("unsafe code file write blocked") {
@@ -11204,10 +11202,8 @@ final class ChatViewModel {
         - If the user interrupts with a question or taps stop, answer the question and wait. Do not resume automatic execution until the user explicitly asks to continue/fix/run.
         Strategy Switch:
         - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, complete-file rewrite, then verification.
-        - For Python indentation/syntax/black parse errors, inspect the user project file named by `目标 Python 文件` or the preserved `失败草稿已保留` path if needed, then rewrite the complete corrected target `.py` file through JSON `write_files` using `code_lines` or `content_base64`. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
-        - If a failed draft path is present, read the draft to recover the exact attempted source, but write the corrected code back to the target Python file, not to the draft path.
-        - For Python indentation-sensitive rewrites, do not use raw shell text or heredoc fragments; use structured complete-file writes.
-        - If a Python shell text write fails, switch to structured `write_files` instead of retrying the same shell write.
+        - For Python indentation/syntax errors, inspect the user project file named by the traceback if needed, then rewrite the complete corrected target `.py` file through JSON `write_files`. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
+        - For Python indentation-sensitive rewrites, use complete-file writes and then verify.
         [/Local Alpine continuation]
         """
         if !messages.isEmpty, messages[0]["role"] as? String == "system" {

@@ -249,12 +249,8 @@ actor LocalWorkspaceAgentService {
         }
     }
 
-    private nonisolated func preparedContent(_ content: String, for path: String) -> String {
-        guard path.lowercased().hasSuffix(".py") else { return content }
-        return LocalAlpinePythonWriteGuard.normalizeGeneratedPython(
-            content,
-            source: .content
-        ).content
+    private nonisolated func preparedContent(_ content: String, for _: String) -> String {
+        content
     }
 
     nonisolated static func visibleContent(from content: String) -> String {

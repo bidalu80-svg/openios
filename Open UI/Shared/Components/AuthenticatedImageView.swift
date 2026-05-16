@@ -156,13 +156,13 @@ struct AuthenticatedImageView: View {
                 .padding(8)
             }
         }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: imageIsRevealed)
         // Combine fileId + retryTrigger so that:
         // 1. A new fileId triggers a fresh load (normal case)
         // 2. Incrementing retryTrigger forces a retry for the same fileId (tap-to-retry / foreground recovery)
         .task(id: "\(fileId)_\(retryTrigger)") {
             await loadImage()
         }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: imageIsRevealed)
         // When the app returns to the foreground, retry any failed images automatically.
         // This handles the case where images failed because the app was backgrounded
         // during generation (slow network, tool-generated images not yet available).
