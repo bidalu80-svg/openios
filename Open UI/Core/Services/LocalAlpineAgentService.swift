@@ -681,10 +681,21 @@ actor LocalAlpineAgentService {
         var finalByteCount = formattedData.count
         var validationResult = await LocalAlpineTerminalService.shared.execute(command: validationCommand, cwd: cwd)
 
-        let repairCommand = pythonIndentRepairCommand(for: runtimeTargetPath)
-        let repairResult = await LocalAlpineTerminalService.shared.execute(command: repairCommand, cwd: cwd)
-        if repairResult.exitCode == 0 {
-            let repairOutput = repairResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let repairResult: LocalAlpineCommandResult?
+        do {
+            let repairScriptRuntimePath = try await ensurePythonIndentRepairScript()
+            let repairCommand = pythonIndentRepairCommand(
+                scriptRuntimePath: repairScriptRuntimePath,
+                targetRuntimePath: runtimeTargetPath
+            )
+            repairResult = await LocalAlpineTerminalService.shared.execute(command: repairCommand, cwd: cwd)
+        } catch {
+            repairResult = nil
+            lines.append("  - Python AST 缩进修复器准备失败：\(error.localizedDescription)")
+        }
+
+        if repairResult?.exitCode == 0 {
+            let repairOutput = repairResult?.output.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if repairOutput.contains("IEXA_PY_REPAIR_SUCCESS") {
                 lines.append("  - Python AST 缩进修复器已重排文件，并通过 ast.parse 校验。")
             } else if repairOutput.contains("IEXA_PY_REPAIR_SKIPPED_ALREADY_VALID") {
@@ -700,7 +711,7 @@ actor LocalAlpineAgentService {
             }
             validationResult = await LocalAlpineTerminalService.shared.execute(command: validationCommand, cwd: cwd)
         } else if validationResult.exitCode != 0 {
-            let repairOutput = repairResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let repairOutput = repairResult?.output.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             lines.append("  - Python AST 缩进修复器未能安全修复，已保留原文件。")
             if !repairOutput.isEmpty {
                 lines.append("    - 修复输出：\(String(repairOutput.prefix(1_000)))")
@@ -736,8 +747,26 @@ actor LocalAlpineAgentService {
         """
     }
 
-    private func pythonIndentRepairCommand(for runtimePath: String) -> String {
-        let script = """
+    private func ensurePythonIndentRepairScript() async throws -> String {
+        let toolDirectory = "/.iexa_tools"
+        let toolName = "python_indent_repair.py"
+        guard let data = pythonIndentRepairScript().data(using: .utf8) else {
+            throw LocalAlpineAgentError.invalidToolScript
+        }
+        try await LocalAlpineTerminalService.shared.writeFile(
+            data: data,
+            fileName: toolName,
+            destinationPath: toolDirectory
+        )
+        return runtimePath(forSharedPath: "\(toolDirectory)/\(toolName)")
+    }
+
+    private func pythonIndentRepairCommand(scriptRuntimePath: String, targetRuntimePath: String) -> String {
+        "python3 \(shellSingleQuoted(scriptRuntimePath)) \(shellSingleQuoted(targetRuntimePath))"
+    }
+
+    private func pythonIndentRepairScript() -> String {
+        """
         import ast
         import pathlib
         import sys
@@ -1008,7 +1037,6 @@ actor LocalAlpineAgentService {
             print(f"IEXA_PY_REPAIR_FAILED: {type(exc).__name__}: {exc}")
         sys.exit(1)
         """
-        return "python3 - \(shellSingleQuoted(runtimePath)) <<'IEXA_PY_REPAIR'\n\(script)\nIEXA_PY_REPAIR"
     }
 
     private func pythonSyntaxCheck(for paths: [String], cwd: String) async -> (command: String, result: LocalAlpineCommandResult)? {
@@ -1400,11 +1428,14 @@ private struct LocalAlpineWriteResult {
 
 private enum LocalAlpineAgentError: LocalizedError {
     case noCommands
+    case invalidToolScript
 
     var errorDescription: String? {
         switch self {
         case .noCommands:
             return "没有找到可执行的 Alpine 命令。"
+        case .invalidToolScript:
+            return "内置 Python 缩进修复器脚本不可用。"
         }
     }
 }
