@@ -978,7 +978,7 @@ struct HighlightedSourceView: View {
     }
 
     var body: some View {
-        ScrollView(.vertical) {
+        ScrollView([.horizontal, .vertical]) {
             Group {
                 if let highlighted = highlightedCode {
                     Text(highlighted)
@@ -989,6 +989,7 @@ struct HighlightedSourceView: View {
             }
             .scaledFont(size: 13, design: .monospaced)
             .lineSpacing(4)
+            .fixedSize(horizontal: true, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
             .textSelection(.enabled)

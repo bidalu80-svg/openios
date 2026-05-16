@@ -1,14 +1,11 @@
 import SwiftUI
-import MarkdownView
 
 // MARK: - Python Code Block View
 
 /// Renders a Python code block with a "Run" button and an inline output panel.
 ///
-/// The code is displayed using `MarkdownView` (same engine as all other code blocks)
-/// which provides full syntax highlighting via HighlightSwift. Pressing "Run"
-/// executes the code in the bundled Local Alpine runtime so imports, packages,
-/// network, and files match the app's terminal environment.
+/// The code is displayed and copied as the original source so indentation stays
+/// runnable. Pressing "Run" executes the same source in Local Alpine.
 struct PythonCodeBlockView: View {
 
     let code: String
@@ -38,27 +35,9 @@ struct PythonCodeBlockView: View {
     @State private var pendingInteractiveInput = ""
 
     @Environment(\.theme) private var theme
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityScale) private var accessibilityScale
-
-    private static let baseBodyFontSize: CGFloat = UIFont.preferredFont(forTextStyle: .body).pointSize
-
-    private var scaledTheme: MarkdownTheme {
-        let scale = accessibilityScale.scale(for: .content)
-        var t = MarkdownTheme.default
-        if abs(scale - 1.0) > 0.01 {
-            t.align(to: Self.baseBodyFontSize * scale)
-        }
-        return t
-    }
-
-    // The markdown string that produces a syntax-highlighted Python block
-    private var markdownCodeBlock: String {
-        "```python\n\(displayCode)\n```"
-    }
 
     private var displayCode: String {
-        Self.normalizedPythonCodeBlockSource(code)
+        Self.displayablePythonCode(code)
     }
 
     // MARK: - Body
@@ -68,8 +47,13 @@ struct PythonCodeBlockView: View {
             // ── Header bar ──────────────────────────────────────────────────
             headerBar
 
-            // ── Code body (MarkdownView handles syntax highlighting) ─────────
-            MarkdownView(markdownCodeBlock, theme: scaledTheme).codeBarHidden(true)
+            HighlightedSourceView(
+                code: displayCode,
+                language: "python",
+                truncate: true,
+                maxHeight: 420
+            )
+            .background(Color(.secondarySystemBackground))
 
             // ── Output panel (shown after run) ──────────────────────────────
             if case .loading = runState {
@@ -435,7 +419,7 @@ struct PythonCodeBlockView: View {
 
     private func executeCode(stdinInput: String?) {
         runState = .running
-        let codeToRun = Self.normalizedPythonCodeBlockSource(code)
+        let codeToRun = displayCode
         Task {
             let outcome = await Self.runCodeInLocalAlpine(code: codeToRun, stdinInput: stdinInput)
             await MainActor.run {
@@ -462,7 +446,7 @@ struct PythonCodeBlockView: View {
 
     private static func runCodeInLocalAlpine(code: String, stdinInput: String? = nil) async -> PythonCodeRunOutcome {
         let fileName = "codeblock-\(UUID().uuidString.prefix(8)).py"
-        let source = normalizedPythonCodeBlockSource(code)
+        let source = displayablePythonCode(code)
         guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return PythonCodeRunOutcome(result: PythonExecutionResult(
                 status: .error,
@@ -471,12 +455,22 @@ struct PythonCodeBlockView: View {
                 images: []
             ))
         }
-        let marker = shellHereDocMarker(for: source)
-        let body = source.hasSuffix("\n") ? source : source + "\n"
         let quotedFile = shellSingleQuoted(fileName)
+        do {
+            try await LocalAlpineTerminalService.shared.writeFile(
+                data: Data(source.utf8),
+                fileName: fileName,
+                destinationPath: "/"
+            )
+        } catch {
+            return PythonCodeRunOutcome(result: PythonExecutionResult(
+                status: .error,
+                stdout: "",
+                stderr: "Python 代码写入失败：\(error.localizedDescription)",
+                images: []
+            ))
+        }
         let command = """
-        cat > \(quotedFile) <<'\(marker)'
-        \(body)\(marker)
         python3 -m py_compile \(quotedFile) && python3 \(quotedFile)
         status=$?
         rm -f \(quotedFile)
@@ -525,29 +519,15 @@ struct PythonCodeBlockView: View {
         ) != nil
     }
 
-    private static func normalizedPythonCodeBlockSource(_ code: String) -> String {
-        let prepared = LocalAlpinePythonWriteGuard.normalizeGeneratedPython(
-            code,
-            source: .codeBlock
-        )
-        return prepared.content.trimmingCharacters(in: .newlines)
+    private static func displayablePythonCode(_ code: String) -> String {
+        code
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .trimmingCharacters(in: .newlines)
     }
 
     private static func shellSingleQuoted(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
-    }
-
-    private static func shellHereDocMarker(for content: String, prefix: String = "IEXA_PY") -> String {
-        var marker = prefix
-        var suffix = 0
-        let lines = Set(content.components(separatedBy: .newlines).map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines)
-        })
-        while lines.contains(marker) {
-            suffix += 1
-            marker = "\(prefix)_\(suffix)"
-        }
-        return marker
     }
 }
 
