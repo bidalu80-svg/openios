@@ -771,7 +771,7 @@ struct StreamingMarkdownView: View {
             let isLinkedWebAsset = lang == "css" || lang == "js" || lang == "javascript"
             let isMermaid = lang == "mermaid" && codeContent.trimmingCharacters(in: .whitespacesAndNewlines).count >= 5
             let isSVG = lang == "svg" && looksLikeSVG(codeContent)
-            let isPython = pythonLanguageTags.contains(lang) && codeContent.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
+            let isPython = pythonLanguageTags.contains(lang) && isLikelyRunnablePythonSource(codeContent)
             let isCompactModule = shouldRenderCompactCodeModule(language: lang, code: codeContent)
             let isStandardCodeBlock = normalizedBlock != nil
 
@@ -1009,6 +1009,24 @@ struct StreamingMarkdownView: View {
         return false
     }
 
+    private func isLikelyRunnablePythonSource(_ code: String) -> Bool {
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let lowercased = trimmed.lowercased()
+        let markers = [
+            "def ", "class ", "import ", "from ", "print(", "input(",
+            "for ", "while ", "if ", "elif ", "else:", "try:", "except",
+            "with ", "return ", "async def ", "await ", "lambda "
+        ]
+        if markers.contains(where: { lowercased.contains($0) }) {
+            return true
+        }
+
+        let assignmentPattern = #"(?m)^\s*[A-Za-z_][A-Za-z0-9_]*\s*=[^=]"#
+        return trimmed.range(of: assignmentPattern, options: .regularExpression) != nil
+    }
+
     private func looksLikeSVG(_ code: String) -> Bool {
         let t = code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return t.hasPrefix("<svg") || t.contains("<svg ")
@@ -1034,6 +1052,13 @@ private struct StandardCodeBlockView: View {
     private var displayLanguage: String {
         let value = language.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? "text" : value
+    }
+
+    private var fencedCodeMarkdown: String {
+        let trimmed = code.trimmingCharacters(in: .newlines)
+        let fence = trimmed.contains("```") ? "````" : "```"
+        let body = trimmed.isEmpty ? " " : trimmed
+        return "\(fence)\(displayLanguage)\n\(body)\n\(fence)"
     }
 
     var body: some View {
@@ -1087,12 +1112,8 @@ private struct StandardCodeBlockView: View {
             .padding(.vertical, 8)
             .background(theme.surfaceContainer.opacity(theme.isDark ? 0.72 : 0.90))
 
-            HighlightedSourceView(
-                code: code.trimmingCharacters(in: .newlines),
-                language: displayLanguage,
-                truncate: true,
-                maxHeight: 360
-            )
+            MarkdownView(fencedCodeMarkdown)
+                .codeBarHidden(true)
             .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.22 : 0.42))
         }
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))

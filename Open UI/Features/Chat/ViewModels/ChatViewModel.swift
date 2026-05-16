@@ -9691,7 +9691,10 @@ final class ChatViewModel {
         }
     }
 
-    private func buildAPIMessagesAsync(imageCanvasInstructionMessageId: String? = nil) async -> [[String: Any]] {
+    private func buildAPIMessagesAsync(
+        imageCanvasInstructionMessageId: String? = nil,
+        includeLocalAlpineExecutionContext: Bool? = nil
+    ) async -> [[String: Any]] {
         guard let conversation else { return [] }
         var apiMessages: [[String: Any]] = []
         let asyncEffectiveSP: String? = {
@@ -9699,14 +9702,27 @@ final class ChatViewModel {
                !cp.trimmingCharacters(in: .whitespaces).isEmpty { return cp }
             return conversation.systemPrompt
         }()
+        let shouldIncludeLocalAlpineContext: Bool = {
+            if let includeLocalAlpineExecutionContext {
+                return includeLocalAlpineExecutionContext
+            }
+            guard terminalEnabled, selectedTerminalIsLocalAlpine else { return false }
+            guard let latestUserText = conversation.messages.last(where: {
+                $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+            })?.content else {
+                return false
+            }
+            return Self.isExplicitLocalAlpineRequest(latestUserText)
+                || Self.isExplicitLocalAlpineResumeRequest(latestUserText)
+        }()
         let memoryContext = await localMemorySystemContext()
         let workspaceContext = shouldExecuteLocalWorkspaceAgentForCurrentRequest()
             ? Self.projectContinuitySystemContext()
             : Self.workspaceGuardSystemContext()
-        let alpineContext = selectedTerminalIsLocalAlpine && terminalEnabled
+        let alpineContext = shouldIncludeLocalAlpineContext
             ? Self.localAlpineAgentSystemContext()
             : nil
-        let alpineExecutionStateContext = selectedTerminalIsLocalAlpine && terminalEnabled
+        let alpineExecutionStateContext = shouldIncludeLocalAlpineContext
             ? Self.localAlpineExecutionStateSystemContext(from: conversation.messages)
             : nil
         let webSearchToolContext = webSearchEnabled
@@ -9721,12 +9737,13 @@ final class ChatViewModel {
             apiMessages.append(["role": "system", "content": combinedSystemPrompt])
         }
         for message in conversation.messages where !message.isStreaming
-            && !Self.isLocalWorkspaceAgentResult(message) {
+            && !Self.isLocalWorkspaceAgentResult(message)
+            && !Self.isLocalAlpineAgentResult(message) {
             let modelContent = contentForModel(
                 message: message,
                 includeImageCanvasInstruction: message.id == imageCanvasInstructionMessageId
             )
-            let modelRole = Self.isLocalAlpineAgentResult(message) ? "system" : message.role.rawValue
+            let modelRole = message.role.rawValue
             let imageFiles = message.files.filter { f in
                 f.type == "image" || (f.contentType ?? "").hasPrefix("image/")
             }
@@ -10853,7 +10870,7 @@ final class ChatViewModel {
         self.conversation?.history.currentId = assistantMessageId
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
-        var apiMessages = await buildAPIMessagesAsync()
+        var apiMessages = await buildAPIMessagesAsync(includeLocalAlpineExecutionContext: true)
         if finalSummaryOnly {
             Self.appendLocalAlpineFinalSummaryInstruction(to: &apiMessages)
         } else {

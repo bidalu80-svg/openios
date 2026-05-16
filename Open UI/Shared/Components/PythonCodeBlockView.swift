@@ -1,4 +1,5 @@
 import SwiftUI
+import MarkdownView
 
 // MARK: - Python Code Block View
 
@@ -40,6 +41,12 @@ struct PythonCodeBlockView: View {
         Self.displayablePythonCode(code)
     }
 
+    private var fencedCodeMarkdown: String {
+        let fence = displayCode.contains("```") ? "````" : "```"
+        let body = displayCode.isEmpty ? " " : displayCode
+        return "\(fence)python\n\(body)\n\(fence)"
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -47,12 +54,8 @@ struct PythonCodeBlockView: View {
             // ── Header bar ──────────────────────────────────────────────────
             headerBar
 
-            HighlightedSourceView(
-                code: displayCode,
-                language: "python",
-                truncate: true,
-                maxHeight: 420
-            )
+            MarkdownView(fencedCodeMarkdown)
+                .codeBarHidden(true)
             .background(Color(.secondarySystemBackground))
 
             // ── Output panel (shown after run) ──────────────────────────────

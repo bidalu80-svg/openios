@@ -425,7 +425,9 @@ final class NetworkManager: NSObject, Sendable {
         path: String,
         method: HTTPMethod = .post,
         body: [String: Any]? = nil,
-        authenticated: Bool = true
+        authenticated: Bool = true,
+        maxRetries: Int = 1,
+        baseDelay: TimeInterval = 0.6
     ) async throws -> SSEStream {
         let bodyData: Data?
         if let body {
@@ -444,19 +446,46 @@ final class NetworkManager: NSObject, Sendable {
         urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
 
         let streamSession = makeStreamingSession()
-        let (bytes, response) = try await streamSession.bytes(for: urlRequest)
+        var lastError: Error?
 
-        if let httpResponse = response as? HTTPURLResponse,
-           !(200..<400).contains(httpResponse.statusCode) {
-            var errorBody = Data()
-            for try await byte in bytes {
-                errorBody.append(byte)
-                if errorBody.count > 4096 { break }
+        for attempt in 0...maxRetries {
+            do {
+                let (bytes, response) = try await streamSession.bytes(for: urlRequest)
+
+                if let httpResponse = response as? HTTPURLResponse,
+                   !(200..<400).contains(httpResponse.statusCode) {
+                    var errorBody = Data()
+                    for try await byte in bytes {
+                        errorBody.append(byte)
+                        if errorBody.count > 4096 { break }
+                    }
+                    let apiError = parseHTTPError(statusCode: httpResponse.statusCode, data: errorBody)
+                    lastError = apiError
+                    guard apiError.isRetryable, attempt < maxRetries else {
+                        throw apiError
+                    }
+
+                    let delay = baseDelay * pow(2.0, Double(attempt))
+                    logger.warning("Streaming request got retryable HTTP error \(httpResponse.statusCode) on attempt \(attempt + 1)/\(maxRetries + 1), retrying in \(delay)s")
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    continue
+                }
+
+                return SSEStream(bytes: bytes)
+            } catch {
+                lastError = error
+                let apiError = APIError.from(error)
+                guard apiError.isRetryable, attempt < maxRetries else {
+                    throw error
+                }
+
+                let delay = baseDelay * pow(2.0, Double(attempt))
+                logger.warning("Streaming request failed on attempt \(attempt + 1)/\(maxRetries + 1): \(apiError.localizedDescription), retrying in \(delay)s")
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
-            throw parseHTTPError(statusCode: httpResponse.statusCode, data: errorBody)
         }
 
-        return SSEStream(bytes: bytes)
+        throw lastError ?? APIError.unknown(underlying: nil)
     }
 
     /// Lock-protected lazy streaming session. Reused across all SSE requests to prevent leaks.
