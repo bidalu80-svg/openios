@@ -3745,6 +3745,7 @@ private struct IsolatedStreamingStatus: View {
 private struct ImageGenerationPlaceholderView: View {
     @Environment(\.theme) private var theme
     @State private var isAnimating = false
+    @State private var sweepPhase: CGFloat = -1
 
     private var baseColors: [Color] {
         if isAnimating {
@@ -3764,57 +3765,85 @@ private struct ImageGenerationPlaceholderView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ImageGenerationTitleShimmer(text: "正在创建图片")
-                .accessibilityAddTraits(.updatesFrequently)
-
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: baseColors.map { $0.opacity(theme.isDark ? 0.86 : 0.78) },
-                        startPoint: isAnimating ? .topTrailing : .bottomLeading,
-                        endPoint: isAnimating ? .bottomLeading : .topTrailing
-                    )
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: baseColors.map { $0.opacity(theme.isDark ? 0.86 : 0.78) },
+                    startPoint: isAnimating ? .topTrailing : .bottomLeading,
+                    endPoint: isAnimating ? .bottomLeading : .topTrailing
                 )
-                .overlay {
-                    ZStack {
-                        RadialGradient(
-                            colors: [
-                                Color.white.opacity(theme.isDark ? 0.28 : 0.52),
-                                Color.white.opacity(0.02)
-                            ],
-                            center: isAnimating ? .topTrailing : .bottomLeading,
-                            startRadius: 20,
-                            endRadius: 260
-                        )
-                        LinearGradient(
-                            colors: [
-                                .clear,
-                                Color.white.opacity(theme.isDark ? 0.22 : 0.42),
-                                .clear
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                        .rotationEffect(.degrees(isAnimating ? 10 : -12))
-                        .offset(x: isAnimating ? 190 : -190, y: isAnimating ? 34 : -34)
-                        .blur(radius: 22)
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            )
+            .overlay {
+                ZStack {
+                    RadialGradient(
+                        colors: [
+                            Color.white.opacity(theme.isDark ? 0.28 : 0.52),
+                            Color.white.opacity(0.02)
+                        ],
+                        center: isAnimating ? .topTrailing : .bottomLeading,
+                        startRadius: 20,
+                        endRadius: 260
+                    )
+                    LinearGradient(
+                        colors: [
+                            .clear,
+                            Color.white.opacity(theme.isDark ? 0.22 : 0.42),
+                            .clear
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    .rotationEffect(.degrees(isAnimating ? 10 : -12))
+                    .offset(x: isAnimating ? 190 : -190, y: isAnimating ? 34 : -34)
+                    .blur(radius: 22)
                 }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(Color.white.opacity(theme.isDark ? 0.10 : 0.46), lineWidth: 0.8)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Color.white.opacity(theme.isDark ? 0.10 : 0.46), lineWidth: 0.8)
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .frame(maxWidth: 340)
+            .overlay(sweepOverlay)
+            .shadow(color: Color.black.opacity(theme.isDark ? 0.18 : 0.06), radius: 16, y: 8)
+            .padding(.top, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onAppear {
+                isAnimating = true
+                withAnimation(.linear(duration: 2.8).repeatForever(autoreverses: false)) {
+                    sweepPhase = 1
                 }
-                .aspectRatio(1, contentMode: .fit)
-                .frame(maxWidth: 340)
-                .shadow(color: Color.black.opacity(theme.isDark ? 0.18 : 0.06), radius: 16, y: 8)
-                .accessibilityHidden(true)
+            }
+    }
+
+    private var sweepOverlay: some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            let sweepWidth = max(width * 0.18, 72)
+
+            LinearGradient(
+                colors: [
+                    .clear,
+                    Color.white.opacity(theme.isDark ? 0.08 : 0.12),
+                    Color.white.opacity(theme.isDark ? 0.26 : 0.42),
+                    Color.white.opacity(theme.isDark ? 0.78 : 0.96),
+                    Color.white.opacity(theme.isDark ? 0.26 : 0.42),
+                    Color.white.opacity(theme.isDark ? 0.08 : 0.12),
+                    .clear
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: sweepWidth)
+            .offset(x: -sweepWidth + sweepPhase * (width + sweepWidth * 2))
+            .rotationEffect(.degrees(-8))
+            .blur(radius: 11)
+            .blendMode(.screen)
+            .opacity(theme.isDark ? 0.92 : 1.0)
         }
-        .padding(.top, 2)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { isAnimating = true }
-        .animation(.easeInOut(duration: 3.2).repeatForever(autoreverses: true), value: isAnimating)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .allowsHitTesting(false)
     }
 }
 

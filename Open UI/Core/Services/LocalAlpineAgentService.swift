@@ -609,6 +609,17 @@ actor LocalAlpineAgentService {
             .replacingOccurrences(of: "\r", with: "\n")
         var notes: [String] = []
         if target.lowercased().hasSuffix(".py") {
+            if file.source == .content || file.source == .heredoc {
+                return LocalAlpineProtectedWriteOutcome(
+                    lines: [
+                        "- `\(target)` 写入已拒绝：Python 文件必须使用完整结构化写入，避免普通字符串或 heredoc 压坏缩进。",
+                        "  - 请用 `iexa_alpine` JSON `write_files`，并提供 `code_lines` 或 `content_base64` 的完整文件内容，然后再运行验证命令。"
+                    ],
+                    writtenPath: nil,
+                    writtenFile: nil,
+                    hadFailure: true
+                )
+            }
             let prepared = LocalAlpinePythonWriteGuard.normalizeGeneratedPython(
                 content,
                 source: file.source.guardSource
@@ -739,7 +750,7 @@ actor LocalAlpineAgentService {
             )
         }
 
-        writeNotes.append("已在临时文件中执行 black 格式化，并在格式化后再次通过语法检查。")
+        writeNotes.append("已对完整 Python 文件执行 black 格式化，并在格式化后通过语法检查。")
 
         let compileCommand = "python3 -m py_compile \(shellSingleQuoted(runtimeDraftPath))"
         let postFormatCompileResult = await LocalAlpineTerminalService.shared.execute(command: compileCommand, cwd: cwd)
@@ -992,7 +1003,7 @@ actor LocalAlpineAgentService {
         lines.append("  - 目标 Python 文件：`\(targetRuntimePath)`")
         if let failedDraftRuntimePath {
             lines.append("  - 失败草稿已保留：`\(failedDraftRuntimePath)`")
-            lines.append("  - 下一步应读取失败草稿的完整行号内容，修正后用 shell heredoc 覆盖目标 Python 文件。")
+            lines.append("  - 下一步必须整体重写完整 Python 文件：使用 `iexa_alpine` JSON `write_files` 的 `code_lines` 或 `content_base64`，不要用局部补丁或 heredoc 片段。")
         }
         lines.append("  - 验证命令：`\(command.trimmingCharacters(in: .whitespacesAndNewlines))`")
         let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
