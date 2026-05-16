@@ -652,14 +652,10 @@ actor LocalAlpineAgentService {
             )
         }
 
-        var formatted = LocalAlpinePythonWriteGuard.normalizeGeneratedPython(
+        let formatted = LocalAlpinePythonWriteGuard.normalizeGeneratedPython(
             content,
             source: source.pythonGuardSource
         )
-        if let repaired = LocalAlpinePythonWriteGuard.repairCollapsedIndentationIfNeeded(formatted.content) {
-            formatted.content = repaired.content
-            formatted.notes.append(contentsOf: repaired.notes)
-        }
         guard let formattedData = formatted.content.data(using: .utf8) else {
             return LocalAlpineProtectedWriteOutcome(
                 lines: ["- `\(target)` 写入失败：Python 格式化后内容不是有效 UTF-8"],
@@ -674,15 +670,43 @@ actor LocalAlpineAgentService {
             content: formatted.content,
             target: target,
             source: source,
-            notes: ["Python 文件已通过内置格式化器写入；会保留语义并自动修复换行、Tab、常见乱码和明显被压扁的缩进。"] + formatted.notes
+            notes: ["Python 文件已通过内置格式化器写入；会保留语义并自动修复换行、Tab、常见乱码，再由 AST 缩进修复器检查结构。"] + formatted.notes
         )
         guard !directWrite.hadFailure else { return directWrite }
 
         let runtimeTargetPath = runtimePath(forSharedPath: target)
         let validationCommand = pythonASTValidationCommand(for: runtimeTargetPath)
-        let validationResult = await LocalAlpineTerminalService.shared.execute(command: validationCommand, cwd: cwd)
-
         var lines = directWrite.lines
+        var finalContent = formatted.content
+        var finalByteCount = formattedData.count
+        var validationResult = await LocalAlpineTerminalService.shared.execute(command: validationCommand, cwd: cwd)
+
+        let repairCommand = pythonIndentRepairCommand(for: runtimeTargetPath)
+        let repairResult = await LocalAlpineTerminalService.shared.execute(command: repairCommand, cwd: cwd)
+        if repairResult.exitCode == 0 {
+            let repairOutput = repairResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if repairOutput.contains("IEXA_PY_REPAIR_SUCCESS") {
+                lines.append("  - Python AST 缩进修复器已重排文件，并通过 ast.parse 校验。")
+            } else if repairOutput.contains("IEXA_PY_REPAIR_SKIPPED_ALREADY_VALID") {
+                lines.append("  - Python AST 缩进修复器检查通过，无需重排。")
+            }
+            if let repairedData = try? await LocalAlpineTerminalService.shared.readFile(path: target),
+               let repairedContent = String(data: repairedData, encoding: .utf8) {
+                finalContent = repairedContent
+                finalByteCount = repairedData.count
+                if repairOutput.contains("IEXA_PY_REPAIR_SUCCESS") {
+                    lines.append("  - 修复后文件大小：\(repairedData.count) B。")
+                }
+            }
+            validationResult = await LocalAlpineTerminalService.shared.execute(command: validationCommand, cwd: cwd)
+        } else if validationResult.exitCode != 0 {
+            let repairOutput = repairResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            lines.append("  - Python AST 缩进修复器未能安全修复，已保留原文件。")
+            if !repairOutput.isEmpty {
+                lines.append("    - 修复输出：\(String(repairOutput.prefix(1_000)))")
+            }
+        }
+
         if validationResult.exitCode == 0 {
             lines.append("  - Python 语法校验通过。")
         } else {
@@ -696,7 +720,12 @@ actor LocalAlpineAgentService {
         return LocalAlpineProtectedWriteOutcome(
             lines: lines,
             writtenPath: directWrite.writtenPath,
-            writtenFile: directWrite.writtenFile,
+            writtenFile: LocalAlpineWrittenFile(
+                path: target,
+                content: finalContent,
+                source: source.displayName,
+                byteCount: finalByteCount
+            ),
             hadFailure: false
         )
     }
@@ -705,6 +734,281 @@ actor LocalAlpineAgentService {
         """
         python3 -c "import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')); print('IEXA_AST_PARSE_SUCCESS')" \(shellSingleQuoted(runtimePath))
         """
+    }
+
+    private func pythonIndentRepairCommand(for runtimePath: String) -> String {
+        let script = """
+        import ast
+        import pathlib
+        import sys
+
+        path = pathlib.Path(sys.argv[1])
+        original = path.read_text(encoding="utf-8")
+
+        def normalize_newlines(source):
+            return source.replace("\\r\\n", "\\n").replace("\\r", "\\n").strip("\\n")
+
+        def parse_ok(source):
+            try:
+                ast.parse(source)
+                return True
+            except SyntaxError:
+                return False
+            except IndentationError:
+                return False
+
+        def starts_class(line):
+            return line.startswith("class ")
+
+        def starts_def(line):
+            return line.startswith("def ") or line.startswith("async def ")
+
+        def starts_definition(line):
+            return starts_class(line) or starts_def(line)
+
+        def leading_width(line):
+            return len(line) - len(line.lstrip(" \\t"))
+
+        def next_meaningful(lines, offset):
+            for index in range(offset + 1, len(lines)):
+                candidate = lines[index].strip()
+                if candidate:
+                    return candidate
+            return ""
+
+        def is_terminal(line):
+            head = line.split(None, 1)[0] if line.split(None, 1) else ""
+            return head in {"return", "raise", "break", "continue", "pass"}
+
+        def opens_block(line):
+            return line.endswith(":") and not line.lstrip().startswith("#")
+
+        def block_kind(line):
+            if starts_class(line):
+                return "class"
+            if starts_def(line):
+                return "function"
+            if line.startswith(("if ", "elif ")):
+                return "if"
+            if line.startswith("try:"):
+                return "try"
+            if line.startswith(("except", "finally:")):
+                return "except"
+            if line.startswith("else:"):
+                return "else"
+            if line.startswith(("for ", "while ")):
+                return "loop"
+            if line.startswith(("with ", "async with ")):
+                return "with"
+            return "other"
+
+        def nearest_function_scope(stack):
+            last_function = None
+            for index, kind in enumerate(stack):
+                if kind == "function":
+                    last_function = index
+            if last_function is not None:
+                return stack[:last_function + 1]
+            last_class = None
+            for index, kind in enumerate(stack):
+                if kind == "class":
+                    last_class = index
+            if last_class is not None:
+                return stack[:last_class + 1]
+            return []
+
+        def definition_parent(stack, blank_run):
+            if blank_run >= 2:
+                return []
+            if "class" in stack:
+                class_index = max(index for index, kind in enumerate(stack) if kind == "class")
+                return stack[:class_index + 1]
+            if blank_run == 0 and stack:
+                return stack
+            return []
+
+        def decorator_parent(stack, blank_run):
+            if blank_run >= 2:
+                return []
+            if "class" in stack:
+                class_index = max(index for index, kind in enumerate(stack) if kind == "class")
+                return stack[:class_index + 1]
+            if blank_run == 0 and stack:
+                return stack
+            return []
+
+        def pop_until(stack, kinds):
+            updated = list(stack)
+            while updated:
+                current = updated.pop()
+                if current in kinds:
+                    break
+            return updated
+
+        def starts_with_closing(line):
+            return bool(line) and line[0] in ")]}"
+
+        def continuation_depth(closers, line):
+            depth = len(closers)
+            for character in line:
+                if character in ")]}":
+                    depth = max(0, depth - 1)
+                else:
+                    break
+            return depth
+
+        def update_closers(closers, line):
+            quote = None
+            escaped = False
+            for character in line:
+                if escaped:
+                    escaped = False
+                    continue
+                if character == "\\\\":
+                    escaped = True
+                    continue
+                if quote:
+                    if character == quote:
+                        quote = None
+                    continue
+                if character in {"'", '"'}:
+                    quote = character
+                    continue
+                if character == "#":
+                    break
+                if character == "(":
+                    closers.append(")")
+                elif character == "[":
+                    closers.append("]")
+                elif character == "{":
+                    closers.append("}")
+                elif character in ")]}" and closers:
+                    closers.pop()
+
+        def looks_structurally_suspicious(source):
+            lines = normalize_newlines(source).split("\\n")
+            significant = [line for line in lines if line.strip()]
+            if len(significant) < 4:
+                return False
+
+            leading_values = [leading_width(line) for line in significant]
+            if max(leading_values, default=0) <= 1 and any(line.strip().endswith(":") for line in significant):
+                return True
+
+            blank_run = 0
+            previous = ""
+            for index, raw_line in enumerate(lines):
+                stripped = raw_line.strip()
+                if not stripped:
+                    blank_run += 1
+                    continue
+
+                current_indent = leading_width(raw_line)
+                upcoming = ""
+                upcoming_indent = 0
+                for next_index in range(index + 1, len(lines)):
+                    next_stripped = lines[next_index].strip()
+                    if next_stripped:
+                        upcoming = next_stripped
+                        upcoming_indent = leading_width(lines[next_index])
+                        break
+
+                if stripped.startswith("@") and starts_definition(upcoming) and current_indent > upcoming_indent:
+                    return True
+                if blank_run >= 2 and starts_definition(stripped) and current_indent > 0:
+                    return True
+                if blank_run >= 1 and is_terminal(previous) and current_indent > 4:
+                    return True
+                if blank_run >= 1 and stripped.startswith(("print(", "match =", "text =", "parser =", "links =")) and current_indent > 4:
+                    return True
+
+                previous = stripped
+                blank_run = 0
+
+            return False
+
+        def rebuild_indentation(source):
+            raw_lines = normalize_newlines(source).split("\\n")
+            stripped_lines = [line.strip() for line in raw_lines]
+            output = []
+            stack = []
+            closers = []
+            blank_run = 0
+            previous_opened = False
+            previous_significant = ""
+
+            for index, line in enumerate(stripped_lines):
+                if not line:
+                    output.append("")
+                    blank_run += 1
+                    previous_opened = False
+                    continue
+
+                upcoming = next_meaningful(stripped_lines, index)
+                is_continuation = bool(closers) or starts_with_closing(line)
+
+                if not is_continuation:
+                    if line.startswith("if __name__"):
+                        stack = []
+                    elif blank_run >= 2 and starts_definition(line):
+                        stack = []
+                    elif blank_run >= 2 and line.startswith("@") and starts_definition(upcoming):
+                        stack = []
+                    elif line.startswith("@") and starts_definition(upcoming):
+                        stack = decorator_parent(stack, blank_run)
+                    elif starts_class(line):
+                        stack = [] if blank_run >= 1 else definition_parent(stack, blank_run)
+                    elif starts_def(line):
+                        stack = definition_parent(stack, blank_run)
+                    elif line.startswith("elif "):
+                        stack = pop_until(stack, {"if"})
+                    elif line.startswith(("except", "finally:")):
+                        stack = pop_until(stack, {"try", "except"})
+                    elif line.startswith("else:"):
+                        stack = pop_until(stack, {"if", "try", "loop", "except", "else"})
+                    else:
+                        if blank_run and stack and stack[-1] not in {"class", "function"}:
+                            stack = nearest_function_scope(stack)
+                        if blank_run and is_terminal(previous_significant):
+                            stack = nearest_function_scope(stack)
+                        if line.startswith("if ") and not previous_opened and stack and stack[-1] == "if":
+                            stack.pop()
+
+                extra_depth = continuation_depth(closers, line)
+                output.append("    " * (len(stack) + extra_depth) + line)
+
+                if not is_continuation and opens_block(line):
+                    stack.append(block_kind(line))
+                update_closers(closers, line)
+                previous_opened = (not is_continuation and opens_block(line))
+                previous_significant = line
+                blank_run = 0
+
+            return "\\n".join(output).strip("\\n") + "\\n"
+
+        normalized = normalize_newlines(original)
+        if parse_ok(normalized) and not looks_structurally_suspicious(normalized):
+            print("IEXA_PY_REPAIR_SKIPPED_ALREADY_VALID")
+            sys.exit(0)
+
+        candidates = [rebuild_indentation(normalized)]
+        seen = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if parse_ok(candidate):
+                path.write_text(candidate, encoding="utf-8")
+                print("IEXA_PY_REPAIR_SUCCESS")
+                sys.exit(0)
+
+        try:
+            ast.parse(candidates[0])
+        except Exception as exc:
+            print(f"IEXA_PY_REPAIR_FAILED: {type(exc).__name__}: {exc}")
+        sys.exit(1)
+        """
+        return "python3 - \(shellSingleQuoted(runtimePath)) <<'IEXA_PY_REPAIR'\n\(script)\nIEXA_PY_REPAIR"
     }
 
     private func pythonSyntaxCheck(for paths: [String], cwd: String) async -> (command: String, result: LocalAlpineCommandResult)? {
