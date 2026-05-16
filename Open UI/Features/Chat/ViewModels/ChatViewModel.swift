@@ -8314,12 +8314,19 @@ final class ChatViewModel {
         for video in result.videos {
             attachResolvedVideoFile(messageId: assistantMessageId, video: video)
         }
+        for image in result.images {
+            attachResolvedImageFile(messageId: assistantMessageId, image: image)
+        }
 
         let description: String
         if result.successCount > 0 {
-            description = result.videos.isEmpty
+            let mediaParts = [
+                result.videos.isEmpty ? nil : "\(result.videos.count) 个 MP4",
+                result.images.isEmpty ? nil : "\(result.images.count) 张图片"
+            ].compactMap { $0 }
+            description = mediaParts.isEmpty
                 ? "已读取 \(result.successCount) 个链接"
-                : "已解析 \(result.successCount) 个链接，找到 \(result.videos.count) 个 MP4"
+                : "已解析 \(result.successCount) 个链接，找到 \(mediaParts.joined(separator: "、"))"
         } else {
             description = "链接读取失败，已按原文发送"
         }
@@ -8339,7 +8346,7 @@ final class ChatViewModel {
         """
 
         [客户端已读取的链接上下文]
-        用户消息里包含链接。以下内容由 iOS 客户端在发送前读取，用来帮助你回答；请把它当作该链接的可用上下文。若包含 MP4 URL，请直接返还给用户并结合页面标题/描述概括视频内容。
+        用户消息里包含链接。以下内容由 iOS 客户端在发送前读取，用来帮助你回答；请把它当作该链接的可用上下文。若包含 MP4 URL 或图片 URL，请直接返还给用户并结合页面标题/描述概括内容。
         \(context)
         [/客户端已读取的链接上下文]
         """
@@ -9636,6 +9643,25 @@ final class ChatViewModel {
             url: video.url,
             name: video.title,
             contentType: "video/mp4",
+            displayURL: nil
+        )
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        if conversation?.messages[index].files.contains(where: { $0.url == file.url }) != true {
+            conversation?.messages[index].files.append(file)
+        }
+        conversation?.history.updateNode(id: messageId) { node in
+            if !node.files.contains(where: { $0.url == file.url }) {
+                node.files.append(file)
+            }
+        }
+    }
+
+    private func attachResolvedImageFile(messageId: String, image: ResolvedWebImage) {
+        let file = ChatMessageFile(
+            type: "image",
+            url: image.url,
+            name: image.title,
+            contentType: Self.imageContentType(for: image.url),
             displayURL: nil
         )
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }

@@ -14,12 +14,12 @@ struct InAppWebPreviewSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @State private var state = InAppWebPreviewState()
-    @State private var resolvedDouyinVideo: ResolvedWebVideo?
+    @State private var resolvedDouyinPost: ResolvedDouyinPost?
     @State private var isResolvingDouyin = false
     @State private var isDownloadingDouyin = false
     @State private var douyinErrorMessage: String?
     @State private var playingVideo: WebPreviewVideoItem?
-    @State private var downloadedVideoURL: WebPreviewDownloadedFile?
+    @State private var downloadedMedia: WebPreviewDownloadedMedia?
     @State private var resolvedDouyinSourceID = ""
 
     var body: some View {
@@ -76,21 +76,21 @@ struct InAppWebPreviewSheet: View {
             await resolveDouyinIfNeeded()
         }
         .onChange(of: state.pageVideoURL) { _, _ in
-            if resolvedDouyinVideo == nil {
+            if resolvedDouyinPost?.video == nil {
                 douyinErrorMessage = nil
             }
         }
         .onChange(of: activeURL) { _, newURL in
             guard !WebLinkContextResolver.isDouyinURL(newURL) else { return }
-            resolvedDouyinVideo = nil
+            resolvedDouyinPost = nil
             resolvedDouyinSourceID = ""
             douyinErrorMessage = nil
         }
         .sheet(item: $playingVideo) { item in
             WebPreviewVideoPlayerSheet(url: item.url)
         }
-        .sheet(item: $downloadedVideoURL) { item in
-            ShareSheetView(activityItems: [item.url])
+        .sheet(item: $downloadedMedia) { item in
+            ShareSheetView(activityItems: item.urls)
         }
         .alert("抖音解析失败", isPresented: Binding(
             get: { douyinErrorMessage != nil },
@@ -119,25 +119,29 @@ struct InAppWebPreviewSheet: View {
 
     private var shouldShowDouyinControls: Bool {
         WebLinkContextResolver.isDouyinURL(activeURL)
-            || resolvedDouyinVideo != nil
+            || resolvedDouyinPost?.hasMedia == true
             || state.pageVideoURL != nil
     }
 
     private var playableVideoURL: URL? {
-        if let raw = resolvedDouyinVideo?.url, let url = URL(string: raw) {
+        if let raw = resolvedDouyinPost?.video?.url, let url = URL(string: raw) {
             return url
         }
         return state.pageVideoURL
     }
 
+    private var resolvedImageCount: Int {
+        resolvedDouyinPost?.images.count ?? 0
+    }
+
     private var douyinControlBar: some View {
         HStack(spacing: 10) {
-            Image(systemName: playableVideoURL == nil ? "link.badge.plus" : "play.rectangle.fill")
+            Image(systemName: douyinLeadingIconName)
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(playableVideoURL == nil ? theme.textSecondary : theme.brandPrimary)
+                .foregroundStyle(resolvedDouyinPost?.hasMedia == true || playableVideoURL != nil ? theme.brandPrimary : theme.textSecondary)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(resolvedDouyinVideo?.title ?? "抖音视频")
+                Text(resolvedDouyinTitle)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
@@ -166,17 +170,18 @@ struct InAppWebPreviewSheet: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            .disabled(isResolvingDouyin)
+            .disabled(isResolvingDouyin || (playableVideoURL == nil && resolvedImageCount > 0))
+            .opacity(playableVideoURL == nil && resolvedImageCount > 0 ? 0.45 : 1)
 
             Button {
-                Task { await downloadDouyinVideo() }
+                Task { await downloadDouyinMedia() }
             } label: {
                 Image(systemName: "arrow.down.circle.fill")
                     .font(.system(size: 16, weight: .bold))
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .disabled(playableVideoURL == nil || isDownloadingDouyin)
+            .disabled(!hasDownloadableDouyinMedia || isDownloadingDouyin)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -191,8 +196,26 @@ struct InAppWebPreviewSheet: View {
     private var douyinStatusText: String {
         if isResolvingDouyin { return "正在解析可播放地址..." }
         if isDownloadingDouyin { return "正在下载..." }
+        if resolvedImageCount > 0 { return "已解析 \(resolvedImageCount) 张图片，可下载保存" }
         if playableVideoURL != nil { return "可在 App 内播放或下载" }
         return "打开抖音链接后自动解析"
+    }
+
+    private var douyinLeadingIconName: String {
+        if resolvedImageCount > 0 { return "photo.on.rectangle.angled" }
+        if playableVideoURL != nil { return "play.rectangle.fill" }
+        return "link.badge.plus"
+    }
+
+    private var resolvedDouyinTitle: String {
+        if let imageTitle = resolvedDouyinPost?.images.first?.title, resolvedImageCount > 0 {
+            return imageTitle
+        }
+        return resolvedDouyinPost?.video?.title ?? "抖音内容"
+    }
+
+    private var hasDownloadableDouyinMedia: Bool {
+        playableVideoURL != nil || resolvedImageCount > 0
     }
 
     @MainActor
@@ -206,8 +229,8 @@ struct InAppWebPreviewSheet: View {
         defer { isResolvingDouyin = false }
 
         do {
-            let video = try await WebLinkContextResolver().resolveDouyinVideo(activeURL)
-            resolvedDouyinVideo = video
+            let post = try await WebLinkContextResolver().resolveDouyinPost(activeURL)
+            resolvedDouyinPost = post
             resolvedDouyinSourceID = sourceID
             douyinErrorMessage = nil
         } catch {
@@ -218,14 +241,21 @@ struct InAppWebPreviewSheet: View {
     }
 
     @MainActor
-    private func downloadDouyinVideo() async {
-        guard let videoURL = playableVideoURL else { return }
+    private func downloadDouyinMedia() async {
+        guard hasDownloadableDouyinMedia else { return }
         guard !isDownloadingDouyin else { return }
 
         isDownloadingDouyin = true
         defer { isDownloadingDouyin = false }
 
         do {
+            if let images = resolvedDouyinPost?.images, !images.isEmpty {
+                let urls = try await downloadDouyinImages(images)
+                downloadedMedia = WebPreviewDownloadedMedia(urls: urls)
+                return
+            }
+
+            guard let videoURL = playableVideoURL else { return }
             var request = URLRequest(url: videoURL, timeoutInterval: 300)
             request.setValue(Self.mobileUserAgent, forHTTPHeaderField: "User-Agent")
             request.setValue("*/*", forHTTPHeaderField: "Accept")
@@ -235,10 +265,36 @@ struct InAppWebPreviewSheet: View {
                 .appendingPathComponent(downloadFileName(response: response, url: videoURL))
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.moveItem(at: temporaryURL, to: destination)
-            downloadedVideoURL = WebPreviewDownloadedFile(url: destination)
+            downloadedMedia = WebPreviewDownloadedMedia(urls: [destination])
         } catch {
             douyinErrorMessage = "下载失败：\(error.localizedDescription)"
         }
+    }
+
+    @MainActor
+    private func downloadDouyinImages(_ images: [ResolvedWebImage]) async throws -> [URL] {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("douyin-images-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        var downloaded: [URL] = []
+        for image in images {
+            guard let imageURL = URL(string: image.url) else { continue }
+            var request = URLRequest(url: imageURL, timeoutInterval: 120)
+            request.setValue(Self.mobileUserAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue("image/avif,image/webp,image/apng,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            request.setValue(activeURL.absoluteString, forHTTPHeaderField: "Referer")
+            let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+            let destination = directory.appendingPathComponent(downloadImageFileName(image: image, response: response, url: imageURL))
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+            downloaded.append(destination)
+        }
+
+        guard !downloaded.isEmpty else {
+            throw URLError(.cannotDecodeContentData)
+        }
+        return downloaded
     }
 
     private func downloadFileName(response: URLResponse, url: URL) -> String {
@@ -248,7 +304,7 @@ struct InAppWebPreviewSheet: View {
             return filename
         }
 
-        let title = resolvedDouyinVideo?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let title = resolvedDouyinPost?.video?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !title.isEmpty {
             return title.lowercased().hasSuffix(".mp4") ? title : "\(title).mp4"
         }
@@ -258,6 +314,25 @@ struct InAppWebPreviewSheet: View {
             return (last as NSString).pathExtension.isEmpty ? "\(last).mp4" : last
         }
         return "douyin-video.mp4"
+    }
+
+    private func downloadImageFileName(image: ResolvedWebImage, response: URLResponse, url: URL) -> String {
+        if let http = response as? HTTPURLResponse,
+           let disposition = http.value(forHTTPHeaderField: "Content-Disposition"),
+           let filename = filenameFromContentDisposition(disposition) {
+            return filename
+        }
+
+        let title = image.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty {
+            return title
+        }
+
+        let last = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+        if !last.isEmpty, last != "/" {
+            return (last as NSString).pathExtension.isEmpty ? "\(last).jpg" : last
+        }
+        return "douyin-image-\(image.index).jpg"
     }
 
     private func filenameFromContentDisposition(_ disposition: String) -> String? {
@@ -299,9 +374,9 @@ private struct WebPreviewVideoItem: Identifiable {
     var id: String { url.absoluteString }
 }
 
-private struct WebPreviewDownloadedFile: Identifiable {
-    let url: URL
-    var id: String { url.absoluteString }
+private struct WebPreviewDownloadedMedia: Identifiable {
+    let urls: [URL]
+    let id = UUID().uuidString
 }
 
 private struct WebPreviewVideoPlayerSheet: View {

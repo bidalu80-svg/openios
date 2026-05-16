@@ -3,11 +3,12 @@ import Foundation
 struct WebLinkContextResolution: Sendable {
     let context: String
     let videos: [ResolvedWebVideo]
+    let images: [ResolvedWebImage]
     let successCount: Int
     let failureCount: Int
 
     var hasUsefulContext: Bool {
-        !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !videos.isEmpty
+        !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !videos.isEmpty || !images.isEmpty
     }
 }
 
@@ -18,6 +19,31 @@ struct ResolvedWebVideo: Sendable, Hashable, Identifiable {
     let videoId: String?
 
     var id: String { url }
+}
+
+struct ResolvedWebImage: Sendable, Hashable, Identifiable {
+    let title: String
+    let url: String
+    let sourceURL: String
+    let imageId: String?
+    let index: Int
+
+    var id: String { "\(url)#\(index)" }
+}
+
+struct ResolvedDouyinPost: Sendable, Hashable {
+    let sourceURL: String
+    let pageURL: String
+    let video: ResolvedWebVideo?
+    let images: [ResolvedWebImage]
+    let title: String
+    let author: String?
+    let description: String
+    let videoId: String?
+
+    var hasMedia: Bool {
+        video != nil || !images.isEmpty
+    }
 }
 
 struct WebLinkContextResolver: Sendable {
@@ -57,13 +83,21 @@ struct WebLinkContextResolver: Sendable {
     }
 
     func resolveDouyinVideo(_ url: URL) async throws -> ResolvedWebVideo {
-        try await resolveDouyin(url).video
+        let result = try await resolveDouyin(url)
+        guard let video = result.video else {
+            throw URLError(.cannotParseResponse)
+        }
+        return video
+    }
+
+    func resolveDouyinPost(_ url: URL) async throws -> ResolvedDouyinPost {
+        try await resolveDouyin(url)
     }
 
     func resolve(from text: String, limit: Int = 3) async -> WebLinkContextResolution {
         let urls = Self.extractHTTPURLs(from: text, limit: limit)
         guard !urls.isEmpty else {
-            return WebLinkContextResolution(context: "", videos: [], successCount: 0, failureCount: 0)
+            return WebLinkContextResolution(context: "", videos: [], images: [], successCount: 0, failureCount: 0)
         }
 
         let outcomes = await withTaskGroup(of: LinkFetchOutcome.self) { group in
@@ -76,6 +110,7 @@ struct WebLinkContextResolver: Sendable {
                                 index: index,
                                 block: self.douyinContextBlock(result: result, index: index + 1),
                                 video: result.video,
+                                images: result.images,
                                 success: true
                             )
                         } else {
@@ -84,11 +119,12 @@ struct WebLinkContextResolver: Sendable {
                                 index: index,
                                 block: self.webPageContextBlock(page: page, index: index + 1),
                                 video: nil,
+                                images: [],
                                 success: true
                             )
                         }
                     } catch {
-                        return LinkFetchOutcome(index: index, block: nil, video: nil, success: false)
+                        return LinkFetchOutcome(index: index, block: nil, video: nil, images: [], success: false)
                     }
                 }
             }
@@ -102,6 +138,7 @@ struct WebLinkContextResolver: Sendable {
 
         let blocks = outcomes.compactMap(\.block)
         let videos = outcomes.compactMap(\.video)
+        let images = outcomes.flatMap(\.images)
         let successCount = outcomes.filter(\.success).count
         let failureCount = outcomes.count - successCount
 
@@ -109,6 +146,7 @@ struct WebLinkContextResolver: Sendable {
         return WebLinkContextResolution(
             context: String(context.prefix(Self.maxCombinedCharacters)),
             videos: videos,
+            images: images,
             successCount: successCount,
             failureCount: failureCount
         )
@@ -149,12 +187,13 @@ struct WebLinkContextResolver: Sendable {
         )
     }
 
-    private func resolveDouyin(_ url: URL) async throws -> DouyinResolveResult {
+    private func resolveDouyin(_ url: URL) async throws -> ResolvedDouyinPost {
         let (_, shareResponse) = try await load(url, mobile: true)
         let finalURL = shareResponse.url ?? url
         let videoId = Self.videoId(from: finalURL) ?? Self.videoId(from: url)
+        let itemType = Self.douyinItemType(from: finalURL) ?? Self.douyinItemType(from: url) ?? "video"
         let pageURL = videoId
-            .flatMap { URL(string: "https://www.iesdouyin.com/share/video/\($0)") }
+            .flatMap { URL(string: "https://www.iesdouyin.com/share/\(itemType)/\($0)") }
             ?? finalURL
 
         let (data, _) = try await load(pageURL, mobile: true)
@@ -170,25 +209,38 @@ struct WebLinkContextResolver: Sendable {
             (author["nickname"] as? String) ?? (author["unique_id"] as? String)
         }
 
-        guard let video = item["video"] as? [String: Any],
-              let playAddr = video["play_addr"] as? [String: Any],
-              let urlList = playAddr["url_list"] as? [String],
-              let firstURL = urlList.first else {
-            throw URLError(.cannotParseResponse)
+        let resolvedVideo: ResolvedWebVideo?
+        if let video = item["video"] as? [String: Any],
+           let playAddr = video["play_addr"] as? [String: Any],
+           let urlList = playAddr["url_list"] as? [String],
+           let firstURL = urlList.first {
+            let mp4URL = firstURL.replacingOccurrences(of: "playwm", with: "play")
+            resolvedVideo = ResolvedWebVideo(
+                title: Self.safeVideoFileName(title),
+                url: mp4URL,
+                sourceURL: url.absoluteString,
+                videoId: parsedVideoId
+            )
+        } else {
+            resolvedVideo = nil
         }
 
-        let mp4URL = firstURL.replacingOccurrences(of: "playwm", with: "play")
-        let resolvedVideo = ResolvedWebVideo(
-            title: Self.safeVideoFileName(title),
-            url: mp4URL,
+        let images = Self.resolvedImages(
+            from: item,
+            title: title,
             sourceURL: url.absoluteString,
             videoId: parsedVideoId
         )
 
-        return DouyinResolveResult(
+        guard resolvedVideo != nil || !images.isEmpty else {
+            throw URLError(.cannotParseResponse)
+        }
+
+        return ResolvedDouyinPost(
             sourceURL: url.absoluteString,
             pageURL: pageURL.absoluteString,
             video: resolvedVideo,
+            images: images,
             title: title,
             author: author,
             description: title,
@@ -235,9 +287,9 @@ struct WebLinkContextResolver: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    private func douyinContextBlock(result: DouyinResolveResult, index: Int) -> String {
+    private func douyinContextBlock(result: ResolvedDouyinPost, index: Int) -> String {
         var lines = [
-            "### Link \(index): Douyin Video",
+            result.images.isEmpty ? "### Link \(index): Douyin Video" : "### Link \(index): Douyin Image Post",
             "Original URL: \(result.sourceURL)",
             "Resolved page: \(result.pageURL)"
         ]
@@ -248,8 +300,16 @@ struct WebLinkContextResolver: Sendable {
             lines.append("Author: \(author)")
         }
         lines.append("Title/description: \(result.description)")
-        lines.append("MP4 URL: \(result.video.url)")
-        lines.append("Client note: the MP4 is attached to this assistant response when possible. The parsed page supplied title/description metadata; no audio transcript is available unless the user provides or enables transcription separately.")
+        if let video = result.video {
+            lines.append("MP4 URL: \(video.url)")
+        }
+        if !result.images.isEmpty {
+            lines.append("Image count: \(result.images.count)")
+            for image in result.images.prefix(20) {
+                lines.append("Image \(image.index): \(image.url)")
+            }
+        }
+        lines.append("Client note: parsed Douyin media is attached to this assistant response when possible. Image posts can include multiple image URLs; video posts include an MP4 URL. No audio transcript is available unless the user provides or enables transcription separately.")
         return lines.joined(separator: "\n")
     }
 
@@ -266,6 +326,13 @@ struct WebLinkContextResolver: Sendable {
         }
         if let numeric { return numeric }
         return url.pathComponents.last?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    private static func douyinItemType(from url: URL) -> String? {
+        let components = url.pathComponents.map { $0.lowercased() }
+        if components.contains("note") { return "note" }
+        if components.contains("video") { return "video" }
+        return nil
     }
 
     private static func routerDataJSON(from html: String) -> Any? {
@@ -298,6 +365,77 @@ struct WebLinkContextResolver: Sendable {
             }
         }
         return nil
+    }
+
+    private static func resolvedImages(
+        from item: [String: Any],
+        title: String,
+        sourceURL: String,
+        videoId: String?
+    ) -> [ResolvedWebImage] {
+        let imageContainers = [
+            item["images"],
+            (item["aweme_detail"] as? [String: Any])?["images"]
+        ]
+
+        var urls: [String] = []
+        var seen = Set<String>()
+        for container in imageContainers {
+            guard let images = container as? [[String: Any]] else { continue }
+            for image in images {
+                for candidate in imageURLCandidates(from: image) where seen.insert(candidate).inserted {
+                    urls.append(candidate)
+                }
+            }
+        }
+
+        let baseTitle = safeBaseFileName(title, fallback: "douyin-image")
+        return urls.enumerated().map { offset, url in
+            let ext = imageFileExtension(from: url)
+            let imageTitle = "\(baseTitle)-\(offset + 1).\(ext)"
+            return ResolvedWebImage(
+                title: imageTitle,
+                url: url,
+                sourceURL: sourceURL,
+                imageId: videoId,
+                index: offset + 1
+            )
+        }
+    }
+
+    private static func imageURLCandidates(from image: [String: Any]) -> [String] {
+        var candidates: [String] = []
+        appendImageURLs(from: image["download_addr"], to: &candidates)
+        appendImageURLs(from: image["url_list"], to: &candidates)
+        appendImageURLs(from: image["uri"], to: &candidates)
+        appendImageURLs(from: image["origin_url"], to: &candidates)
+        appendImageURLs(from: image["large"], to: &candidates)
+        appendImageURLs(from: image["cover"], to: &candidates)
+        return candidates
+            .map { $0.replacingOccurrences(of: "\\u0026", with: "&") }
+            .filter { raw in
+                guard let url = URL(string: raw),
+                      let scheme = url.scheme?.lowercased(),
+                      scheme == "http" || scheme == "https" else { return false }
+                return true
+            }
+    }
+
+    private static func appendImageURLs(from value: Any?, to candidates: inout [String]) {
+        if let string = value as? String, !string.isEmpty {
+            candidates.append(string)
+            return
+        }
+
+        if let list = value as? [String] {
+            candidates.append(contentsOf: list.filter { !$0.isEmpty })
+            return
+        }
+
+        if let dict = value as? [String: Any] {
+            appendImageURLs(from: dict["url_list"], to: &candidates)
+            appendImageURLs(from: dict["uri"], to: &candidates)
+        }
     }
 
     private static func htmlToPlainText(_ html: String) -> String {
@@ -379,11 +517,26 @@ struct WebLinkContextResolver: Sendable {
     }
 
     private static func safeVideoFileName(_ title: String) -> String {
+        let base = safeBaseFileName(title, fallback: "douyin-video")
+        return base.lowercased().hasSuffix(".mp4") ? base : "\(base).mp4"
+    }
+
+    private static func safeBaseFileName(_ title: String, fallback: String) -> String {
         let cleaned = title
             .replacingOccurrences(of: #"[\\/:*?"<>|]+"#, with: "_", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = cleaned.isEmpty ? "douyin-video" : String(cleaned.prefix(80))
-        return base.lowercased().hasSuffix(".mp4") ? base : "\(base).mp4"
+        return cleaned.isEmpty ? fallback : String(cleaned.prefix(80))
+    }
+
+    private static func imageFileExtension(from rawURL: String) -> String {
+        guard let url = URL(string: rawURL) else { return "jpg" }
+        let ext = url.pathExtension.lowercased()
+        switch ext {
+        case "jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "avif":
+            return ext
+        default:
+            return "jpg"
+        }
     }
 
     private static var trailingURLTrimCharacters: CharacterSet {
@@ -402,15 +555,6 @@ private struct LinkFetchOutcome: Sendable {
     let index: Int
     let block: String?
     let video: ResolvedWebVideo?
+    let images: [ResolvedWebImage]
     let success: Bool
-}
-
-private struct DouyinResolveResult: Sendable {
-    let sourceURL: String
-    let pageURL: String
-    let video: ResolvedWebVideo
-    let title: String
-    let author: String?
-    let description: String
-    let videoId: String?
 }
