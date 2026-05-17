@@ -61,6 +61,53 @@ final class APIClient: @unchecked Sendable {
         }
     }
 
+    private static func parseModelContextLength(_ raw: [String: Any]) -> Int? {
+        let keys = [
+            "context_length", "contextLength", "context_window", "contextWindow",
+            "max_context_length", "maxContextLength", "max_context", "maxContext",
+            "num_ctx"
+        ]
+
+        func intValue(_ value: Any?) -> Int? {
+            if let int = value as? Int, int > 0 { return int }
+            if let double = value as? Double, double > 0 { return Int(double) }
+            if let number = value as? NSNumber, number.intValue > 0 { return number.intValue }
+            if let string = value as? String {
+                let cleaned = string
+                    .replacingOccurrences(of: ",", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                if cleaned.hasSuffix("k"),
+                   let n = Double(cleaned.dropLast()) {
+                    return Int(n * 1_000)
+                }
+                if cleaned.hasSuffix("m"),
+                   let n = Double(cleaned.dropLast()) {
+                    return Int(n * 1_000_000)
+                }
+                if let int = Int(cleaned), int > 0 { return int }
+            }
+            return nil
+        }
+
+        func scan(_ dict: [String: Any]) -> Int? {
+            for key in keys {
+                if let value = intValue(dict[key]) {
+                    return value
+                }
+            }
+            for nestedKey in ["info", "meta", "params", "capabilities", "limits"] {
+                if let nested = dict[nestedKey] as? [String: Any],
+                   let value = scan(nested) {
+                    return value
+                }
+            }
+            return nil
+        }
+
+        return scan(raw)
+    }
+
     // MARK: - Health & Configuration
 
     func checkHealth() async -> Bool {
@@ -1471,7 +1518,7 @@ final class APIClient: @unchecked Sendable {
             isMultimodal: isMultimodal,
             supportsStreaming: true,
             supportsRAG: supportsRAG,
-            contextLength: raw["context_length"] as? Int,
+            contextLength: Self.parseModelContextLength(raw),
             capabilities: capabilities,
             profileImageURL: profileImageURL,
             toolIds: toolIds,
@@ -4502,7 +4549,7 @@ final class APIClient: @unchecked Sendable {
                 isMultimodal: isMultimodal,
                 supportsStreaming: true,
                 supportsRAG: supportsRAG,
-                contextLength: raw["context_length"] as? Int,
+                contextLength: APIClient.parseModelContextLength(raw),
                 capabilities: capabilities,
                 profileImageURL: profileImageURL,
                 toolIds: toolIds,

@@ -42,6 +42,39 @@ private struct ClientWebSearchToolRequest {
     let queries: [String]
 }
 
+struct ChatContextBudgetStatus: Sendable, Equatable {
+    var modelId: String = ""
+    var usedTokens: Int = 0
+    var windowTokens: Int = 0
+    var isWindowEstimated: Bool = true
+    var isCompressed: Bool = false
+    var originalTokens: Int?
+    var compressedTokens: Int?
+
+    static let empty = ChatContextBudgetStatus()
+
+    var hasWindow: Bool {
+        windowTokens > 0
+    }
+
+    var usageRatio: Double {
+        guard windowTokens > 0 else { return 0 }
+        return min(1.5, max(0, Double(usedTokens) / Double(windowTokens)))
+    }
+
+    var isNearLimit: Bool {
+        usageRatio >= 0.75
+    }
+
+    var isOverLimit: Bool {
+        usageRatio >= 1
+    }
+
+    var percentageText: String {
+        "\(Int((usageRatio * 100).rounded()))%"
+    }
+}
+
 /// Manages state and logic for a single chat conversation.
 /// Handles sending/streaming messages via Socket.IO, loading history, and model selection.
 /// Instances are held by `ActiveChatStore` so they survive navigation transitions.
@@ -81,6 +114,7 @@ final class ChatViewModel {
         }
     }
     var selectedModelId: String?
+    var contextBudgetStatus = ChatContextBudgetStatus.empty
     var isStreaming: Bool = false
     var isLoadingConversation: Bool = false
     var isLoadingModels: Bool = false
@@ -90,6 +124,27 @@ final class ChatViewModel {
     var errorMessage: String?
     var inputText: String = ""
     var attachments: [ChatAttachment] = []
+    private var lastContextBudgetRefreshSignature: String = ""
+    func updateLiveContextBudgetPreview() {
+        let signature = [
+            selectedModelId ?? "",
+            conversation?.id ?? "",
+            "\(conversation?.messages.count ?? 0)",
+            "\(inputText.count)",
+            "\(attachments.count)"
+        ].joined(separator: "|")
+        guard signature != lastContextBudgetRefreshSignature else { return }
+        lastContextBudgetRefreshSignature = signature
+        let modelId = selectedModelId ?? conversation?.model
+        let visibleTokens = Self.estimatedTokensForVisibleConversation(conversation)
+        let draftTokens = Self.estimatedTokenCount(for: inputText)
+            + attachments.reduce(0) { $0 + Self.estimatedAttachmentTokens(for: $1) }
+        contextBudgetStatus = Self.contextStatus(
+            model: selectedModel,
+            modelId: modelId,
+            usedTokens: visibleTokens + draftTokens
+        )
+    }
     var webSearchEnabled: Bool = false {
         didSet {
             guard !suppressBuiltinFeatureTracking else { return }
@@ -657,6 +712,10 @@ final class ChatViewModel {
     var selectedModel: AIModel? {
         guard let id = selectedModelId else { return nil }
         return availableModels.first { $0.id == id }
+    }
+
+    var effectiveContextWindowTokens: Int {
+        Self.contextWindowTokens(for: selectedModel, modelId: selectedModelId ?? conversation?.model)
     }
 
     var canSend: Bool {
@@ -2814,6 +2873,7 @@ final class ChatViewModel {
             }
             // Write back to shared cache so subsequent VMs are pre-populated
             activeChatStore?.updateModelCache(models: availableModels, selectedId: selectedModelId)
+            refreshContextBudgetStatus()
         } catch {
             logger.error("Failed to load models: \(error.localizedDescription)")
         }
@@ -3745,6 +3805,7 @@ final class ChatViewModel {
         inputText = ""
         attachments = []
         errorMessage = nil
+        refreshContextBudgetStatus()
         cleanupStreaming()
         webSearchEnabled = false
         imageGenerationEnabled = false
@@ -4213,6 +4274,7 @@ final class ChatViewModel {
         let apiMessages = await buildAPIMessagesAsync(
             imageCanvasInstructionMessageId: imageCanvasInstructionMessageId
         )
+        appendContextCompressionStatusIfNeeded(to: assistantMessageId)
         let parentId = userMessage.id
         sessionId = UUID().uuidString
         let effectiveChatId = conversationId ?? conversation?.id
@@ -4239,6 +4301,7 @@ final class ChatViewModel {
             initialStatusHistory: initialStatusHistory,
             initialSources: initialSources
         )
+        appendContextCompressionStatusIfNeeded(to: assistantMessageId)
         await startRunLiveActivity(id: assistantMessageId, modelId: modelId, prompt: modelPromptText)
 
         if isOpenAICompatibleProvider {
@@ -6581,6 +6644,7 @@ final class ChatViewModel {
         // 8. Get the user message (parentId) for the API messages build.
         guard conversation?.messages.contains(where: { $0.role == .user }) == true else { return }
         let apiMessages = await buildAPIMessagesAsync()
+        appendContextCompressionStatusIfNeeded(to: newAssistantId)
         let effectiveChatId = conversationId ?? conversation?.id
         sessionId = UUID().uuidString
 
@@ -6591,6 +6655,7 @@ final class ChatViewModel {
 
         // Activate the isolated streaming store for the regenerated message
         streamingStore.beginStreaming(messageId: newAssistantId, modelId: modelId)
+        appendContextCompressionStatusIfNeeded(to: newAssistantId)
 
         // Cancel any previous subscriptions/timers
         chatSubscription?.dispose()
@@ -6732,6 +6797,7 @@ final class ChatViewModel {
 
     func selectModel(_ modelId: String) {
         selectedModelId = modelId
+        refreshContextBudgetStatus()
         activeChatStore?.updateLastSelectedModel(modelId)
         // Switching models is a deliberate user action — reset disabled tools
         // so the new model's defaults apply cleanly without stale overrides.
@@ -6996,6 +7062,7 @@ final class ChatViewModel {
         guard let lastUser = conversation?.messages.last(where: { $0.role == .user }) else { return }
 
         let apiMessages = await buildAPIMessagesAsync()
+        appendContextCompressionStatusIfNeeded(to: assistantMessageId)
         let parentId = lastUser.id
         let effectiveChatId = conversationId ?? conversation?.id
 
@@ -7004,6 +7071,7 @@ final class ChatViewModel {
         selfInitiatedStream = true
 
         streamingStore.beginStreaming(messageId: assistantMessageId, modelId: modelId)
+        appendContextCompressionStatusIfNeeded(to: assistantMessageId)
 
         chatSubscription?.dispose()
         chatSubscription = nil
@@ -9113,6 +9181,235 @@ final class ChatViewModel {
         }
     }
 
+    private static func contextWindowTokens(for model: AIModel?, modelId: String?) -> Int {
+        guard model != nil || modelId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            return 0
+        }
+        if let contextLength = model?.contextLength, contextLength > 0 {
+            return contextLength
+        }
+        var parts: [String] = []
+        if let modelId, !modelId.isEmpty { parts.append(modelId) }
+        if let model {
+            parts.append(model.id)
+            parts.append(model.name)
+            if let description = model.description, !description.isEmpty {
+                parts.append(description)
+            }
+        }
+        let raw = parts.joined(separator: " ").lowercased()
+        if raw.contains("1m") || raw.contains("1000k") { return 1_000_000 }
+        if raw.contains("512k") { return 512_000 }
+        if raw.contains("256k") { return 256_000 }
+        if raw.contains("200k") { return 200_000 }
+        if raw.contains("128k") { return 128_000 }
+        if raw.contains("96k") { return 96_000 }
+        if raw.contains("64k") { return 64_000 }
+        if raw.contains("32k") { return 32_000 }
+        if raw.contains("16k") { return 16_000 }
+        if raw.contains("8k") { return 8_000 }
+        if raw.contains("4k") { return 4_000 }
+        if raw.contains("claude-3") || raw.contains("claude-sonnet") || raw.contains("claude-opus") {
+            return 200_000
+        }
+        if raw.contains("gemini-1.5") || raw.contains("gemini-2") {
+            return 1_000_000
+        }
+        if raw.contains("gpt-4.1") || raw.contains("gpt-5") || raw.contains("gpt-4o") || raw.contains("o3") || raw.contains("o4") {
+            return 128_000
+        }
+        if raw.contains("qwen") || raw.contains("grok") || raw.contains("deepseek") {
+            return 128_000
+        }
+        return 32_000
+    }
+
+    private static func contextStatus(
+        model: AIModel?,
+        modelId: String?,
+        usedTokens: Int,
+        isCompressed: Bool = false,
+        originalTokens: Int? = nil,
+        compressedTokens: Int? = nil
+    ) -> ChatContextBudgetStatus {
+        let window = contextWindowTokens(for: model, modelId: modelId)
+        return ChatContextBudgetStatus(
+            modelId: modelId ?? model?.id ?? "",
+            usedTokens: usedTokens,
+            windowTokens: window,
+            isWindowEstimated: model?.contextLength == nil,
+            isCompressed: isCompressed,
+            originalTokens: originalTokens,
+            compressedTokens: compressedTokens
+        )
+    }
+
+    private static func estimatedTokens(in apiMessages: [[String: Any]]) -> Int {
+        apiMessages.reduce(0) { total, message in
+            total + 4 + estimatedTokens(inContent: message["content"])
+                + estimatedTokens(inFiles: message["files"])
+        }
+    }
+
+    private static func estimatedTokens(inContent content: Any?) -> Int {
+        if let text = content as? String {
+            return estimatedTokenCount(for: text)
+        }
+        if let parts = content as? [[String: Any]] {
+            return parts.reduce(0) { total, part in
+                if let text = part["text"] as? String {
+                    return total + estimatedTokenCount(for: text)
+                }
+                if let image = part["image_url"] as? [String: Any],
+                   let url = image["url"] as? String,
+                   url.hasPrefix("data:image/") {
+                    return total + 1_200
+                }
+                return total + 80
+            }
+        }
+        return 0
+    }
+
+    private static func estimatedTokens(inFiles files: Any?) -> Int {
+        guard let fileArray = files as? [[String: Any]] else { return 0 }
+        return fileArray.count * 256
+    }
+
+    private static func messageTextForContextSummary(_ message: [String: Any]) -> String {
+        let role = (message["role"] as? String) ?? "message"
+        let content: String = {
+            if let text = message["content"] as? String {
+                return text
+            }
+            if let parts = message["content"] as? [[String: Any]] {
+                return parts.compactMap { part in
+                    if let text = part["text"] as? String { return text }
+                    if part["image_url"] != nil { return "[image]" }
+                    return nil
+                }.joined(separator: "\n")
+            }
+            return ""
+        }()
+        let cleaned = content
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return "\(role): [empty]" }
+        return "\(role): \(String(cleaned.prefix(900)))"
+    }
+
+    private static func compactMessagesIfNeeded(
+        _ messages: [[String: Any]],
+        model: AIModel?,
+        modelId: String?
+    ) -> (messages: [[String: Any]], status: ChatContextBudgetStatus) {
+        let window = contextWindowTokens(for: model, modelId: modelId)
+        let originalTokens = estimatedTokens(in: messages)
+        var status = contextStatus(
+            model: model,
+            modelId: modelId,
+            usedTokens: originalTokens
+        )
+
+        let softLimit = Int(Double(window) * 0.82)
+        guard window > 0, originalTokens > softLimit, messages.count > 4 else {
+            return (messages, status)
+        }
+
+        let leadingSystemCount = messages.prefix {
+            ($0["role"] as? String) == "system"
+        }.count
+        let leadingSystemMessages = Array(messages.prefix(leadingSystemCount))
+        let chronologicalMessages = Array(messages.dropFirst(leadingSystemCount))
+        guard chronologicalMessages.count > 3 else {
+            return (messages, status)
+        }
+
+        let keepTailCount = min(max(4, chronologicalMessages.count / 3), 12)
+        let splitIndex = max(0, chronologicalMessages.count - keepTailCount)
+        let olderMessages = Array(chronologicalMessages.prefix(splitIndex))
+        let recentMessages = Array(chronologicalMessages.suffix(keepTailCount))
+        guard !olderMessages.isEmpty else {
+            return (messages, status)
+        }
+
+        let summaryBudget = max(900, min(4_000, Int(Double(window) * 0.04)))
+        var summaryLines: [String] = []
+        var usedSummaryTokens = 0
+        for message in olderMessages {
+            let line = messageTextForContextSummary(message)
+            let tokens = estimatedTokenCount(for: line)
+            if usedSummaryTokens + tokens > summaryBudget { break }
+            summaryLines.append("- \(line)")
+            usedSummaryTokens += tokens
+        }
+        if summaryLines.count < olderMessages.count {
+            summaryLines.append("- 其余较早消息已省略，只保留关键顺序和最近完整上下文。")
+        }
+
+        let summary = """
+        [自动压缩的较早对话上下文]
+        因当前会话接近模型上下文窗口，客户端在发送前把较早消息压缩为摘要。请把下面摘要作为历史背景，最近几轮消息仍保持完整原文。
+
+        \(summaryLines.joined(separator: "\n"))
+        [/自动压缩的较早对话上下文]
+        """
+
+        let compacted = leadingSystemMessages
+            + [["role": "system", "content": summary]]
+            + recentMessages
+        let compactedTokens = estimatedTokens(in: compacted)
+        status.usedTokens = compactedTokens
+        status.isCompressed = true
+        status.originalTokens = originalTokens
+        status.compressedTokens = compactedTokens
+        return (compacted, status)
+    }
+
+    private func refreshContextBudgetStatus(
+        from messages: [[String: Any]]? = nil,
+        compressed: Bool = false,
+        originalTokens: Int? = nil,
+        compressedTokens: Int? = nil
+    ) {
+        let modelId = selectedModelId ?? conversation?.model
+        let used = messages.map(Self.estimatedTokens(in:)) ?? Self.estimatedTokensForVisibleConversation(conversation)
+        contextBudgetStatus = Self.contextStatus(
+            model: selectedModel,
+            modelId: modelId,
+            usedTokens: used,
+            isCompressed: compressed,
+            originalTokens: originalTokens,
+            compressedTokens: compressedTokens
+        )
+    }
+
+    private func appendContextCompressionStatusIfNeeded(to assistantMessageId: String) {
+        guard contextBudgetStatus.isCompressed else { return }
+        appendStatusUpdate(
+            id: assistantMessageId,
+            status: ChatStatusUpdate(
+                action: "context_compaction",
+                description: "已自动压缩上下文",
+                done: true,
+                count: contextBudgetStatus.compressedTokens
+            )
+        )
+    }
+
+    private static func estimatedTokensForVisibleConversation(_ conversation: Conversation?) -> Int {
+        guard let conversation else { return 0 }
+        return conversation.messages.reduce(0) { total, message in
+            guard !message.isStreaming,
+                  !isLocalWorkspaceAgentResult(message),
+                  !isLocalAlpineAgentResult(message) else {
+                return total
+            }
+            return total + 4 + estimatedTokenCount(for: message.content)
+                + message.files.count * 256
+        }
+    }
+
     private static func firstIntValue(in usage: [String: Any]?, keys: [String]) -> Int? {
         guard let usage else { return nil }
         for key in keys {
@@ -9348,7 +9645,11 @@ final class ChatViewModel {
             && !Self.isLocalWorkspaceAgentResult(msg) {
             msgs.append(["role": msg.role.rawValue, "content": msg.content])
         }
-        return msgs
+        return Self.compactMessagesIfNeeded(
+            msgs,
+            model: selectedModel,
+            modelId: selectedModelId ?? conversation.model
+        ).messages
     }
 
     private func resolveWebLinkContextIfNeeded(
@@ -9892,6 +10193,7 @@ final class ChatViewModel {
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
         var apiMessages = await buildAPIMessagesAsync()
+        appendContextCompressionStatusIfNeeded(to: assistantMessageId)
         Self.appendClientWebSearchContinuationInstruction(to: &apiMessages)
 
         isStreaming = true
@@ -9905,6 +10207,7 @@ final class ChatViewModel {
             modelId: modelId,
             initialStatusHistory: [thinkingStatus]
         )
+        appendContextCompressionStatusIfNeeded(to: assistantMessageId)
 
         let effectiveChatId = conversationId ?? self.conversation?.id
         let socket = socketService
@@ -10893,7 +11196,13 @@ final class ChatViewModel {
                 apiMessages.append(msgDict)
             }
         }
-        return apiMessages
+        let compacted = Self.compactMessagesIfNeeded(
+            apiMessages,
+            model: selectedModel,
+            modelId: selectedModelId ?? conversation.model
+        )
+        contextBudgetStatus = compacted.status
+        return compacted.messages
     }
 
     private func parseStatusData(_ data: [String: Any]) -> ChatStatusUpdate {
@@ -11978,6 +12287,7 @@ final class ChatViewModel {
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
         var apiMessages = await buildAPIMessagesAsync(includeLocalAlpineExecutionContext: true)
+        appendContextCompressionStatusIfNeeded(to: assistantMessageId)
         if finalSummaryOnly {
             Self.appendLocalAlpineFinalSummaryInstruction(to: &apiMessages)
         } else {
@@ -11995,6 +12305,7 @@ final class ChatViewModel {
             modelId: modelId,
             initialStatusHistory: [thinkingStatus]
         )
+        appendContextCompressionStatusIfNeeded(to: assistantMessageId)
 
         let effectiveChatId = conversationId ?? self.conversation?.id
         let socket = socketService

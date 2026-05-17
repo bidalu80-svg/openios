@@ -813,6 +813,8 @@ struct ChatDetailView: View {
                 isEnabled: !vm.isStreaming,
                 onSend: { Task { await viewModel.sendMessage() } },
                 onStopGenerating: vm.isStreaming ? { viewModel.stopStreaming() } : nil,
+                contextBudgetStatus: vm.contextBudgetStatus,
+                onContextBudgetPreviewUpdate: { viewModel.updateLiveContextBudgetPreview() },
                 webSearchEnabled: $vm.webSearchEnabled,
                 imageGenerationEnabled: $vm.imageGenerationEnabled,
                 codeInterpreterEnabled: $vm.codeInterpreterEnabled,

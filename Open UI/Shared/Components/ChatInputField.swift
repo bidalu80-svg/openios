@@ -73,6 +73,8 @@ struct ChatInputField: View {
     var isEnabled: Bool = true
     var onSend: () -> Void
     var onStopGenerating: (() -> Void)?
+    var contextBudgetStatus: ChatContextBudgetStatus = .empty
+    var onContextBudgetPreviewUpdate: (() -> Void)? = nil
 
     // Tools menu bindings
     @Binding var webSearchEnabled: Bool
@@ -141,6 +143,7 @@ struct ChatInputField: View {
     @Environment(\.accessibilityScale) private var accessibilityScale
     @FocusState private var isFocused: Bool
     @State private var showToolsSheet = false
+    @State private var showContextBudgetPopover = false
     @State private var previewingAttachment: ChatAttachment? = nil
 
     /// Quick pills preference from UserDefaults
@@ -248,6 +251,15 @@ struct ChatInputField: View {
         .padding(.bottom, Spacing.sm)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isDictating)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: dictationService?.state == .processing)
+        .task {
+            onContextBudgetPreviewUpdate?()
+        }
+        .onChange(of: text) { _, _ in
+            onContextBudgetPreviewUpdate?()
+        }
+        .onChange(of: attachments.count) { _, _ in
+            onContextBudgetPreviewUpdate?()
+        }
         // Widget deep link — focus the text field and show keyboard when
         // the user taps the "New Chat" action button on the home screen widget.
         .onReceive(NotificationCenter.default.publisher(for: .chatInputFieldRequestFocus)) { _ in
@@ -342,6 +354,16 @@ struct ChatInputField: View {
                 pillsRow
                     .padding(.horizontal, 10)
                     .padding(.bottom, 8)
+            }
+
+            if contextBudgetStatus.hasWindow {
+                contextBudgetIndicator
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .opacity
+                    ))
             }
         }
         .background(composerBackground)
@@ -663,6 +685,79 @@ struct ChatInputField: View {
         }
         .animation(.easeInOut(duration: 0.15), value: canSend)
         .animation(.easeInOut(duration: 0.15), value: isEnabled)
+    }
+
+    // MARK: - Context Budget
+
+    private var contextBudgetIndicator: some View {
+        HStack(spacing: 8) {
+            Button {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    showContextBudgetPopover.toggle()
+                }
+                Haptics.play(.light)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: contextBudgetStatus.isCompressed ? "arrow.down.forward.and.arrow.up.backward" : "memorychip")
+                        .scaledFont(size: 10, weight: .semibold)
+                    Text(contextBudgetStatus.isCompressed ? "已压缩上下文" : "上下文")
+                        .scaledFont(size: 11, weight: .semibold)
+                        .lineLimit(1)
+                    Text(contextBudgetStatus.percentageText)
+                        .scaledFont(size: 11, weight: .semibold)
+                        .monospacedDigit()
+                }
+                .foregroundStyle(contextBudgetColor)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(contextBudgetColor.opacity(0.11)))
+                .overlay(Capsule().strokeBorder(contextBudgetColor.opacity(0.35), lineWidth: 0.75))
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showContextBudgetPopover) {
+                ContextBudgetPopover(status: contextBudgetStatus)
+                    .presentationCompactAdaptation(.popover)
+            }
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(theme.surfaceContainer.opacity(0.8))
+                    Capsule()
+                        .fill(contextBudgetColor.opacity(0.75))
+                        .frame(width: max(8, proxy.size.width * min(contextBudgetStatus.usageRatio, 1)))
+                }
+            }
+            .frame(height: 5)
+
+            Text("\(Self.formatCompactTokenCount(contextBudgetStatus.usedTokens))/\(Self.formatCompactTokenCount(contextBudgetStatus.windowTokens))")
+                .scaledFont(size: 10, weight: .medium)
+                .monospacedDigit()
+                .foregroundStyle(theme.textTertiary)
+                .lineLimit(1)
+        }
+        .frame(minHeight: 24)
+        .accessibilityLabel("Context window")
+        .accessibilityValue("\(contextBudgetStatus.percentageText), \(contextBudgetStatus.usedTokens) of \(contextBudgetStatus.windowTokens) tokens")
+    }
+
+    private var contextBudgetColor: Color {
+        if contextBudgetStatus.isOverLimit { return theme.error }
+        if contextBudgetStatus.isNearLimit { return theme.warning }
+        if contextBudgetStatus.isCompressed { return theme.brandPrimary }
+        return theme.textTertiary
+    }
+
+    private static func formatCompactTokenCount(_ value: Int) -> String {
+        if value >= 1_000_000 {
+            let n = Double(value) / 1_000_000
+            return n >= 10 ? "\(Int(n.rounded()))m" : String(format: "%.1fm", n)
+        }
+        if value >= 1_000 {
+            let n = Double(value) / 1_000
+            return n >= 10 ? "\(Int(n.rounded()))k" : String(format: "%.1fk", n)
+        }
+        return "\(value)"
     }
 
     // MARK: - Pills Row
@@ -1139,6 +1234,70 @@ struct ChatInputField: View {
             .offset(x: 5, y: -5)
             .accessibilityLabel("Remove \(attachment.name)")
         }
+    }
+}
+
+private struct ContextBudgetPopover: View {
+    let status: ChatContextBudgetStatus
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "memorychip")
+                    .scaledFont(size: 13, weight: .semibold)
+                    .foregroundStyle(theme.brandPrimary)
+                Text("背景信息窗口")
+                    .scaledFont(size: 15, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                Spacer()
+                Text(status.percentageText)
+                    .scaledFont(size: 14, weight: .bold)
+                    .monospacedDigit()
+                    .foregroundStyle(status.isOverLimit ? theme.error : (status.isNearLimit ? theme.warning : theme.textPrimary))
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                metricRow("已用", value: "\(Self.formatNumber(status.usedTokens)) 标记")
+                metricRow("总窗口", value: "\(Self.formatNumber(status.windowTokens)) 标记\(status.isWindowEstimated ? "（估算）" : "")")
+                if status.isCompressed,
+                   let original = status.originalTokens,
+                   let compressed = status.compressedTokens {
+                    metricRow("自动压缩", value: "\(Self.formatNumber(original)) -> \(Self.formatNumber(compressed))")
+                }
+            }
+
+            Text(status.isCompressed
+                ? "发送前已把较早对话压成摘要，最近消息仍保留完整原文。"
+                : "接近上限时会自动压缩较早对话，避免模型上下文溢出。")
+                .scaledFont(size: 12, weight: .regular)
+                .foregroundStyle(theme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(width: 260)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func metricRow(_ label: String, value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .scaledFont(size: 12, weight: .medium)
+                .foregroundStyle(theme.textSecondary)
+            Spacer()
+            Text(value)
+                .scaledFont(size: 12, weight: .semibold)
+                .monospacedDigit()
+                .foregroundStyle(theme.textPrimary)
+        }
+    }
+
+    private static func formatNumber(_ value: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 }
 
