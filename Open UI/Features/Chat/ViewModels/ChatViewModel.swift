@@ -332,6 +332,8 @@ final class ChatViewModel {
     /// Assistant message IDs whose Local Alpine command blocks have already
     /// been executed. Keeps refresh/retry paths from running shell commands twice.
     private var localAlpineAgentExecutedMessageIds: Set<String> = []
+    /// Assistant message IDs whose local native iOS tool blocks have already run.
+    private var localNativeToolExecutedMessageIds: Set<String> = []
     private var localAlpineAgentTask: Task<Void, Never>?
     private var localAlpineContinuationTask: Task<Void, Never>?
     private var localAlpineAgentStopRequested = false
@@ -1287,6 +1289,11 @@ final class ChatViewModel {
             || message.content.hasPrefix("Local Alpine 执行结果")
             || message.model == "Local Alpine"
             || message.statusHistory.contains { $0.action?.lowercased() == "local_alpine" }
+    }
+
+    private static func isLocalNativeToolResult(_ message: ChatMessage) -> Bool {
+        message.metadata?["iexa_local_native_result"] == "true"
+            || message.model == "Local Native"
     }
 
     private static func localAlpineExecutionStateSystemContext(from messages: [ChatMessage]) -> String? {
@@ -9545,6 +9552,31 @@ final class ChatViewModel {
         """
     }
 
+    private static func localNativeToolSystemContext() -> String {
+        """
+        Iexa has on-device native iOS tools for location and calendar. These run locally on the user's device and do not require the remote server.
+
+        Use them only when the user asks to get/use their current location, query local calendar events, create a calendar event, or delete a calendar event. Do not emit this tool for ordinary conversation.
+        To call a local native tool, output exactly one fenced `iexa_native` JSON block and no fake tool-call syntax.
+
+        Supported actions:
+        ```iexa_native
+        {"action":"get_location"}
+        ```
+        ```iexa_native
+        {"action":"list_calendar_events","start":"2026-05-17T00:00:00+08:00","end":"2026-05-18T00:00:00+08:00"}
+        ```
+        ```iexa_native
+        {"action":"create_calendar_event","title":"会议","start":"2026-05-18T09:00:00+08:00","end":"2026-05-18T10:00:00+08:00","location":"办公室","description":"讨论项目","alert_minutes":10}
+        ```
+        ```iexa_native
+        {"action":"delete_calendar_event","id":"event-id-from-list"}
+        ```
+
+        Dates must be ISO-8601 with timezone whenever possible. After Iexa appends the native tool result, continue from that real result and answer normally. If permissions are denied or location is not ready, explain the exact local permission/state issue.
+        """
+    }
+
     private static func localAlpineAgentSystemContext() -> String {
         """
         Iexa has an on-device Local Alpine Linux terminal. You can really operate that local Alpine environment for the user by emitting `iexa_alpine` blocks; do not tell the user that this chat lacks terminal/file-system execution when this instruction is present.
@@ -11087,7 +11119,9 @@ final class ChatViewModel {
             ? Self.clientWebSearchToolSystemContext()
             : nil
         let localSkillsContext = LocalSkillsService.shared.contextPrompt()
-        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localSkillsContext, memoryContext]
+        let localNativeToolContext = latestUserTextForLocalAlpine.map(Self.shouldExposeLocalNativeTools)
+            == true ? Self.localNativeToolSystemContext() : nil
+        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localNativeToolContext, localSkillsContext, memoryContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
@@ -11096,7 +11130,16 @@ final class ChatViewModel {
         }
         for message in conversation.messages where !message.isStreaming
             && !Self.isLocalWorkspaceAgentResult(message) {
+            let isNativeToolResult = Self.isLocalNativeToolResult(message)
             let isLocalAlpineResult = Self.isLocalAlpineAgentResult(message)
+            if isNativeToolResult {
+                let modelContent = contentForModel(
+                    message: message,
+                    includeImageCanvasInstruction: false
+                )
+                apiMessages.append(["role": "system", "content": modelContent])
+                continue
+            }
             if isLocalAlpineResult && !shouldIncludeLocalAlpineContext {
                 continue
             }
@@ -11579,6 +11622,397 @@ final class ChatViewModel {
         localAlpineAgentTask = Task { [weak self] in
             await self?.executeLocalAlpineAgent(messageId: messageId, content: executableContent)
         }
+    }
+
+    private func scheduleLocalNativeToolIfNeeded(messageId: String, content: String, error: ChatMessageError?) {
+        guard error == nil else { return }
+        guard LocalNativeToolService.containsNativeToolBlock(content) else { return }
+        guard conversation?.messages.first(where: { $0.id == messageId }).map(Self.isLocalNativeToolResult) != true else {
+            return
+        }
+        guard !localNativeToolExecutedMessageIds.contains(messageId) else { return }
+        localNativeToolExecutedMessageIds.insert(messageId)
+        Task { [weak self] in
+            await self?.executeLocalNativeTool(messageId: messageId, content: content)
+        }
+    }
+
+    private func executeLocalNativeTool(messageId: String, content: String) async {
+        let result = await LocalNativeToolService.shared.executeBlocks(in: content)
+        guard result.didExecute else { return }
+        guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
+
+        let resultMessage = ChatMessage(
+            role: .system,
+            content: "本地 iOS 工具执行结果\n\n\(result.summary)",
+            timestamp: .now,
+            model: "Local Native",
+            isStreaming: false,
+            metadata: ["iexa_local_native_result": "true"]
+        )
+        let resultNode = HistoryNode(
+            id: resultMessage.id,
+            parentId: messageId,
+            childrenIds: [],
+            role: .system,
+            content: resultMessage.content,
+            timestamp: resultMessage.timestamp,
+            model: "Local Native",
+            done: true,
+            metadata: resultMessage.metadata
+        )
+
+        conversation?.messages.append(resultMessage)
+        conversation?.history.addNode(resultNode)
+        conversation?.history.appendChildId(resultMessage.id, to: messageId)
+        conversation?.history.currentId = resultMessage.id
+
+        await persistLocalConversationIfNeeded()
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        await startLocalNativeContinuation(parentId: resultMessage.id)
+    }
+
+    private func startLocalNativeContinuation(parentId: String) async {
+        guard let manager else { return }
+        guard let conversation, conversation.messages.contains(where: { $0.id == parentId }) else { return }
+        guard let modelId = selectedModelId ?? conversation.model else { return }
+
+        let assistantMessageId = UUID().uuidString
+        let thinkingStatus = ChatStatusUpdate(
+            action: "local_native_tool",
+            description: "本地 iOS 工具已返回，正在整理回答...",
+            done: false
+        )
+        let assistantMessage = ChatMessage(
+            id: assistantMessageId,
+            role: .assistant,
+            content: "",
+            timestamp: .now,
+            model: modelId,
+            isStreaming: true,
+            statusHistory: [thinkingStatus],
+            metadata: ["iexa_local_native_continuation": "true"]
+        )
+        let assistantNode = HistoryNode(
+            id: assistantMessageId,
+            parentId: parentId,
+            childrenIds: [],
+            role: .assistant,
+            content: "",
+            timestamp: assistantMessage.timestamp,
+            model: modelId,
+            done: false,
+            statusHistory: [thinkingStatus],
+            metadata: assistantMessage.metadata
+        )
+
+        self.conversation?.messages.append(assistantMessage)
+        self.conversation?.history.addNode(assistantNode)
+        self.conversation?.history.appendChildId(assistantMessageId, to: parentId)
+        self.conversation?.history.currentId = assistantMessageId
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+
+        var apiMessages = await buildAPIMessagesAsync(includeLocalAlpineExecutionContext: false)
+        Self.appendLocalNativeResultInstruction(to: &apiMessages)
+
+        isStreaming = true
+        hasFinishedStreaming = false
+        selfInitiatedStream = true
+        activeTaskId = nil
+        sessionId = UUID().uuidString
+        streamingStore.beginStreaming(
+            messageId: assistantMessageId,
+            modelId: modelId,
+            initialStatusHistory: [thinkingStatus]
+        )
+        beginStreamingBackgroundTaskIfNeeded()
+
+        let effectiveChatId = conversationId ?? self.conversation?.id
+        let socket = socketService
+        var socketConnected = socket?.isConnected ?? false
+        if !isOpenAICompatibleProvider, let socket, !socketConnected {
+            socketConnected = await socket.ensureConnected(timeout: 8.0)
+        }
+        let socketSessionId = socket?.sid ?? sessionId
+        let usePollingFallback = !isOpenAICompatibleProvider && !socketConnected
+
+        if !isOpenAICompatibleProvider {
+            await syncToServerViaTree()
+            if socketConnected, let socket {
+                registerSocketHandlers(
+                    socket: socket,
+                    assistantMessageId: assistantMessageId,
+                    modelId: modelId,
+                    socketSessionId: socketSessionId,
+                    effectiveChatId: effectiveChatId
+                )
+            }
+        }
+
+        streamingTask = Task { [weak self] in
+            guard let self else { return }
+            let acc = ContentAccumulator()
+            var exactUsage: [String: Any]?
+
+            do {
+                var request = ChatCompletionRequest(
+                    model: modelId,
+                    messages: apiMessages,
+                    stream: true,
+                    chatId: effectiveChatId,
+                    sessionId: socketSessionId,
+                    messageId: assistantMessageId,
+                    parentId: parentId
+                )
+                await self.populateCommonRequestFields(&request)
+
+                if self.isOpenAICompatibleProvider {
+                    let stream = try await manager.sendMessageStreaming(request: request)
+                    for try await event in stream {
+                        if Task.isCancelled { break }
+                        if let usage = event.usage, !usage.isEmpty {
+                            exactUsage = usage
+                        }
+                        if let delta = event.contentDelta, !delta.isEmpty {
+                            acc.append(delta)
+                            self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                        }
+                        if event.isFinished { break }
+                    }
+                    if Task.isCancelled { return }
+                    await self.finishLocalNativeContinuation(
+                        assistantMessageId: assistantMessageId,
+                        modelId: modelId,
+                        content: acc.content,
+                        usage: exactUsage
+                    )
+                    return
+                }
+
+                if request.isPipeModel {
+                    let stream = try await manager.apiClient.sendMessagePipeSSE(request: request)
+                    for try await event in stream {
+                        if Task.isCancelled { break }
+                        if let usage = event.usage, !usage.isEmpty {
+                            exactUsage = usage
+                        }
+                        if let delta = event.contentDelta, !delta.isEmpty {
+                            acc.append(delta)
+                            self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                        }
+                        if event.isFinished { break }
+                    }
+                    if Task.isCancelled { return }
+                    await self.finishLocalNativeContinuation(
+                        assistantMessageId: assistantMessageId,
+                        modelId: modelId,
+                        content: acc.content,
+                        usage: exactUsage
+                    )
+                    return
+                }
+
+                let json = try await manager.sendMessageHTTP(request: request)
+                if let err = json["error"] as? String, !err.isEmpty {
+                    self.updateAssistantMessage(
+                        id: assistantMessageId,
+                        content: "",
+                        isStreaming: false,
+                        error: ChatMessageError(content: Self.cleanedProviderErrorMessage(err) ?? err)
+                    )
+                    self.cleanupStreaming()
+                    return
+                }
+                if let detail = json["detail"] as? String, !detail.isEmpty, json["choices"] == nil {
+                    self.updateAssistantMessage(
+                        id: assistantMessageId,
+                        content: "",
+                        isStreaming: false,
+                        error: ChatMessageError(content: detail)
+                    )
+                    self.cleanupStreaming()
+                    return
+                }
+                if let taskId = json["task_id"] as? String {
+                    self.activeTaskId = taskId
+                }
+                if usePollingFallback, let chatId = effectiveChatId {
+                    await self.pollLocalNativeContinuation(
+                        chatId: chatId,
+                        assistantMessageId: assistantMessageId,
+                        modelId: modelId,
+                        socketSessionId: socketSessionId
+                    )
+                } else if usePollingFallback {
+                    self.updateAssistantMessage(
+                        id: assistantMessageId,
+                        content: "",
+                        isStreaming: false,
+                        error: ChatMessageError(content: "当前会话没有可轮询的 chatId，无法继续整理本地 iOS 工具结果。")
+                    )
+                    self.cleanupStreaming()
+                } else {
+                    self.logger.info("Local native continuation HTTP POST done - waiting for socket events")
+                }
+            } catch {
+                if !Task.isCancelled {
+                    let message = Self.localizedGenerationError(error)
+                    self.updateAssistantMessage(
+                        id: assistantMessageId,
+                        content: acc.content,
+                        isStreaming: false,
+                        error: ChatMessageError(content: message)
+                    )
+                    self.cleanupStreaming()
+                    await self.persistLocalConversationIfNeeded()
+                    NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                }
+            }
+        }
+    }
+
+    private func finishLocalNativeContinuation(
+        assistantMessageId: String,
+        modelId: String,
+        content: String,
+        usage: [String: Any]? = nil
+    ) async {
+        let finalContent = content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "本地 iOS 工具已执行完成。"
+            : content
+        updateAssistantMessage(
+            id: assistantMessageId,
+            content: finalContent,
+            isStreaming: false,
+            statusHistory: [
+                ChatStatusUpdate(
+                    action: "local_native_tool",
+                    description: "已根据本地 iOS 工具结果完成回答",
+                    done: true,
+                    occurredAt: .now
+                )
+            ]
+        )
+        normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+        applyUsage(usage, toMessageId: assistantMessageId)
+        let lastUser = conversation?.messages.last(where: {
+            $0.role == .user && $0.metadata?["iexa_local_native_result"] != "true"
+        })
+        recordTokenUsageForCompletedTurn(
+            assistantMessageId: assistantMessageId,
+            userText: lastUser?.content ?? "",
+            assistantText: finalContent,
+            userAttachments: [],
+            usage: usage
+        )
+        hasFinishedStreaming = true
+        isStreaming = false
+        isExternallyStreaming = false
+        selfInitiatedStream = false
+        activeTaskId = nil
+        lastTaskExtractionLength = 0
+        await sendCompletionNotificationIfNeeded(content: finalContent)
+        endBackgroundTask()
+        chatSubscription?.dispose()
+        chatSubscription = nil
+        channelSubscription?.dispose()
+        channelSubscription = nil
+        recoveryTimer?.invalidate()
+        recoveryTimer = nil
+        recoveryDelayTask?.cancel()
+        recoveryDelayTask = nil
+        emptyPollCount = 0
+        await persistLocalConversationIfNeeded()
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func pollLocalNativeContinuation(
+        chatId: String,
+        assistantMessageId: String,
+        modelId: String,
+        socketSessionId: String
+    ) async {
+        guard let manager else {
+            cleanupStreaming()
+            return
+        }
+        var lastContentLength = 0
+        var staleCount = 0
+        for _ in 0..<40 {
+            if Task.isCancelled { return }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if Task.isCancelled { return }
+
+            do {
+                let refreshed = try await manager.fetchConversation(id: chatId)
+                guard let serverAssistant = refreshed.messages.first(where: { $0.id == assistantMessageId }) else {
+                    continue
+                }
+                let serverContent = serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !serverContent.isEmpty else { continue }
+                updateAssistantMessage(id: assistantMessageId, content: serverAssistant.content, isStreaming: true)
+                if serverContent.count > lastContentLength {
+                    lastContentLength = serverContent.count
+                    staleCount = 0
+                } else {
+                    staleCount += 1
+                }
+                if staleCount >= 3 {
+                    await finishLocalNativeContinuation(
+                        assistantMessageId: assistantMessageId,
+                        modelId: modelId,
+                        content: serverAssistant.content,
+                        usage: nil
+                    )
+                    await manager.sendChatCompleted(
+                        chatId: chatId,
+                        messageId: assistantMessageId,
+                        model: modelId,
+                        sessionId: socketSessionId,
+                        messages: buildSimpleAPIMessages()
+                    )
+                    return
+                }
+            } catch {
+                logger.warning("Local native continuation polling failed: \(error.localizedDescription)")
+            }
+        }
+
+        updateAssistantMessage(
+            id: assistantMessageId,
+            content: conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? "",
+            isStreaming: false
+        )
+        cleanupStreaming()
+    }
+
+    private static func appendLocalNativeResultInstruction(to messages: inout [[String: Any]]) {
+        let instruction = """
+        [Local native tool result]
+        The latest Local Native message above is a real on-device iOS tool result for location/calendar. Do not emit another `iexa_native` block in this turn.
+        Reply to the user in normal language only. If the local tool succeeded, summarize the concrete result. If it failed, explain the permission/state problem and the next user action.
+        [/Local native tool result]
+        """
+        if !messages.isEmpty, messages[0]["role"] as? String == "system" {
+            var system = messages[0]
+            let existing = system["content"] as? String ?? ""
+            system["content"] = [existing, instruction]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: "\n\n")
+            messages[0] = system
+        } else {
+            messages.insert(["role": "system", "content": instruction], at: 0)
+        }
+    }
+
+    private static func shouldExposeLocalNativeTools(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let markers = [
+            "定位", "位置", "我在哪", "附近", "坐标", "经纬度",
+            "日历", "日程", "行程", "事件", "提醒", "会议", "预约", "安排",
+            "calendar", "event", "schedule", "reminder", "location", "where am i"
+        ]
+        return markers.contains { lower.contains($0) }
     }
 
     private func localAlpineStepsSinceLastUser() -> Int {
@@ -12949,6 +13383,19 @@ final class ChatViewModel {
             }
         }
 
+        if let nativeToolContent = completedAssistantContentForAgent,
+           LocalNativeToolService.containsNativeToolBlock(nativeToolContent) {
+            let visibleNativeContent = LocalNativeToolService.visibleContent(from: nativeToolContent)
+            if visibleNativeContent != nativeToolContent,
+               let index = conversation?.messages.firstIndex(where: { $0.id == id }) {
+                conversation?.messages[index].content = visibleNativeContent
+                conversation?.history.updateNode(id: id) { node in
+                    node.content = visibleNativeContent
+                    node.done = true
+                }
+            }
+        }
+
         // Extract and apply task list updates live from the streaming content.
         // Gate on a 100-char delta to avoid the O(n) string scan on every token.
         // The function also guards internally (only fires when the magic keywords are present),
@@ -12973,6 +13420,7 @@ final class ChatViewModel {
 
         if let completedAssistantContentForAgent {
             scheduleClientWebSearchToolIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
+            scheduleLocalNativeToolIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
             if conversation?.messages.first(where: { $0.id == id }).map(Self.isLocalAlpineAgentResult) != true {
                 scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
             }

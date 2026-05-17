@@ -344,11 +344,15 @@ enum LocalAlpinePythonWriteGuard {
             || line.hasPrefix("else:")
     }
 
-    private enum PythonBlockKind: Equatable {
+    private enum PythonBlockKind: Hashable {
         case `class`
         case function
         case `if`
         case `try`
+        case loop
+        case with
+        case except
+        case `else`
         case other
     }
 
@@ -359,6 +363,7 @@ enum LocalAlpinePythonWriteGuard {
         var continuationClosers: [Character] = []
         var blankRun = 0
         var previousOpenedBlock = false
+        var previousSignificant = ""
 
         for rawLine in rawLines {
             let stripped = rawLine.trimmingCharacters(in: .whitespaces)
@@ -376,15 +381,21 @@ enum LocalAlpinePythonWriteGuard {
                 if startsAlwaysTopLevel(stripped) || (blankRun >= 2 && startsLikelyTopLevel(stripped)) {
                     stack.removeAll()
                 } else if startsDefinition(stripped) {
-                    collapseToDefinitionParent(&stack)
+                    stack = definitionParent(for: stack, blankRun: blankRun)
                 } else if stripped.hasPrefix("elif ") {
                     popUntilContinuationParent(&stack, matching: .if, fallback: .other)
                 } else if stripped.hasPrefix("except") || stripped.hasPrefix("finally:") {
-                    popUntilContinuationParent(&stack, matching: .try, fallback: .other)
+                    popUntilContinuationParent(&stack, matchingAny: [.try, .except], fallback: .other)
                 } else if stripped.hasPrefix("else:") {
-                    popUntilContinuationParent(&stack, matching: nearestElseParent(in: stack), fallback: .other)
+                    popUntilContinuationParent(&stack, matchingAny: [.if, .try, .loop, .except, .else], fallback: .other)
                 } else if startsNewIfSibling(stripped, previousOpenedBlock: previousOpenedBlock, stack: stack) {
                     _ = stack.popLast()
+                } else {
+                    if isTerminalStatement(previousSignificant) {
+                        popOneCompletedBlock(&stack)
+                    } else if blankRun > 0 {
+                        popOneCompletedBlock(&stack)
+                    }
                 }
             }
 
@@ -395,6 +406,7 @@ enum LocalAlpinePythonWriteGuard {
             }
             updateContinuationClosers(&continuationClosers, with: stripped)
             previousOpenedBlock = opensPythonBlock(stripped)
+            previousSignificant = stripped
             blankRun = 0
         }
 
@@ -425,13 +437,26 @@ enum LocalAlpinePythonWriteGuard {
             && stack.last == .if
     }
 
-    private static func collapseToDefinitionParent(_ stack: inout [PythonBlockKind]) {
-        let keepClass = stack.lastIndex(of: .class)
-        if let keepClass, keepClass == 0 {
-            stack = [.class]
-        } else {
-            stack.removeAll()
+    private static func definitionParent(for stack: [PythonBlockKind], blankRun: Int) -> [PythonBlockKind] {
+        if blankRun >= 2 {
+            return []
         }
+        if let classIndex = stack.lastIndex(of: .class) {
+            return Array(stack.prefix(through: classIndex))
+        }
+        if blankRun == 0 {
+            return stack
+        }
+        return []
+    }
+
+    private static func popOneCompletedBlock(_ stack: inout [PythonBlockKind]) {
+        guard let last = stack.last,
+              last != .class,
+              last != .function else {
+            return
+        }
+        _ = stack.popLast()
     }
 
     private static func popUntilContinuationParent(
@@ -439,7 +464,15 @@ enum LocalAlpinePythonWriteGuard {
         matching kind: PythonBlockKind,
         fallback: PythonBlockKind
     ) {
-        guard stack.contains(kind) else {
+        popUntilContinuationParent(&stack, matchingAny: [kind], fallback: fallback)
+    }
+
+    private static func popUntilContinuationParent(
+        _ stack: inout [PythonBlockKind],
+        matchingAny kinds: Set<PythonBlockKind>,
+        fallback: PythonBlockKind
+    ) {
+        guard stack.contains(where: { kinds.contains($0) }) else {
             if stack.last == fallback {
                 _ = stack.popLast()
             }
@@ -447,15 +480,8 @@ enum LocalAlpinePythonWriteGuard {
         }
         while let last = stack.last {
             stack.removeLast()
-            if last == kind { break }
+            if kinds.contains(last) { break }
         }
-    }
-
-    private static func nearestElseParent(in stack: [PythonBlockKind]) -> PythonBlockKind {
-        for kind in stack.reversed() where kind == .if || kind == .try {
-            return kind
-        }
-        return .other
     }
 
     private static func continuationDepthForIndent(line: String, stack: [Character]) -> Int {
@@ -532,7 +558,16 @@ enum LocalAlpinePythonWriteGuard {
         if line.hasPrefix("def ") || line.hasPrefix("async def ") { return .function }
         if line.hasPrefix("if ") || line.hasPrefix("elif ") { return .if }
         if line.hasPrefix("try:") { return .try }
+        if line.hasPrefix("except") || line.hasPrefix("finally:") { return .except }
+        if line.hasPrefix("else:") { return .else }
+        if line.hasPrefix("for ") || line.hasPrefix("while ") { return .loop }
+        if line.hasPrefix("with ") || line.hasPrefix("async with ") { return .with }
         return .other
+    }
+
+    private static func isTerminalStatement(_ line: String) -> Bool {
+        let head = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).first.map(String.init) ?? ""
+        return ["return", "raise", "break", "continue", "pass"].contains(head)
     }
 
     private static func repairCommonUTF8Mojibake(in content: String) -> (content: String, notes: [String]) {

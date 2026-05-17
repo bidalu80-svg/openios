@@ -514,8 +514,12 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Iexa;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Iexa needs full calendar access to show, create, and delete local calendar events on this device.";
+				INFOPLIST_KEY_NSCalendarsUsageDescription = "Iexa uses your local calendars to show, create, and delete calendar events on this device.";
+				INFOPLIST_KEY_NSCalendarsWriteOnlyAccessUsageDescription = "Iexa needs calendar write access to create local calendar events on this device.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Iexa needs camera access to capture photos and documents for chat attachments.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Iexa uses Face ID to protect your account and conversations.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Iexa uses your location to provide location-aware responses when you enable the Share Location feature in Privacy & Security settings.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Iexa needs microphone access for voice input and voice calls.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Iexa needs permission to save images generated in conversations to your photo library.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Iexa needs photo library access to attach images to your conversations.";
@@ -565,8 +569,12 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Iexa;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Iexa needs full calendar access to show, create, and delete local calendar events on this device.";
+				INFOPLIST_KEY_NSCalendarsUsageDescription = "Iexa uses your local calendars to show, create, and delete calendar events on this device.";
+				INFOPLIST_KEY_NSCalendarsWriteOnlyAccessUsageDescription = "Iexa needs calendar write access to create local calendar events on this device.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Iexa needs camera access to capture photos and documents for chat attachments.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Iexa uses Face ID to protect your account and conversations.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Iexa uses your location to provide location-aware responses when you enable the Share Location feature in Privacy & Security settings.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Iexa needs microphone access for voice input and voice calls.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Iexa needs permission to save images generated in conversations to your photo library.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Iexa needs photo library access to attach images to your conversations.";

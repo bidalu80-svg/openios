@@ -4,7 +4,6 @@ import UIKit
 // MARK: - CalendarView (Sheet Root)
 
 struct CalendarView: View {
-    @Environment(AppDependencyContainer.self) private var dependencies
     @Environment(\.dismiss) private var dismiss
 
     @State private var viewModel: CalendarViewModel?
@@ -21,8 +20,8 @@ struct CalendarView: View {
         // Prevent sheet's swipe-to-dismiss from stealing UICalendarView's horizontal swipe
         .interactiveDismissDisabled()
         .task {
-            if viewModel == nil, let api = dependencies.apiClient {
-                let vm = CalendarViewModel(apiClient: api)
+            if viewModel == nil {
+                let vm = CalendarViewModel()
                 viewModel = vm
                 await vm.load()
             }

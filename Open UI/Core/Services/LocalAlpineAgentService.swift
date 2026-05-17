@@ -221,6 +221,97 @@ actor LocalAlpineAgentService {
 
     private init() {}
 
+    func runPythonCodeBlock(
+        _ code: String,
+        fileName: String,
+        cwd: String = "/mnt/iexa",
+        arguments: [String] = [],
+        stdinInput: String? = nil
+    ) async -> LocalAlpineAgentResult {
+        let normalizedFileName = fileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "codeblock.py"
+            : fileName
+        let file = LocalAlpineAgentFile(
+            path: normalizedFileName,
+            content: code,
+            source: .codeBlock
+        )
+        let writeResult = await writeFiles([file], cwd: cwd)
+        var lines = [
+            "Local Alpine 执行结果",
+            "环境：内置 Alpine Linux，工作目录默认 `/mnt/iexa`",
+            writeResult.summary
+        ]
+        var commandResults: [LocalAlpineAgentCommandResult] = []
+        let writtenFiles = writeResult.writtenFiles
+        if writeResult.hadFailure {
+            let result = LocalAlpineCommandResult(
+                command: "write_files",
+                output: writeResult.summary,
+                exitCode: 125,
+                interactiveRequest: nil
+            )
+            commandResults.append(Self.commandResult(command: "write_files", cwd: cwd, result: result))
+            return LocalAlpineAgentResult(
+                didExecute: true,
+                summary: lines.joined(separator: "\n\n"),
+                interactiveRequest: nil,
+                commandResults: commandResults,
+                writtenFiles: writtenFiles,
+                executedCommandCount: 0,
+                editedFileCount: writeResult.writtenPaths.isEmpty ? 0 : 1,
+                hadFailure: true
+            )
+        }
+
+        let runtimeFile = runtimePath(forSharedPath: resolvedFilePath(normalizedFileName, cwd: cwd))
+        let argumentString = arguments
+            .map { shellSingleQuoted($0) }
+            .joined(separator: " ")
+        let command = [
+            "python3 -m py_compile \(shellSingleQuoted(runtimeFile))",
+            "python3 \(shellSingleQuoted(runtimeFile))\(argumentString.isEmpty ? "" : " \(argumentString)")"
+        ].joined(separator: " && ")
+        let result = await LocalAlpineTerminalService.shared.execute(
+            command: command,
+            cwd: cwd,
+            stdinInput: stdinInput
+        )
+        lines.append(format(command: command, cwd: cwd, result: result))
+        commandResults.append(Self.commandResult(command: command, cwd: cwd, result: result))
+
+        if let interactiveRequest = result.interactiveRequest {
+            return LocalAlpineAgentResult(
+                didExecute: true,
+                summary: lines.joined(separator: "\n\n"),
+                interactiveRequest: interactiveRequest,
+                commandResults: commandResults,
+                writtenFiles: writtenFiles,
+                executedCommandCount: Self.actualCommandCount(commandResults),
+                editedFileCount: writeResult.writtenPaths.isEmpty ? 0 : 1,
+                hadFailure: true
+            )
+        }
+
+        let cleanupCommand = "rm -f \(shellSingleQuoted(runtimeFile))"
+        let cleanupResult = await LocalAlpineTerminalService.shared.execute(command: cleanupCommand, cwd: cwd)
+        if cleanupResult.exitCode != 0 {
+            lines.append(format(command: cleanupCommand, cwd: cwd, result: cleanupResult))
+            commandResults.append(Self.commandResult(command: cleanupCommand, cwd: cwd, result: cleanupResult))
+        }
+
+        return LocalAlpineAgentResult(
+            didExecute: true,
+            summary: lines.joined(separator: "\n\n"),
+            interactiveRequest: nil,
+            commandResults: commandResults,
+            writtenFiles: writtenFiles,
+            executedCommandCount: Self.actualCommandCount(commandResults),
+            editedFileCount: writeResult.writtenPaths.isEmpty ? 0 : 1,
+            hadFailure: commandResults.contains { $0.failed }
+        )
+    }
+
     func hasExecutableBlocks(in content: String) -> Bool {
         let blocks = extractInstructionBlocks(from: content)
         guard !blocks.isEmpty else { return false }
@@ -1585,6 +1676,7 @@ private enum LocalAlpineAgentFileSource: Equatable {
     case contentLines
     case contentBase64
     case heredoc
+    case codeBlock
 
     var displayName: String {
         switch self {
@@ -1593,6 +1685,7 @@ private enum LocalAlpineAgentFileSource: Equatable {
         case .contentLines: return "content_lines"
         case .contentBase64: return "content_base64"
         case .heredoc: return "heredoc"
+        case .codeBlock: return "code_block"
         }
     }
 
@@ -1603,6 +1696,7 @@ private enum LocalAlpineAgentFileSource: Equatable {
         case .contentLines: return .contentLines
         case .contentBase64: return .contentBase64
         case .heredoc: return .heredoc
+        case .codeBlock: return .codeBlock
         }
     }
 }

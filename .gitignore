@@ -1,4 +1,5 @@
 External/ish/
 .build/
+artifacts/
 Open UI/Resources/iexa-alpine-rootfs.fakefs/
 Open UI/Resources/iexa-alpine-rootfs.fakefs.tar.gz

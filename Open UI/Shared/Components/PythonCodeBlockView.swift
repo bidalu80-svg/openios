@@ -464,49 +464,45 @@ struct PythonCodeBlockView: View {
                 images: []
             ))
         }
-        let quotedFile = shellSingleQuoted(fileName)
-        do {
-            try await LocalAlpineTerminalService.shared.writeFile(
-                data: Data(source.utf8),
-                fileName: fileName,
-                destinationPath: "/"
-            )
-        } catch {
-            return PythonCodeRunOutcome(result: PythonExecutionResult(
-                status: .error,
-                stdout: "",
-                stderr: "Python 代码写入失败：\(error.localizedDescription)",
-                images: []
-            ))
-        }
-        let command = """
-        python3 -m py_compile \(quotedFile) && python3 \(quotedFile)
-        status=$?
-        rm -f \(quotedFile)
-        exit $status
-        """
-        let result = await LocalAlpineTerminalService.shared.execute(
-            command: command,
+        let agentResult = await LocalAlpineAgentService.shared.runPythonCodeBlock(
+            source,
+            fileName: fileName,
             cwd: "/mnt/iexa",
             stdinInput: stdinInput
         )
-        if let interactiveRequest = result.interactiveRequest {
+        if let interactiveRequest = agentResult.interactiveRequest {
             return PythonCodeRunOutcome(
-                result: PythonExecutionResult(status: .error, stdout: "", stderr: result.output, images: []),
+                result: PythonExecutionResult(status: .error, stdout: "", stderr: agentResult.summary, images: []),
                 interactiveRequest: interactiveRequest
             )
         }
-        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        if result.exitCode == 0 {
-            let visibleOutput = userVisibleSuccessOutput(from: output)
+        let output = agentResult.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !agentResult.hadFailure {
+            let visibleOutput = userVisibleSuccessOutput(from: userVisiblePythonOutput(from: output))
             return PythonCodeRunOutcome(result: PythonExecutionResult(status: .success, stdout: visibleOutput, stderr: "", images: []))
         }
         return PythonCodeRunOutcome(result: PythonExecutionResult(
             status: .error,
             stdout: "",
-            stderr: output.isEmpty ? "Local Alpine 执行失败，退出码：\(result.exitCode.map(String.init) ?? "unknown")" : output,
+            stderr: output.isEmpty ? "Local Alpine 执行失败。" : output,
             images: []
         ))
+    }
+
+    private static func userVisiblePythonOutput(from agentSummary: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?s)输出\s*\n\s*```text\s*\n([\s\S]*?)\n\s*```"#
+        ) else {
+            return agentSummary
+        }
+        let range = NSRange(agentSummary.startIndex..<agentSummary.endIndex, in: agentSummary)
+        let matches = regex.matches(in: agentSummary, range: range)
+        guard let match = matches.last,
+              match.numberOfRanges >= 2,
+              let swiftRange = Range(match.range(at: 1), in: agentSummary) else {
+            return agentSummary
+        }
+        return String(agentSummary[swiftRange])
     }
 
     private static func userVisibleSuccessOutput(from output: String) -> String {
@@ -535,9 +531,6 @@ struct PythonCodeBlockView: View {
             .trimmingCharacters(in: .newlines)
     }
 
-    private static func shellSingleQuoted(_ value: String) -> String {
-        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
-    }
 }
 
 private struct PythonCodeRunOutcome {

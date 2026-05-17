@@ -36,6 +36,12 @@
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Iexa uses your location to provide location-aware responses when you enable the Share Location feature in Privacy &amp; Security settings.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Iexa uses your local calendars to show, create, and delete calendar events on this device.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Iexa needs full calendar access to show, create, and delete local calendar events on this device.</string>
+	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+	<string>Iexa needs calendar write access to create local calendar events on this device.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Iexa saves generated images to your photo library when you tap Save.</string>
 	<key>NSSupportsLiveActivities</key>

@@ -33,7 +33,7 @@ enum CalendarViewMode: String, CaseIterable {
 @Observable
 @MainActor
 final class CalendarViewModel {
-    private let apiClient: APIClient
+    private let localCalendarService: LocalCalendarService
 
     // MARK: - State
 
@@ -70,8 +70,8 @@ final class CalendarViewModel {
 
     // MARK: - Init
 
-    init(apiClient: APIClient) {
-        self.apiClient = apiClient
+    init(localCalendarService: LocalCalendarService = .shared) {
+        self.localCalendarService = localCalendarService
     }
 
     // MARK: - Loading
@@ -80,7 +80,7 @@ final class CalendarViewModel {
         isLoading = true
         errorMessage = nil
         do {
-            let fetched = try await apiClient.getCalendars()
+            let fetched = try await localCalendarService.loadCalendars()
             calendars = fetched
             // All calendars visible by default
             visibleCalendarIds = Set(fetched.map { $0.id })
@@ -94,7 +94,7 @@ final class CalendarViewModel {
     func loadEventsForDisplayedMonth() async {
         let (start, end) = monthRange(for: displayedMonth)
         do {
-            let fetched = try await apiClient.getCalendarEvents(start: start, end: end)
+            let fetched = try await localCalendarService.loadEvents(start: start, end: end)
             events = fetched
         } catch {
             errorMessage = error.localizedDescription
@@ -104,7 +104,7 @@ final class CalendarViewModel {
     /// Load events for any arbitrary date range (used by Week/Day/Year views).
     func loadEvents(from start: Date, to end: Date) async {
         do {
-            let fetched = try await apiClient.getCalendarEvents(start: start, end: end)
+            let fetched = try await localCalendarService.loadEvents(start: start, end: end)
             events = fetched
         } catch {
             errorMessage = error.localizedDescription
@@ -180,8 +180,10 @@ final class CalendarViewModel {
             meta: meta
         )
         do {
-            let created = try await apiClient.createCalendarEvent(req)
+            let created = try await localCalendarService.createEvent(req)
+            events.removeAll { $0.id == created.id }
             events.append(created)
+            events.sort { $0.startAt < $1.startAt }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -191,7 +193,7 @@ final class CalendarViewModel {
         // Use instance_id if present (recurring), else id
         let deleteId = event.instanceId ?? event.id
         do {
-            try await apiClient.deleteCalendarEvent(id: deleteId)
+            try await localCalendarService.deleteEvent(id: deleteId)
             events.removeAll { $0.id == event.id && $0.instanceId == event.instanceId }
         } catch {
             errorMessage = error.localizedDescription
