@@ -175,7 +175,7 @@ struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
     }
 }
 
-struct LocalAlpineAgentCommandResult: Sendable {
+struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
     let command: String
     let cwd: String
     let exitCode: Int?
@@ -184,6 +184,31 @@ struct LocalAlpineAgentCommandResult: Sendable {
     var failed: Bool {
         guard let exitCode else { return true }
         return exitCode != 0
+    }
+
+    static func metadataString(for results: [LocalAlpineAgentCommandResult]) -> String? {
+        let limitedResults = results.prefix(12).map { result in
+            LocalAlpineAgentCommandResult(
+                command: result.command,
+                cwd: result.cwd,
+                exitCode: result.exitCode,
+                outputPreview: String(result.outputPreview.prefix(1_000))
+            )
+        }
+        guard !limitedResults.isEmpty,
+              let data = try? JSONEncoder().encode(Array(limitedResults)) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func decodeMetadata(_ value: String?) -> [LocalAlpineAgentCommandResult] {
+        guard let value,
+              let data = value.data(using: .utf8),
+              let results = try? JSONDecoder().decode([LocalAlpineAgentCommandResult].self, from: data) else {
+            return []
+        }
+        return results
     }
 }
 

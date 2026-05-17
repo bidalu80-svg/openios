@@ -4232,6 +4232,7 @@ private struct LocalAlpineResultCard: View {
     @State private var isExpanded = false
     @State private var isWrittenFilesCardClosed = false
     private let writtenFiles: [LocalAlpineWrittenFile]
+    private let commandResults: [LocalAlpineAgentCommandResult]
 
     init(
         content: String,
@@ -4244,6 +4245,7 @@ private struct LocalAlpineResultCard: View {
         self.isStreaming = isStreaming
         self.statusHistory = statusHistory
         self.writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata?["iexa_local_alpine_written_files"])
+        self.commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata?["iexa_local_alpine_command_results"])
     }
 
     private var parsed: ParsedLocalAlpineResult {
@@ -4252,7 +4254,11 @@ private struct LocalAlpineResultCard: View {
 
     private var statusText: String {
         if isStreaming { return parsed.streamingSummary(statusDetail: statusDetail) }
-        return parsed.activitySummary(hasError: parsed.hasNonZeroExit)
+        return parsed.activitySummary(
+            editedFileCount: writtenFiles.isEmpty ? nil : writtenFiles.count,
+            commandCount: executableCommandResults.isEmpty ? nil : executableCommandResults.count,
+            hasError: parsed.hasNonZeroExit || commandResults.contains { $0.failed }
+        )
     }
 
     private var statusColor: Color {
@@ -4263,6 +4269,16 @@ private struct LocalAlpineResultCard: View {
 
     private var statusDetail: String {
         statusHistory.last?.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private var executableCommandResults: [LocalAlpineAgentCommandResult] {
+        commandResults.filter { result in
+            result.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "write_files"
+        }
+    }
+
+    private var hiddenActivityCount: Int {
+        max(0, writtenFiles.count - 4) + max(0, executableCommandResults.count - 5)
     }
 
     var body: some View {
@@ -4293,6 +4309,10 @@ private struct LocalAlpineResultCard: View {
             }
             .buttonStyle(.plain)
 
+            if !writtenFiles.isEmpty || !executableCommandResults.isEmpty {
+                activityLedger
+            }
+
             if !writtenFiles.isEmpty && !isWrittenFilesCardClosed {
                 LocalAlpineWrittenFilesCard(files: writtenFiles) {
                     withAnimation(MicroAnimation.snappy) {
@@ -4309,6 +4329,84 @@ private struct LocalAlpineResultCard: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private var activityLedger: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(writtenFiles.prefix(4).enumerated()), id: \.offset) { _, file in
+                activityRow(
+                    icon: "square.and.pencil",
+                    tint: theme.brandPrimary,
+                    label: "已编辑",
+                    value: file.path,
+                    detail: "\(file.lineCount) 行 · \(file.byteCount) B"
+                )
+            }
+
+            ForEach(Array(executableCommandResults.prefix(5).enumerated()), id: \.offset) { _, result in
+                activityRow(
+                    icon: result.failed ? "exclamationmark.circle.fill" : "terminal.fill",
+                    tint: result.failed ? .orange : theme.textTertiary,
+                    label: result.failed ? "运行出错" : "已运行",
+                    value: oneLineCommand(result.command),
+                    detail: "退出码 \(result.exitCode.map(String.init) ?? "unknown") · \(result.cwd)"
+                )
+            }
+
+            if hiddenActivityCount > 0 {
+                Text("还有 \(hiddenActivityCount) 项，展开可查看完整命令和输出")
+                    .scaledFont(size: 11, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+                    .padding(.leading, 22)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.30 : 0.50))
+        )
+    }
+
+    private func activityRow(
+        icon: String,
+        tint: Color,
+        label: String,
+        value: String,
+        detail: String
+    ) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: icon)
+                .scaledFont(size: 11, weight: .semibold)
+                .foregroundStyle(tint)
+                .frame(width: 15, height: 15)
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Text(label)
+                        .scaledFont(size: 11, weight: .semibold)
+                        .foregroundStyle(theme.textSecondary)
+                    Text(value)
+                        .scaledFont(size: 11, weight: .medium, design: .monospaced)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Text(detail)
+                    .scaledFont(size: 10, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func oneLineCommand(_ command: String) -> String {
+        command
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -4561,13 +4659,15 @@ private struct ParsedLocalAlpineResult {
         statusDetail.isEmpty ? "正在运行本地 Alpine" : statusDetail
     }
 
-    func activitySummary(hasError: Bool) -> String {
+    func activitySummary(editedFileCount overrideEditedFileCount: Int? = nil, commandCount overrideCommandCount: Int? = nil, hasError: Bool) -> String {
         var parts: [String] = []
-        if editedFileCount > 0 {
-            parts.append("已编辑 \(editedFileCount) 个文件")
+        let effectiveEditedFileCount = overrideEditedFileCount ?? editedFileCount
+        let effectiveCommandCount = overrideCommandCount ?? commandCount
+        if effectiveEditedFileCount > 0 {
+            parts.append("已编辑 \(effectiveEditedFileCount) 个文件")
         }
-        if commandCount > 0 {
-            parts.append("已运行 \(commandCount) 条命令")
+        if effectiveCommandCount > 0 {
+            parts.append("已运行 \(effectiveCommandCount) 条命令")
         }
         if parts.isEmpty {
             parts.append("本地 Alpine 已完成")
