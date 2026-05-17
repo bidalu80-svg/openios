@@ -286,6 +286,7 @@ final class ChatViewModel {
     private var localAlpineFailureSignatures: [String: Int] = [:]
     private var localAlpineBlockedRepeatCommands: [String: Int] = [:]
     private var localAlpineFinalSummaryParentIds: Set<String> = []
+    private var localAlpineContinuationParentIds: Set<String> = []
     private var localAlpineFinishedContinuationMessageIds: Set<String> = []
     private var clientWebSearchExecutedMessageIds: Set<String> = []
     private var clientWebSearchContinuationMessageIds: Set<String> = []
@@ -6065,6 +6066,7 @@ final class ChatViewModel {
         localAlpineFailureSignatures.removeAll()
         localAlpineBlockedRepeatCommands.removeAll()
         localAlpineFinalSummaryParentIds.removeAll()
+        localAlpineContinuationParentIds.removeAll()
         localAlpineFinishedContinuationMessageIds.removeAll()
     }
 
@@ -6076,6 +6078,7 @@ final class ChatViewModel {
         localAlpineContinuationTask?.cancel()
         localAlpineContinuationTask = nil
         cancelLocalAlpineInput()
+        localAlpineContinuationParentIds.removeAll()
     }
 
     private func pauseLocalAlpineAgentLoopForUserInterjection() {
@@ -6087,6 +6090,7 @@ final class ChatViewModel {
         localAlpineContinuationTask = nil
         cancelLocalAlpineInput()
         localAlpineNoCommandContinuationRetries = 0
+        localAlpineContinuationParentIds.removeAll()
     }
 
     private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
@@ -8923,6 +8927,7 @@ final class ChatViewModel {
         localAlpineContinuationTask = nil
         cancelLocalAlpineInput()
         localAlpineNoCommandContinuationRetries = 0
+        localAlpineContinuationParentIds.removeAll()
     }
 
     private static func firstRegexCapture(in text: String, pattern: String) -> String? {
@@ -11545,12 +11550,14 @@ final class ChatViewModel {
         guard terminalEnabled, selectedTerminalIsLocalAlpine else { return false }
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return false }
         guard !localAlpineFinalSummaryParentIds.contains(resultMessageId) else { return false }
+        guard !localAlpineContinuationParentIds.contains(resultMessageId) else { return false }
         guard conversation?.messages.contains(where: {
             $0.metadata?["iexa_local_alpine_final_summary"] == resultMessageId
         }) != true else { return false }
         guard !hasLaterNonResultAssistant(after: resultMessageId) else { return false }
 
         localAlpineFinalSummaryParentIds.insert(resultMessageId)
+        localAlpineContinuationParentIds.insert(resultMessageId)
         localAlpineContinuationTask?.cancel()
         localAlpineContinuationTask = Task { [weak self] in
             await self?.startLocalAlpineContinuation(
@@ -11582,8 +11589,10 @@ final class ChatViewModel {
             appendLocalAlpineAgentLimitMessage(parentId: resultMessageId)
             return
         }
+        guard !localAlpineContinuationParentIds.contains(resultMessageId) else { return }
         guard forceContinue || isLocalAlpineAgentStillNeeded(after: resultMessageId) else { return }
 
+        localAlpineContinuationParentIds.insert(resultMessageId)
         localAlpineContinuationTask?.cancel()
         localAlpineContinuationTask = Task { [weak self] in
             await self?.startLocalAlpineContinuation(parentId: resultMessageId, forceContinue: forceContinue)
@@ -11977,6 +11986,10 @@ final class ChatViewModel {
         if normalized.contains("iexa_auto_repair_verified_success") {
             return false
         }
+        if containsSuccessfulLocalAlpineExit(normalized)
+            && !containsCriticalLocalAlpineFailureMarker(normalized) {
+            return false
+        }
         return containsLocalAlpineFailureMarker(normalized)
     }
 
@@ -11993,6 +12006,21 @@ final class ChatViewModel {
             normalized = normalized.replacingOccurrences(of: token, with: ".iexa_draft_writes")
         }
         return normalized
+    }
+
+    private static func containsSuccessfulLocalAlpineExit(_ normalized: String) -> Bool {
+        normalized.contains("退出码：`0`")
+            || normalized.contains("退出码: `0`")
+            || normalized.contains("exit code 0")
+            || normalized.contains("exit code: 0")
+    }
+
+    private static func containsCriticalLocalAlpineFailureMarker(_ normalized: String) -> Bool {
+        let markers = [
+            "traceback", "syntaxerror", "indentationerror", "modulenotfounderror",
+            "写入已拒绝", "写入失败", "缩进预检失败", "语法校验失败"
+        ]
+        return markers.contains { normalized.contains($0) }
     }
 
     private static func containsLocalAlpineFailureMarker(_ normalized: String) -> Bool {
