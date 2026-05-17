@@ -3876,7 +3876,7 @@ final class ChatViewModel {
         let normalizedLocalAlpineText = Self.normalizedLocalAlpineCommand(currentText)
         let shouldAutoUseLocalAlpine = !isLocalAlpineInterjection && (
             shouldAutoRouteExplicitLocalAlpineCommand(normalizedLocalAlpineText)
-                || Self.isExplicitLocalAlpineRequest(currentText)
+                || shouldUseLocalAlpineAgentForRequest(currentText)
                 || isExplicitLocalAlpineResume
         )
         if shouldAutoUseLocalAlpine {
@@ -4768,6 +4768,13 @@ final class ChatViewModel {
         return alpineTerms.contains { lowercased.contains($0) }
     }
 
+    private func shouldUseLocalAlpineAgentForRequest(_ text: String) -> Bool {
+        if Self.isExplicitLocalAlpineRequest(text) || Self.isExplicitLocalAlpineResumeRequest(text) {
+            return true
+        }
+        return Self.isLocalAlpineFollowUpFileOperation(text, messages: conversation?.messages ?? [])
+    }
+
     private static func isExplicitLocalAlpineRequest(_ text: String) -> Bool {
         let normalized = text
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4791,6 +4798,36 @@ final class ChatViewModel {
             "run command", "execute command", "run script", "run project"
         ]
         return terms.contains { normalized.contains($0) }
+    }
+
+    private static func isLocalAlpineFollowUpFileOperation(_ text: String, messages: [ChatMessage]) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        guard messages.contains(where: { Self.isLocalAlpineAgentResult($0) }) else { return false }
+
+        let operationTerms = [
+            "创建", "新建", "写入", "生成", "保存", "create", "write", "save",
+            "删", "删除", "移除", "清理", "删掉", "删了", "delete", "remove", "rm ",
+            "读", "读取", "打开", "查看", "看一下", "看看", "cat ", "read",
+            "列出", "列表", "目录", "搜索", "查找", "grep", "find",
+            "改", "修改", "重命名", "移动", "复制", "rename", "move", "copy",
+            "执行", "运行", "跑", "测试", "execute", "run", "test"
+        ]
+        guard operationTerms.contains(where: { normalized.contains($0) }) else { return false }
+
+        if normalized.contains("/mnt/iexa") || normalized.contains("本地") || normalized.contains("alpine") {
+            return true
+        }
+        let localReferenceTerms = [
+            "这个", "这个文件", "刚才", "上面", "上一", "生成的", "创建的",
+            "脚本", "文件", "项目", "目录", "lua", "python", "py", "js", "ts",
+            "html", "css", "json", "md", "sh"
+        ]
+        if localReferenceTerms.contains(where: { normalized.contains($0) }) {
+            return true
+        }
+        let fileReferencePattern = #"[a-z0-9_\-./]+\.(lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|swift|c|cpp|h|rs|go|java|kt|rb|php)"#
+        return normalized.range(of: fileReferencePattern, options: .regularExpression) != nil
     }
 
     private static func fallbackLocalAlpineBlockForAssistantCode(content: String, userText: String) -> String? {
@@ -4823,6 +4860,17 @@ final class ChatViewModel {
         """
     }
 
+    private static func fallbackLocalAlpineBlockForAssistantShellCode(content: String) -> String? {
+        guard let shell = firstRunnableShellCodeBlock(in: content) else { return nil }
+        let command = normalizedShellCodeBlock(shell)
+        guard shouldSendRawTextDirectlyToLocalAlpine(command) else { return nil }
+        return """
+        ```iexa_alpine
+        \(command)
+        ```
+        """
+    }
+
     private static func fallbackLocalAlpineBlockForLatestAssistantCode(
         messages: [ChatMessage],
         excludingMessageId: String? = nil,
@@ -4836,6 +4884,94 @@ final class ChatViewModel {
                 return fallback
             }
         }
+        return nil
+    }
+
+    private func fallbackLocalAlpineBlockForFollowUpOperation(userText: String) -> String? {
+        guard let messages = conversation?.messages else { return nil }
+        guard let command = Self.localAlpineFollowUpCommand(for: userText, messages: messages) else { return nil }
+        return """
+        ```iexa_alpine
+        \(command)
+        ```
+        """
+    }
+
+    private static func localAlpineFollowUpCommand(for text: String, messages: [ChatMessage]) -> String? {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard isLocalAlpineFollowUpFileOperation(text, messages: messages) else { return nil }
+
+        let explicitPath = extractLocalAlpinePath(from: text)
+        let targetPath = explicitPath ?? latestLocalAlpineTouchedPath(
+            in: messages,
+            extensionHint: localAlpineExtensionHint(in: normalized)
+        )
+        let target = targetPath ?? "/mnt/iexa"
+        guard isSafeLocalAlpineTarget(target) else { return nil }
+        let quotedTarget = shellQuoted(target)
+
+        if containsAny(normalized, ["删", "删除", "移除", "清理", "删掉", "删了", "delete", "remove", "rm "]) {
+            guard targetPath != nil else { return nil }
+            return """
+            target=\(quotedTarget)
+            if [ -e "$target" ]; then
+              rm -rf -- "$target" && printf 'deleted: %s\\n' "$target"
+            else
+              printf 'missing: %s\\n' "$target"
+            fi
+            """
+        }
+
+        if containsAny(normalized, ["读", "读取", "打开", "查看", "看一下", "看看", "cat ", "read"]) {
+            return """
+            target=\(quotedTarget)
+            if [ -f "$target" ]; then
+              sed -n '1,240p' "$target"
+            elif [ -d "$target" ]; then
+              ls -la "$target"
+            else
+              printf 'missing: %s\\n' "$target"
+            fi
+            """
+        }
+
+        if containsAny(normalized, ["列出", "列表", "目录", "ls ", "list"]) {
+            return """
+            target=\(quotedTarget)
+            if [ -d "$target" ]; then
+              ls -la "$target"
+            else
+              ls -la /mnt/iexa
+            fi
+            """
+        }
+
+        if containsAny(normalized, ["执行", "运行", "跑", "测试", "execute", "run", "test"]) {
+            guard let targetPath else { return nil }
+            let runner: String
+            switch (targetPath as NSString).pathExtension.lowercased() {
+            case "lua": runner = "lua"
+            case "py": runner = "python3"
+            case "js", "mjs", "cjs": runner = "node"
+            case "sh", "bash": runner = "sh"
+            default: runner = ""
+            }
+            if runner.isEmpty {
+                return """
+                target=\(quotedTarget)
+                if [ -x "$target" ]; then
+                  "$target"
+                else
+                  printf 'not executable: %s\\n' "$target"
+                fi
+                """
+            }
+            return """
+            target=\(quotedTarget)
+            \(runner) "$target"
+            """
+        }
+
         return nil
     }
 
@@ -4978,6 +5114,153 @@ final class ChatViewModel {
             }
         }
         return nil
+    }
+
+    private static func firstRunnableShellCodeBlock(in content: String) -> String? {
+        let nsContent = content as NSString
+        guard let regex = try? NSRegularExpression(
+            pattern: #"```([^\n`]*)\n([\s\S]*?)```"#,
+            options: [.caseInsensitive]
+        ) else { return nil }
+        let shellLanguages: Set<String> = ["bash", "sh", "shell", "zsh", "terminal", "console"]
+        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
+        for match in matches where match.numberOfRanges >= 3 {
+            let info = nsContent.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard shellLanguages.contains(info) else { continue }
+            let body = nsContent.substring(with: match.range(at: 2))
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\n"))
+            if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return body
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedShellCodeBlock(_ code: String) -> String {
+        code
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+            .map { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("$ ") {
+                    return String(trimmed.dropFirst(2))
+                }
+                return line
+            }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func containsAny(_ text: String, _ terms: [String]) -> Bool {
+        terms.contains { text.contains($0) }
+    }
+
+    private static func extractLocalAlpinePath(from text: String) -> String? {
+        let patterns = [
+            #"`([^`]+)`"#,
+            #""([^"]+)""#,
+            #"['“”‘’]([^'“”‘’]+)['“”‘’]"#,
+            #"(/mnt/iexa/[^\s`"'“”‘’\]\)）>，。；;]+)"#,
+            #"((?:[\w.-]+/)+[\w.-]+\.(?:lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|swift|c|cpp|h|rs|go|java|kt|rb|php))"#,
+            #"([\w.-]+\.(?:lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|swift|c|cpp|h|rs|go|java|kt|rb|php))"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard let match = regex.firstMatch(in: text, range: nsRange),
+                  match.numberOfRanges >= 2,
+                  let range = Range(match.range(at: 1), in: text) else {
+                continue
+            }
+            let candidate = cleanLocalAlpinePathCandidate(String(text[range]))
+            let runtimePath = localAlpineRuntimePath(for: candidate, cwd: "/mnt/iexa")
+            if isSafeLocalAlpineTarget(runtimePath) {
+                return runtimePath
+            }
+        }
+        return nil
+    }
+
+    private static func latestLocalAlpineTouchedPath(
+        in messages: [ChatMessage],
+        extensionHint: String?
+    ) -> String? {
+        for message in messages.reversed() where Self.isLocalAlpineAgentResult(message) {
+            let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(message.metadata?["iexa_local_alpine_written_files"])
+            let writtenPaths = writtenFiles.map(\.path)
+            if let match = preferredLocalAlpinePath(from: writtenPaths, extensionHint: extensionHint) {
+                return match
+            }
+
+            let text = [
+                message.metadata?["iexa_local_alpine_raw_result"],
+                message.metadata?["iexa_local_alpine_display_command"],
+                message.content
+            ]
+                .compactMap { $0 }
+                .joined(separator: "\n")
+            let paths = localAlpinePaths(in: text)
+            if let match = preferredLocalAlpinePath(from: paths, extensionHint: extensionHint) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    private static func preferredLocalAlpinePath(from paths: [String], extensionHint: String?) -> String? {
+        let safePaths = paths
+            .map(cleanLocalAlpinePathCandidate)
+            .map { localAlpineRuntimePath(for: $0, cwd: "/mnt/iexa") }
+            .filter { isSafeLocalAlpineTarget($0) }
+        guard !safePaths.isEmpty else { return nil }
+        if let extensionHint,
+           let preferred = safePaths.reversed().first(where: {
+            ($0 as NSString).pathExtension.lowercased() == extensionHint
+           }) {
+            return preferred
+        }
+        return safePaths.last
+    }
+
+    private static func localAlpinePaths(in text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(/mnt/iexa/[^\s`"'“”‘’\]\)）>，。；;]+)"#,
+            options: [.caseInsensitive]
+        ) else { return [] }
+        let nsText = text as NSString
+        return regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+            .compactMap { match in
+                guard match.numberOfRanges >= 2 else { return nil }
+                return cleanLocalAlpinePathCandidate(nsText.substring(with: match.range(at: 1)))
+            }
+    }
+
+    private static func cleanLocalAlpinePathCandidate(_ path: String) -> String {
+        path.trimmingCharacters(
+            in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "`\"'“”‘’.,，。:：;；)]）"))
+        )
+    }
+
+    private static func localAlpineExtensionHint(in text: String) -> String? {
+        let hints: [(String, String)] = [
+            ("lua", "lua"), ("python", "py"), ("py", "py"), ("javascript", "js"),
+            ("node", "js"), ("js", "js"), ("typescript", "ts"), ("ts", "ts"),
+            ("html", "html"), ("css", "css"), ("json", "json"), ("markdown", "md"),
+            ("md", "md"), ("shell", "sh"), ("bash", "sh"), ("sh", "sh")
+        ]
+        return hints.first(where: { text.contains($0.0) })?.1
+    }
+
+    private static func isSafeLocalAlpineTarget(_ path: String) -> Bool {
+        let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        guard normalized == "/mnt/iexa" || normalized.hasPrefix("/mnt/iexa/") else { return false }
+        return !normalized.split(separator: "/").contains("..")
     }
 
     private static func shellQuoted(_ value: String) -> String {
@@ -5176,7 +5459,8 @@ final class ChatViewModel {
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
         if result.interactiveRequest == nil {
-            scheduleLocalAlpineFinalSummary(after: assistantMessageId)
+            localAlpineAgentStopRequested = false
+            scheduleLocalAlpineContinuationIfNeeded(after: assistantMessageId, forceContinue: true)
         }
     }
 
@@ -8255,6 +8539,8 @@ final class ChatViewModel {
         - The execution is non-interactive. Do not rely on prompts, REPLs, `input()`, `read`, `scanf`, `cin`, `npm init` prompts, editors waiting for input, or long-running servers that never exit.
 
         Operational rules:
+        - Act like a Codex CLI style agent loop: understand the user's goal, choose one bounded next step, execute it, read the real output, then either continue with the next step or stop with a concise summary.
+        - Keep an internal step ledger: what has already been inspected, what command/file write was just attempted, what the output proved, and what the next smallest useful step is. Do not rely on memory guesses when the Local Alpine result is available.
         - Local Alpine terminal mode owns local project operations. If the user asks to list/read/search/create/modify/delete project files, inspect a directory, run a script, or "read the mnt directory", use `/mnt/iexa` via `iexa_alpine`; do not use the Documents/Iexa Workspace tool.
         - If the user asks you to run, execute, test, verify, inspect the environment, install packages, write a runnable script/project, crawl a website, or diagnose command output, use `iexa_alpine`.
         - Do not merely explain commands when the user wants action. Emit the block so the app executes it.
@@ -8262,7 +8548,8 @@ final class ChatViewModel {
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
         - For scripts/projects, prefer JSON `write_files` / `code_lines` inside `iexa_alpine` to create files, then run a bounded verification command. This keeps file bytes under the tool protocol instead of relying on chat rendering.
-        - For Python files, send the complete intended file content through `write_files`. The app normalizes newlines/tabs/common mojibake, then runs a Local Alpine AST-based indentation repair pass when the file is invalid or structurally suspicious, and validates syntax before continuing.
+        - Python write protocol is mandatory: send the complete intended `.py` file through `iexa_alpine` JSON `write_files` using `code_lines` for normal files or `content_base64` for very long/complex content. Do not write Python through visible Markdown, partial snippets, shell heredocs, `echo`, or `cat > file.py` unless explicitly debugging the writer itself.
+        - The app has a built-in Python formatter/write guard. Python `write_files` is routed through `LocalAlpinePythonWriteGuard`: it preserves intended block structure, normalizes newlines/tabs/common mojibake, runs an AST indentation repair pass when needed, then validates syntax before continuing. Use this path so indentation is not eaten by chat rendering or shell quoting.
         - When fixing an existing Python file after a syntax/indentation error, rewrite the complete corrected target Python file with `iexa_alpine` JSON `write_files`. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
         - Prefer complete structured Python writes for class/function bodies, then run the requested script or a bounded verification command.
         - After writing Python, run the requested script or a bounded verification command. If syntax or indentation fails, return one complete corrected file through `write_files`; do not try to fix only the reported line.
@@ -9741,8 +10028,7 @@ final class ChatViewModel {
             })?.content else {
                 return false
             }
-            return Self.isExplicitLocalAlpineRequest(latestUserText)
-                || Self.isExplicitLocalAlpineResumeRequest(latestUserText)
+            return shouldUseLocalAlpineAgentForRequest(latestUserText)
         }()
         let memoryContext = await localMemorySystemContext()
         let workspaceContext = shouldExecuteLocalWorkspaceAgentForCurrentRequest()
@@ -10193,12 +10479,15 @@ final class ChatViewModel {
         let latestUserText = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content
-        let userRequestedExecution = latestUserText.map(Self.isExplicitLocalAlpineRequest) ?? false
+        let userRequestedExecution = latestUserText.map { shouldUseLocalAlpineAgentForRequest($0) } ?? false
 
         let executableContent: String
         if userRequestedExecution,
            let userText = latestUserText,
            let fallback = Self.fallbackLocalAlpineBlockForAssistantCode(content: content, userText: userText) {
+            executableContent = fallback
+        } else if userRequestedExecution,
+                  let fallback = Self.fallbackLocalAlpineBlockForAssistantShellCode(content: content) {
             executableContent = fallback
         } else if userRequestedExecution,
                   let userText = latestUserText,
@@ -10214,6 +10503,10 @@ final class ChatViewModel {
             executableContent = normalized
         } else if message.metadata?["iexa_local_alpine_continuation"] == "true" {
             return
+        } else if userRequestedExecution,
+                  let userText = latestUserText,
+                  let fallback = fallbackLocalAlpineBlockForFollowUpOperation(userText: userText) {
+            executableContent = fallback
         } else if userRequestedExecution,
                   let userText = latestUserText,
                   let fallback = Self.fallbackLocalAlpineBlock(for: userText) {
@@ -10760,9 +11053,7 @@ final class ChatViewModel {
             scheduleLocalAlpineContinuationIfNeeded(after: resultMessageId, forceContinue: true)
         } else if result.interactiveRequest == nil,
                   !localAlpineAgentStopRequested {
-            if !scheduleLocalAlpineFinalSummary(after: resultMessageId) {
-                localAlpineAgentStopRequested = true
-            }
+            scheduleLocalAlpineContinuationIfNeeded(after: resultMessageId, forceContinue: true)
         } else {
             localAlpineAgentStopRequested = true
         }
@@ -11312,11 +11603,15 @@ final class ChatViewModel {
         [Local Alpine continuation]
         You are in a continuous Local Alpine agent loop. Read the latest real Local Alpine result above.
         Loop Runtime:
+        - Operate like Codex CLI: plan internally, execute exactly one bounded next step, observe the real result, repair if needed, verify, then summarize only when the user goal is actually done.
         - Treat every Local Alpine result as an observation. Read its stdout/stderr/exit code before deciding the next step; exit code 0 does not automatically mean the user's task is complete.
         - Continue until the task is verified complete, blocked by missing external information, or the user stops it. Do not stop after a single command if the output shows an error or incomplete state.
         - If the user's task is complete, answer normally and do not emit `iexa_alpine`. Include a concise Codex-style summary: what you did, what command/output verified it, files changed/created, and any remaining caveat.
         Tool System:
         - Use exactly one next tool action per assistant turn. For local shell/files, emit one `iexa_alpine` block. For current web facts, rely on the web-search context already injected by the app; if more current info is needed, ask for/perform a more precise search before guessing.
+        Python Writes:
+        - For `.py` files, always use `iexa_alpine` JSON `write_files` with full-file `code_lines` or `content_base64`; this app's built-in Python formatter/write guard only protects indentation reliably on that structured path.
+        - After writing Python, run `python3 -m py_compile <file>` or the requested script. If indentation/syntax fails, rewrite the complete target file through `write_files`, then verify again.
         Browser:
         - If a website/API check is needed, use `curl -I`, `curl -L`, `curl -w`, or a short Python `urllib` fetch. Never execute a bare domain as a shell command.
         Retry:
