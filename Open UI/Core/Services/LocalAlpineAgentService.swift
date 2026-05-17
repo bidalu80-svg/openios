@@ -717,7 +717,7 @@ actor LocalAlpineAgentService {
             lines.append("  - Python 语法校验通过。")
         } else {
             let output = validationResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            lines.append("  - Python 语法校验失败，文件已保留；需要继续修复后再运行。")
+            lines.append("  - Python 语法校验失败，已阻止后续命令运行；需要完整重写该文件后再验证。")
             if !output.isEmpty {
                 lines.append("    - 输出：\(String(output.prefix(1_000)))")
             }
@@ -732,7 +732,7 @@ actor LocalAlpineAgentService {
                 source: source.displayName,
                 byteCount: finalByteCount
             ),
-            hadFailure: false
+            hadFailure: validationResult.exitCode != 0
         )
     }
 

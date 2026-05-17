@@ -8646,6 +8646,7 @@ final class ChatViewModel {
         - For scripts/projects, prefer JSON `write_files` / `code_lines` inside `iexa_alpine` to create files, then run a bounded verification command. This keeps file bytes under the tool protocol instead of relying on chat rendering.
         - Python write protocol is mandatory: send the complete intended `.py` file through `iexa_alpine` JSON `write_files` using `code_lines` for normal files or `content_base64` for very long/complex content. Do not write Python through visible Markdown, partial snippets, shell heredocs, `echo`, or `cat > file.py` unless explicitly debugging the writer itself.
         - The app has a built-in Python formatter/write guard. Python `write_files` is routed through `LocalAlpinePythonWriteGuard`: it preserves intended block structure, normalizes newlines/tabs/common mojibake, runs an AST indentation repair pass when needed, then validates syntax before continuing. Use this path so indentation is not eaten by chat rendering or shell quoting.
+        - The app treats Python AST/compile validation as the write gate. If that gate fails, the command after `write_files` is blocked; your next step must be a complete-file rewrite through structured `write_files`, not a line patch or a repeated run command.
         - When fixing an existing Python file after a syntax/indentation error, rewrite the complete corrected target Python file with `iexa_alpine` JSON `write_files`. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
         - Prefer complete structured Python writes for class/function bodies, then run the requested script or a bounded verification command.
         - After writing Python, run the requested script or a bounded verification command. If syntax or indentation fails, return one complete corrected file through `write_files`; do not try to fix only the reported line.
@@ -11708,6 +11709,7 @@ final class ChatViewModel {
         - Before the block, write at most one short visible sentence naming the current step. Do not reveal detailed hidden reasoning.
         Python Writes:
         - For `.py` files, always use `iexa_alpine` JSON `write_files` with full-file `code_lines` or `content_base64`; this app's built-in Python formatter/write guard only protects indentation reliably on that structured path.
+        - Python writes are transactional: if the app reports Python AST/compile validation failed, do not run the broken file and do not patch one line. Rewrite the complete `.py` target through structured `write_files`, then verify again.
         - After writing Python, run `python3 -m py_compile <file>` or the requested script. If indentation/syntax fails, rewrite the complete target file through `write_files`, then verify again.
         Browser:
         - If a website/API check is needed, use `curl -I`, `curl -L`, `curl -w`, or a short Python `urllib` fetch. Never execute a bare domain as a shell command.
