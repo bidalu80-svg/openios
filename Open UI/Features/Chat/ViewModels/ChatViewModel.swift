@@ -3866,19 +3866,23 @@ final class ChatViewModel {
             currentText,
             modelId: modelId
         )
-        let shouldAutoUseLocalAlpine = !shouldKeepMediaRoute && !isLocalAlpineInterjection && (
-            shouldAutoRouteExplicitLocalAlpineCommand(normalizedLocalAlpineText)
-                || shouldUseLocalAlpineAgentForRequest(currentText, modelId: modelId)
+        let shouldKeepNativeLinkRoute = Self.shouldKeepNativeLinkResolverOffLocalAlpine(currentText)
+        let terminalButtonIsLocalAlpine = terminalEnabled && selectedTerminalIsLocalAlpine
+        let shouldAutoOpenLocalAlpine = !shouldKeepMediaRoute && !shouldKeepNativeLinkRoute && !isLocalAlpineInterjection && (
+            shouldAutoRouteExplicitLocalAlpineCommand(currentText)
                 || isExplicitLocalAlpineResume
         )
-        if shouldAutoUseLocalAlpine {
+        if shouldAutoOpenLocalAlpine {
             selectedTerminalServer = .localAlpine
             terminalEnabled = true
         }
         if !shouldKeepMediaRoute,
+           !shouldKeepNativeLinkRoute,
            processedAttachments.isEmpty,
-           shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText),
-           (terminalEnabled && selectedTerminalIsLocalAlpine || shouldAutoUseLocalAlpine) {
+           (terminalButtonIsLocalAlpine
+                ? shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText)
+                : Self.shouldSendRawTextDirectlyToLocalAlpine(currentText)),
+           (terminalButtonIsLocalAlpine || shouldAutoOpenLocalAlpine) {
             await sendDirectLocalAlpineCommand(currentText, modelId: modelId)
             return
         }
@@ -4753,20 +4757,20 @@ final class ChatViewModel {
     private func shouldAutoRouteExplicitLocalAlpineCommand(_ text: String) -> Bool {
         let lowercased = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !lowercased.isEmpty else { return false }
+        if Self.shouldAutoRouteRawShellTextToLocalAlpine(lowercased) { return true }
+        if Self.embeddedLocalAlpinePackageManagerCommand(in: lowercased) != nil { return true }
+        guard Self.hasExplicitLocalAlpineRouteIntent(lowercased) else { return false }
         if Self.localAlpineDiagnosticCommand(for: lowercased) != nil { return true }
         if Self.localAlpineNaturalLanguageCommand(for: lowercased) != nil { return true }
-        if Self.embeddedLocalAlpinePackageManagerCommand(in: lowercased) != nil { return true }
-        let alpineTerms = [
-            "alpine", "apk ", "/etc/alpine-release", "python3", "pip ", "pip3 ",
-            "gcc", "g++", "make", "cmake", "vim", "node", "npm ", "npx ",
-            "curl ", "wget ", "git ", "uname", "whoami", "ls /", "pwd", "/mnt/iexa"
-        ]
-        return alpineTerms.contains { lowercased.contains($0) }
+        return Self.hasExplicitLocalAlpineActionIntent(lowercased)
     }
 
     private func shouldUseLocalAlpineAgentForRequest(_ text: String, modelId: String? = nil) -> Bool {
         let effectiveModelId = modelId ?? selectedModelId ?? conversation?.model ?? ""
         if shouldKeepMediaGenerationRequestOffLocalAlpine(text, modelId: effectiveModelId) {
+            return false
+        }
+        if Self.shouldKeepNativeLinkResolverOffLocalAlpine(text) {
             return false
         }
         if Self.isExplicitLocalAlpineRequest(text) || Self.isExplicitLocalAlpineResumeRequest(text) {
@@ -4779,6 +4783,18 @@ final class ChatViewModel {
             return true
         }
         return Self.isLocalAlpineFollowUpFileOperation(text, messages: conversation?.messages ?? [])
+    }
+
+    private static func shouldKeepNativeLinkResolverOffLocalAlpine(_ text: String) -> Bool {
+        isDouyinLinkRequest(text) && !hasExplicitLocalAlpineRouteIntent(text.lowercased())
+    }
+
+    private static func isDouyinLinkRequest(_ text: String) -> Bool {
+        let urls = WebLinkContextResolver.extractHTTPURLs(from: text, limit: 5)
+        return urls.contains { url in
+            let host = url.host?.lowercased() ?? ""
+            return host.contains("douyin.com") || host.contains("iesdouyin.com")
+        }
     }
 
     private func shouldKeepMediaGenerationRequestOffLocalAlpine(_ text: String, modelId: String) -> Bool {
@@ -4800,6 +4816,9 @@ final class ChatViewModel {
     }
 
     private static func hasStrongLocalAlpineIntent(_ normalized: String) -> Bool {
+        if hasExplicitLocalAlpineRouteIntent(normalized) {
+            return true
+        }
         let strongTerms = [
             "iexa_alpine", "local alpine", "/mnt/iexa", "alpine 执行", "alpine运行",
             "终端", "命令", "用 shell", "用 bash", "shell command", "bash command",
@@ -4823,6 +4842,30 @@ final class ChatViewModel {
             "python ", "python3 ", "rm ", "sed ", "touch ", "uname", "wget ", "whoami"
         ]
         return commandPrefixes.contains { normalized == $0.trimmingCharacters(in: .whitespaces) || normalized.hasPrefix($0) }
+    }
+
+    private static func hasExplicitLocalAlpineRouteIntent(_ normalized: String) -> Bool {
+        let text = normalized.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !text.isEmpty else { return false }
+        let explicitTerms = [
+            "iexa_alpine", "local alpine", "/mnt/iexa", "alpine 执行", "alpine运行",
+            "用终端", "在终端", "终端里", "终端执行", "终端运行",
+            "用命令", "命令执行", "执行命令", "运行命令", "shell", "bash",
+            "terminal", "command line", "run command", "execute command"
+        ]
+        return explicitTerms.contains { text.contains($0) }
+    }
+
+    private static func hasExplicitLocalAlpineActionIntent(_ normalized: String) -> Bool {
+        let actionTerms = [
+            "执行", "运行", "跑", "测试", "验证", "检查", "查看", "读取", "列出",
+            "安装", "装", "编译", "构建", "创建", "新建", "生成", "写入", "保存",
+            "修改", "删除", "修复", "调试",
+            "execute", "run", "test", "verify", "check", "inspect", "read", "list",
+            "install", "build", "compile", "create", "write", "save", "modify",
+            "delete", "fix", "debug"
+        ]
+        return containsAny(normalized, actionTerms)
     }
 
     private static func isExplicitLocalAlpineRequest(_ text: String) -> Bool {
@@ -5887,6 +5930,27 @@ final class ChatViewModel {
         if trimmed.range(of: #"[;&|`$<>]"#, options: .regularExpression) != nil { return true }
 
         let command = trimmed.split(separator: " ", maxSplits: 1).first.map(String.init) ?? trimmed
+        return isKnownLocalAlpineShellCommand(command)
+    }
+
+    private static func shouldAutoRouteRawShellTextToLocalAlpine(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.hasPrefix("$ ") { return true }
+        if trimmed.hasPrefix("./") || trimmed.hasPrefix("/") { return true }
+        if trimmed.range(of: #"[;&|`$<>]"#, options: .regularExpression) != nil { return true }
+        let nonEmptyLines = trimmed
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        guard !nonEmptyLines.isEmpty else { return false }
+        return nonEmptyLines.allSatisfy { line in
+            let command = line.split(separator: " ", maxSplits: 1).first.map(String.init) ?? line
+            return isKnownLocalAlpineShellCommand(command)
+        }
+    }
+
+    private static func isKnownLocalAlpineShellCommand(_ command: String) -> Bool {
         let knownCommands: Set<String> = [
             "apk", "ash", "sh", "bash", "cat", "cd", "chmod", "chown", "cp", "date",
             "curl", "df", "du", "echo", "env", "find", "free", "gcc", "g++", "git", "grep", "head",
