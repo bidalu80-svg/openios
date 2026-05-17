@@ -3862,16 +3862,21 @@ final class ChatViewModel {
         errorMessage = nil
 
         let normalizedLocalAlpineText = Self.normalizedLocalAlpineCommand(currentText)
-        let shouldAutoUseLocalAlpine = !isLocalAlpineInterjection && (
+        let shouldKeepMediaRoute = shouldKeepMediaGenerationRequestOffLocalAlpine(
+            currentText,
+            modelId: modelId
+        )
+        let shouldAutoUseLocalAlpine = !shouldKeepMediaRoute && !isLocalAlpineInterjection && (
             shouldAutoRouteExplicitLocalAlpineCommand(normalizedLocalAlpineText)
-                || shouldUseLocalAlpineAgentForRequest(currentText)
+                || shouldUseLocalAlpineAgentForRequest(currentText, modelId: modelId)
                 || isExplicitLocalAlpineResume
         )
         if shouldAutoUseLocalAlpine {
             selectedTerminalServer = .localAlpine
             terminalEnabled = true
         }
-        if processedAttachments.isEmpty,
+        if !shouldKeepMediaRoute,
+           processedAttachments.isEmpty,
            shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText),
            (terminalEnabled && selectedTerminalIsLocalAlpine || shouldAutoUseLocalAlpine) {
             await sendDirectLocalAlpineCommand(currentText, modelId: modelId)
@@ -4759,7 +4764,11 @@ final class ChatViewModel {
         return alpineTerms.contains { lowercased.contains($0) }
     }
 
-    private func shouldUseLocalAlpineAgentForRequest(_ text: String) -> Bool {
+    private func shouldUseLocalAlpineAgentForRequest(_ text: String, modelId: String? = nil) -> Bool {
+        let effectiveModelId = modelId ?? selectedModelId ?? conversation?.model ?? ""
+        if shouldKeepMediaGenerationRequestOffLocalAlpine(text, modelId: effectiveModelId) {
+            return false
+        }
         if Self.isExplicitLocalAlpineRequest(text) || Self.isExplicitLocalAlpineResumeRequest(text) {
             return true
         }
@@ -4767,6 +4776,47 @@ final class ChatViewModel {
             return true
         }
         return Self.isLocalAlpineFollowUpFileOperation(text, messages: conversation?.messages ?? [])
+    }
+
+    private func shouldKeepMediaGenerationRequestOffLocalAlpine(_ text: String, modelId: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+
+        if Self.hasStrongLocalAlpineIntent(normalized) {
+            return false
+        }
+
+        if shouldUseDirectImageGeneration(modelId: modelId)
+            || shouldPreferChatNativeImageGeneration(modelId: modelId) {
+            return true
+        }
+        if imageGenerationEnabled && Self.looksLikeImageGenerationRequest(normalized) {
+            return true
+        }
+        return shouldUseDirectVideoGeneration(modelId: modelId)
+    }
+
+    private static func hasStrongLocalAlpineIntent(_ normalized: String) -> Bool {
+        let strongTerms = [
+            "iexa_alpine", "local alpine", "/mnt/iexa", "alpine 执行", "alpine运行",
+            "终端", "命令", "用 shell", "用 bash", "shell command", "bash command",
+            "执行脚本", "运行脚本", "执行代码", "运行代码",
+            "安装依赖", "装依赖", "安装包", "装包", "编译项目", "构建项目",
+            "run command", "execute command", "run script", "execute script",
+            "install dependencies", "install deps", "install package",
+            "build project", "compile project"
+        ]
+        if strongTerms.contains(where: { normalized.contains($0) }) {
+            return true
+        }
+
+        let commandPrefixes = [
+            "$ ", "./", "apk ", "ash ", "sh ", "bash ", "cat ", "cd ", "chmod ",
+            "cp ", "curl ", "find ", "gcc ", "g++ ", "git ", "grep ", "ls ",
+            "lua ", "mkdir ", "mv ", "node ", "npm ", "npx ", "pip ", "pip3 ",
+            "python ", "python3 ", "rm ", "sed ", "touch ", "uname", "wget ", "whoami"
+        ]
+        return commandPrefixes.contains { normalized == $0.trimmingCharacters(in: .whitespaces) || normalized.hasPrefix($0) }
     }
 
     private static func isExplicitLocalAlpineRequest(_ text: String) -> Bool {
@@ -10568,21 +10618,28 @@ final class ChatViewModel {
                !cp.trimmingCharacters(in: .whitespaces).isEmpty { return cp }
             return conversation.systemPrompt
         }()
+        let latestUserTextForLocalAlpine = conversation.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })?.content
+        let localAlpineModelId = selectedModelId ?? conversation.model ?? ""
+        let localAlpineTerminalApplies = terminalEnabled
+            && selectedTerminalIsLocalAlpine
+            && !(latestUserTextForLocalAlpine.map {
+                shouldKeepMediaGenerationRequestOffLocalAlpine($0, modelId: localAlpineModelId)
+            } ?? false)
         let shouldIncludeLocalAlpineContext: Bool = {
             if let includeLocalAlpineExecutionContext {
                 return includeLocalAlpineExecutionContext
             }
-            guard terminalEnabled, selectedTerminalIsLocalAlpine else { return false }
-            guard let latestUserText = conversation.messages.last(where: {
-                $0.role == .user && !Self.isLocalAlpineAgentResult($0)
-            })?.content else {
+            guard localAlpineTerminalApplies else { return false }
+            guard let latestUserText = latestUserTextForLocalAlpine else {
                 return false
             }
             return shouldUseLocalAlpineAgentForRequest(latestUserText)
         }()
         let memoryContext = await localMemorySystemContext()
         let workspaceContext: String? = {
-            if shouldIncludeLocalAlpineContext || (terminalEnabled && selectedTerminalIsLocalAlpine) {
+            if shouldIncludeLocalAlpineContext || localAlpineTerminalApplies {
                 return Self.workspaceDisabledForLocalAlpineSystemContext()
             }
             return shouldExecuteLocalWorkspaceAgentForCurrentRequest()
@@ -11034,7 +11091,14 @@ final class ChatViewModel {
         let latestUserText = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content
-        let userRequestedExecution = latestUserText.map { shouldUseLocalAlpineAgentForRequest($0) } ?? false
+        let effectiveModelId = selectedModelId ?? message.model ?? conversation?.model ?? ""
+        if let latestUserText,
+           shouldKeepMediaGenerationRequestOffLocalAlpine(latestUserText, modelId: effectiveModelId) {
+            return
+        }
+        let userRequestedExecution = latestUserText.map {
+            shouldUseLocalAlpineAgentForRequest($0, modelId: effectiveModelId)
+        } ?? false
 
         let executableContent: String
         if userRequestedExecution,
