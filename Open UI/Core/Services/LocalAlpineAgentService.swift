@@ -710,7 +710,51 @@ actor LocalAlpineAgentService {
             validationResult = await LocalAlpineTerminalService.shared.execute(command: validationCommand, cwd: cwd)
         } else if validationResult.exitCode != 0 {
             let repairOutput = repairResult?.output.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            lines.append("  - Python AST 缩进修复器未能安全修复，已保留原文件。")
+            let syntaxRepairs = LocalAlpinePythonWriteGuard.repairCandidatesForSyntaxIssue(
+                finalContent,
+                diagnosticOutput: validationResult.output + "\n" + repairOutput
+            )
+            var acceptedSyntaxRepair: LocalAlpinePythonWriteGuard.SyntaxRepair?
+            var rejectedCandidateOutputs: [String] = []
+            let targetSplit = splitFilePath(target)
+            for syntaxRepair in syntaxRepairs {
+                guard let repairedData = syntaxRepair.content.data(using: .utf8) else { continue }
+                try? await LocalAlpineTerminalService.shared.writeFile(
+                    data: repairedData,
+                    fileName: targetSplit.fileName,
+                    destinationPath: targetSplit.directory
+                )
+                let candidateValidation = await LocalAlpineTerminalService.shared.execute(command: validationCommand, cwd: cwd)
+                if candidateValidation.exitCode == 0 {
+                    finalContent = syntaxRepair.content
+                    finalByteCount = repairedData.count
+                    validationResult = candidateValidation
+                    acceptedSyntaxRepair = syntaxRepair
+                    break
+                }
+                let candidateOutput = candidateValidation.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !candidateOutput.isEmpty {
+                    rejectedCandidateOutputs.append(String(candidateOutput.prefix(1_000)))
+                }
+            }
+
+            if let acceptedSyntaxRepair {
+                lines.append("  - Python 写入保护器已重排缩进并通过 ast.parse 校验。")
+                lines.append(contentsOf: acceptedSyntaxRepair.notes.map { "    - \($0)" })
+            } else if !syntaxRepairs.isEmpty {
+                let targetSplit = splitFilePath(target)
+                try? await LocalAlpineTerminalService.shared.writeFile(
+                    data: formattedData,
+                    fileName: targetSplit.fileName,
+                    destinationPath: targetSplit.directory
+                )
+                lines.append("  - Python 写入保护器尝试了 \(syntaxRepairs.count) 个缩进候选但验证仍失败，已回滚到原始写入内容。")
+                if let candidateOutput = rejectedCandidateOutputs.last {
+                    lines.append("    - 候选验证输出：\(candidateOutput)")
+                }
+            } else {
+                lines.append("  - Python AST 缩进修复器未能安全修复，已保留原文件。")
+            }
             if !repairOutput.isEmpty {
                 lines.append("    - 修复输出：\(String(repairOutput.prefix(1_000)))")
             }

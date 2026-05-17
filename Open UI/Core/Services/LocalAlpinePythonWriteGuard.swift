@@ -17,6 +17,11 @@ enum LocalAlpinePythonWriteGuard {
         case failure(String)
     }
 
+    struct SyntaxRepair: Sendable {
+        let content: String
+        let notes: [String]
+    }
+
     private struct ExtractedCode {
         let content: String
         let notes: [String]
@@ -80,6 +85,11 @@ enum LocalAlpinePythonWriteGuard {
         prepared = tabRepair.content
         notes.append(contentsOf: tabRepair.notes)
 
+        if let indentationRepair = repairCollapsedIndentationIfNeeded(prepared) {
+            prepared = indentationRepair.content
+            notes.append(contentsOf: indentationRepair.notes)
+        }
+
         return (ensureTrailingNewline(prepared), notes)
     }
 
@@ -93,6 +103,43 @@ enum LocalAlpinePythonWriteGuard {
             ensureTrailingNewline(repaired),
             ["检测到 Python 块缩进被压扁，客户端已按冒号块/def/class/else 结构自动恢复 4 空格缩进。"]
         )
+    }
+
+    static func repairForSyntaxIssue(_ content: String, diagnosticOutput: String) -> SyntaxRepair? {
+        repairCandidatesForSyntaxIssue(content, diagnosticOutput: diagnosticOutput).first
+    }
+
+    static func repairCandidatesForSyntaxIssue(_ content: String, diagnosticOutput: String) -> [SyntaxRepair] {
+        let normalized = normalizeNewlines(content).trimmingCharacters(in: .newlines)
+        let lowercased = diagnosticOutput.lowercased()
+        let shouldAttemptRepair = lowercased.contains("indentationerror")
+            || lowercased.contains("taberror")
+            || lowercased.contains("expected an indented block")
+            || lowercased.contains("expected 'except' or 'finally' block")
+        guard shouldAttemptRepair else { return [] }
+
+        var baseNotes: [String] = []
+        if let line = firstDiagnosticLineNumber(in: diagnosticOutput) {
+            baseNotes.append("检测到 Python 语法/缩进错误位置：第 \(line) 行。")
+        }
+
+        var candidates = syntaxRepairCandidates(for: normalized, diagnosticOutput: diagnosticOutput)
+        candidates.append(rebuildIndentation(from: normalized))
+
+        var seen = Set<String>()
+        var repairs: [SyntaxRepair] = []
+        for (offset, candidate) in candidates.enumerated() {
+            let prepared = candidate.trimmingCharacters(in: .newlines)
+            guard !prepared.isEmpty,
+                  prepared != normalized,
+                  seen.insert(prepared).inserted else {
+                continue
+            }
+            var notes = baseNotes
+            notes.append("写入保护器已按 Python 块结构生成第 \(offset + 1) 个缩进修复候选，将交给内置 Alpine ast.parse 验证后再接受。")
+            repairs.append(SyntaxRepair(content: ensureTrailingNewline(prepared), notes: notes))
+        }
+        return repairs
     }
 
     private static func extractPythonCode(from content: String, source: Source) -> Extraction {
@@ -196,6 +243,105 @@ enum LocalAlpinePythonWriteGuard {
             }
         }
         return false
+    }
+
+    private static func firstDiagnosticLineNumber(in output: String) -> Int? {
+        let preferredPatterns = [
+            #"File\s+"<unknown>",\s*line\s+(\d+)"#,
+            #"\(<unknown>,\s*line\s+(\d+)\)"#
+        ]
+        for pattern in preferredPatterns {
+            if let line = firstLineNumber(matching: pattern, in: output) {
+                return line
+            }
+        }
+        if output.lowercased().contains("expected an indented block"),
+           let parentLine = lastLineNumber(matching: #"after\s+['"][^'"]+['"]\s+statement\s+on\s+line\s+(\d+)"#, in: output) {
+            return parentLine + 1
+        }
+        return lastLineNumber(matching: #"\bline\s+(\d+)\b"#, in: output)
+    }
+
+    private static func firstLineNumber(matching pattern: String, in output: String) -> Int? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let range = NSRange(output.startIndex..<output.endIndex, in: output)
+        guard let match = regex.firstMatch(in: output, range: range),
+              match.numberOfRanges >= 2,
+              let swiftRange = Range(match.range(at: 1), in: output) else {
+            return nil
+        }
+        return Int(String(output[swiftRange]))
+    }
+
+    private static func lastLineNumber(matching pattern: String, in output: String) -> Int? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let range = NSRange(output.startIndex..<output.endIndex, in: output)
+        var lineNumber: Int?
+        regex.enumerateMatches(in: output, range: range) { match, _, _ in
+            guard let match,
+                  match.numberOfRanges >= 2,
+                  let swiftRange = Range(match.range(at: 1), in: output),
+                  let line = Int(String(output[swiftRange])) else {
+                return
+            }
+            lineNumber = line
+        }
+        return lineNumber
+    }
+
+    private static func syntaxRepairCandidates(for content: String, diagnosticOutput: String) -> [String] {
+        guard let lineNumber = firstDiagnosticLineNumber(in: diagnosticOutput) else { return [] }
+        let lines = content.components(separatedBy: "\n")
+        guard lineNumber > 1, lineNumber <= lines.count else { return [] }
+
+        let currentIndex = lineNumber - 1
+        var candidates: [String] = []
+        for previousIndex in stride(from: currentIndex - 1, through: 0, by: -1) {
+            let previous = lines[previousIndex].trimmingCharacters(in: .whitespaces)
+            guard !previous.isEmpty else { continue }
+            if previous.hasSuffix(":") {
+                candidates.append(reindentLineRange(lines, startIndex: currentIndex, baseIndex: previousIndex))
+            }
+            break
+        }
+        return candidates
+    }
+
+    private static func reindentLineRange(_ lines: [String], startIndex: Int, baseIndex: Int) -> String {
+        var repaired = lines
+        let baseIndent = lines[baseIndex].prefix { $0 == " " || $0 == "\t" }
+        let nestedIndent = String(baseIndent) + "    "
+        let originalIndentWidth = lines[startIndex].prefix { $0 == " " || $0 == "\t" }.count
+
+        for index in startIndex..<lines.count {
+            let stripped = lines[index].trimmingCharacters(in: .whitespaces)
+            guard !stripped.isEmpty else { continue }
+            let currentIndentWidth = lines[index].prefix { $0 == " " || $0 == "\t" }.count
+            if index > startIndex && currentIndentWidth < originalIndentWidth {
+                break
+            }
+            if startsBlockPeer(stripped) && currentIndentWidth <= originalIndentWidth {
+                break
+            }
+            repaired[index] = nestedIndent + stripped
+            if stripped.hasPrefix("except") || stripped.hasPrefix("finally:") {
+                break
+            }
+        }
+
+        return repaired.joined(separator: "\n")
+    }
+
+    private static func startsBlockPeer(_ line: String) -> Bool {
+        startsDefinition(line)
+            || line.hasPrefix("except")
+            || line.hasPrefix("finally:")
+            || line.hasPrefix("elif ")
+            || line.hasPrefix("else:")
     }
 
     private enum PythonBlockKind: Equatable {

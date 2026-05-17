@@ -4775,6 +4775,9 @@ final class ChatViewModel {
         if Self.isLocalAlpineWebOrScriptTask(text) {
             return true
         }
+        if Self.isLocalAlpineFileWorkRequest(text) {
+            return true
+        }
         return Self.isLocalAlpineFollowUpFileOperation(text, messages: conversation?.messages ?? [])
     }
 
@@ -4802,9 +4805,12 @@ final class ChatViewModel {
             "终端", "命令", "用 shell", "用 bash", "shell command", "bash command",
             "执行脚本", "运行脚本", "执行代码", "运行代码",
             "安装依赖", "装依赖", "安装包", "装包", "编译项目", "构建项目",
+            "创建文件", "新建文件", "生成文件", "写入文件", "保存文件",
+            "创建脚本", "生成脚本", "写脚本", "创建项目", "生成项目",
             "run command", "execute command", "run script", "execute script",
             "install dependencies", "install deps", "install package",
-            "build project", "compile project"
+            "build project", "compile project", "create file", "write file",
+            "save file", "generate file", "create project", "generate project"
         ]
         if strongTerms.contains(where: { normalized.contains($0) }) {
             return true
@@ -4828,6 +4834,9 @@ final class ChatViewModel {
             return true
         }
         if isLocalAlpineWebOrScriptTask(normalized) {
+            return true
+        }
+        if isLocalAlpineFileWorkRequest(normalized) {
             return true
         }
         if (normalized.contains("脚本") || normalized.contains("script"))
@@ -4854,13 +4863,30 @@ final class ChatViewModel {
             "写个脚本运行", "写一个脚本运行", "写个项目运行", "写一个项目运行",
             "创建项目并运行", "创建脚本并运行", "测试项目", "运行项目",
             "安装依赖", "装依赖", "装一下依赖", "安装包", "装包", "安装模块", "安装库",
+            "创建文件", "新建文件", "生成文件", "写入文件", "保存文件", "修改文件",
+            "创建脚本", "生成脚本", "写脚本", "创建项目", "生成项目",
             "编译项目", "构建项目", "测试代码", "检查项目", "查看目录", "列出目录",
             "跑一下", "跑下", "执行一下", "运行一下", "查一下命令", "用 bash", "用 shell",
             "local alpine", "alpine 执行", "alpine运行",
             "run command", "execute command", "run script", "run project",
-            "install dependencies", "install deps", "install package", "build project", "compile project"
+            "install dependencies", "install deps", "install package", "build project", "compile project",
+            "create file", "write file", "save file", "generate file", "modify file"
         ]
         return terms.contains { normalized.contains($0) }
+    }
+
+    private static func isLocalAlpineFileWorkRequest(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        let actionTerms = [
+            "创建", "新建", "生成", "写入", "保存", "落地", "修改", "改",
+            "create", "new file", "generate", "write", "save", "modify", "edit"
+        ]
+        let targetTerms = [
+            "文件", "脚本", "代码", "项目", "目录", "file", "script", "code", "project", "folder",
+            ".py", ".js", ".ts", ".html", ".css", ".json", ".md", ".sh", ".lua", ".c", ".cpp"
+        ]
+        return containsAny(normalized, actionTerms) && containsAny(normalized, targetTerms)
     }
 
     private static func isLocalAlpineWebOrScriptTask(_ text: String) -> Bool {
@@ -4928,7 +4954,7 @@ final class ChatViewModel {
         let codeLines = pythonCodeLines(from: code)
         guard !codeLines.isEmpty else { return nil }
 
-        let fileName = "script.py"
+        let fileName = pythonFileName(for: userText)
         let command = pythonRunCommand(fileName: fileName, userText: userText)
         let payload: [String: Any] = [
             "iexa_alpine": [
@@ -4951,6 +4977,16 @@ final class ChatViewModel {
         \(json)
         ```
         """
+    }
+
+    private static func pythonFileName(for userText: String) -> String {
+        let lowercased = userText.lowercased()
+        if lowercased.contains("爬虫") || lowercased.contains("爬取")
+            || lowercased.contains("抓取") || lowercased.contains("crawler")
+            || lowercased.contains("crawl") || lowercased.contains("scrape") {
+            return "crawler.py"
+        }
+        return "script.py"
     }
 
     private static func fallbackLocalAlpineBlockForAssistantRunnableCode(content: String, userText: String) -> String? {
@@ -5807,6 +5843,34 @@ final class ChatViewModel {
         guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         guard shouldSendRawTextDirectlyToLocalAlpine(command) else { return nil }
 
+        return """
+        ```iexa_alpine
+        \(command)
+        ```
+        """
+    }
+
+    private static func fallbackLocalAlpineKickoffBlock(for text: String) -> String? {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+        guard isExplicitLocalAlpineRequest(normalized)
+            || isExplicitLocalAlpineResumeRequest(normalized)
+            || isLocalAlpineFileWorkRequest(normalized)
+            || isLocalAlpineWebOrScriptTask(normalized)
+            || isLocalAlpineNaturalLanguageExecutionRequest(normalized) else {
+            return nil
+        }
+        let quotedRequest = shellQuoted(normalized)
+        let command = """
+        printf 'IEXA_AGENT_KICKOFF: local task needs model action\\n'
+        printf 'USER_REQUEST: %s\\n' \(quotedRequest)
+        printf '\\n== cwd ==\\n'
+        pwd
+        printf '\\n== /mnt/iexa ==\\n'
+        ls -la /mnt/iexa
+        printf '\\nNEXT_ACTION_REQUIRED: emit an iexa_alpine block with write_files/command to create, modify, run, install, inspect, or verify the requested task. Do not ask the user to run it manually.\\n'
+        exit 1
+        """
         return """
         ```iexa_alpine
         \(command)
@@ -11130,6 +11194,10 @@ final class ChatViewModel {
                   let userText = latestUserText,
                   let fallback = Self.fallbackLocalAlpineBlock(for: userText) {
             executableContent = fallback
+        } else if userRequestedExecution,
+                  let userText = latestUserText,
+                  let fallback = Self.fallbackLocalAlpineKickoffBlock(for: userText) {
+            executableContent = fallback
         } else {
             return
         }
@@ -11327,6 +11395,19 @@ final class ChatViewModel {
     }
 
     private func appendLocalAlpineRepeatedErrorStopMessage(parentId: String, result: LocalAlpineAgentCommandResult) {
+        let pythonRepairInstruction: String
+        if Self.localAlpineOutputHasPythonSyntaxIssue(result.outputPreview) {
+            pythonRepairInstruction = """
+
+            Python repair required:
+            不要让用户手动复制或敲命令。下一步必须由你自己发出 `iexa_alpine` JSON `write_files`：
+            1. 重写完整 `.py` 文件，优先使用 `code_lines` 或 `content_base64`。
+            2. 同一条 action 里运行 `python3 -m py_compile <file> && python3 <file>`。
+            3. 如果再次失败，换完整文件实现，不要只修一行，不要重复同一条失败命令。
+            """
+        } else {
+            pythonRepairInstruction = ""
+        }
         let content = """
         我先停下，避免继续死循环。
 
@@ -11345,6 +11426,7 @@ final class ChatViewModel {
         ```
 
         当前判断：需要换一个定位路径，而不是继续重复执行同类命令。
+        \(pythonRepairInstruction)
         """
         appendAssistantResult(parentId: parentId, model: selectedModelId ?? "Local Alpine Agent", content: content)
     }
@@ -12157,7 +12239,8 @@ final class ChatViewModel {
     private static func containsCriticalLocalAlpineFailureMarker(_ normalized: String) -> Bool {
         let markers = [
             "traceback", "syntaxerror", "indentationerror", "modulenotfounderror",
-            "写入已拒绝", "写入失败", "缩进预检失败", "语法校验失败"
+            "写入已拒绝", "写入失败", "缩进预检失败", "语法校验失败",
+            "iexa_agent_kickoff", "next_action_required"
         ]
         return markers.contains { normalized.contains($0) }
     }
@@ -12168,7 +12251,8 @@ final class ChatViewModel {
             "not found", "error", "missing", "no such file", "traceback", "exception",
             "command not found", "permission denied", "syntaxerror", "indentationerror",
             "module not found", "no module named", "输入已取消", "存在错误输出",
-            "写入已拒绝", "写入失败", "缩进预检失败", "语法校验失败"
+            "写入已拒绝", "写入失败", "缩进预检失败", "语法校验失败",
+            "iexa_agent_kickoff", "next_action_required"
         ]
         if markers.contains(where: { normalized.contains($0.lowercased()) }) {
             return true
@@ -12268,9 +12352,11 @@ final class ChatViewModel {
         Retry:
         - If the last command failed, inspect the exit code/output first, then emit a different bounded diagnostic or fix command before rerunning verification.
         - Retry only after changing something meaningful: edited file, installed a dependency that was proven missing, changed cwd, changed command arguments, or gathered new diagnostics.
+        - If the last output contains `IEXA_AGENT_KICKOFF` or `NEXT_ACTION_REQUIRED`, it means the app routed an explicit local task to you but your previous answer did not include an executable block. Your next response must emit one concrete `iexa_alpine` block with `write_files` and/or `command` for the user's request.
         Stuck Detection:
         - Never repeat the exact same failed command. If the app says a repeat was blocked, switch strategy immediately.
         - If the same error signature repeats twice after a fix, stop and summarize the blocker instead of looping.
+        - Never tell the user to copy/paste/run commands manually for a Local Alpine task. If a local action is needed, emit `iexa_alpine` yourself. Only ask the user when external credentials, unavailable network access, or a destructive confirmation is required.
         - If the user interrupts with a question or taps stop, answer the question and wait. Do not resume automatic execution until the user explicitly asks to continue/fix/run.
         Strategy Switch:
         - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, complete-file rewrite, then verification.
