@@ -402,29 +402,7 @@ actor LocalAlpineAgentService {
     }
 
     private func extractInstructionBlocks(from content: String) -> [String] {
-        var blocks: [String] = []
-        let nsContent = content as NSString
-
-        if let regex = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)```"#, options: [.caseInsensitive]) {
-            let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
-            for match in matches where match.numberOfRanges >= 3 {
-                let info = nsContent.substring(with: match.range(at: 1)).lowercased()
-                let body = nsContent.substring(with: match.range(at: 2)).trimmingCharacters(in: .newlines)
-                if info.contains("iexa_alpine")
-                    || (info.trimmingCharacters(in: .whitespacesAndNewlines) == "json" && body.contains("\"iexa_alpine\"")) {
-                    blocks.append(body)
-                }
-            }
-        }
-
-        if let tagRegex = try? NSRegularExpression(pattern: #"<iexa_alpine>([\s\S]*?)</iexa_alpine>"#, options: [.caseInsensitive]) {
-            let matches = tagRegex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
-            for match in matches where match.numberOfRanges >= 2 {
-                blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .newlines))
-            }
-        }
-
-        return blocks
+        Self.instructionBlocks(from: content)
     }
 
     private func parseCommands(from block: String) throws -> [LocalAlpineAgentCommand] {
@@ -452,7 +430,7 @@ actor LocalAlpineAgentService {
             return []
         }
 
-        if let nested = dict["iexa_alpine"] ?? dict["commands"] {
+        if let nested = dict["iexa_alpine"] ?? dict["local_alpine_exec"] ?? dict["commands"] {
             return parseCommands(from: nested)
         }
 
@@ -1324,8 +1302,9 @@ actor LocalAlpineAgentService {
                 let info = nsContent.substring(with: match.range(at: 1)).lowercased()
                 let body = nsContent.substring(with: match.range(at: 2))
                 if info.contains("iexa_alpine")
+                    || info.contains("local_alpine_exec")
                     || (info.trimmingCharacters(in: .whitespacesAndNewlines) == "json"
-                        && body.contains("\"iexa_alpine\"")) {
+                        && (body.contains("\"iexa_alpine\"") || body.contains("\"local_alpine_exec\""))) {
                     removalRanges.append(match.range)
                 }
             }
@@ -1334,6 +1313,10 @@ actor LocalAlpineAgentService {
         if let tagRegex = try? NSRegularExpression(pattern: #"<iexa_alpine>[\s\S]*?</iexa_alpine>"#, options: [.caseInsensitive]) {
             removalRanges.append(contentsOf: tagRegex.matches(in: content, range: fullRange).map(\.range))
         }
+        if let tagRegex = try? NSRegularExpression(pattern: #"<local_alpine_exec>[\s\S]*?</local_alpine_exec>"#, options: [.caseInsensitive]) {
+            removalRanges.append(contentsOf: tagRegex.matches(in: content, range: fullRange).map(\.range))
+        }
+        removalRanges.append(contentsOf: pseudoToolCallRanges(in: content, includeIncomplete: true))
 
         if let incompleteFenceRange = incompleteInstructionFenceRange(in: content) {
             removalRanges.append(incompleteFenceRange)
@@ -1348,7 +1331,7 @@ actor LocalAlpineAgentService {
         }
 
         let mutable = NSMutableString(string: content)
-        for range in removalRanges.sorted(by: { $0.location > $1.location }) {
+        for range in mergedRanges(removalRanges).sorted(by: { $0.location > $1.location }) {
             mutable.replaceCharacters(in: range, with: "")
         }
 
@@ -1359,11 +1342,159 @@ actor LocalAlpineAgentService {
         return cleaned
     }
 
+    nonisolated static func instructionBlocks(from content: String) -> [String] {
+        var blocks: [String] = []
+        let nsContent = content as NSString
+        let fullRange = NSRange(location: 0, length: nsContent.length)
+
+        if let regex = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)```"#, options: [.caseInsensitive]) {
+            let matches = regex.matches(in: content, range: fullRange)
+            for match in matches where match.numberOfRanges >= 3 {
+                let info = nsContent.substring(with: match.range(at: 1)).lowercased()
+                let body = nsContent.substring(with: match.range(at: 2)).trimmingCharacters(in: .newlines)
+                if info.contains("iexa_alpine")
+                    || info.contains("local_alpine_exec")
+                    || (info.trimmingCharacters(in: .whitespacesAndNewlines) == "json"
+                        && (body.contains("\"iexa_alpine\"") || body.contains("\"local_alpine_exec\""))) {
+                    blocks.append(body)
+                }
+            }
+        }
+
+        if let tagRegex = try? NSRegularExpression(pattern: #"<iexa_alpine>([\s\S]*?)</iexa_alpine>"#, options: [.caseInsensitive]) {
+            let matches = tagRegex.matches(in: content, range: fullRange)
+            for match in matches where match.numberOfRanges >= 2 {
+                blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .newlines))
+            }
+        }
+        if let tagRegex = try? NSRegularExpression(pattern: #"<local_alpine_exec>([\s\S]*?)</local_alpine_exec>"#, options: [.caseInsensitive]) {
+            let matches = tagRegex.matches(in: content, range: fullRange)
+            for match in matches where match.numberOfRanges >= 2 {
+                blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .newlines))
+            }
+        }
+
+        for range in pseudoToolCallPayloadRanges(in: content) {
+            blocks.append(nsContent.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        return blocks
+    }
+
+    nonisolated private static func pseudoToolCallRanges(in content: String, includeIncomplete: Bool) -> [NSRange] {
+        pseudoToolCallRangesWithPayload(in: content, includeIncomplete: includeIncomplete).map(\.full)
+    }
+
+    nonisolated private static func pseudoToolCallPayloadRanges(in content: String) -> [NSRange] {
+        pseudoToolCallRangesWithPayload(in: content, includeIncomplete: false).map(\.payload)
+    }
+
+    nonisolated private static func pseudoToolCallRangesWithPayload(
+        in content: String,
+        includeIncomplete: Bool
+    ) -> [(full: NSRange, payload: NSRange)] {
+        let pattern = #"(?m)(?:^|\n)\s*(?:to\s*=\s*)?local_alpine_exec(?:\s+code)?\s*"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return []
+        }
+
+        let nsContent = content as NSString
+        let fullRange = NSRange(location: 0, length: nsContent.length)
+        var ranges: [(full: NSRange, payload: NSRange)] = []
+        for match in regex.matches(in: content, range: fullRange) {
+            guard let markerRange = Range(match.range, in: content),
+                  let payloadRange = balancedJSONRange(in: content, after: markerRange.upperBound) else {
+                if includeIncomplete,
+                   let markerRange = Range(match.range, in: content) {
+                    let full = NSRange(markerRange.lowerBound..<content.endIndex, in: content)
+                    ranges.append((full: full, payload: full))
+                }
+                continue
+            }
+            ranges.append((
+                full: NSRange(markerRange.lowerBound..<payloadRange.upperBound, in: content),
+                payload: NSRange(payloadRange, in: content)
+            ))
+        }
+        return ranges
+    }
+
+    nonisolated private static func balancedJSONRange(
+        in content: String,
+        after markerEnd: String.Index
+    ) -> Range<String.Index>? {
+        var start = markerEnd
+        while start < content.endIndex, content[start].isWhitespace {
+            start = content.index(after: start)
+        }
+        guard start < content.endIndex else {
+            return nil
+        }
+        let opener = content[start]
+        guard opener == "{" || opener == "[" else { return nil }
+
+        var expectedClosers: [Character] = []
+        var inString = false
+        var escaped = false
+        var index = start
+        while index < content.endIndex {
+            let char = content[index]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if char == "\\" {
+                    escaped = true
+                } else if char == "\"" {
+                    inString = false
+                }
+            } else if char == "\"" {
+                inString = true
+            } else if char == "{" {
+                expectedClosers.append("}")
+            } else if char == "[" {
+                expectedClosers.append("]")
+            } else if let expected = expectedClosers.last, char == expected {
+                expectedClosers.removeLast()
+                if expectedClosers.isEmpty {
+                    return start..<content.index(after: index)
+                }
+            }
+            index = content.index(after: index)
+        }
+        return nil
+    }
+
+    nonisolated private static func mergedRanges(_ ranges: [NSRange]) -> [NSRange] {
+        guard !ranges.isEmpty else { return [] }
+        let sorted = ranges.sorted {
+            if $0.location == $1.location { return $0.length < $1.length }
+            return $0.location < $1.location
+        }
+        var merged: [NSRange] = []
+        for range in sorted {
+            guard range.location != NSNotFound else { continue }
+            guard let last = merged.last else {
+                merged.append(range)
+                continue
+            }
+            let lastEnd = last.location + last.length
+            let rangeEnd = range.location + range.length
+            if range.location <= lastEnd {
+                merged[merged.count - 1] = NSRange(
+                    location: last.location,
+                    length: max(lastEnd, rangeEnd) - last.location
+                )
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
+    }
+
     nonisolated private static func incompleteInstructionFenceRange(in content: String) -> NSRange? {
-        guard let markerRange = content.range(
-            of: "```iexa_alpine",
-            options: [.caseInsensitive, .backwards]
-        ) else {
+        let markerRange = content.range(of: "```iexa_alpine", options: [.caseInsensitive, .backwards])
+            ?? content.range(of: "```local_alpine_exec", options: [.caseInsensitive, .backwards])
+        guard let markerRange else {
             return nil
         }
 
@@ -1376,15 +1507,15 @@ actor LocalAlpineAgentService {
     }
 
     nonisolated private static func incompleteInstructionTagRange(in content: String) -> NSRange? {
-        guard let markerRange = content.range(
-            of: "<iexa_alpine>",
-            options: [.caseInsensitive, .backwards]
-        ) else {
+        let markerRange = content.range(of: "<iexa_alpine>", options: [.caseInsensitive, .backwards])
+            ?? content.range(of: "<local_alpine_exec>", options: [.caseInsensitive, .backwards])
+        guard let markerRange else {
             return nil
         }
 
         let afterMarker = content[markerRange.upperBound...]
-        guard afterMarker.range(of: "</iexa_alpine>", options: .caseInsensitive) == nil else {
+        guard afterMarker.range(of: "</iexa_alpine>", options: .caseInsensitive) == nil,
+              afterMarker.range(of: "</local_alpine_exec>", options: .caseInsensitive) == nil else {
             return nil
         }
 

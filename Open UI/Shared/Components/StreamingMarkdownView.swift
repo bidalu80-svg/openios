@@ -1003,8 +1003,10 @@ struct StreamingMarkdownView: View {
         let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if normalized.contains("iexa_workspace")
             || normalized.contains("iexa_alpine")
+            || normalized.contains("local_alpine_exec")
             || code.contains("\"iexa_workspace\"")
-            || code.contains("\"iexa_alpine\"") {
+            || code.contains("\"iexa_alpine\"")
+            || code.contains("\"local_alpine_exec\"") {
             return true
         }
         return false
@@ -1240,7 +1242,10 @@ private struct CompactCodeModuleView: View {
     }
 
     private var isAlpineModule: Bool {
-        normalizedLanguage.contains("iexa_alpine") || code.contains("\"iexa_alpine\"")
+        normalizedLanguage.contains("iexa_alpine")
+            || normalizedLanguage.contains("local_alpine_exec")
+            || code.contains("\"iexa_alpine\"")
+            || code.contains("\"local_alpine_exec\"")
     }
 
     private var workspacePaths: [String] {
@@ -1434,7 +1439,7 @@ private struct CompactCodeModuleView: View {
         }
         guard let dict = object as? [String: Any] else { return [] }
 
-        if let nested = dict["iexa_alpine"] ?? dict["commands"] {
+        if let nested = dict["iexa_alpine"] ?? dict["local_alpine_exec"] ?? dict["commands"] {
             return collectCommands(from: nested)
         }
         if let command = (dict["command"] as? String) ?? (dict["cmd"] as? String) {
