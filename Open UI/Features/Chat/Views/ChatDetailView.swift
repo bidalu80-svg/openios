@@ -1569,6 +1569,7 @@ struct ChatDetailView: View {
     private func messageBubble(for message: ChatMessage, isLastAssistant: Bool) -> some View {
         if isLocalAlpineResultMessage(message) {
             LocalAlpineResultCard(
+                messageId: message.id,
                 content: message.content,
                 metadata: message.metadata,
                 isStreaming: message.isStreaming,
@@ -4223,23 +4224,26 @@ private struct IsolatedAssistantMessage: View {
 }
 
 private struct LocalAlpineResultCard: View {
+    let messageId: String
     let content: String
     let metadata: [String: String]?
     let isStreaming: Bool
     let statusHistory: [ChatStatusUpdate]
 
     @Environment(\.theme) private var theme
+    @AppStorage("localAlpineClosedWrittenFileCardKeys") private var closedWrittenFileCardKeysStorage = ""
     @State private var isExpanded = false
-    @State private var isWrittenFilesCardClosed = false
     private let writtenFiles: [LocalAlpineWrittenFile]
     private let commandResults: [LocalAlpineAgentCommandResult]
 
     init(
+        messageId: String,
         content: String,
         metadata: [String: String]?,
         isStreaming: Bool,
         statusHistory: [ChatStatusUpdate]
     ) {
+        self.messageId = messageId
         self.content = content
         self.metadata = metadata
         self.isStreaming = isStreaming
@@ -4281,6 +4285,10 @@ private struct LocalAlpineResultCard: View {
         max(0, writtenFiles.count - 4) + max(0, executableCommandResults.count - 5)
     }
 
+    private var isWrittenFilesCardClosed: Bool {
+        Set(closedWrittenFileCardKeysStorage.split(separator: "\n").map(String.init)).contains(messageId)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Button {
@@ -4316,7 +4324,7 @@ private struct LocalAlpineResultCard: View {
             if !writtenFiles.isEmpty && !isWrittenFilesCardClosed {
                 LocalAlpineWrittenFilesCard(files: writtenFiles) {
                     withAnimation(MicroAnimation.snappy) {
-                        isWrittenFilesCardClosed = true
+                        closeWrittenFilesCard()
                     }
                 }
             }
@@ -4407,6 +4415,19 @@ private struct LocalAlpineResultCard: View {
         command
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func closeWrittenFilesCard() {
+        var keys = closedWrittenFileCardKeysStorage
+            .split(separator: "\n")
+            .map(String.init)
+        if !keys.contains(messageId) {
+            keys.append(messageId)
+        }
+        if keys.count > 400 {
+            keys = Array(keys.suffix(400))
+        }
+        closedWrittenFileCardKeysStorage = keys.joined(separator: "\n")
     }
 }
 
