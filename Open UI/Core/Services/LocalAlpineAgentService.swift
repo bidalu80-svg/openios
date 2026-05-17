@@ -527,7 +527,7 @@ actor LocalAlpineAgentService {
     }
 
     private func writeFiles(_ files: [LocalAlpineAgentFile], cwd: String) async -> LocalAlpineWriteResult {
-        var lines = ["写入文件（命令行直写）"]
+        var lines = ["写入文件（结构化写入）"]
         var writtenPaths: [String] = []
         var writtenFiles: [LocalAlpineWrittenFile] = []
         var hadFailure = false

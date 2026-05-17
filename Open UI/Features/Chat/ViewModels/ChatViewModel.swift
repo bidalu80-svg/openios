@@ -4819,7 +4819,8 @@ final class ChatViewModel {
             return true
         }
         let localReferenceTerms = [
-            "这个", "这个文件", "刚才", "上面", "上一", "生成的", "创建的",
+            "这个", "这个文件", "那个", "它", "该文件", "刚才", "刚刚", "刚写的", "刚创建的", "刚生成的",
+            "上面", "上一", "生成的", "创建的",
             "脚本", "文件", "项目", "目录", "lua", "python", "py", "js", "ts",
             "html", "css", "json", "md", "sh"
         ]
@@ -4837,6 +4838,39 @@ final class ChatViewModel {
 
         let fileName = "script.py"
         let command = pythonRunCommand(fileName: fileName, userText: userText)
+        let payload: [String: Any] = [
+            "iexa_alpine": [
+                [
+                    "cwd": "/mnt/iexa",
+                    "write_files": [
+                        [
+                            "path": fileName,
+                            "code_lines": codeLines
+                        ]
+                    ],
+                    "command": command
+                ]
+            ]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return """
+        ```iexa_alpine
+        \(json)
+        ```
+        """
+    }
+
+    private static func fallbackLocalAlpineBlockForAssistantRunnableCode(content: String, userText: String) -> String? {
+        if let pythonFallback = fallbackLocalAlpineBlockForAssistantCode(content: content, userText: userText) {
+            return pythonFallback
+        }
+        guard let block = firstRunnableNonPythonCodeBlock(in: content) else { return nil }
+        let codeLines = pythonCodeLines(from: block.code)
+        guard !codeLines.isEmpty else { return nil }
+
+        let fileName = runnableFileName(for: block.language)
+        let command = runnableCommand(fileName: fileName, language: block.language)
         let payload: [String: Any] = [
             "iexa_alpine": [
                 [
@@ -4880,7 +4914,7 @@ final class ChatViewModel {
             guard message.role == .assistant else { continue }
             if let excludingMessageId, message.id == excludingMessageId { continue }
             if isLocalAlpineAgentResult(message) || isLocalWorkspaceAgentResult(message) { continue }
-            if let fallback = fallbackLocalAlpineBlockForAssistantCode(content: message.content, userText: userText) {
+            if let fallback = fallbackLocalAlpineBlockForAssistantRunnableCode(content: message.content, userText: userText) {
                 return fallback
             }
         }
@@ -5114,6 +5148,67 @@ final class ChatViewModel {
             }
         }
         return nil
+    }
+
+    private struct RunnableCodeBlock {
+        let language: String
+        let code: String
+    }
+
+    private static func firstRunnableNonPythonCodeBlock(in content: String) -> RunnableCodeBlock? {
+        let nsContent = content as NSString
+        guard let regex = try? NSRegularExpression(
+            pattern: #"```([^\n`]*)\n([\s\S]*?)```"#,
+            options: [.caseInsensitive]
+        ) else { return nil }
+        let supportedLanguages: Set<String> = [
+            "lua", "javascript", "js", "node", "mjs", "cjs"
+        ]
+        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
+        for match in matches where match.numberOfRanges >= 3 {
+            let info = nsContent.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let language = info.split(whereSeparator: { $0 == " " || $0 == "\t" }).first.map(String.init) ?? info
+            guard supportedLanguages.contains(language) else { continue }
+            let body = nsContent.substring(with: match.range(at: 2))
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\n"))
+            if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return RunnableCodeBlock(language: language, code: body)
+            }
+        }
+        return nil
+    }
+
+    private static func runnableFileName(for language: String) -> String {
+        switch language {
+        case "lua": return "script.lua"
+        case "javascript", "js", "node", "mjs", "cjs": return "script.js"
+        default: return "script.txt"
+        }
+    }
+
+    private static func runnableCommand(fileName: String, language: String) -> String {
+        let quotedFile = shellQuoted(fileName)
+        switch language {
+        case "lua":
+            return """
+            if command -v lua >/dev/null 2>&1; then
+              lua \(quotedFile)
+            elif command -v lua5.4 >/dev/null 2>&1; then
+              lua5.4 \(quotedFile)
+            else
+              printf 'lua runtime missing\\n'
+              exit 127
+            fi
+            """
+        case "javascript", "js", "node", "mjs", "cjs":
+            return "node \(quotedFile)"
+        default:
+            return "cat \(quotedFile)"
+        }
     }
 
     private static func firstRunnableShellCodeBlock(in content: String) -> String? {
@@ -8541,6 +8636,7 @@ final class ChatViewModel {
         Operational rules:
         - Act like a Codex CLI style agent loop: understand the user's goal, choose one bounded next step, execute it, read the real output, then either continue with the next step or stop with a concise summary.
         - Keep an internal step ledger: what has already been inspected, what command/file write was just attempted, what the output proved, and what the next smallest useful step is. Do not rely on memory guesses when the Local Alpine result is available.
+        - For multi-step tasks, include one short visible step note before the `iexa_alpine` block, such as "先检查文件" or "现在修复并验证". Keep detailed reasoning internal.
         - Local Alpine terminal mode owns local project operations. If the user asks to list/read/search/create/modify/delete project files, inspect a directory, run a script, or "read the mnt directory", use `/mnt/iexa` via `iexa_alpine`; do not use the Documents/Iexa Workspace tool.
         - If the user asks you to run, execute, test, verify, inspect the environment, install packages, write a runnable script/project, crawl a website, or diagnose command output, use `iexa_alpine`.
         - Do not merely explain commands when the user wants action. Emit the block so the app executes it.
@@ -10484,7 +10580,7 @@ final class ChatViewModel {
         let executableContent: String
         if userRequestedExecution,
            let userText = latestUserText,
-           let fallback = Self.fallbackLocalAlpineBlockForAssistantCode(content: content, userText: userText) {
+           let fallback = Self.fallbackLocalAlpineBlockForAssistantRunnableCode(content: content, userText: userText) {
             executableContent = fallback
         } else if userRequestedExecution,
                   let fallback = Self.fallbackLocalAlpineBlockForAssistantShellCode(content: content) {
@@ -11609,6 +11705,7 @@ final class ChatViewModel {
         - If the user's task is complete, answer normally and do not emit `iexa_alpine`. Include a concise Codex-style summary: what you did, what command/output verified it, files changed/created, and any remaining caveat.
         Tool System:
         - Use exactly one next tool action per assistant turn. For local shell/files, emit one `iexa_alpine` block. For current web facts, rely on the web-search context already injected by the app; if more current info is needed, ask for/perform a more precise search before guessing.
+        - Before the block, write at most one short visible sentence naming the current step. Do not reveal detailed hidden reasoning.
         Python Writes:
         - For `.py` files, always use `iexa_alpine` JSON `write_files` with full-file `code_lines` or `content_base64`; this app's built-in Python formatter/write guard only protects indentation reliably on that structured path.
         - After writing Python, run `python3 -m py_compile <file>` or the requested script. If indentation/syntax fails, rewrite the complete target file through `write_files`, then verify again.
