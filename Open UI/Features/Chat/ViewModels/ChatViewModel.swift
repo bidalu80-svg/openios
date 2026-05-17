@@ -6523,6 +6523,19 @@ final class ChatViewModel {
             return
         }
 
+        if conversation?.messages.first(where: { $0.id == assistantMessageId })?
+            .metadata?["iexa_local_alpine_continuation"] == "true" {
+            Task {
+                await finishLocalAlpineContinuation(
+                    assistantMessageId: assistantMessageId,
+                    modelId: modelId,
+                    content: acc.content,
+                    usage: usage
+                )
+            }
+            return
+        }
+
         // Finalize the message — mark as not streaming but DON'T dispose
         // socket subscriptions yet. Follow-ups, title, and tags arrive
         // AFTER done:true via socket events, so we need to keep listening.
@@ -9753,13 +9766,16 @@ final class ChatViewModel {
             apiMessages.append(["role": "system", "content": combinedSystemPrompt])
         }
         for message in conversation.messages where !message.isStreaming
-            && !Self.isLocalWorkspaceAgentResult(message)
-            && !Self.isLocalAlpineAgentResult(message) {
+            && !Self.isLocalWorkspaceAgentResult(message) {
+            let isLocalAlpineResult = Self.isLocalAlpineAgentResult(message)
+            if isLocalAlpineResult && !shouldIncludeLocalAlpineContext {
+                continue
+            }
             let modelContent = contentForModel(
                 message: message,
                 includeImageCanvasInstruction: message.id == imageCanvasInstructionMessageId
             )
-            let modelRole = message.role.rawValue
+            let modelRole = isLocalAlpineResult ? "system" : message.role.rawValue
             let imageFiles = message.files.filter { f in
                 f.type == "image" || (f.contentType ?? "").hasPrefix("image/")
             }
@@ -11142,12 +11158,22 @@ final class ChatViewModel {
         )
         hasFinishedStreaming = true
         isStreaming = false
+        isExternallyStreaming = false
         selfInitiatedStream = false
         activeTaskId = nil
         lastTaskExtractionLength = 0
         await persistLocalConversationIfNeeded()
         await sendCompletionNotificationIfNeeded(content: finalContent)
         endBackgroundTask()
+        chatSubscription?.dispose()
+        chatSubscription = nil
+        channelSubscription?.dispose()
+        channelSubscription = nil
+        recoveryTimer?.invalidate()
+        recoveryTimer = nil
+        recoveryDelayTask?.cancel()
+        recoveryDelayTask = nil
+        emptyPollCount = 0
         if isFinalSummary {
             localAlpineAgentStopRequested = true
             localAlpineContinuationTask = nil
