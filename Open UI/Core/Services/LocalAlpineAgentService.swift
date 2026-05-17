@@ -399,6 +399,23 @@ actor LocalAlpineAgentService {
                     continue
                 }
 
+                if let warning = unsafeCodeFileWriteWarning(for: commandToExecute) {
+                    let result = LocalAlpineCommandResult(
+                        command: commandToExecute,
+                        output: warning,
+                        exitCode: 126,
+                        interactiveRequest: nil
+                    )
+                    stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
+                    commandResults.append(Self.commandResult(
+                        command: commandToExecute,
+                        cwd: effectiveCWD,
+                        result: result
+                    ))
+                    stopRemainingCommands = true
+                    continue
+                }
+
                 var result = await LocalAlpineTerminalService.shared.execute(
                     command: commandToExecute,
                     cwd: effectiveCWD
@@ -1308,19 +1325,22 @@ actor LocalAlpineAgentService {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
-    private func unsafeCodeFileWriteWarning(for _: String) -> String? {
-        return nil
+    private func unsafeCodeFileWriteWarning(for command: String) -> String? {
+        guard Self.commandWritesPythonThroughShellText(command) else { return nil }
+        return """
+        Unsafe Python file write blocked.
+
+        Python files are indentation-sensitive. Do not write `.py` files through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline Python writer scripts.
+        Re-send the complete file through structured `iexa_alpine` JSON `write_files` using `code_lines` or `content_base64`, then run `python3 -m py_compile <file>` before executing it.
+        """
     }
 
-    private nonisolated static func commandWritesCodeThroughShellText(_ command: String) -> Bool {
-        let codeFileTarget = #"(?:['"]?)[^'"\s;|&>]*\.(?:py|pyw|js|jsx|ts|tsx|mjs|cjs|html|htm|css|scss|sass|swift|kt|kts|java|c|cc|cpp|cxx|h|hpp|cs|go|rs|rb|php|sh|bash|zsh|fish|pl|lua|r|sql|json|jsonl|yaml|yml|toml|xml|md)(?:['"]?)"#
-        let specialFileTarget = #"(?:['"]?)(?:[^'"\s;|&>]*/)?(?:makefile|dockerfile)(?:['"]?)"#
-        let target = "(?:\(codeFileTarget)|\(specialFileTarget))"
-
+    private nonisolated static func commandWritesPythonThroughShellText(_ command: String) -> Bool {
+        let pythonFileTarget = #"(?:['"]?)[^'"\s;|&>]*\.(?:py|pyw)(?:['"]?)"#
         let redirectionWritePatterns = [
-            #"(?is)\b(?:cat|printf|echo)\b[\s\S]{0,800}(?:^|[^0-9])(?:>>?|1>)\s*"# + target,
-            #"(?is)\bcat\b\s+<<-?\s*['"]?[A-Za-z0-9_.-]+['"]?[\s\S]{0,1200}(?:^|[^0-9])(?:>>?|1>)\s*"# + target,
-            #"(?is)(?:^|[;&|]\s*)tee\s+(?:-[A-Za-z]+\s+)*"# + target
+            #"(?is)\b(?:cat|printf|echo)\b[\s\S]{0,800}(?:^|[^0-9])(?:>>?|1>)\s*"# + pythonFileTarget,
+            #"(?is)\bcat\b\s+<<-?\s*['"]?[A-Za-z0-9_.-]+['"]?[\s\S]{0,1200}(?:^|[^0-9])(?:>>?|1>)\s*"# + pythonFileTarget,
+            #"(?is)(?:^|[;&|]\s*)tee\s+(?:-[A-Za-z]+\s+)*"# + pythonFileTarget
         ]
         if redirectionWritePatterns.contains(where: {
             command.range(of: $0, options: .regularExpression) != nil
@@ -1328,10 +1348,10 @@ actor LocalAlpineAgentService {
             return true
         }
 
-        let quotedCodeFile = #"['"][^'"]*\.(?:py|pyw|js|jsx|ts|tsx|mjs|cjs|html|htm|css|scss|sass|swift|kt|kts|java|c|cc|cpp|cxx|h|hpp|cs|go|rs|rb|php|sh|bash|zsh|fish|pl|lua|r|sql|json|jsonl|yaml|yml|toml|xml|md)['"]"#
+        let quotedPythonFile = #"['"][^'"]*\.(?:py|pyw)['"]"#
         let pythonHeredocWritePatterns = [
-            #"(?is)\bpython3?\b[\s\S]{0,120}<<[\s\S]{0,2400}\bopen\s*\(\s*"# + quotedCodeFile + #"[\s\S]{0,160}['"][wax]\+?['"]"#,
-            #"(?is)\bpython3?\b[\s\S]{0,120}<<[\s\S]{0,2400}\b(?:Path\s*\(\s*)"# + quotedCodeFile + #"[\s\S]{0,240}\.(?:write_text|write_bytes)\s*\("#
+            #"(?is)\bpython3?\b[\s\S]{0,120}<<[\s\S]{0,2400}\bopen\s*\(\s*"# + quotedPythonFile + #"[\s\S]{0,160}['"][wax]\+?['"]"#,
+            #"(?is)\bpython3?\b[\s\S]{0,120}<<[\s\S]{0,2400}\b(?:Path\s*\(\s*)"# + quotedPythonFile + #"[\s\S]{0,240}\.(?:write_text|write_bytes)\s*\("#
         ]
 
         return pythonHeredocWritePatterns.contains { pattern in
