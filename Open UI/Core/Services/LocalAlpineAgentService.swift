@@ -592,6 +592,7 @@ actor LocalAlpineAgentService {
     private func parseWriteFile(from object: Any) -> LocalAlpineAgentFile? {
         guard let dict = object as? [String: Any] else { return nil }
         guard let path = (dict["path"] as? String)
+            ?? (dict["file_path"] as? String)
             ?? (dict["file"] as? String)
             ?? (dict["name"] as? String)
             ?? (dict["filename"] as? String)
@@ -732,6 +733,17 @@ actor LocalAlpineAgentService {
                 fileName: split.fileName,
                 destinationPath: split.directory
             )
+            let writtenData = try await LocalAlpineTerminalService.shared.readFile(path: target)
+            guard writtenData == data else {
+                return LocalAlpineProtectedWriteOutcome(
+                    lines: [
+                        "- `\(target)` 写入失败：写入后读回字节不一致（expected \(data.count) B, got \(writtenData.count) B），已阻止继续执行。"
+                    ],
+                    writtenPath: nil,
+                    writtenFile: nil,
+                    hadFailure: true
+                )
+            }
             var lines = ["- `\(target)` (\(data.count) B，已写入，来源：\(source.displayName))"]
             lines.append(contentsOf: notes.map { "  - \($0)" })
             return LocalAlpineProtectedWriteOutcome(

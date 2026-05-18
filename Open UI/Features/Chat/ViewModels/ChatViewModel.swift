@@ -1481,6 +1481,7 @@ final class ChatViewModel {
                 }
             }
             guard let path = ((dict["path"] as? String)
+                ?? (dict["file_path"] as? String)
                 ?? (dict["file"] as? String)
                 ?? (dict["name"] as? String)
                 ?? (dict["filename"] as? String)
@@ -1614,6 +1615,7 @@ final class ChatViewModel {
             if !nestedPaths.isEmpty { return nestedPaths }
         }
         guard let path = ((dict["path"] as? String)
+            ?? (dict["file_path"] as? String)
             ?? (dict["file"] as? String)
             ?? (dict["name"] as? String)
             ?? (dict["filename"] as? String)
@@ -5666,11 +5668,44 @@ final class ChatViewModel {
                 dict[key] = normalizedLocalAlpineObject(value, changed: &changed)
             }
         }
-        return dict
+        return normalizedPythonWriteFilePayload(in: dict, changed: &changed)
+    }
+
+    private static func normalizedPythonWriteFilePayload(
+        in dict: [String: Any],
+        changed: inout Bool
+    ) -> [String: Any] {
+        guard let path = localAlpineWriteFilePath(from: dict),
+              path.lowercased().hasSuffix(".py"),
+              !hasStructuredLocalAlpinePayload(dict),
+              let content = plainLocalAlpineContent(from: dict) else {
+            return dict
+        }
+
+        let prepared: String
+        switch LocalAlpinePythonWriteGuard.prepare(content, source: .content) {
+        case .success(let source, _):
+            prepared = source
+        case .failure:
+            prepared = content
+        }
+
+        guard let data = prepared.data(using: .utf8) else {
+            return dict
+        }
+
+        var updated = dict
+        ["content", "contents", "text", "body", "code"].forEach {
+            updated.removeValue(forKey: $0)
+        }
+        updated["content_base64"] = data.base64EncodedString()
+        changed = true
+        return updated
     }
 
     private static func localAlpineWriteFilePath(from dict: [String: Any]) -> String? {
         ((dict["path"] as? String)
+            ?? (dict["file_path"] as? String)
             ?? (dict["file"] as? String)
             ?? (dict["name"] as? String)
             ?? (dict["filename"] as? String)
@@ -10252,7 +10287,7 @@ final class ChatViewModel {
 
         Tool request schema:
         - To execute commands, include exactly one fenced block with language `iexa_alpine`. The block may contain POSIX shell, or JSON with one object or an `iexa_alpine` array.
-        - JSON objects support `cwd`, `write_files`, and `command`. `write_files` entries support `path`, `code_lines`, `content_lines`, `content`, or `content_base64`.
+        - JSON objects support `cwd`, `write_files`, and `command`. `write_files` entries support `path` or `file_path`, plus `code_lines`, `content_lines`, `content`, or `content_base64`. For Python, the app will normalize plain `content` into a byte-safe `content_base64` payload before execution.
         - For create/modify project tasks, prefer JSON `write_files` plus a verification `command` in the same object.
         - For read/list/delete/search tasks, prefer a minimal shell command scoped to `/mnt/iexa`.
         - The app will run the request locally on the device and append the real output. Do not output this block unless command execution is actually needed.
