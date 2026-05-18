@@ -117,6 +117,7 @@ private struct CalendarContentView: View {
         } message: {
             Text(vm.errorMessage ?? "")
         }
+        .environment(\.locale, Locale(identifier: "zh_CN"))
     }
 
     // MARK: - Top Bar
@@ -1107,8 +1108,10 @@ private struct NativeCalendarView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UICalendarView {
         let calendarView = UICalendarView()
-        calendarView.calendar = Calendar.current
-        calendarView.locale = Locale.current
+        var calendar = Calendar.current
+        calendar.locale = Locale(identifier: "zh_CN")
+        calendarView.calendar = calendar
+        calendarView.locale = Locale(identifier: "zh_CN")
         calendarView.fontDesign = .rounded
         calendarView.tintColor = UIColor(theme.brandPrimary)
 
@@ -1132,6 +1135,10 @@ private struct NativeCalendarView: UIViewRepresentable {
     }
 
     func updateUIView(_ calendarView: UICalendarView, context: Context) {
+        var calendar = Calendar.current
+        calendar.locale = Locale(identifier: "zh_CN")
+        calendarView.calendar = calendar
+        calendarView.locale = Locale(identifier: "zh_CN")
         calendarView.tintColor = UIColor(theme.brandPrimary)
         context.coordinator.vm = vm
 
