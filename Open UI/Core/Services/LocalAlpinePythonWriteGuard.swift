@@ -38,7 +38,7 @@ enum LocalAlpinePythonWriteGuard {
         case .codeLines, .contentLines, .contentBase64:
             extracted = ExtractedCode(
                 content: normalizeNewlines(content),
-                notes: ["结构化 Python 源码已按完整文件写入，并交给内置 Python 格式化器做安全归一化。"]
+                notes: ["结构化 Python 源码已按完整文件写入，并交给 Python 写入保护器做安全归一化。"]
             )
         case .content, .heredoc, .codeBlock:
             switch extractPythonCode(from: content, source: source) {
@@ -85,61 +85,19 @@ enum LocalAlpinePythonWriteGuard {
         prepared = tabRepair.content
         notes.append(contentsOf: tabRepair.notes)
 
-        if let indentationRepair = repairCollapsedIndentationIfNeeded(prepared) {
-            prepared = indentationRepair.content
-            notes.append(contentsOf: indentationRepair.notes)
-        }
-
         return (ensureTrailingNewline(prepared), notes)
     }
 
-    static func repairCollapsedIndentationIfNeeded(_ content: String) -> (content: String, notes: [String])? {
-        let normalized = normalizeNewlines(content).trimmingCharacters(in: .newlines)
-        guard looksCollapsedIndentation(normalized) else { return nil }
-
-        let repaired = rebuildIndentation(from: normalized)
-        guard repaired != normalized else { return nil }
-        return (
-            ensureTrailingNewline(repaired),
-            ["检测到 Python 块缩进被压扁，客户端已按冒号块/def/class/else 结构自动恢复 4 空格缩进。"]
-        )
+    static func repairCollapsedIndentationIfNeeded(_: String) -> (content: String, notes: [String])? {
+        return nil
     }
 
     static func repairForSyntaxIssue(_ content: String, diagnosticOutput: String) -> SyntaxRepair? {
         repairCandidatesForSyntaxIssue(content, diagnosticOutput: diagnosticOutput).first
     }
 
-    static func repairCandidatesForSyntaxIssue(_ content: String, diagnosticOutput: String) -> [SyntaxRepair] {
-        let normalized = normalizeNewlines(content).trimmingCharacters(in: .newlines)
-        let lowercased = diagnosticOutput.lowercased()
-        let shouldAttemptRepair = lowercased.contains("indentationerror")
-            || lowercased.contains("taberror")
-            || lowercased.contains("expected an indented block")
-            || lowercased.contains("expected 'except' or 'finally' block")
-        guard shouldAttemptRepair else { return [] }
-
-        var baseNotes: [String] = []
-        if let line = firstDiagnosticLineNumber(in: diagnosticOutput) {
-            baseNotes.append("检测到 Python 语法/缩进错误位置：第 \(line) 行。")
-        }
-
-        var candidates = syntaxRepairCandidates(for: normalized, diagnosticOutput: diagnosticOutput)
-        candidates.append(rebuildIndentation(from: normalized))
-
-        var seen = Set<String>()
-        var repairs: [SyntaxRepair] = []
-        for (offset, candidate) in candidates.enumerated() {
-            let prepared = candidate.trimmingCharacters(in: .newlines)
-            guard !prepared.isEmpty,
-                  prepared != normalized,
-                  seen.insert(prepared).inserted else {
-                continue
-            }
-            var notes = baseNotes
-            notes.append("写入保护器已按 Python 块结构生成第 \(offset + 1) 个缩进修复候选，将交给内置 Alpine ast.parse 验证后再接受。")
-            repairs.append(SyntaxRepair(content: ensureTrailingNewline(prepared), notes: notes))
-        }
-        return repairs
+    static func repairCandidatesForSyntaxIssue(_: String, diagnosticOutput _: String) -> [SyntaxRepair] {
+        return []
     }
 
     private static func extractPythonCode(from content: String, source: Source) -> Extraction {

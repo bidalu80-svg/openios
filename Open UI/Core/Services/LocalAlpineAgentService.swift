@@ -776,100 +776,22 @@ actor LocalAlpineAgentService {
             content: formatted.content,
             target: target,
             source: source,
-            notes: ["Python 文件已通过内置格式化器写入；会保留语义并自动修复换行、Tab、常见乱码；语法有效时不会再重排缩进。"] + formatted.notes
+            notes: ["Python 文件已按结构化内容原样写入；仅做换行、行首 Tab 和常见乱码的安全归一化，缩进不再由客户端猜测重排。"] + formatted.notes
         )
         guard !directWrite.hadFailure else { return directWrite }
 
         let runtimeTargetPath = runtimePath(forSharedPath: target)
         let validationCommand = pythonASTValidationCommand(for: runtimeTargetPath)
         var lines = directWrite.lines
-        var finalContent = formatted.content
-        var finalByteCount = formattedData.count
-        var validationResult = await LocalAlpineTerminalService.shared.execute(command: validationCommand, cwd: cwd)
-
-        if validationResult.exitCode != 0 {
-            let repairResult: LocalAlpineCommandResult?
-            do {
-                let repairScriptRuntimePath = try await ensurePythonIndentRepairScript()
-                let repairCommand = pythonIndentRepairCommand(
-                    scriptRuntimePath: repairScriptRuntimePath,
-                    targetRuntimePath: runtimeTargetPath
-                )
-                repairResult = await LocalAlpineTerminalService.shared.execute(command: repairCommand, cwd: cwd)
-            } catch {
-                repairResult = nil
-                lines.append("  - Python AST 缩进修复器准备失败：\(error.localizedDescription)")
-            }
-
-            let repairOutput = repairResult?.output.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if repairResult?.exitCode == 0, repairOutput.contains("IEXA_PY_REPAIR_SUCCESS") {
-                if let repairedData = try? await LocalAlpineTerminalService.shared.readFile(path: target),
-                   let repairedContent = String(data: repairedData, encoding: .utf8) {
-                    finalContent = repairedContent
-                    finalByteCount = repairedData.count
-                    lines.append("  - Python AST 缩进修复器已重排文件，并通过 ast.parse 校验。")
-                    lines.append("  - 修复后文件大小：\(repairedData.count) B。")
-                }
-                validationResult = await LocalAlpineTerminalService.shared.execute(command: validationCommand, cwd: cwd)
-            }
-
-            if validationResult.exitCode != 0 {
-                let syntaxRepairs = LocalAlpinePythonWriteGuard.repairCandidatesForSyntaxIssue(
-                    finalContent,
-                    diagnosticOutput: validationResult.output + "\n" + repairOutput
-                )
-                var acceptedSyntaxRepair: LocalAlpinePythonWriteGuard.SyntaxRepair?
-                var rejectedCandidateOutputs: [String] = []
-                let targetSplit = splitFilePath(target)
-                for syntaxRepair in syntaxRepairs {
-                    guard let repairedData = syntaxRepair.content.data(using: .utf8) else { continue }
-                    try? await LocalAlpineTerminalService.shared.writeFile(
-                        data: repairedData,
-                        fileName: targetSplit.fileName,
-                        destinationPath: targetSplit.directory
-                    )
-                    let candidateValidation = await LocalAlpineTerminalService.shared.execute(command: validationCommand, cwd: cwd)
-                    if candidateValidation.exitCode == 0 {
-                        finalContent = syntaxRepair.content
-                        finalByteCount = repairedData.count
-                        validationResult = candidateValidation
-                        acceptedSyntaxRepair = syntaxRepair
-                        break
-                    }
-                    let candidateOutput = candidateValidation.output.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !candidateOutput.isEmpty {
-                        rejectedCandidateOutputs.append(String(candidateOutput.prefix(1_000)))
-                    }
-                }
-
-                if let acceptedSyntaxRepair {
-                    lines.append("  - Python 写入保护器已重排缩进并通过 ast.parse 校验。")
-                    lines.append(contentsOf: acceptedSyntaxRepair.notes.map { "    - \($0)" })
-                } else if !syntaxRepairs.isEmpty {
-                    let targetSplit = splitFilePath(target)
-                    try? await LocalAlpineTerminalService.shared.writeFile(
-                        data: formattedData,
-                        fileName: targetSplit.fileName,
-                        destinationPath: targetSplit.directory
-                    )
-                    lines.append("  - Python 写入保护器尝试了 \(syntaxRepairs.count) 个缩进候选但验证仍失败，已回滚到原始写入内容。")
-                    if let candidateOutput = rejectedCandidateOutputs.last {
-                        lines.append("    - 候选验证输出：\(candidateOutput)")
-                    }
-                } else {
-                    lines.append("  - Python AST 缩进修复器未能安全修复，已保留原文件。")
-                }
-            }
-            if !repairOutput.isEmpty {
-                lines.append("    - 修复输出：\(String(repairOutput.prefix(1_000)))")
-            }
-        }
+        let finalContent = formatted.content
+        let finalByteCount = formattedData.count
+        let validationResult = await LocalAlpineTerminalService.shared.execute(command: validationCommand, cwd: cwd)
 
         if validationResult.exitCode == 0 {
             lines.append("  - Python 语法校验通过。")
         } else {
             let output = validationResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            lines.append("  - Python 语法校验失败，已阻止后续命令运行；需要完整重写该文件后再验证。")
+            lines.append("  - Python 语法/缩进校验失败，已保留写入原文并阻止后续命令运行；下一轮必须完整重写该文件后再验证。")
             if !output.isEmpty {
                 lines.append("    - 输出：\(String(output.prefix(1_000)))")
             }
