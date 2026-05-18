@@ -91,16 +91,45 @@ enum LocalAlpinePythonWriteGuard {
         return (ensureTrailingNewline(prepared), notes)
     }
 
-    static func repairCollapsedIndentationIfNeeded(_: String) -> (content: String, notes: [String])? {
-        return nil
+    static func repairCollapsedIndentationIfNeeded(_ content: String) -> (content: String, notes: [String])? {
+        let normalized = normalizeNewlines(content).trimmingCharacters(in: .newlines)
+        guard looksCollapsedIndentation(normalized) else { return nil }
+        let rebuilt = rebuildIndentation(from: normalized)
+        guard rebuilt != normalized,
+              !rebuilt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return (
+            content: ensureTrailingNewline(rebuilt),
+            notes: ["检测到 Python 代码块缩进几乎全部丢失，已在写入层按 Python 语法块重建缩进。"]
+        )
     }
 
     static func repairForSyntaxIssue(_ content: String, diagnosticOutput: String) -> SyntaxRepair? {
         repairCandidatesForSyntaxIssue(content, diagnosticOutput: diagnosticOutput).first
     }
 
-    static func repairCandidatesForSyntaxIssue(_: String, diagnosticOutput _: String) -> [SyntaxRepair] {
-        return []
+    static func repairCandidatesForSyntaxIssue(_ content: String, diagnosticOutput: String) -> [SyntaxRepair] {
+        let normalized = normalizeNewlines(content).trimmingCharacters(in: .newlines)
+        guard !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+
+        var candidates: [SyntaxRepair] = []
+        if let collapsed = repairCollapsedIndentationIfNeeded(normalized) {
+            candidates.append(SyntaxRepair(content: collapsed.content, notes: collapsed.notes))
+        }
+        candidates.append(contentsOf: syntaxRepairCandidates(for: normalized, diagnosticOutput: diagnosticOutput).map {
+            SyntaxRepair(
+                content: ensureTrailingNewline($0.trimmingCharacters(in: .newlines)),
+                notes: ["根据 Python 语法错误定位，将疑似丢失缩进的代码块向内缩进后重新校验。"]
+            )
+        })
+
+        var seen = Set<String>()
+        return candidates.filter { candidate in
+            guard !seen.contains(candidate.content) else { return false }
+            seen.insert(candidate.content)
+            return true
+        }
     }
 
     private static func extractPythonCode(from content: String, source: Source) -> Extraction {

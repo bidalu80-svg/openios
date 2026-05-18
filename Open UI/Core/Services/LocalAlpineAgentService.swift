@@ -771,12 +771,31 @@ actor LocalAlpineAgentService {
             )
         }
 
-        let validationResult = await validatePythonContent(formatted.content, cwd: cwd)
+        var finalContent = formatted.content
+        var finalData = formattedData
+        var finalNotes = formatted.notes
+        var validationResult = await validatePythonContent(finalContent, cwd: cwd)
+        if validationResult.exitCode != 0 {
+            let repairCandidates = LocalAlpinePythonWriteGuard.repairCandidatesForSyntaxIssue(
+                finalContent,
+                diagnosticOutput: validationResult.output
+            )
+            for repair in repairCandidates {
+                guard let repairedData = repair.content.data(using: .utf8) else { continue }
+                let repairedValidation = await validatePythonContent(repair.content, cwd: cwd)
+                guard repairedValidation.exitCode == 0 else { continue }
+                finalContent = repair.content
+                finalData = repairedData
+                finalNotes.append(contentsOf: repair.notes)
+                validationResult = repairedValidation
+                break
+            }
+        }
         guard validationResult.exitCode == 0 else {
             var lines = [
                 "- `\(target)` Python 写入已拒绝：语法/缩进校验未通过，目标文件未被覆盖。"
             ]
-            lines.append(contentsOf: formatted.notes.map { "  - \($0)" })
+            lines.append(contentsOf: finalNotes.map { "  - \($0)" })
             if let draftPath = await writeFailedPythonDraft(
                 data: formattedData,
                 target: target
@@ -797,17 +816,16 @@ actor LocalAlpineAgentService {
         }
 
         let directWrite = await writeFileBytes(
-            data: formattedData,
-            content: formatted.content,
+            data: finalData,
+            content: finalContent,
             target: target,
             source: source,
-            notes: ["Python 文件已按工具参数写入；写入目标前已通过 AST 语法校验。"] + formatted.notes
+            notes: ["Python 文件已按工具参数写入；写入目标前已通过 AST 语法校验。"] + finalNotes
         )
         guard !directWrite.hadFailure else { return directWrite }
 
         var lines = directWrite.lines
-        let finalContent = formatted.content
-        let finalByteCount = formattedData.count
+        let finalByteCount = finalData.count
         lines.append("  - Python 语法校验通过。")
 
         return LocalAlpineProtectedWriteOutcome(
