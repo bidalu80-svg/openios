@@ -3961,23 +3961,11 @@ final class ChatViewModel {
             modelId: modelId
         )
         let shouldKeepNativeLinkRoute = Self.shouldKeepNativeLinkResolverOffLocalAlpine(currentText)
-        let terminalButtonIsLocalAlpine = terminalEnabled && selectedTerminalIsLocalAlpine
-        let shouldAutoOpenLocalAlpine = !shouldKeepMediaRoute && !shouldKeepNativeLinkRoute && !isLocalAlpineInterjection && (
-            shouldAutoRouteExplicitLocalAlpineCommand(currentText)
-                || isExplicitLocalAlpineResume
-                || shouldUseLocalAlpineAgentForRequest(currentText, modelId: modelId)
-        )
-        let localAlpineModeForThisTurn = terminalButtonIsLocalAlpine || shouldAutoOpenLocalAlpine
-        if shouldAutoOpenLocalAlpine {
-            selectedTerminalServer = .localAlpine
-            terminalEnabled = true
-        }
+        let localAlpineModeForThisTurn = terminalEnabled && selectedTerminalIsLocalAlpine
         if !shouldKeepMediaRoute,
            !shouldKeepNativeLinkRoute,
            processedAttachments.isEmpty,
-           (localAlpineModeForThisTurn
-                ? shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText)
-                : Self.shouldSendRawTextDirectlyToLocalAlpine(currentText)),
+           shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText),
            localAlpineModeForThisTurn {
             await sendDirectLocalAlpineCommand(currentText, modelId: modelId)
             return
@@ -4882,6 +4870,7 @@ final class ChatViewModel {
     }
 
     private func latestUserRequestsLocalAlpineAgent(modelId: String? = nil) -> Bool {
+        guard terminalEnabled && selectedTerminalIsLocalAlpine else { return false }
         guard let latestUserText = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content else { return false }
@@ -9151,13 +9140,7 @@ final class ChatViewModel {
         if let sp = effectiveSP, !sp.trimmingCharacters(in: .whitespaces).isEmpty {
             params["system"] = sp
         }
-        let latestUserTextForTools = conversation?.messages.last(where: {
-            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
-        })?.content ?? ""
-        let localAlpineClientSideTask = shouldUseLocalAlpineAgentForRequest(
-            latestUserTextForTools,
-            modelId: selectedModel?.id ?? selectedModelId ?? conversation?.model
-        )
+        let localAlpineClientSideTask = terminalEnabled && selectedTerminalIsLocalAlpine
 
         if localAlpineClientSideTask {
             params.removeValue(forKey: "function_calling")
@@ -11821,11 +11804,11 @@ final class ChatViewModel {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content
         let localAlpineModelId = selectedModelId ?? conversation.model ?? ""
-        let latestUserNeedsLocalAlpine = latestUserTextForLocalAlpine.map {
+        let localAlpineTerminalIsEnabled = terminalEnabled && selectedTerminalIsLocalAlpine
+        let latestUserNeedsLocalAlpine = localAlpineTerminalIsEnabled && (latestUserTextForLocalAlpine.map {
             shouldUseLocalAlpineAgentForRequest($0, modelId: localAlpineModelId)
-        } ?? false
-        let localAlpineTerminalApplies = ((terminalEnabled && selectedTerminalIsLocalAlpine)
-            || latestUserNeedsLocalAlpine)
+        } ?? false)
+        let localAlpineTerminalApplies = localAlpineTerminalIsEnabled
             && !(latestUserTextForLocalAlpine.map {
                 shouldKeepMediaGenerationRequestOffLocalAlpine($0, modelId: localAlpineModelId)
             } ?? false)
@@ -12296,6 +12279,7 @@ final class ChatViewModel {
 
     private func scheduleLocalAlpineAgentIfNeeded(messageId: String, content: String, error: ChatMessageError?) {
         guard error == nil else { return }
+        guard terminalEnabled && selectedTerminalIsLocalAlpine else { return }
         guard !localAlpineAgentStopRequested else { return }
         guard !localAlpineAutoExecutionPaused else { return }
         guard let message = conversation?.messages.first(where: { $0.id == messageId }),
@@ -12317,7 +12301,7 @@ final class ChatViewModel {
         let userRequestedExecution = latestUserText.map {
             shouldUseLocalAlpineAgentForRequest($0, modelId: effectiveModelId)
         } ?? false
-        guard (terminalEnabled && selectedTerminalIsLocalAlpine) || userRequestedExecution else {
+        guard userRequestedExecution || Self.contentContainsLocalAlpineInstruction(content) else {
             return
         }
 
@@ -13017,39 +13001,9 @@ final class ChatViewModel {
     }
 
     private func shouldExecuteLocalWorkspaceAgentForCurrentRequest() -> Bool {
-        if terminalEnabled, selectedTerminalIsLocalAlpine {
-            return false
-        }
-        guard let userText = conversation?.messages.last(where: {
-            $0.role == .user && !Self.isLocalWorkspaceAgentResult($0)
-        })?.content.lowercased() else { return false }
-        if shouldUseLocalAlpineAgentForRequest(userText) {
-            return false
-        }
-        if Self.isExplicitLocalAlpineRequest(userText) || Self.localAlpineNaturalLanguageCommand(for: userText) != nil {
-            return false
-        }
-
-        let strongWorkspaceIntent = [
-            "本地工作区", "工作区", "保存到", "保存为", "写入文件", "创建文件", "新建文件",
-            "修改文件", "删除文件", "删除文件夹", "创建文件夹", "新建文件夹", "读取文件",
-            "列出文件", "生成项目", "创建项目", "项目文件", "workspace", "save file",
-            "write file", "create file", "modify file", "delete file", "mkdir", "append",
-            "落地到本地", "落地项目", "直接写到", "帮我保存", "存到工作区", "写入工作区",
-            "保存成文件", "搜索文件", "搜索内容", "查找文件", "查找内容", "搜文件",
-            "全文搜索", "grep", "find in files", "search files", "search workspace",
-            "create project", "save to workspace", "write to workspace"
-        ].contains { userText.contains($0) }
-
-        let previewOnlyIntent = [
-            "给我看", "看看", "预览", "展示", "单文件", "不要创建", "不用创建",
-            "不需要创建", "不要保存", "不用保存", "只看", "直接给代码", "写一个",
-            "写个", "做一个给我看", "先看看", "先预览", "不要落地", "不要写入",
-            "不要生成项目", "别创建文件", "show me", "preview", "single file",
-            "don't create", "do not create", "just show", "only show"
-        ].contains { userText.contains($0) }
-
-        return strongWorkspaceIntent && !previewOnlyIntent
+        // Ordinary chat must never start a local file executor on keyword guesses.
+        // Local project/file/command work is isolated behind the explicit Terminal Agent mode.
+        return false
     }
 
     private func fallbackWorkspaceAgentBlockForCurrentRequest() -> String? {
