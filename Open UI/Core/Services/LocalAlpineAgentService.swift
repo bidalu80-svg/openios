@@ -523,6 +523,7 @@ actor LocalAlpineAgentService {
 
         let shell = block.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !shell.isEmpty else { throw LocalAlpineAgentError.noCommands }
+        guard Self.looksLikeShellBlock(shell) else { throw LocalAlpineAgentError.noCommands }
         return [LocalAlpineAgentCommand(command: shell, cwd: nil, writeFiles: [])]
     }
 
@@ -670,6 +671,7 @@ actor LocalAlpineAgentService {
     private func writeProtectedFile(_ file: LocalAlpineAgentFile, cwd: String) async -> LocalAlpineProtectedWriteOutcome {
         let target = resolvedFilePath(file.path, cwd: cwd)
         let content = file.content
+        let isStructuredWrite = file.source.preservesStructuredWriteExactly
         guard let data = content.data(using: .utf8) else {
             return LocalAlpineProtectedWriteOutcome(
                 lines: ["- `\(target)` 写入失败：内容不是有效 UTF-8"],
@@ -684,6 +686,16 @@ actor LocalAlpineAgentService {
                 target: target,
                 cwd: cwd,
                 source: file.source
+            )
+        }
+
+        if isStructuredWrite {
+            return await writeFileBytes(
+                data: data,
+                content: content,
+                target: target,
+                source: file.source,
+                notes: ["结构化写入按工具参数原样落盘；未做缩进重排或格式化。"]
             )
         }
 
@@ -775,22 +787,6 @@ actor LocalAlpineAgentService {
         var finalData = formattedData
         var finalNotes = formatted.notes
         var validationResult = await validatePythonContent(finalContent, cwd: cwd)
-        if validationResult.exitCode != 0 {
-            let repairCandidates = LocalAlpinePythonWriteGuard.repairCandidatesForSyntaxIssue(
-                finalContent,
-                diagnosticOutput: validationResult.output
-            )
-            for repair in repairCandidates {
-                guard let repairedData = repair.content.data(using: .utf8) else { continue }
-                let repairedValidation = await validatePythonContent(repair.content, cwd: cwd)
-                guard repairedValidation.exitCode == 0 else { continue }
-                finalContent = repair.content
-                finalData = repairedData
-                finalNotes.append(contentsOf: repair.notes)
-                validationResult = repairedValidation
-                break
-            }
-        }
         guard validationResult.exitCode == 0 else {
             var lines = [
                 "- `\(target)` Python 写入已拒绝：语法/缩进校验未通过，目标文件未被覆盖。"
@@ -1363,6 +1359,39 @@ actor LocalAlpineAgentService {
         }
     }
 
+    private nonisolated static func looksLikeShellBlock(_ block: String) -> Bool {
+        let lines = block
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return false }
+        return lines.allSatisfy { line in
+            if line.hasPrefix("#") || line.hasPrefix("#!") { return true }
+            if line.range(of: #"^[A-Za-z_][A-Za-z0-9_]*=.*$"#, options: .regularExpression) != nil {
+                return true
+            }
+            if line.range(of: #"^(if|then|else|elif|fi|for|while|do|done|case|esac|function|\{|\}|set|export|trap|exit|return|break|continue)\b"#, options: .regularExpression) != nil {
+                return true
+            }
+            if line.range(of: #"[;&|`$<>]"#, options: .regularExpression) != nil {
+                return true
+            }
+            let command = line.split(separator: " ", maxSplits: 1).first.map(String.init) ?? line
+            return knownShellCommands.contains(command)
+        }
+    }
+
+    private static let knownShellCommands: Set<String> = [
+        "apk", "ash", "awk", "bash", "bunzip2", "busybox", "bzcat", "bzip2", "cat", "cd",
+        "chmod", "chown", "cmake", "cp", "curl", "date", "df", "dirname", "du", "echo",
+        "env", "find", "free", "g++", "gcc", "git", "grep", "gunzip", "gzip", "head",
+        "id", "install", "ln", "ls", "lua", "make", "mkdir", "mv", "nc", "node", "npm",
+        "npx", "patch", "perl", "pip", "pip3", "printf", "ps", "pwd", "python", "python3",
+        "rm", "rmdir", "sed", "sh", "sleep", "sort", "tail", "tar", "tee", "test", "top",
+        "touch", "tr", "uname", "uniq", "unzip", "vi", "vim", "wget", "which", "whoami",
+        "xargs", "xz", "zip"
+    ]
+
     private nonisolated static func commandTargetsCodeOrIndentationSensitiveFile(_ normalizedCommand: String) -> Bool {
         let filePatterns = [
             #"\.(py|pyw|js|jsx|ts|tsx|mjs|cjs|html|htm|css|scss|sass|swift|kt|kts|java|c|cc|cpp|cxx|h|hpp|cs|go|rs|rb|php|sh|bash|zsh|fish|pl|lua|r|sql|json|jsonl|yaml|yml|toml|xml|md|dockerfile|makefile)(?:['"\s;|&>]|$)"#,
@@ -1718,6 +1747,15 @@ private enum LocalAlpineAgentFileSource: Equatable {
         case .contentBase64: return .contentBase64
         case .heredoc: return .heredoc
         case .codeBlock: return .codeBlock
+        }
+    }
+
+    var preservesStructuredWriteExactly: Bool {
+        switch self {
+        case .content, .codeLines, .contentLines, .contentBase64:
+            return true
+        case .heredoc, .codeBlock:
+            return false
         }
     }
 }
