@@ -1352,7 +1352,7 @@ final class ChatViewModel {
             }
             if localAlpineOutputHasPythonSyntaxIssue(content + "\n" + (rawResult ?? "")) {
                 lines.append("  required next action:")
-                lines.append(indentForSystemContext("Python syntax/indentation error detected. Rewrite the complete corrected Python file through iexa_alpine JSON write_files, preserving the file body exactly, then run a bounded verification command. Do not repeat only the same failed command."))
+                lines.append(indentForSystemContext("Python syntax/indentation error detected. Rewrite the complete corrected Python file through byte-preserving iexa_alpine JSON write_files, then run a bounded verification command. Do not repeat only the same failed command."))
             }
             return lines.joined(separator: "\n")
         }
@@ -1368,7 +1368,7 @@ final class ChatViewModel {
         - If result output is present, answer from that output as the source of truth.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
-        - If the latest result contains Python IndentationError or SyntaxError, emit one complete corrected Python file through `iexa_alpine` JSON `write_files`, then run a bounded verification command. Keep the file body complete and exact; do not repeat only the same failed command.
+        - If the latest result contains Python IndentationError or SyntaxError, emit one complete corrected Python file through byte-preserving `iexa_alpine` JSON `write_files`, then run a bounded verification command. Keep the file body complete and exact; do not repeat only the same failed command.
         [/Local Alpine execution state]
         """
     }
@@ -5196,11 +5196,6 @@ final class ChatViewModel {
         return nil
     }
 
-    private func forcedLocalAlpineBlockAfterManualResponse(userText: String) -> String? {
-        Self.fallbackLocalAlpineBlock(for: userText)
-            ?? Self.fallbackLocalAlpineKickoffBlock(for: userText)
-    }
-
     private func fallbackLocalAlpineBlockForFollowUpOperation(userText: String) -> String? {
         guard let messages = conversation?.messages else { return nil }
         guard let command = Self.localAlpineFollowUpCommand(for: userText, messages: messages) else { return nil }
@@ -5267,31 +5262,147 @@ final class ChatViewModel {
 
         if containsAny(normalized, ["执行", "运行", "跑", "测试", "execute", "run", "test"]) {
             guard let targetPath else { return nil }
-            let runner: String
-            switch (targetPath as NSString).pathExtension.lowercased() {
-            case "lua": runner = "lua"
-            case "py": runner = "python3"
-            case "js", "mjs", "cjs": runner = "node"
-            case "sh", "bash": runner = "sh"
-            default: runner = ""
-            }
-            if runner.isEmpty {
-                return """
-                target=\(quotedTarget)
-                if [ -x "$target" ]; then
-                  "$target"
-                else
-                  printf 'not executable: %s\\n' "$target"
-                fi
-                """
-            }
+            let runCommand = localAlpineRunCommand(for: targetPath)
+                ?? localAlpineExecutableFallbackCommand()
             return """
             target=\(quotedTarget)
-            \(runner) "$target"
+            \(runCommand)
             """
         }
 
         return nil
+    }
+
+    private static func localAlpineRunCommand(for targetPath: String) -> String? {
+        let ext = (targetPath as NSString).pathExtension.lowercased()
+        switch ext {
+        case "lua":
+            return """
+            command -v lua >/dev/null 2>&1 || command -v lua5.4 >/dev/null 2>&1 || { apk update && apk add --no-cache lua5.4; }
+            if command -v lua >/dev/null 2>&1; then lua "$target"; else lua5.4 "$target"; fi
+            """
+        case "py", "pyw":
+            return """
+            command -v python3 >/dev/null 2>&1 || { apk update && apk add --no-cache python3; }
+            python3 -m py_compile "$target" && python3 "$target"
+            """
+        case "js", "mjs", "cjs":
+            return """
+            command -v node >/dev/null 2>&1 || { apk update && apk add --no-cache nodejs; }
+            node "$target"
+            """
+        case "ts", "tsx":
+            return """
+            command -v npx >/dev/null 2>&1 || { apk update && apk add --no-cache nodejs npm; }
+            npx --yes tsx "$target"
+            """
+        case "sh":
+            return "sh \"$target\""
+        case "bash":
+            return """
+            command -v bash >/dev/null 2>&1 || { apk update && apk add --no-cache bash; }
+            bash "$target"
+            """
+        case "zsh":
+            return """
+            command -v zsh >/dev/null 2>&1 || { apk update && apk add --no-cache zsh; }
+            zsh "$target"
+            """
+        case "rb":
+            return """
+            command -v ruby >/dev/null 2>&1 || { apk update && apk add --no-cache ruby; }
+            ruby "$target"
+            """
+        case "php":
+            return """
+            command -v php >/dev/null 2>&1 || { apk update && apk add --no-cache php; }
+            php "$target"
+            """
+        case "pl":
+            return """
+            command -v perl >/dev/null 2>&1 || { apk update && apk add --no-cache perl; }
+            perl "$target"
+            """
+        case "r":
+            return """
+            command -v Rscript >/dev/null 2>&1 || { apk update && apk add --no-cache R; }
+            Rscript "$target"
+            """
+        case "go":
+            return """
+            command -v go >/dev/null 2>&1 || { apk update && apk add --no-cache go; }
+            go run "$target"
+            """
+        case "rs":
+            return """
+            command -v rustc >/dev/null 2>&1 || { apk update && apk add --no-cache rust; }
+            out="/tmp/iexa-rust-$(date +%s)"
+            rustc "$target" -o "$out" && "$out"
+            """
+        case "c":
+            return """
+            command -v gcc >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
+            out="/tmp/iexa-c-$(date +%s)"
+            gcc "$target" -o "$out" && "$out"
+            """
+        case "cc", "cpp", "cxx":
+            return """
+            command -v g++ >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
+            out="/tmp/iexa-cpp-$(date +%s)"
+            g++ "$target" -o "$out" && "$out"
+            """
+        case "java":
+            return """
+            command -v javac >/dev/null 2>&1 || { apk update && apk add --no-cache openjdk17; }
+            dir=$(dirname "$target")
+            base=$(basename "$target" .java)
+            (cd "$dir" && javac "$base.java" && java "$base")
+            """
+        case "kt":
+            return """
+            command -v kotlinc >/dev/null 2>&1 || { apk update && apk add --no-cache kotlin; }
+            out="/tmp/iexa-kt-$(date +%s).jar"
+            kotlinc "$target" -include-runtime -d "$out" && java -jar "$out"
+            """
+        case "kts":
+            return """
+            command -v kotlinc >/dev/null 2>&1 || { apk update && apk add --no-cache kotlin; }
+            kotlinc -script "$target"
+            """
+        case "swift":
+            return """
+            command -v swift >/dev/null 2>&1 || { printf 'swift runtime is not installed in this Alpine image\\n'; exit 127; }
+            swift "$target"
+            """
+        case "dart":
+            return """
+            command -v dart >/dev/null 2>&1 || { apk update && apk add --no-cache dart; }
+            dart "$target"
+            """
+        case "exs":
+            return """
+            command -v elixir >/dev/null 2>&1 || { apk update && apk add --no-cache elixir; }
+            elixir "$target"
+            """
+        case "html", "htm":
+            return """
+            printf 'HTML file exists; showing the first 120 lines for verification.\\n'
+            sed -n '1,120p' "$target"
+            """
+        default:
+            return nil
+        }
+    }
+
+    private static func localAlpineExecutableFallbackCommand() -> String {
+        """
+        if [ -x "$target" ]; then
+          "$target"
+        else
+          printf 'not executable and no runner is known for: %s\\n' "$target"
+          exit 2
+        fi
+        """
     }
 
     private static func localAlpineRepairContextCommand(in messages: [ChatMessage]) -> String? {
@@ -5671,15 +5782,7 @@ final class ChatViewModel {
             return dict
         }
 
-        let prepared: String
-        switch LocalAlpinePythonWriteGuard.prepare(content, source: .content) {
-        case .success(let source, _):
-            prepared = source
-        case .failure:
-            prepared = content
-        }
-
-        guard let data = prepared.data(using: .utf8) else {
+        guard let data = content.data(using: .utf8) else {
             return dict
         }
 
@@ -6442,88 +6545,8 @@ final class ChatViewModel {
 
     private static func fileRunCommand(for target: String) -> String {
         let quoted = shellQuoted(target)
-        let ext = (target as NSString).pathExtension.lowercased()
-        let run: String
-        switch ext {
-        case "lua":
-            run = """
-            command -v lua >/dev/null 2>&1 || command -v lua5.4 >/dev/null 2>&1 || { apk update && apk add --no-cache lua5.4; }
-            if command -v lua >/dev/null 2>&1; then
-              lua "$target"
-            else
-              lua5.4 "$target"
-            fi
-            """
-        case "py", "pyw":
-            run = """
-            command -v python3 >/dev/null 2>&1 || { apk update && apk add --no-cache python3; }
-            python3 -m py_compile "$target" && python3 "$target"
-            """
-        case "js", "mjs", "cjs":
-            run = """
-            command -v node >/dev/null 2>&1 || { apk update && apk add --no-cache nodejs; }
-            node "$target"
-            """
-        case "ts", "tsx":
-            run = """
-            command -v npm >/dev/null 2>&1 || { apk update && apk add --no-cache nodejs npm; }
-            command -v npx >/dev/null 2>&1 || { printf 'npx still missing after node/npm install\\n'; exit 127; }
-            npx --yes tsx "$target"
-            """
-        case "go":
-            run = """
-            command -v go >/dev/null 2>&1 || { apk update && apk add --no-cache go; }
-            go run "$target"
-            """
-        case "rs":
-            run = """
-            command -v rustc >/dev/null 2>&1 || { apk update && apk add --no-cache rust; }
-            rustc "$target" -o /tmp/iexa_rust_main && /tmp/iexa_rust_main
-            """
-        case "java":
-            run = """
-            command -v javac >/dev/null 2>&1 || { apk update && apk add --no-cache openjdk17; }
-            dir=$(dirname "$target")
-            base=$(basename "$target" .java)
-            (cd "$dir" && javac "$base.java" && java "$base")
-            """
-        case "c":
-            run = """
-            command -v gcc >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
-            gcc "$target" -o /tmp/iexa_c_main && /tmp/iexa_c_main
-            """
-        case "cc", "cpp", "cxx":
-            run = """
-            command -v g++ >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
-            g++ "$target" -o /tmp/iexa_cpp_main && /tmp/iexa_cpp_main
-            """
-        case "rb":
-            run = """
-            command -v ruby >/dev/null 2>&1 || { apk update && apk add --no-cache ruby; }
-            ruby "$target"
-            """
-        case "php":
-            run = """
-            command -v php >/dev/null 2>&1 || { apk update && apk add --no-cache php; }
-            php "$target"
-            """
-        case "sh", "bash":
-            run = "sh \"$target\""
-        case "html", "htm":
-            run = """
-            printf 'HTML file exists; showing first 80 lines for verification.\\n'
-            sed -n '1,80p' "$target"
-            """
-        default:
-            run = """
-            if [ -x "$target" ]; then
-              "$target"
-            else
-              printf 'not executable and no runner is known for: %s\\n' "$target"
-              exit 2
-            fi
-            """
-        }
+        let run = localAlpineRunCommand(for: target)
+            ?? localAlpineExecutableFallbackCommand()
         return """
         set -u
         target=\(quoted)
@@ -6579,38 +6602,15 @@ final class ChatViewModel {
         let command = normalizedLocalAlpineCommand(text)
         guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         guard shouldSendRawTextDirectlyToLocalAlpine(command) else { return nil }
-
-        return """
-        ```iexa_alpine
-        \(command)
-        ```
-        """
+        return localAlpineFenceBlock(command)
     }
 
-    private static func fallbackLocalAlpineKickoffBlock(for text: String) -> String? {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return nil }
-        guard isExplicitLocalAlpineRequest(normalized)
-            || isExplicitLocalAlpineResumeRequest(normalized)
-            || isLocalAlpineFileWorkRequest(normalized)
-            || isLocalAlpineWebOrScriptTask(normalized)
-            || isLocalAlpineNaturalLanguageExecutionRequest(normalized) else {
-            return nil
-        }
-        let quotedRequest = shellQuoted(normalized)
-        let command = """
-        printf 'IEXA_AGENT_KICKOFF: local task needs model action\\n'
-        printf 'USER_REQUEST: %s\\n' \(quotedRequest)
-        printf '\\n== cwd ==\\n'
-        pwd
-        printf '\\n== /mnt/iexa ==\\n'
-        ls -la /mnt/iexa
-        printf '\\nNEXT_ACTION_REQUIRED: emit an iexa_alpine block with write_files/command to create, modify, run, install, inspect, or verify the requested task. Do not ask the user to run it manually.\\n'
-        exit 1
-        """
+    private static func localAlpineFenceBlock(_ command: String) -> String? {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
         return """
         ```iexa_alpine
-        \(command)
+        \(trimmed)
         ```
         """
     }
@@ -10273,7 +10273,7 @@ final class ChatViewModel {
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
         - For scripts/projects, prefer JSON `write_files` / `code_lines` inside `iexa_alpine` to create files, then run a bounded verification command. This keeps file bytes under the tool protocol instead of relying on chat rendering.
         - Python write protocol is mandatory: send the complete intended `.py` file through `iexa_alpine` JSON `write_files` using `code_lines` for normal files or `content_base64` for very long/complex content. Do not write Python through visible Markdown, partial snippets, shell heredocs, `echo`, or `cat > file.py` unless explicitly debugging the writer itself.
-        - The app has a built-in Python write guard. Python `write_files` is routed through `LocalAlpinePythonWriteGuard`: it preserves the intended source, normalizes newlines/tabs/common mojibake, then validates syntax before continuing. If validation fails because indentation was collapsed, the app may try one conservative repair candidate and only write it after AST validation passes; otherwise rewrite the complete file through `write_files`.
+        - Python `write_files` is byte-preserving: `code_lines`, `content_lines`, `content`, and `content_base64` are written exactly as provided. The app does not re-indent, normalize, or repair Python source.
         - The app treats Python AST/compile validation as the write gate. If that gate fails, the command after `write_files` is blocked; your next step must be a complete-file rewrite through structured `write_files`, not a line patch or a repeated run command.
         - When fixing an existing Python file after a syntax/indentation error, rewrite the complete corrected target Python file with `iexa_alpine` JSON `write_files`. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
         - Prefer complete structured Python writes for class/function bodies, then run the requested script or a bounded verification command.
@@ -10292,7 +10292,7 @@ final class ChatViewModel {
 
         Tool request schema:
         - To execute commands, include exactly one fenced block with language `iexa_alpine`. The block may contain POSIX shell, or JSON with one object or an `iexa_alpine` array.
-        - JSON objects support `cwd`, `write_files`, and `command`. `write_files` entries support `path` or `file_path`, plus `code_lines`, `content_lines`, `content`, or `content_base64`. For Python, the app will normalize plain `content` into a byte-safe `content_base64` payload before execution.
+        - JSON objects support `cwd`, `write_files`, and `command`. `write_files` entries support `path` or `file_path`, plus `code_lines`, `content_lines`, `content`, or `content_base64`. The app preserves file content exactly; use `code_lines` or `content_base64` when indentation matters.
         - For create/modify project tasks, prefer JSON `write_files` plus a verification `command` in the same object.
         - For read/list/delete/search tasks, prefer a minimal shell command scoped to `/mnt/iexa`.
         - The app will run the request locally on the device and append the real output. Do not output this block unless command execution is actually needed.
@@ -12298,23 +12298,12 @@ final class ChatViewModel {
            shouldKeepMediaGenerationRequestOffLocalAlpine(latestUserText, modelId: effectiveModelId) {
             return
         }
-        let userRequestedExecution = latestUserText.map {
-            shouldUseLocalAlpineAgentForRequest($0, modelId: effectiveModelId)
-        } ?? false
-        guard userRequestedExecution || Self.contentContainsLocalAlpineInstruction(content) else {
-            return
-        }
-
         let executableContent: String
         if Self.contentContainsLocalAlpineInstruction(content),
            let normalized = Self.normalizedLocalAlpineExecutableContent(from: content) {
             executableContent = normalized
         } else if message.metadata?["iexa_local_alpine_continuation"] == "true" {
             return
-        } else if userRequestedExecution,
-                  let userText = latestUserText,
-                  let fallback = Self.fallbackLocalAlpineKickoffBlock(for: userText) {
-            executableContent = fallback
         } else {
             return
         }
@@ -13186,10 +13175,11 @@ final class ChatViewModel {
             endBackgroundTask()
         }
 
-        let result = await LocalAlpineAgentService.shared.executeBlocks(in: content) { request in
+        let toolResult = await LocalAlpineTerminalAgentRunner.run(.executableContent(content)) { request in
             guard !Task.isCancelled else { return nil }
             return await self.requestLocalAlpineInput(request)
         }
+        let result = toolResult.result
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
         guard !Task.isCancelled else {
             let stoppedStatus = localAlpineStatus(description: "本地 Alpine 已停止", done: true)
@@ -13883,10 +13873,10 @@ final class ChatViewModel {
         - Never emit `to=local_alpine_exec code` or any other pseudo tool-call text. This app executes only `iexa_alpine`; use that exact fenced block.
         - Before the block, write at most one short visible sentence naming the current step. Do not reveal detailed hidden reasoning.
         Python Writes:
-        - For `.py` files, always use fenced `iexa_alpine` JSON `write_files` with full-file `code_lines` or `content_base64`; this app's Python write guard only preserves indentation reliably on that structured path.
+        - For `.py` files, always use fenced `iexa_alpine` JSON `write_files` with full-file `code_lines` or `content_base64`; the app writes those bytes exactly and then validates the file before running commands.
         - Never put `def main()` or `main()` inside a class unless the user explicitly asked for a class method. Top-level runnable Python must keep `def main():` and `if __name__ == "__main__": main()` at column 0.
         - For `HTMLParser` examples, parser callback methods belong inside the parser class, but crawler orchestration such as `main()` belongs outside the class at top level.
-        - Python writes are transactional: if the app reports Python AST/compile validation failed after its conservative repair attempt, do not run the broken file and do not patch one line. Rewrite the complete `.py` target through structured `write_files`, then verify again.
+        - Python writes are transactional: if the app reports Python AST/compile validation failed, it did not overwrite the target file. Rewrite the complete `.py` target through structured `write_files`, then verify again.
         - After writing Python, run `python3 -m py_compile <file>` or the requested script. If indentation/syntax fails, rewrite the complete target file through `write_files`, then verify again.
         Browser:
         - If a website/API check is needed, use `curl -I`, `curl -L`, `curl -w`, or a short Python `urllib` fetch. Never execute a bare domain as a shell command.
