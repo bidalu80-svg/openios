@@ -37,8 +37,8 @@ enum LocalAlpinePythonWriteGuard {
         switch source {
         case .codeLines, .contentLines, .contentBase64:
             extracted = ExtractedCode(
-                content: normalizeNewlines(content),
-                notes: ["结构化 Python 源码已按完整文件写入，并交给 Python 写入保护器做安全归一化。"]
+                content: content,
+                notes: ["结构化 Python 源码按工具参数原样接收，未经过 Markdown 清洗或缩进重排。"]
             )
         case .content, .heredoc, .codeBlock:
             switch extractPythonCode(from: content, source: source) {
@@ -61,7 +61,10 @@ enum LocalAlpinePythonWriteGuard {
         let extracted: ExtractedCode
         switch source {
         case .codeLines, .contentLines, .contentBase64:
-            extracted = ExtractedCode(content: normalizeNewlines(content), notes: [])
+            return (
+                content: content,
+                notes: ["结构化 Python 源码按工具参数原样写入；未做 Markdown 提取、缩进猜测或自动重排。"]
+            )
         case .content, .heredoc, .codeBlock:
             switch extractPythonCode(from: content, source: source) {
             case .success(let value):

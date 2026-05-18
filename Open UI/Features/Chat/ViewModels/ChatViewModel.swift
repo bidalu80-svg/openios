@@ -4856,9 +4856,7 @@ final class ChatViewModel {
         if Self.shouldAutoRouteRawShellTextToLocalAlpine(lowercased) { return true }
         if Self.embeddedLocalAlpinePackageManagerCommand(in: lowercased) != nil { return true }
         guard Self.hasExplicitLocalAlpineRouteIntent(lowercased) else { return false }
-        if Self.localAlpineDiagnosticCommand(for: lowercased) != nil { return true }
-        if Self.localAlpineNaturalLanguageCommand(for: lowercased) != nil { return true }
-        return Self.hasExplicitLocalAlpineActionIntent(lowercased)
+        return Self.shouldSendRawTextDirectlyToLocalAlpine(Self.normalizedLocalAlpineCommand(text))
     }
 
     private func shouldUseLocalAlpineAgentForRequest(_ text: String, modelId: String? = nil) -> Bool {
@@ -5105,8 +5103,9 @@ final class ChatViewModel {
 
     private static func fallbackLocalAlpineBlockForAssistantCode(content: String, userText: String) -> String? {
         guard let code = firstRunnablePythonCodeBlock(in: content) else { return nil }
-        let codeLines = pythonCodeLines(from: code)
-        guard !codeLines.isEmpty else { return nil }
+        let normalizedCode = normalizedRunnableCodePayload(from: code)
+        guard !normalizedCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let encodedCode = normalizedCode.data(using: .utf8)?.base64EncodedString() else { return nil }
 
         let fileName = pythonFileName(for: userText)
         let command = pythonRunCommand(fileName: fileName, userText: userText)
@@ -5117,7 +5116,7 @@ final class ChatViewModel {
                     "write_files": [
                         [
                             "path": fileName,
-                            "code_lines": codeLines
+                            "content_base64": encodedCode
                         ]
                     ],
                     "command": command
@@ -5149,8 +5148,9 @@ final class ChatViewModel {
             return pythonFallback
         }
         guard let block = firstRunnableNonPythonCodeBlock(in: content) else { return nil }
-        let codeLines = pythonCodeLines(from: block.code)
-        guard !codeLines.isEmpty else { return nil }
+        let normalizedCode = normalizedRunnableCodePayload(from: block.code)
+        guard !normalizedCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let encodedCode = normalizedCode.data(using: .utf8)?.base64EncodedString() else { return nil }
 
         let fileName = runnableFileName(for: block.language)
         let command = runnableCommand(fileName: fileName, language: block.language)
@@ -5161,7 +5161,7 @@ final class ChatViewModel {
                     "write_files": [
                         [
                             "path": fileName,
-                            "code_lines": codeLines
+                            "content_base64": encodedCode
                         ]
                     ],
                     "command": command
@@ -5206,9 +5206,7 @@ final class ChatViewModel {
     }
 
     private func forcedLocalAlpineBlockAfterManualResponse(userText: String) -> String? {
-        fallbackLocalAlpineBlockForFollowUpOperation(userText: userText)
-            ?? Self.fallbackLocalAlpineBlockForLanguageRunRequest(for: userText)
-            ?? Self.fallbackLocalAlpineBlock(for: userText)
+        Self.fallbackLocalAlpineBlock(for: userText)
             ?? Self.fallbackLocalAlpineKickoffBlock(for: userText)
     }
 
@@ -5698,17 +5696,21 @@ final class ChatViewModel {
     }
 
     private static func pythonCodeLines(from code: String) -> [String] {
+        normalizedRunnableCodePayload(from: code).components(separatedBy: .newlines)
+    }
+
+    private static func normalizedRunnableCodePayload(from code: String) -> String {
         let normalized = code
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
-        var lines = normalized.components(separatedBy: .newlines)
+        var lines = normalized.components(separatedBy: "\n")
         while let first = lines.first, first.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lines.removeFirst()
         }
         while let last = lines.last, last.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lines.removeLast()
         }
-        return lines
+        return lines.joined(separator: "\n") + "\n"
     }
 
     private static func pythonRunCommand(fileName: String, userText: String) -> String {
@@ -7045,28 +7047,21 @@ final class ChatViewModel {
         var command = rawCommand
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: #"^\$\s+"#, with: "", options: .regularExpression)
-        if let diagnosticCommand = localAlpineDiagnosticCommand(for: command.lowercased()) {
-            return diagnosticCommand
-        }
-        if let naturalLanguageCommand = localAlpineNaturalLanguageCommand(for: command.lowercased()) {
-            return naturalLanguageCommand
-        }
         let lowercased = command.lowercased()
         for prefix in [
             "帮我执行一下", "帮我运行一下", "帮我执行", "帮我运行",
             "帮我在终端执行", "帮我在终端运行", "在终端执行", "在终端运行",
             "用终端执行", "用终端运行", "在alpine执行", "在 alpine 执行",
-            "帮我安装一下", "帮我安装", "安装一下", "安装",
-            "帮我验证一下", "帮我验证", "验证一下", "验证",
-            "帮我检查一下", "帮我检查", "检查一下", "检查",
-            "帮我查看一下", "帮我查看", "查看一下", "查看",
             "执行命令：", "执行命令:", "运行命令：", "运行命令:",
             "执行命令 ", "运行命令 ", "执行#", "执行：", "执行:", "执行 ",
             "运行#", "运行：", "运行:", "运行 ",
             "run command:", "run command ", "execute command:", "execute command ",
             "run:", "execute:"
         ] where lowercased.hasPrefix(prefix) {
-            command = String(command.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidate = String(command.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if shouldSendRawTextDirectlyToLocalAlpine(candidate) {
+                command = candidate
+            }
             break
         }
         return command
@@ -12277,30 +12272,6 @@ final class ChatViewModel {
             return
         } else if userRequestedExecution,
                   let userText = latestUserText,
-                  let fallback = fallbackLocalAlpineBlockForFollowUpOperation(userText: userText) {
-            executableContent = fallback
-        } else if userRequestedExecution,
-                  let userText = latestUserText,
-                  let fallback = Self.fallbackLocalAlpineBlock(for: userText) {
-            executableContent = fallback
-        } else if userRequestedExecution,
-                  let userText = latestUserText,
-                  let fallback = Self.fallbackLocalAlpineBlockForAssistantRunnableCode(content: content, userText: userText) {
-            executableContent = fallback
-        } else if userRequestedExecution,
-                  let fallback = Self.fallbackLocalAlpineBlockForAssistantShellCode(content: content) {
-            executableContent = fallback
-        } else if userRequestedExecution,
-                  let userText = latestUserText,
-                  let messages = conversation?.messages,
-                  let fallback = Self.fallbackLocalAlpineBlockForLatestAssistantCode(
-                    messages: messages,
-                    excludingMessageId: messageId,
-                    userText: userText
-                  ) {
-            executableContent = fallback
-        } else if userRequestedExecution,
-                  let userText = latestUserText,
                   let fallback = Self.fallbackLocalAlpineKickoffBlock(for: userText) {
             executableContent = fallback
         } else {
@@ -12745,6 +12716,25 @@ final class ChatViewModel {
         localAlpineAgentStopRequested = true
         Task { await persistLocalConversationIfNeeded() }
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func appendLocalAlpineNoToolCallStopMessage(parentId: String) {
+        let content = """
+        Local Alpine Agent 已暂停
+
+        模型连续没有发出可执行的 `iexa_alpine` 工具调用，我已停止本轮自动循环，避免反复空转。
+
+        这不是执行失败，而是模型没有按工具协议行动。请换一个支持工具调用/结构化输出更稳定的模型，或继续发送“继续执行”，我会重新要求模型发出 `iexa_alpine` 工具调用。
+        """
+        appendAssistantResult(
+            parentId: parentId,
+            model: "Local Alpine",
+            content: content,
+            metadata: [
+                "iexa_local_alpine_result": "true",
+                "iexa_local_alpine_no_tool_call_stop": "true"
+            ]
+        )
     }
 
     private func repeatedLocalAlpineFailure(for content: String) -> LocalAlpineAgentCommandFailure? {
@@ -13614,6 +13604,7 @@ final class ChatViewModel {
                     localAlpineAgentStopRequested = false
                     scheduleLocalAlpineContinuationIfNeeded(after: parentResultId, forceContinue: true)
                 } else {
+                    appendLocalAlpineNoToolCallStopMessage(parentId: parentResultId)
                     localAlpineAgentStopRequested = true
                     localAlpineContinuationTask = nil
                 }
@@ -13692,6 +13683,9 @@ final class ChatViewModel {
             localAlpineContinuationTask = nil
             scheduleLocalAlpineContinuationIfNeeded(after: parentResultId, forceContinue: true)
         } else {
+            if parentNeedsFollowUp, let parentResultId {
+                appendLocalAlpineNoToolCallStopMessage(parentId: parentResultId)
+            }
             localAlpineAgentStopRequested = true
             localAlpineContinuationTask = nil
         }
@@ -13742,6 +13736,7 @@ final class ChatViewModel {
         let markers = [
             "traceback", "syntaxerror", "indentationerror", "modulenotfounderror",
             "写入已拒绝", "写入失败", "缩进预检失败", "语法校验失败",
+            "python 写入已拒绝", "语法/缩进校验未通过", "目标文件未被覆盖",
             "iexa_agent_kickoff", "next_action_required"
         ]
         return markers.contains { normalized.contains($0) }
@@ -13749,11 +13744,12 @@ final class ChatViewModel {
 
     private static func containsLocalAlpineFailureMarker(_ normalized: String) -> Bool {
         let markers = [
-            "退出码：`1`", "退出码：`2`", "退出码：`126`", "退出码：`127`", "退出码：`124`",
+            "退出码：`1`", "退出码：`2`", "退出码：`125`", "退出码：`126`", "退出码：`127`", "退出码：`124`",
             "not found", "error", "missing", "no such file", "traceback", "exception",
             "command not found", "permission denied", "syntaxerror", "indentationerror",
             "module not found", "no module named", "输入已取消", "存在错误输出",
             "写入已拒绝", "写入失败", "缩进预检失败", "语法校验失败",
+            "python 写入已拒绝", "语法/缩进校验未通过", "目标文件未被覆盖",
             "iexa_agent_kickoff", "next_action_required"
         ]
         if markers.contains(where: { normalized.contains($0.lowercased()) }) {

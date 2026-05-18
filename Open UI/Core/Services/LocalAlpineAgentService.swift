@@ -771,31 +771,44 @@ actor LocalAlpineAgentService {
             )
         }
 
+        let validationResult = await validatePythonContent(formatted.content, cwd: cwd)
+        guard validationResult.exitCode == 0 else {
+            var lines = [
+                "- `\(target)` Python 写入已拒绝：语法/缩进校验未通过，目标文件未被覆盖。"
+            ]
+            lines.append(contentsOf: formatted.notes.map { "  - \($0)" })
+            if let draftPath = await writeFailedPythonDraft(
+                data: formattedData,
+                target: target
+            ) {
+                lines.append("  - 已把失败草稿保存到 `\(draftPath)`，用于下一轮诊断；原目标文件保持不变。")
+            }
+            let output = validationResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !output.isEmpty {
+                lines.append("  - Python 语法/缩进校验失败：\(String(output.prefix(1_000)))")
+            }
+            lines.append("  - NEXT_ACTION_REQUIRED: rewrite the complete Python file through structured write_files/content_base64, then verify again.")
+            return LocalAlpineProtectedWriteOutcome(
+                lines: lines,
+                writtenPath: nil,
+                writtenFile: nil,
+                hadFailure: true
+            )
+        }
+
         let directWrite = await writeFileBytes(
             data: formattedData,
             content: formatted.content,
             target: target,
             source: source,
-            notes: ["Python 文件已按结构化内容原样写入；仅做换行、行首 Tab 和常见乱码的安全归一化，缩进不再由客户端猜测重排。"] + formatted.notes
+            notes: ["Python 文件已按工具参数写入；写入目标前已通过 AST 语法校验。"] + formatted.notes
         )
         guard !directWrite.hadFailure else { return directWrite }
 
-        let runtimeTargetPath = runtimePath(forSharedPath: target)
-        let validationCommand = pythonASTValidationCommand(for: runtimeTargetPath)
         var lines = directWrite.lines
         let finalContent = formatted.content
         let finalByteCount = formattedData.count
-        let validationResult = await LocalAlpineTerminalService.shared.execute(command: validationCommand, cwd: cwd)
-
-        if validationResult.exitCode == 0 {
-            lines.append("  - Python 语法校验通过。")
-        } else {
-            let output = validationResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            lines.append("  - Python 语法/缩进校验失败，已保留写入原文并阻止后续命令运行；下一轮必须完整重写该文件后再验证。")
-            if !output.isEmpty {
-                lines.append("    - 输出：\(String(output.prefix(1_000)))")
-            }
-        }
+        lines.append("  - Python 语法校验通过。")
 
         return LocalAlpineProtectedWriteOutcome(
             lines: lines,
@@ -806,8 +819,59 @@ actor LocalAlpineAgentService {
                 source: source.displayName,
                 byteCount: finalByteCount
             ),
-            hadFailure: validationResult.exitCode != 0
+            hadFailure: false
         )
+    }
+
+    private func validatePythonContent(_ content: String, cwd: String) async -> LocalAlpineCommandResult {
+        guard let data = content.data(using: .utf8) else {
+            return LocalAlpineCommandResult(
+                command: "write_files",
+                output: "Python validation failed: content is not valid UTF-8",
+                exitCode: 125,
+                interactiveRequest: nil
+            )
+        }
+
+        let temporaryPath = "/.iexa-write-\(UUID().uuidString).py"
+        let split = splitFilePath(temporaryPath)
+        do {
+            try await LocalAlpineTerminalService.shared.writeFile(
+                data: data,
+                fileName: split.fileName,
+                destinationPath: split.directory
+            )
+        } catch {
+            return LocalAlpineCommandResult(
+                command: "write_files",
+                output: "Python validation temp write failed: \(error.localizedDescription)",
+                exitCode: 125,
+                interactiveRequest: nil
+            )
+        }
+
+        let command = pythonASTValidationCommand(for: runtimePath(forSharedPath: temporaryPath))
+        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
+        try? await LocalAlpineTerminalService.shared.deleteItem(path: temporaryPath)
+        return result
+    }
+
+    private func writeFailedPythonDraft(data: Data, target: String) async -> String? {
+        let targetName = splitFilePath(target).fileName
+        let baseName = targetName.isEmpty ? "script.py" : targetName
+        let suffix = UUID().uuidString.prefix(8).lowercased()
+        let draftPath = "/.iexa_failed_writes/\(baseName)-\(suffix).py"
+        let split = splitFilePath(draftPath)
+        do {
+            try await LocalAlpineTerminalService.shared.writeFile(
+                data: data,
+                fileName: split.fileName,
+                destinationPath: split.directory
+            )
+            return draftPath
+        } catch {
+            return nil
+        }
     }
 
     private func pythonASTValidationCommand(for runtimePath: String) -> String {
