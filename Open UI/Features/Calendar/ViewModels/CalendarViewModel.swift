@@ -4,10 +4,10 @@ import SwiftUI
 // MARK: - View Mode
 
 enum CalendarViewMode: String, CaseIterable {
-    case day   = "Day"
-    case week  = "Week"
-    case month = "Month"
-    case year  = "Year"
+    case day   = "日"
+    case week  = "周"
+    case month = "月"
+    case year  = "年"
 
     var zoomLevel: Int {
         switch self {
@@ -303,7 +303,8 @@ final class CalendarViewModel {
 
     var monthTitle: String {
         let fmt = DateFormatter()
-        fmt.dateFormat = "MMMM yyyy"
+        fmt.locale = Locale(identifier: "zh_CN")
+        fmt.dateFormat = "yyyy年M月"
         return fmt.string(from: displayedMonth)
     }
 

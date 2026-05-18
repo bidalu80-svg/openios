@@ -19,17 +19,17 @@ struct CreateCalendarEventSheet: View {
 
     // Reminder options matching the screenshot
     private let reminderOptions: [(label: String, minutes: Int?)] = [
-        ("None", nil),
-        ("At time of event", 0),
-        ("5 minutes before", 5),
-        ("10 minutes before", 10),
-        ("15 minutes before", 15),
-        ("30 minutes before", 30),
-        ("1 hour before", 60)
+        ("无", nil),
+        ("事件开始时", 0),
+        ("提前 5 分钟", 5),
+        ("提前 10 分钟", 10),
+        ("提前 15 分钟", 15),
+        ("提前 30 分钟", 30),
+        ("提前 1 小时", 60)
     ]
 
     private var reminderLabel: String {
-        reminderOptions.first(where: { $0.minutes == alertMinutes })?.label ?? "None"
+        reminderOptions.first(where: { $0.minutes == alertMinutes })?.label ?? "无"
     }
 
     var body: some View {
@@ -40,7 +40,7 @@ struct CreateCalendarEventSheet: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         // Title
-                        TextField("Title", text: $title)
+                        TextField("标题", text: $title)
                             .font(.title2.weight(.semibold))
                             .foregroundStyle(theme.textPrimary)
                             .padding(.horizontal, 20)
@@ -50,13 +50,13 @@ struct CreateCalendarEventSheet: View {
 
                         // Calendar picker
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Calendar")
+                            Text("日历")
                                 .font(.caption)
                                 .foregroundStyle(theme.textTertiary)
                                 .padding(.horizontal, 20)
                                 .padding(.top, 16)
 
-                            Picker("Calendar", selection: $selectedCalendarId) {
+                            Picker("日历", selection: $selectedCalendarId) {
                                 ForEach(vm.editableCalendars) { cal in
                                     HStack {
                                         Circle()
@@ -76,7 +76,7 @@ struct CreateCalendarEventSheet: View {
 
                         // When
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("When")
+                            Text("时间")
                                 .font(.caption)
                                 .foregroundStyle(theme.textTertiary)
                                 .padding(.horizontal, 20)
@@ -101,7 +101,7 @@ struct CreateCalendarEventSheet: View {
 
                                 Spacer()
 
-                                Toggle("All day", isOn: $allDay)
+                                Toggle("全天", isOn: $allDay)
                                     .labelsHidden()
                                     .onChange(of: allDay) { _, newVal in
                                         if newVal {
@@ -112,7 +112,7 @@ struct CreateCalendarEventSheet: View {
                                         }
                                     }
 
-                                Text("All day")
+                                Text("全天")
                                     .font(.caption)
                                     .foregroundStyle(theme.textSecondary)
                             }
@@ -124,13 +124,13 @@ struct CreateCalendarEventSheet: View {
 
                         // Location
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Location")
+                            Text("地点")
                                 .font(.caption)
                                 .foregroundStyle(theme.textTertiary)
                                 .padding(.horizontal, 20)
                                 .padding(.top, 16)
 
-                            TextField("Add location", text: $location)
+                            TextField("添加地点", text: $location)
                                 .foregroundStyle(theme.textPrimary)
                                 .padding(.horizontal, 20)
                                 .padding(.bottom, 12)
@@ -140,7 +140,7 @@ struct CreateCalendarEventSheet: View {
 
                         // Reminder
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Reminder")
+                            Text("提醒")
                                 .font(.caption)
                                 .foregroundStyle(theme.textTertiary)
                                 .padding(.horizontal, 20)
@@ -206,13 +206,13 @@ struct CreateCalendarEventSheet: View {
 
                         // Description
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Description")
+                            Text("备注")
                                 .font(.caption)
                                 .foregroundStyle(theme.textTertiary)
                                 .padding(.horizontal, 20)
                                 .padding(.top, 16)
 
-                            TextField("Add description", text: $description, axis: .vertical)
+                            TextField("添加备注", text: $description, axis: .vertical)
                                 .foregroundStyle(theme.textPrimary)
                                 .lineLimit(3...6)
                                 .padding(.horizontal, 20)
@@ -221,18 +221,18 @@ struct CreateCalendarEventSheet: View {
                     }
                 }
             }
-            .navigationTitle(title.isEmpty ? "New Event" : title)
+            .navigationTitle(title.isEmpty ? "新建事件" : title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel") { dismiss() }
+                    Button("取消") { dismiss() }
                         .foregroundStyle(theme.textSecondary)
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     if isSaving {
                         ProgressView()
                     } else {
-                        Button("Create") {
+                        Button("创建") {
                             Task { await save() }
                         }
                         .font(.body.weight(.semibold))

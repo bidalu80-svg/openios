@@ -109,11 +109,11 @@ private struct CalendarContentView: View {
         .sheet(item: $vm.selectedEvent) { event in
             CalendarEventDetailView(event: event, vm: vm)
         }
-        .alert("Error", isPresented: Binding(
+        .alert("错误", isPresented: Binding(
             get: { vm.errorMessage != nil },
             set: { if !$0 { vm.errorMessage = nil } }
         )) {
-            Button("OK") { vm.errorMessage = nil }
+            Button("确定") { vm.errorMessage = nil }
         } message: {
             Text(vm.errorMessage ?? "")
         }
@@ -150,7 +150,7 @@ private struct CalendarContentView: View {
                 Button {
                     vm.goToToday()
                 } label: {
-                    Text("Today")
+                    Text("今天")
                         .font(.subheadline)
                         .foregroundStyle(theme.brandPrimary)
                 }
@@ -219,21 +219,23 @@ private struct CalendarContentView: View {
         case .week:
             let cal = Calendar.current
             let days = vm.currentWeekDays
-            guard let first = days.first, let last = days.last else { return "Calendar" }
+            guard let first = days.first, let last = days.last else { return "日历" }
             let firstComps = cal.dateComponents([.year, .month], from: first)
             let lastComps  = cal.dateComponents([.year, .month], from: last)
             let fmt = DateFormatter()
             if firstComps.month == lastComps.month {
-                fmt.dateFormat = "MMMM yyyy"
+                fmt.locale = Locale(identifier: "zh_CN")
+                fmt.dateFormat = "yyyy年M月"
                 return fmt.string(from: first)
             } else {
-                let m1 = DateFormatter(); m1.dateFormat = "MMM"
-                let m2 = DateFormatter(); m2.dateFormat = "MMM yyyy"
+                let m1 = DateFormatter(); m1.locale = Locale(identifier: "zh_CN"); m1.dateFormat = "M月"
+                let m2 = DateFormatter(); m2.locale = Locale(identifier: "zh_CN"); m2.dateFormat = "yyyy年M月"
                 return "\(m1.string(from: first)) – \(m2.string(from: last))"
             }
         case .day:
             let fmt = DateFormatter()
-            fmt.dateFormat = "EEEE, MMMM d"
+            fmt.locale = Locale(identifier: "zh_CN")
+            fmt.dateFormat = "EEEE，M月d日"
             return fmt.string(from: vm.selectedDate)
         }
     }
@@ -347,11 +349,12 @@ private struct MiniMonthView: View {
 
     private var monthName: String {
         let fmt = DateFormatter()
-        fmt.dateFormat = "MMM"
+        fmt.locale = Locale(identifier: "zh_CN")
+        fmt.dateFormat = "M月"
         return fmt.string(from: month)
     }
 
-    private let weekLabels = ["S", "M", "T", "W", "T", "F", "S"]
+    private let weekLabels = ["日", "一", "二", "三", "四", "五", "六"]
 
     var body: some View {
         let cal = Calendar.current
@@ -453,7 +456,8 @@ private struct MonthView: View {
 
     private var dayEventSection: some View {
         let fmt = DateFormatter()
-        fmt.dateFormat = "EEEE, MMMM d"
+        fmt.locale = Locale(identifier: "zh_CN")
+        fmt.dateFormat = "EEEE，M月d日"
 
         return VStack(spacing: 0) {
             HStack {
@@ -462,7 +466,7 @@ private struct MonthView: View {
                     .foregroundStyle(theme.textSecondary)
                 Spacer()
                 if !vm.eventsForSelectedDate.isEmpty {
-                    Text("\(vm.eventsForSelectedDate.count) event\(vm.eventsForSelectedDate.count == 1 ? "" : "s")")
+                    Text("\(vm.eventsForSelectedDate.count) 个事件")
                         .font(.caption)
                         .foregroundStyle(theme.textTertiary)
                 }
@@ -476,7 +480,7 @@ private struct MonthView: View {
                     Image(systemName: "calendar")
                         .font(.title2)
                         .foregroundStyle(theme.textTertiary.opacity(0.5))
-                    Text("No events")
+                    Text("无事件")
                         .font(.subheadline)
                         .foregroundStyle(theme.textTertiary)
                 }
@@ -719,7 +723,7 @@ private struct WeekView: View {
 
     private var allDayBar: some View {
         HStack(spacing: 4) {
-            Text("All-day")
+            Text("全天")
                 .font(.system(size: 9))
                 .foregroundStyle(theme.textTertiary)
                 .frame(width: timeColumnWidth, alignment: .trailing)
@@ -770,8 +774,10 @@ private struct WeekView: View {
     // MARK: Helpers
 
     private func weekdayAbbrev(_ date: Date) -> String {
-        let f = DateFormatter(); f.dateFormat = "EEE"
-        return f.string(from: date).uppercased()
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "E"
+        return f.string(from: date)
     }
 
     private func minutesFromMidnight(_ date: Date) -> Int {
@@ -780,14 +786,14 @@ private struct WeekView: View {
     }
 
     private func shortTime(_ date: Date) -> String {
-        let fmt = DateFormatter(); fmt.dateFormat = "h:mm"
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "zh_CN")
+        fmt.dateFormat = "HH:mm"
         return fmt.string(from: date)
     }
 
     private func hourLabel(_ hour: Int) -> String {
-        if hour == 0 { return "12a" }
-        if hour == 12 { return "12p" }
-        return hour < 12 ? "\(hour)a" : "\(hour - 12)p"
+        String(format: "%02d:00", hour)
     }
 }
 
@@ -920,7 +926,10 @@ private struct DayView: View {
                     let isToday = dc.year == todayComps.year && dc.month == todayComps.month && dc.day == todayComps.day
                     let isSelected = cal.isDate(day, inSameDayAs: vm.selectedDate)
                     let wdFmt: DateFormatter = {
-                        let f = DateFormatter(); f.dateFormat = "EEE"; return f
+                        let f = DateFormatter()
+                        f.locale = Locale(identifier: "zh_CN")
+                        f.dateFormat = "E"
+                        return f
                     }()
                     Button {
                         vm.selectedDate = day
@@ -1080,14 +1089,13 @@ private struct DayView: View {
 
     private func shortTime(_ date: Date) -> String {
         let fmt = DateFormatter()
-        fmt.dateFormat = "h:mm a"
+        fmt.locale = Locale(identifier: "zh_CN")
+        fmt.dateFormat = "HH:mm"
         return fmt.string(from: date)
     }
 
     private func hourLabel(_ hour: Int) -> String {
-        if hour == 0 { return "12a" }
-        if hour == 12 { return "12p" }
-        return hour < 12 ? "\(hour)a" : "\(hour - 12)p"
+        String(format: "%02d:00", hour)
     }
 }
 
@@ -1258,9 +1266,10 @@ struct CalendarEventRow: View {
     @Environment(\.theme) private var theme
 
     private var timeString: String {
-        if event.allDay { return "All day" }
+        if event.allDay { return "全天" }
         let fmt = DateFormatter()
-        fmt.dateFormat = "h:mm a"
+        fmt.locale = Locale(identifier: "zh_CN")
+        fmt.dateFormat = "HH:mm"
         if let end = event.endAt {
             return "\(fmt.string(from: event.startAt)) – \(fmt.string(from: end))"
         }
@@ -1297,7 +1306,7 @@ struct CalendarEventRow: View {
                         Text("·")
                             .foregroundStyle(theme.textTertiary)
                         Label(
-                            status == "success" ? "Success" : "Failed",
+                            status == "success" ? "成功" : "失败",
                             systemImage: status == "success" ? "checkmark.circle.fill" : "xmark.circle.fill"
                         )
                         .font(.caption)

@@ -9,7 +9,7 @@ struct CalendarEventDetailView: View {
     @State private var showDeleteConfirm = false
 
     private var calendarName: String {
-        vm.calendars.first(where: { $0.id == event.calendarId })?.name ?? "Calendar"
+        vm.calendars.first(where: { $0.id == event.calendarId })?.name ?? "日历"
     }
 
     private var calendarColor: Color {
@@ -17,8 +17,9 @@ struct CalendarEventDetailView: View {
     }
 
     private var timeString: String {
-        if event.allDay { return "All day" }
+        if event.allDay { return "全天" }
         let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "zh_CN")
         fmt.dateStyle = .medium
         fmt.timeStyle = .short
         if let end = event.endAt {
@@ -27,7 +28,8 @@ struct CalendarEventDetailView: View {
             let cal = Calendar.current
             if cal.isDate(event.startAt, inSameDayAs: end) {
                 let timeFmt = DateFormatter()
-                timeFmt.dateFormat = "h:mm a"
+                timeFmt.locale = Locale(identifier: "zh_CN")
+                timeFmt.dateFormat = "HH:mm"
                 return "\(startStr) – \(timeFmt.string(from: end))"
             }
             return "\(startStr) – \(fmt.string(from: end))"
@@ -38,13 +40,13 @@ struct CalendarEventDetailView: View {
     private var reminderLabel: String {
         guard let mins = event.meta?.alertMinutes else { return "" }
         switch mins {
-        case 0: return "At time of event"
-        case 5: return "5 minutes before"
-        case 10: return "10 minutes before"
-        case 15: return "15 minutes before"
-        case 30: return "30 minutes before"
-        case 60: return "1 hour before"
-        default: return "\(mins) minutes before"
+        case 0: return "事件开始时"
+        case 5: return "提前 5 分钟"
+        case 10: return "提前 10 分钟"
+        case 15: return "提前 15 分钟"
+        case 30: return "提前 30 分钟"
+        case 60: return "提前 1 小时"
+        default: return "提前 \(mins) 分钟"
         }
     }
 
@@ -84,16 +86,16 @@ struct CalendarEventDetailView: View {
                         Divider().background(theme.divider)
 
                         // Date/Time
-                        detailRow(icon: "clock", title: "When", value: timeString)
+                        detailRow(icon: "clock", title: "时间", value: timeString)
 
                         if event.rrule != nil {
                             Divider().background(theme.divider).padding(.leading, 56)
-                            detailRow(icon: "repeat", title: "Recurrence", value: event.rrule ?? "")
+                            detailRow(icon: "repeat", title: "重复", value: event.rrule ?? "")
                         }
 
                         if let loc = event.location, !loc.isEmpty {
                             Divider().background(theme.divider).padding(.leading, 56)
-                            detailRow(icon: "mappin", title: "Location", value: loc)
+                            detailRow(icon: "mappin", title: "地点", value: loc)
                         }
 
                         if let desc = event.description, !desc.isEmpty {
@@ -104,7 +106,7 @@ struct CalendarEventDetailView: View {
                                         .frame(width: 24)
                                         .foregroundStyle(theme.textTertiary)
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text("Description")
+                                        Text("备注")
                                             .font(.caption)
                                             .foregroundStyle(theme.textTertiary)
                                         Text(desc)
@@ -120,7 +122,7 @@ struct CalendarEventDetailView: View {
 
                         if !reminderLabel.isEmpty {
                             Divider().background(theme.divider).padding(.leading, 56)
-                            detailRow(icon: "bell", title: "Reminder", value: reminderLabel)
+                            detailRow(icon: "bell", title: "提醒", value: reminderLabel)
                         }
 
                         // Automation run status
@@ -128,8 +130,8 @@ struct CalendarEventDetailView: View {
                             Divider().background(theme.divider).padding(.leading, 56)
                             detailRow(
                                 icon: status == "success" ? "checkmark.circle.fill" : "xmark.circle.fill",
-                                title: "Run Status",
-                                value: status == "success" ? "Succeeded" : "Failed",
+                                title: "运行状态",
+                                value: status == "success" ? "成功" : "失败",
                                 valueColor: status == "success" ? .green : .red
                             )
                         }
@@ -145,7 +147,7 @@ struct CalendarEventDetailView: View {
                             } label: {
                                 HStack {
                                     Spacer()
-                                    Label("Delete Event", systemImage: "trash")
+                                    Label("删除事件", systemImage: "trash")
                                         .foregroundStyle(.red)
                                     Spacer()
                                 }
@@ -156,28 +158,28 @@ struct CalendarEventDetailView: View {
                     }
                 }
             }
-            .navigationTitle("Event")
+            .navigationTitle("事件")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { dismiss() }
+                    Button("完成") { dismiss() }
                         .foregroundStyle(theme.brandPrimary)
                 }
             }
             .confirmationDialog(
-                "Delete \"\(event.title)\"?",
+                "删除“\(event.title)”？",
                 isPresented: $showDeleteConfirm,
                 titleVisibility: .visible
             ) {
-                Button("Delete Event", role: .destructive) {
+                Button("删除事件", role: .destructive) {
                     Task {
                         await vm.deleteEvent(event)
                         dismiss()
                     }
                 }
-                Button("Cancel", role: .cancel) {}
+                Button("取消", role: .cancel) {}
             } message: {
-                Text("This event will be permanently deleted.")
+                Text("此事件将被永久删除。")
             }
         }
     }
