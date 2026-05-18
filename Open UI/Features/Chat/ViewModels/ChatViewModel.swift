@@ -3965,6 +3965,7 @@ final class ChatViewModel {
                 || isExplicitLocalAlpineResume
                 || shouldUseLocalAlpineAgentForRequest(currentText, modelId: modelId)
         )
+        let localAlpineModeForThisTurn = terminalButtonIsLocalAlpine || shouldAutoOpenLocalAlpine
         if shouldAutoOpenLocalAlpine {
             selectedTerminalServer = .localAlpine
             terminalEnabled = true
@@ -3972,10 +3973,10 @@ final class ChatViewModel {
         if !shouldKeepMediaRoute,
            !shouldKeepNativeLinkRoute,
            processedAttachments.isEmpty,
-           (terminalButtonIsLocalAlpine
+           (localAlpineModeForThisTurn
                 ? shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText)
                 : Self.shouldSendRawTextDirectlyToLocalAlpine(currentText)),
-           (terminalButtonIsLocalAlpine || shouldAutoOpenLocalAlpine) {
+           localAlpineModeForThisTurn {
             await sendDirectLocalAlpineCommand(currentText, modelId: modelId)
             return
         }
@@ -5025,10 +5026,14 @@ final class ChatViewModel {
         guard !normalized.isEmpty else { return false }
         let actionTerms = [
             "创建", "新建", "生成", "写入", "保存", "落地", "修改", "改",
-            "create", "new file", "generate", "write", "save", "modify", "edit"
+            "删除", "删掉", "删了", "移除", "清理",
+            "读取", "查看", "打开", "列出", "搜索", "查找",
+            "create", "new file", "generate", "write", "save", "modify", "edit",
+            "delete", "remove", "rm ", "read", "open", "list", "search", "find"
         ]
         let targetTerms = [
             "文件", "脚本", "代码", "项目", "目录", "file", "script", "code", "project", "folder",
+            "directory",
             "python", "javascript", "typescript", "node", "lua", "golang", "go语言", "rust",
             "java", "c语言", "c++", "cpp", "ruby", "php", "shell", "bash",
             ".py", ".js", ".ts", ".html", ".css", ".json", ".md", ".sh", ".lua", ".c", ".cpp",
@@ -5139,6 +5144,7 @@ final class ChatViewModel {
     }
 
     private static func fallbackLocalAlpineBlockForAssistantRunnableCode(content: String, userText: String) -> String? {
+        guard shouldUseAssistantRunnableCodeFallback(for: userText) else { return nil }
         if let pythonFallback = fallbackLocalAlpineBlockForAssistantCode(content: content, userText: userText) {
             return pythonFallback
         }
@@ -5187,6 +5193,7 @@ final class ChatViewModel {
         excludingMessageId: String? = nil,
         userText: String
     ) -> String? {
+        guard shouldUseAssistantRunnableCodeFallback(for: userText) else { return nil }
         for message in messages.reversed() {
             guard message.role == .assistant else { continue }
             if let excludingMessageId, message.id == excludingMessageId { continue }
@@ -5199,8 +5206,8 @@ final class ChatViewModel {
     }
 
     private func forcedLocalAlpineBlockAfterManualResponse(userText: String) -> String? {
-        Self.fallbackLocalAlpineBlockForLanguageRunRequest(for: userText)
-            ?? fallbackLocalAlpineBlockForFollowUpOperation(userText: userText)
+        fallbackLocalAlpineBlockForFollowUpOperation(userText: userText)
+            ?? Self.fallbackLocalAlpineBlockForLanguageRunRequest(for: userText)
             ?? Self.fallbackLocalAlpineBlock(for: userText)
             ?? Self.fallbackLocalAlpineKickoffBlock(for: userText)
     }
@@ -5354,6 +5361,7 @@ final class ChatViewModel {
     private static func fallbackLocalAlpineBlockForLanguageRunRequest(for text: String) -> String? {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return nil }
+        guard shouldUseAssistantRunnableCodeFallback(for: normalized) else { return nil }
         guard containsAny(normalized, ["写", "创建", "生成", "运行", "执行", "跑", "编译", "write", "create", "generate", "run", "execute", "compile"]) else {
             return nil
         }
@@ -5874,6 +5882,50 @@ final class ChatViewModel {
         terms.contains { text.contains($0) }
     }
 
+    private static func shouldUseAssistantRunnableCodeFallback(for text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        if isLocalAlpineFileManagementOnlyRequest(normalized) {
+            return false
+        }
+        let runnableTerms = [
+            "写", "创建", "生成", "运行", "执行", "跑", "测试", "验证", "编译", "构建",
+            "脚本", "项目", "代码", "write", "create", "generate", "run", "execute",
+            "test", "verify", "compile", "build", "script", "project", "code"
+        ]
+        return containsAny(normalized, runnableTerms)
+            || isLocalAlpineWebOrScriptTask(normalized)
+    }
+
+    private static func isLocalAlpineFileManagementOnlyRequest(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+
+        let hasFileReference = extractLocalAlpinePath(from: normalized) != nil
+            || normalized.range(
+                of: #"[a-z0-9_\-./]+\.(lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|swift|c|cpp|h|rs|go|java|kt|rb|php)"#,
+                options: [.regularExpression, .caseInsensitive]
+            ) != nil
+            || containsAny(normalized, ["文件", "目录", "/mnt/iexa", "file", "folder", "directory"])
+        guard hasFileReference else { return false }
+
+        if containsAny(normalized, ["删", "删除", "移除", "清理", "删掉", "删了", "delete", "remove", "rm "]) {
+            return true
+        }
+
+        let managementTerms = [
+            "读取", "打开", "查看", "检查", "列出", "列表", "搜索", "查找",
+            "read", "open", "show", "inspect", "list", "search", "find"
+        ]
+        guard containsAny(normalized, managementTerms) else { return false }
+
+        let creationOrRunTerms = [
+            "写", "创建", "生成", "运行", "跑", "测试", "编译", "构建",
+            "write", "create", "generate", "run", "test", "compile", "build"
+        ]
+        return !containsAny(normalized, creationOrRunTerms)
+    }
+
     private static func extractLocalAlpinePath(from text: String) -> String? {
         let patterns = [
             #"`([^`]+)`"#,
@@ -5996,13 +6048,15 @@ final class ChatViewModel {
 
         let actionTerms = [
             "执行", "运行", "跑", "测试", "验证", "检查", "查看", "读取", "列出",
+            "删除", "删掉", "删了", "移除", "清理",
             "安装", "装", "依赖", "编译", "构建", "修复", "搜索",
             "execute", "run", "test", "verify", "check", "inspect", "read", "list",
-            "install", "dependency", "dependencies", "build", "compile", "fix", "search"
+            "delete", "remove", "install", "dependency", "dependencies", "build", "compile", "fix", "search"
         ]
         let targetTerms = [
             "命令", "终端", "shell", "bash", "alpine", "版本", "目录",
             "/mnt/iexa", "python", "python3", "pip", "node", "npm", "g++", "gcc", "c++",
+            "lua", "go", "golang", "rust", "java", "ruby", "php", "文件", "脚本",
             "make", "cmake", "curl", "wget", "git", "package.json", "requirements.txt",
             "pyproject.toml", "makefile"
         ]
@@ -6032,6 +6086,16 @@ final class ChatViewModel {
             return command
         }
 
+        if isFileDeleteRequest(normalized),
+           let target = extractLocalAlpinePath(from: normalized) {
+            return fileDeleteCommand(for: target)
+        }
+
+        if isFileRunRequest(normalized),
+           let target = extractLocalAlpinePath(from: normalized) {
+            return fileRunCommand(for: target)
+        }
+
         if isDirectoryListingRequest(normalized) {
             let target = extractLocalAlpinePath(from: normalized) ?? "/mnt/iexa"
             return directoryListingCommand(for: target)
@@ -6040,6 +6104,13 @@ final class ChatViewModel {
         if isFileReadRequest(normalized),
            let target = extractLocalAlpinePath(from: normalized) {
             return fileReadCommand(for: target)
+        }
+
+        if isFileSearchRequest(normalized) {
+            let target = extractLocalAlpinePath(from: normalized) ?? "/mnt/iexa"
+            if let query = localAlpineSearchQuery(from: normalized) {
+                return fileSearchCommand(query: query, target: target)
+            }
         }
 
         if isVersionInspectionRequest(normalized) {
@@ -6115,6 +6186,53 @@ final class ChatViewModel {
             || text.range(of: #"[a-z0-9_\-./]+\.(lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|swift|c|cpp|h|rs|go|java|kt|rb|php)"#, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
+    private static func isFileDeleteRequest(_ text: String) -> Bool {
+        let deleteTerms = ["删", "删除", "移除", "清理", "删掉", "删了", "delete", "remove", "rm "]
+        guard containsAny(text, deleteTerms) else { return false }
+        return extractLocalAlpinePath(from: text) != nil
+            || text.range(of: #"[a-z0-9_\-./]+\.(lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|swift|c|cpp|h|rs|go|java|kt|rb|php)"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private static func isFileRunRequest(_ text: String) -> Bool {
+        let runTerms = [
+            "运行", "执行", "跑", "测试", "验证", "编译", "构建",
+            "run", "execute", "test", "verify", "compile", "build"
+        ]
+        guard containsAny(text, runTerms) else { return false }
+        return extractLocalAlpinePath(from: text) != nil
+            || text.range(of: #"[a-z0-9_\-./]+\.(lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|c|cpp|rs|go|java|rb|php)"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private static func isFileSearchRequest(_ text: String) -> Bool {
+        containsAny(text, [
+            "搜索", "查找", "找一下", "搜一下", "grep", "find in files",
+            "search", "find"
+        ])
+    }
+
+    private static func localAlpineSearchQuery(from text: String) -> String? {
+        let patterns = [
+            #"`([^`]+)`"#,
+            #""([^"]+)""#,
+            #"['“”‘’]([^'“”‘’]+)['“”‘’]"#,
+            #"(?:搜索|查找|找一下|搜一下)\s*([^\s，。；;]+)"#,
+            #"(?:search|find)\s+(?:for\s+)?([^\s,.;]+)"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let nsText = text as NSString
+            guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)),
+                  match.numberOfRanges >= 2 else { continue }
+            let query = nsText.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !query.isEmpty,
+               query != "/mnt/iexa" {
+                return query
+            }
+        }
+        return nil
+    }
+
     private static func isVersionInspectionRequest(_ text: String) -> Bool {
         if text.contains("--version") {
             return true
@@ -6143,6 +6261,12 @@ final class ChatViewModel {
             (["pip3", "pip"], [LocalAlpinePackageSpec(command: "pip3", package: "py3-pip")]),
             (["node", "nodejs"], [LocalAlpinePackageSpec(command: "node", package: "nodejs")]),
             (["npm"], [LocalAlpinePackageSpec(command: "npm", package: "npm")]),
+            (["lua", "lua5.4"], [LocalAlpinePackageSpec(command: "lua5.4", package: "lua5.4")]),
+            (["go", "golang"], [LocalAlpinePackageSpec(command: "go", package: "go")]),
+            (["rust", "rustc"], [LocalAlpinePackageSpec(command: "rustc", package: "rust")]),
+            (["java", "javac"], [LocalAlpinePackageSpec(command: "javac", package: "openjdk17")]),
+            (["ruby"], [LocalAlpinePackageSpec(command: "ruby", package: "ruby")]),
+            (["php"], [LocalAlpinePackageSpec(command: "php", package: "php")]),
             (["curl"], [LocalAlpinePackageSpec(command: "curl", package: "curl")]),
             (["wget"], [LocalAlpinePackageSpec(command: "wget", package: "wget")]),
             (["git"], [LocalAlpinePackageSpec(command: "git", package: "git")]),
@@ -6261,6 +6385,150 @@ final class ChatViewModel {
         else
           printf 'missing: %s\\n' "$target"
           exit 1
+        fi
+        """
+    }
+
+    private static func fileDeleteCommand(for target: String) -> String {
+        let quoted = shellQuoted(target)
+        return """
+        target=\(quoted)
+        case "$target" in
+          /mnt/iexa/*) ;;
+          *)
+            printf 'refusing unsafe delete target: %s\\n' "$target"
+            exit 2
+            ;;
+        esac
+        if [ "$target" = "/mnt/iexa" ]; then
+          printf 'refusing to delete workspace root: %s\\n' "$target"
+          exit 2
+        fi
+        if [ -e "$target" ]; then
+          rm -rf -- "$target" && printf 'deleted: %s\\n' "$target"
+        else
+          printf 'missing: %s\\n' "$target"
+        fi
+        printf '\\n== /mnt/iexa ==\\n'
+        ls -la /mnt/iexa
+        """
+    }
+
+    private static func fileRunCommand(for target: String) -> String {
+        let quoted = shellQuoted(target)
+        let ext = (target as NSString).pathExtension.lowercased()
+        let run: String
+        switch ext {
+        case "lua":
+            run = """
+            command -v lua >/dev/null 2>&1 || command -v lua5.4 >/dev/null 2>&1 || { apk update && apk add --no-cache lua5.4; }
+            if command -v lua >/dev/null 2>&1; then
+              lua "$target"
+            else
+              lua5.4 "$target"
+            fi
+            """
+        case "py", "pyw":
+            run = """
+            command -v python3 >/dev/null 2>&1 || { apk update && apk add --no-cache python3; }
+            python3 -m py_compile "$target" && python3 "$target"
+            """
+        case "js", "mjs", "cjs":
+            run = """
+            command -v node >/dev/null 2>&1 || { apk update && apk add --no-cache nodejs; }
+            node "$target"
+            """
+        case "ts", "tsx":
+            run = """
+            command -v npm >/dev/null 2>&1 || { apk update && apk add --no-cache nodejs npm; }
+            command -v npx >/dev/null 2>&1 || { printf 'npx still missing after node/npm install\\n'; exit 127; }
+            npx --yes tsx "$target"
+            """
+        case "go":
+            run = """
+            command -v go >/dev/null 2>&1 || { apk update && apk add --no-cache go; }
+            go run "$target"
+            """
+        case "rs":
+            run = """
+            command -v rustc >/dev/null 2>&1 || { apk update && apk add --no-cache rust; }
+            rustc "$target" -o /tmp/iexa_rust_main && /tmp/iexa_rust_main
+            """
+        case "java":
+            run = """
+            command -v javac >/dev/null 2>&1 || { apk update && apk add --no-cache openjdk17; }
+            dir=$(dirname "$target")
+            base=$(basename "$target" .java)
+            (cd "$dir" && javac "$base.java" && java "$base")
+            """
+        case "c":
+            run = """
+            command -v gcc >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
+            gcc "$target" -o /tmp/iexa_c_main && /tmp/iexa_c_main
+            """
+        case "cc", "cpp", "cxx":
+            run = """
+            command -v g++ >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
+            g++ "$target" -o /tmp/iexa_cpp_main && /tmp/iexa_cpp_main
+            """
+        case "rb":
+            run = """
+            command -v ruby >/dev/null 2>&1 || { apk update && apk add --no-cache ruby; }
+            ruby "$target"
+            """
+        case "php":
+            run = """
+            command -v php >/dev/null 2>&1 || { apk update && apk add --no-cache php; }
+            php "$target"
+            """
+        case "sh", "bash":
+            run = "sh \"$target\""
+        case "html", "htm":
+            run = """
+            printf 'HTML file exists; showing first 80 lines for verification.\\n'
+            sed -n '1,80p' "$target"
+            """
+        default:
+            run = """
+            if [ -x "$target" ]; then
+              "$target"
+            else
+              printf 'not executable and no runner is known for: %s\\n' "$target"
+              exit 2
+            fi
+            """
+        }
+        return """
+        set -u
+        target=\(quoted)
+        if [ ! -f "$target" ]; then
+          printf 'missing: %s\\n' "$target"
+          exit 1
+        fi
+        printf '== target ==\\n%s\\n\\n' "$target"
+        \(run)
+        """
+    }
+
+    private static func fileSearchCommand(query: String, target: String) -> String {
+        let quotedQuery = shellQuoted(query)
+        let quotedTarget = shellQuoted(target)
+        return """
+        set -u
+        query=\(quotedQuery)
+        target=\(quotedTarget)
+        if [ -z "$target" ] || [ "$target" = "." ]; then
+          target=/mnt/iexa
+        fi
+        if [ ! -e "$target" ]; then
+          printf 'missing: %s\\n' "$target"
+          exit 1
+        fi
+        printf '== search ==\\n%s\\n\\n' "$query"
+        if command -v rg >/dev/null 2>&1; then
+          rg -n --hidden --glob '!node_modules' --glob '!.git' -- "$query" "$target" | head -n 80
+        else
+          grep -RIn --exclude-dir=node_modules --exclude-dir=.git -- "$query" "$target" | head -n 80
         fi
         """
     }
@@ -9954,6 +10222,10 @@ final class ChatViewModel {
 
         Operational rules:
         - Act like a Codex CLI style agent loop: understand the user's goal, choose one bounded next step, execute it, read the real output, then either continue with the next step or stop with a concise summary.
+        - Treat `iexa_alpine` as a real tool call, analogous to a CLI `tool_use`: emit one structured tool request, wait for the app's real tool result, then decide the next action from that result.
+        - Resolve intent before acting. File-management requests such as delete/read/list/search/rename are not code-generation requests. If the user says "删除 hello.lua", delete exactly `/mnt/iexa/hello.lua` and verify the directory; do not create or run a demo Lua script.
+        - For relative paths, treat them as inside `/mnt/iexa`. For destructive operations, stay inside `/mnt/iexa`, refuse the workspace root itself, act only on the explicit target, then list or read back enough output to prove the result.
+        - For project/code-generation requests in any language, create the needed files under `/mnt/iexa`, include entrypoints and config/dependency files, check the relevant runtime/compiler/package manager, install only missing dependencies with `apk`/`npm`/`pip` as appropriate, then run a bounded verification command.
         - Keep an internal step ledger: what has already been inspected, what command/file write was just attempted, what the output proved, and what the next smallest useful step is. Do not rely on memory guesses when the Local Alpine result is available.
         - For multi-step tasks, include one short visible step note before the `iexa_alpine` block, such as "先检查文件" or "现在修复并验证". Keep detailed reasoning internal.
         - Local Alpine terminal mode owns local project operations. If the user asks to list/read/search/create/modify/delete project files, inspect a directory, run a script, or "read the mnt directory", use `/mnt/iexa` via `iexa_alpine`; do not use the Documents/Iexa Workspace tool.
@@ -9983,7 +10255,12 @@ final class ChatViewModel {
         - After the app appends a Local Alpine execution result, continue from that real output: if the task is not done, emit the next bounded `iexa_alpine` block; if an error appears, fix and rerun; if the task is done, give a concise final summary of what you changed, what command verified it, and any remaining limitation. Do not stop after one command unless the output proves the task is complete.
         - If the user asks an interruption/meta question such as "为什么不修复", "怎么还报错", "你不会修复吗", "什么问题", or asks to stop, do not emit `iexa_alpine`; explain the latest result and wait for an explicit continue/fix/run request.
 
-        To execute commands, include exactly one fenced block with language `iexa_alpine` containing POSIX shell commands. The app will run those commands locally on the device and append the real output. Do not output this block unless command execution is actually needed.
+        Tool request schema:
+        - To execute commands, include exactly one fenced block with language `iexa_alpine`. The block may contain POSIX shell, or JSON with one object or an `iexa_alpine` array.
+        - JSON objects support `cwd`, `write_files`, and `command`. `write_files` entries support `path`, `code_lines`, `content_lines`, `content`, or `content_base64`.
+        - For create/modify project tasks, prefer JSON `write_files` plus a verification `command` in the same object.
+        - For read/list/delete/search tasks, prefer a minimal shell command scoped to `/mnt/iexa`.
+        - The app will run the request locally on the device and append the real output. Do not output this block unless command execution is actually needed.
 
         Example:
         ```iexa_alpine
@@ -11993,9 +12270,22 @@ final class ChatViewModel {
         }
 
         let executableContent: String
-        if userRequestedExecution,
-           let userText = latestUserText,
-           let fallback = Self.fallbackLocalAlpineBlockForAssistantRunnableCode(content: content, userText: userText) {
+        if Self.contentContainsLocalAlpineInstruction(content),
+           let normalized = Self.normalizedLocalAlpineExecutableContent(from: content) {
+            executableContent = normalized
+        } else if message.metadata?["iexa_local_alpine_continuation"] == "true" {
+            return
+        } else if userRequestedExecution,
+                  let userText = latestUserText,
+                  let fallback = fallbackLocalAlpineBlockForFollowUpOperation(userText: userText) {
+            executableContent = fallback
+        } else if userRequestedExecution,
+                  let userText = latestUserText,
+                  let fallback = Self.fallbackLocalAlpineBlock(for: userText) {
+            executableContent = fallback
+        } else if userRequestedExecution,
+                  let userText = latestUserText,
+                  let fallback = Self.fallbackLocalAlpineBlockForAssistantRunnableCode(content: content, userText: userText) {
             executableContent = fallback
         } else if userRequestedExecution,
                   let fallback = Self.fallbackLocalAlpineBlockForAssistantShellCode(content: content) {
@@ -12008,19 +12298,6 @@ final class ChatViewModel {
                     excludingMessageId: messageId,
                     userText: userText
                   ) {
-            executableContent = fallback
-        } else if Self.contentContainsLocalAlpineInstruction(content),
-                  let normalized = Self.normalizedLocalAlpineExecutableContent(from: content) {
-            executableContent = normalized
-        } else if message.metadata?["iexa_local_alpine_continuation"] == "true" {
-            return
-        } else if userRequestedExecution,
-                  let userText = latestUserText,
-                  let fallback = fallbackLocalAlpineBlockForFollowUpOperation(userText: userText) {
-            executableContent = fallback
-        } else if userRequestedExecution,
-                  let userText = latestUserText,
-                  let fallback = Self.fallbackLocalAlpineBlock(for: userText) {
             executableContent = fallback
         } else if userRequestedExecution,
                   let userText = latestUserText,
@@ -13561,9 +13838,13 @@ final class ChatViewModel {
         You are in a continuous Local Alpine agent loop. Read the latest real Local Alpine result above.
         Loop Runtime:
         - Operate like Codex CLI: plan internally, execute exactly one bounded next step, observe the real result, repair if needed, verify, then summarize only when the user goal is actually done.
+        - The previous `iexa_alpine` block is the tool_use and the latest Local Alpine result is the tool_result. Continue exactly like a tool-driven coding agent: observe, choose the next smallest useful tool call, execute, observe again.
         - Treat every Local Alpine result as an observation. Read its stdout/stderr/exit code before deciding the next step; exit code 0 does not automatically mean the user's task is complete.
         - Continue until the task is verified complete, blocked by missing external information, or the user stops it. Do not stop after a single command if the output shows an error or incomplete state.
         - If the user's task is complete, answer normally and do not emit `iexa_alpine`. Include a concise Codex-style summary: what you did, what command/output verified it, files changed/created, and any remaining caveat.
+        Intent:
+        - Keep file operations separate from code generation. Delete/read/list/search requests should operate on the exact target under `/mnt/iexa`; never replace them with a sample script or project.
+        - For language/project requests, create the real files, check/install missing runtime dependencies, run the project or a bounded test, and continue from the output until it works or a concrete blocker remains.
         Tool System:
         - Use exactly one next tool action per assistant turn. For local shell/files, emit one `iexa_alpine` block. For current web facts, rely on the web-search context already injected by the app; if more current info is needed, ask for/perform a more precise search before guessing.
         - Never emit `to=local_alpine_exec code` or any other pseudo tool-call text. This app executes only `iexa_alpine`; use that exact fenced block.
