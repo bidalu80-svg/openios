@@ -787,6 +787,17 @@ actor LocalAlpineAgentService {
         var finalData = formattedData
         var finalNotes = formatted.notes
         var validationResult = await validatePythonContent(finalContent, cwd: cwd)
+        if validationResult.exitCode != 0,
+           let repaired = await validatedPythonRepairCandidate(
+                for: finalContent,
+                diagnosticOutput: validationResult.output,
+                cwd: cwd
+           ) {
+            finalContent = repaired.content
+            finalData = repaired.data
+            finalNotes.append(contentsOf: repaired.notes)
+            validationResult = repaired.validationResult
+        }
         guard validationResult.exitCode == 0 else {
             var lines = [
                 "- `\(target)` Python 写入已拒绝：语法/缩进校验未通过，目标文件未被覆盖。"
@@ -816,7 +827,7 @@ actor LocalAlpineAgentService {
             content: finalContent,
             target: target,
             source: source,
-            notes: ["Python 文件已按工具参数写入；写入目标前已通过 AST 语法校验。"] + finalNotes
+            notes: ["Python 文件写入目标前已通过 AST 语法校验。"] + finalNotes
         )
         guard !directWrite.hadFailure else { return directWrite }
 
@@ -835,6 +846,33 @@ actor LocalAlpineAgentService {
             ),
             hadFailure: false
         )
+    }
+
+    private func validatedPythonRepairCandidate(
+        for content: String,
+        diagnosticOutput: String,
+        cwd: String
+    ) async -> (content: String, data: Data, notes: [String], validationResult: LocalAlpineCommandResult)? {
+        let candidates = LocalAlpinePythonWriteGuard.repairCandidatesForSyntaxIssue(
+            content,
+            diagnosticOutput: diagnosticOutput
+        )
+        guard !candidates.isEmpty else { return nil }
+
+        for candidate in candidates {
+            guard let candidateData = candidate.content.data(using: .utf8) else { continue }
+            let validationResult = await validatePythonContent(candidate.content, cwd: cwd)
+            guard validationResult.exitCode == 0 else { continue }
+
+            return (
+                content: candidate.content,
+                data: candidateData,
+                notes: candidate.notes + ["Python 缩进修复候选已通过 AST 语法校验后写入。"],
+                validationResult: validationResult
+            )
+        }
+
+        return nil
     }
 
     private func validatePythonContent(_ content: String, cwd: String) async -> LocalAlpineCommandResult {
