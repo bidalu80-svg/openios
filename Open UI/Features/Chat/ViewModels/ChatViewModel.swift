@@ -1308,6 +1308,8 @@ final class ChatViewModel {
             let cwd = metadata["iexa_local_alpine_cwd"]
             let rawResult = metadata["iexa_local_alpine_raw_result"]
             let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata["iexa_local_alpine_command_results"])
+            let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata["iexa_local_alpine_written_files"])
 
             var lines = ["- state: \(state)"]
             if let status, !status.isEmpty {
@@ -1327,6 +1329,26 @@ final class ChatViewModel {
             if let rawResult, !rawResult.isEmpty, rawResult != content {
                 lines.append("  raw result:")
                 lines.append(indentForSystemContext(clippedForSystemContext(rawResult, maxCharacters: 8_000)))
+            }
+            if !commandResults.isEmpty {
+                lines.append("  command observations:")
+                for result in commandResults.suffix(4) {
+                    let exit = result.exitCode.map(String.init) ?? "unknown"
+                    lines.append(indentForSystemContext("""
+                    command: \(result.command)
+                    cwd: \(result.cwd)
+                    exit_code: \(exit)
+                    output:
+                    \(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : clippedForSystemContext(result.outputPreview, maxCharacters: 8_000))
+                    """))
+                }
+            }
+            if !writtenFiles.isEmpty {
+                lines.append("  written files:")
+                let fileLines = writtenFiles.map { file in
+                    "- \(file.path) (\(file.lineCount) 行, \(file.byteCount) bytes)"
+                }.joined(separator: "\n")
+                lines.append(indentForSystemContext(fileLines))
             }
             if localAlpineOutputHasPythonSyntaxIssue(content + "\n" + (rawResult ?? "")) {
                 lines.append("  required next action:")
@@ -5007,7 +5029,10 @@ final class ChatViewModel {
         ]
         let targetTerms = [
             "文件", "脚本", "代码", "项目", "目录", "file", "script", "code", "project", "folder",
-            ".py", ".js", ".ts", ".html", ".css", ".json", ".md", ".sh", ".lua", ".c", ".cpp"
+            "python", "javascript", "typescript", "node", "lua", "golang", "go语言", "rust",
+            "java", "c语言", "c++", "cpp", "ruby", "php", "shell", "bash",
+            ".py", ".js", ".ts", ".html", ".css", ".json", ".md", ".sh", ".lua", ".c", ".cpp",
+            ".go", ".rs", ".java", ".rb", ".php"
         ]
         return containsAny(normalized, actionTerms) && containsAny(normalized, targetTerms)
     }
@@ -5063,7 +5088,8 @@ final class ChatViewModel {
             "这个", "这个文件", "那个", "它", "该文件", "刚才", "刚刚", "刚写的", "刚创建的", "刚生成的",
             "上面", "上一", "生成的", "创建的", "报错", "错误", "问题", "结果",
             "脚本", "文件", "项目", "目录", "lua", "python", "py", "js", "ts",
-            "html", "css", "json", "md", "sh"
+            "html", "css", "json", "md", "sh", "go", "golang", "rust", "rs",
+            "java", "c语言", "c++", "cpp", "ruby", "php"
         ]
         if localReferenceTerms.contains(where: { normalized.contains($0) }) {
             return true
@@ -5170,6 +5196,13 @@ final class ChatViewModel {
             }
         }
         return nil
+    }
+
+    private func forcedLocalAlpineBlockAfterManualResponse(userText: String) -> String? {
+        Self.fallbackLocalAlpineBlockForLanguageRunRequest(for: userText)
+            ?? fallbackLocalAlpineBlockForFollowUpOperation(userText: userText)
+            ?? Self.fallbackLocalAlpineBlock(for: userText)
+            ?? Self.fallbackLocalAlpineKickoffBlock(for: userText)
     }
 
     private func fallbackLocalAlpineBlockForFollowUpOperation(userText: String) -> String? {
@@ -5309,6 +5342,263 @@ final class ChatViewModel {
           ls -la /mnt/iexa
         fi
         """
+    }
+
+    private struct LocalAlpineLanguageRunSpec {
+        let terms: [String]
+        let fileName: String
+        let codeLines: [String]
+        let command: String
+    }
+
+    private static func fallbackLocalAlpineBlockForLanguageRunRequest(for text: String) -> String? {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return nil }
+        guard containsAny(normalized, ["写", "创建", "生成", "运行", "执行", "跑", "编译", "write", "create", "generate", "run", "execute", "compile"]) else {
+            return nil
+        }
+        guard let spec = localAlpineLanguageRunSpecs().first(where: { candidate in
+            candidate.terms.contains(where: { localAlpineTextContains(normalized, $0) || normalized.contains($0) })
+        }) else { return nil }
+
+        let payload: [String: Any] = [
+            "iexa_alpine": [
+                [
+                    "cwd": "/mnt/iexa",
+                    "write_files": [
+                        [
+                            "path": spec.fileName,
+                            "code_lines": spec.codeLines
+                        ]
+                    ],
+                    "command": spec.command
+                ]
+            ]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return """
+        ```iexa_alpine
+        \(json)
+        ```
+        """
+    }
+
+    private static func localAlpineLanguageRunSpecs() -> [LocalAlpineLanguageRunSpec] {
+        [
+            LocalAlpineLanguageRunSpec(
+                terms: ["go", "golang", "go语言"],
+                fileName: "main.go",
+                codeLines: [
+                    "package main",
+                    "",
+                    "import \"fmt\"",
+                    "",
+                    "func main() {",
+                    "    fmt.Println(\"Hello from Go\")",
+                    "}"
+                ],
+                command: localAlpineInstallAndRunCommand(
+                    probes: ["go"],
+                    packages: ["go"],
+                    run: "go run main.go"
+                )
+            ),
+            LocalAlpineLanguageRunSpec(
+                terms: ["rust", "rs"],
+                fileName: "main.rs",
+                codeLines: [
+                    "fn main() {",
+                    "    println!(\"Hello from Rust\");",
+                    "}"
+                ],
+                command: localAlpineInstallAndRunCommand(
+                    probes: ["rustc"],
+                    packages: ["rust"],
+                    run: "rustc main.rs -o /tmp/iexa_rust_main && /tmp/iexa_rust_main"
+                )
+            ),
+            LocalAlpineLanguageRunSpec(
+                terms: ["java"],
+                fileName: "Main.java",
+                codeLines: [
+                    "public class Main {",
+                    "    public static void main(String[] args) {",
+                    "        System.out.println(\"Hello from Java\");",
+                    "    }",
+                    "}"
+                ],
+                command: localAlpineInstallAndRunCommand(
+                    probes: ["javac", "java"],
+                    packages: ["openjdk17"],
+                    run: "javac Main.java && java Main"
+                )
+            ),
+            LocalAlpineLanguageRunSpec(
+                terms: ["c语言", "c language", "clang c", "gcc", " c "],
+                fileName: "main.c",
+                codeLines: [
+                    "#include <stdio.h>",
+                    "",
+                    "int main(void) {",
+                    "    puts(\"Hello from C\");",
+                    "    return 0;",
+                    "}"
+                ],
+                command: localAlpineInstallAndRunCommand(
+                    probes: ["gcc"],
+                    packages: ["build-base"],
+                    run: "gcc main.c -o /tmp/iexa_c_main && /tmp/iexa_c_main"
+                )
+            ),
+            LocalAlpineLanguageRunSpec(
+                terms: ["c++", "cpp", "g++"],
+                fileName: "main.cpp",
+                codeLines: [
+                    "#include <iostream>",
+                    "",
+                    "int main() {",
+                    "    std::cout << \"Hello from C++\" << std::endl;",
+                    "    return 0;",
+                    "}"
+                ],
+                command: localAlpineInstallAndRunCommand(
+                    probes: ["g++"],
+                    packages: ["build-base"],
+                    run: "g++ main.cpp -o /tmp/iexa_cpp_main && /tmp/iexa_cpp_main"
+                )
+            ),
+            LocalAlpineLanguageRunSpec(
+                terms: ["javascript", "node", "nodejs", "js"],
+                fileName: "main.js",
+                codeLines: [
+                    "console.log(\"Hello from Node.js\");"
+                ],
+                command: localAlpineInstallAndRunCommand(
+                    probes: ["node"],
+                    packages: ["nodejs"],
+                    run: "node main.js"
+                )
+            ),
+            LocalAlpineLanguageRunSpec(
+                terms: ["python", "python3", "py"],
+                fileName: "script.py",
+                codeLines: [
+                    "print(\"Hello from Python\")"
+                ],
+                command: localAlpineInstallAndRunCommand(
+                    probes: ["python3"],
+                    packages: ["python3"],
+                    run: "python3 -m py_compile script.py && python3 script.py"
+                )
+            ),
+            LocalAlpineLanguageRunSpec(
+                terms: ["lua"],
+                fileName: "script.lua",
+                codeLines: [
+                    "print(\"Hello from Lua\")"
+                ],
+                command: localAlpineInstallAndRunCommand(
+                    probes: ["lua", "lua5.4"],
+                    packages: ["lua5.4"],
+                    run: "(lua script.lua 2>/dev/null || lua5.4 script.lua)"
+                )
+            ),
+            LocalAlpineLanguageRunSpec(
+                terms: ["ruby", "rb"],
+                fileName: "script.rb",
+                codeLines: [
+                    "puts \"Hello from Ruby\""
+                ],
+                command: localAlpineInstallAndRunCommand(
+                    probes: ["ruby"],
+                    packages: ["ruby"],
+                    run: "ruby script.rb"
+                )
+            ),
+            LocalAlpineLanguageRunSpec(
+                terms: ["php"],
+                fileName: "script.php",
+                codeLines: [
+                    "<?php",
+                    "echo \"Hello from PHP\\n\";"
+                ],
+                command: localAlpineInstallAndRunCommand(
+                    probes: ["php"],
+                    packages: ["php"],
+                    run: "php script.php"
+                )
+            ),
+            LocalAlpineLanguageRunSpec(
+                terms: ["shell", "bash", "sh"],
+                fileName: "script.sh",
+                codeLines: [
+                    "#!/bin/sh",
+                    "printf 'Hello from shell\\n'"
+                ],
+                command: "chmod +x script.sh && sh script.sh"
+            )
+        ]
+    }
+
+    private static func localAlpineInstallAndRunCommand(probes: [String], packages: [String], run: String) -> String {
+        let probeList = probes.joined(separator: " ")
+        let packageList = packages.joined(separator: " ")
+        return """
+        set -u
+        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+        cd /mnt/iexa
+        missing=0
+        for x in \(probeList); do
+          command -v "$x" >/dev/null 2>&1 && { printf 'found %s: ' "$x"; command -v "$x"; missing=0; break; }
+          missing=1
+        done
+        if [ "$missing" -ne 0 ]; then
+          apk update
+          apk add --no-cache \(packageList)
+          hash -r 2>/dev/null || true
+          export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+        fi
+        printf '\\n== tools ==\\n'
+        found=0
+        for x in \(probeList); do
+          if command -v "$x" >/dev/null 2>&1; then
+            found=1
+            printf '%s -> ' "$x"
+            command -v "$x"
+            "$x" --version 2>/dev/null | head -n 1 || "$x" -v 2>/dev/null | head -n 1 || true
+          fi
+        done
+        if [ "$found" -eq 0 ]; then
+          printf 'dependency still missing after apk add: \(probeList)\\n'
+          printf '\\n== PATH ==\\n%s\\n' "$PATH"
+          printf '\\n== matching files ==\\n'
+          for d in /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin; do
+            [ -d "$d" ] && find "$d" -maxdepth 1 -type f \\( -name '\(probes.first ?? "")' -o -name '\(probes.last ?? "")' \\) -print
+          done
+          exit 127
+        fi
+        printf '\\n== run ==\\n'
+        \(run)
+        """
+    }
+
+    private static func isLocalAlpineManualRunOrRefusalResponse(_ content: String) -> Bool {
+        let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        let refusalTerms = [
+            "tool iexa_alpine does not exist", "tool iexa_alpine does not exists",
+            "iexa_alpine does not exist", "iexa_alpine does not exists",
+            "无法直接执行", "不能直接执行", "无法执行 shell", "不能执行 shell",
+            "无法直接运行", "不能直接运行", "无法在 /mnt/iexa", "不能在 /mnt/iexa",
+            "无法代你", "不能代你", "不能落盘", "无法落盘",
+            "请手动", "手动运行", "手动执行", "复制下面", "复制以下",
+            "在终端运行", "到终端运行", "运行以下命令", "执行以下命令",
+            "cannot directly execute", "can't directly execute", "cannot execute shell",
+            "unable to execute", "unable to run", "cannot run commands",
+            "run manually", "manually run", "copy and paste", "paste into terminal"
+        ]
+        return refusalTerms.contains { normalized.contains($0) }
     }
 
     private static func normalizedLocalAlpineExecutableContent(from content: String) -> String? {
@@ -5464,7 +5754,9 @@ final class ChatViewModel {
             options: [.caseInsensitive]
         ) else { return nil }
         let supportedLanguages: Set<String> = [
-            "lua", "javascript", "js", "node", "mjs", "cjs"
+            "lua", "javascript", "js", "node", "mjs", "cjs",
+            "go", "golang", "rust", "rs", "java", "c", "cpp", "c++",
+            "ruby", "rb", "php", "bash", "sh", "shell"
         ]
         let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
         for match in matches where match.numberOfRanges >= 3 {
@@ -5488,6 +5780,14 @@ final class ChatViewModel {
         switch language {
         case "lua": return "script.lua"
         case "javascript", "js", "node", "mjs", "cjs": return "script.js"
+        case "go", "golang": return "main.go"
+        case "rust", "rs": return "main.rs"
+        case "java": return "Main.java"
+        case "c": return "main.c"
+        case "cpp", "c++": return "main.cpp"
+        case "ruby", "rb": return "script.rb"
+        case "php": return "script.php"
+        case "bash", "sh", "shell": return "script.sh"
         default: return "script.txt"
         }
     }
@@ -5497,6 +5797,7 @@ final class ChatViewModel {
         switch language {
         case "lua":
             return """
+            command -v lua >/dev/null 2>&1 || command -v lua5.4 >/dev/null 2>&1 || { apk update && apk add --no-cache lua5.4; }
             if command -v lua >/dev/null 2>&1; then
               lua \(quotedFile)
             elif command -v lua5.4 >/dev/null 2>&1; then
@@ -5507,7 +5808,23 @@ final class ChatViewModel {
             fi
             """
         case "javascript", "js", "node", "mjs", "cjs":
-            return "node \(quotedFile)"
+            return "command -v node >/dev/null 2>&1 || { apk update && apk add --no-cache nodejs; }\nnode \(quotedFile)"
+        case "go", "golang":
+            return "command -v go >/dev/null 2>&1 || { apk update && apk add --no-cache go; }\ngo run \(quotedFile)"
+        case "rust", "rs":
+            return "command -v rustc >/dev/null 2>&1 || { apk update && apk add --no-cache rust; }\nrustc \(quotedFile) -o /tmp/iexa_rust_main && /tmp/iexa_rust_main"
+        case "java":
+            return "command -v javac >/dev/null 2>&1 || { apk update && apk add --no-cache openjdk17; }\njavac \(quotedFile) && java Main"
+        case "c":
+            return "command -v gcc >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }\ngcc \(quotedFile) -o /tmp/iexa_c_main && /tmp/iexa_c_main"
+        case "cpp", "c++":
+            return "command -v g++ >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }\ng++ \(quotedFile) -o /tmp/iexa_cpp_main && /tmp/iexa_cpp_main"
+        case "ruby", "rb":
+            return "command -v ruby >/dev/null 2>&1 || { apk update && apk add --no-cache ruby; }\nruby \(quotedFile)"
+        case "php":
+            return "command -v php >/dev/null 2>&1 || { apk update && apk add --no-cache php; }\nphp \(quotedFile)"
+        case "bash", "sh", "shell":
+            return "sh \(quotedFile)"
         default:
             return "cat \(quotedFile)"
         }
@@ -5648,7 +5965,10 @@ final class ChatViewModel {
             ("lua", "lua"), ("python", "py"), ("py", "py"), ("javascript", "js"),
             ("node", "js"), ("js", "js"), ("typescript", "ts"), ("ts", "ts"),
             ("html", "html"), ("css", "css"), ("json", "json"), ("markdown", "md"),
-            ("md", "md"), ("shell", "sh"), ("bash", "sh"), ("sh", "sh")
+            ("md", "md"), ("shell", "sh"), ("bash", "sh"), ("sh", "sh"),
+            ("golang", "go"), ("go语言", "go"), ("go", "go"), ("rust", "rs"),
+            ("rs", "rs"), ("java", "java"), ("c++", "cpp"), ("cpp", "cpp"),
+            ("c语言", "c"), ("ruby", "rb"), ("rb", "rb"), ("php", "php")
         ]
         return hints.first(where: { text.contains($0.0) })?.1
     }
@@ -6189,11 +6509,11 @@ final class ChatViewModel {
             command: command,
             cwd: "/mnt/iexa",
             exitCode: result.exitCode,
-            outputPreview: String(result.output.prefix(1_000))
+            outputPreview: String(result.output.prefix(8_000))
         )
         if let index = conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) {
             var metadata = conversation?.messages[index].metadata ?? [:]
-            metadata["iexa_local_alpine_raw_result"] = output
+            metadata["iexa_local_alpine_raw_result"] = result.output
             if let commandResults = LocalAlpineAgentCommandResult.metadataString(for: [directCommandResult]) {
                 metadata["iexa_local_alpine_command_results"] = commandResults
             }
@@ -6219,7 +6539,13 @@ final class ChatViewModel {
 
         if result.interactiveRequest == nil {
             localAlpineAgentStopRequested = false
-            scheduleLocalAlpineContinuationIfNeeded(after: assistantMessageId, forceContinue: true)
+            if !scheduleLocalAlpineFinalSummary(after: assistantMessageId) {
+                localAlpineAgentStopRequested = true
+                localAlpineContinuationTask = nil
+            }
+        } else {
+            localAlpineAgentStopRequested = true
+            localAlpineContinuationTask = nil
         }
     }
 
@@ -8527,7 +8853,15 @@ final class ChatViewModel {
         if let sp = effectiveSP, !sp.trimmingCharacters(in: .whitespaces).isEmpty {
             params["system"] = sp
         }
-        if let fc = selectedModel?.functionCallingMode, fc == "native" {
+        let latestUserTextForTools = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })?.content ?? ""
+        let localAlpineClientSideTask = shouldUseLocalAlpineAgentForRequest(
+            latestUserTextForTools,
+            modelId: selectedModel?.id ?? selectedModelId ?? conversation?.model
+        )
+
+        if let fc = selectedModel?.functionCallingMode, fc == "native", !localAlpineClientSideTask {
             params["function_calling"] = "native"
         }
         if !params.isEmpty { request.params = params }
@@ -8564,7 +8898,7 @@ final class ChatViewModel {
         }
 
         // Tool IDs (user selection respects manual toggles via userDisabledToolIds)
-        let allToolIds = Array(selectedToolIds)
+        let allToolIds = localAlpineClientSideTask ? [] : Array(selectedToolIds)
         if !allToolIds.isEmpty { request.toolIds = allToolIds }
 
         // Terminal ID if enabled
@@ -11029,6 +11363,9 @@ final class ChatViewModel {
         message: ChatMessage,
         includeImageCanvasInstruction: Bool = false
     ) -> String {
+        if Self.isLocalAlpineAgentResult(message) {
+            return Self.localAlpineObservationContent(for: message)
+        }
         guard message.role == .user else {
             return message.content
         }
@@ -11057,6 +11394,49 @@ final class ChatViewModel {
             return extraContexts.joined(separator: "\n\n")
         }
         return content + "\n\n" + extraContexts.joined(separator: "\n\n")
+    }
+
+    private static func localAlpineObservationContent(for message: ChatMessage) -> String {
+        let metadata = message.metadata ?? [:]
+        let command = metadata["iexa_local_alpine_display_command"]
+            ?? metadata["iexa_local_alpine_command_preview"]
+            ?? ""
+        let cwd = metadata["iexa_local_alpine_cwd"] ?? "/mnt/iexa"
+        let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata["iexa_local_alpine_command_results"])
+        let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata["iexa_local_alpine_written_files"])
+        let rawResult = metadata["iexa_local_alpine_raw_result"] ?? message.content
+
+        var lines: [String] = [
+            "[Local Alpine observation]",
+            "This is real on-device Local Alpine output. Use it as the source of truth.",
+            "cwd: \(cwd)"
+        ]
+        if !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.append("request/command:")
+            lines.append(clippedForSystemContext(command, maxCharacters: 4_000))
+        }
+        if !commandResults.isEmpty {
+            lines.append("command_results:")
+            for result in commandResults.suffix(6) {
+                let exit = result.exitCode.map(String.init) ?? "unknown"
+                lines.append("""
+                - command: \(result.command)
+                  cwd: \(result.cwd)
+                  exit_code: \(exit)
+                  output:
+                \(indentForSystemContext(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : clippedForSystemContext(result.outputPreview, maxCharacters: 8_000)))
+                """)
+            }
+        } else if !rawResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.append("raw_output:")
+            lines.append(clippedForSystemContext(rawResult, maxCharacters: 10_000))
+        }
+        if !writtenFiles.isEmpty {
+            lines.append("written_files:")
+            lines.append(writtenFiles.map { "- \($0.path) (\($0.lineCount) 行, \($0.byteCount) bytes)" }.joined(separator: "\n"))
+        }
+        lines.append("[/Local Alpine observation]")
+        return lines.joined(separator: "\n")
     }
 
     private func attachResolvedVideoFile(messageId: String, video: ResolvedWebVideo) {
@@ -12598,11 +12978,14 @@ final class ChatViewModel {
             localAlpineAgentStopRequested = true
         } else if result.interactiveRequest == nil,
                   !localAlpineAgentStopRequested,
+                  result.hadFailure,
                   localAlpineResultNeedsFollowUp(after: resultMessageId) {
             scheduleLocalAlpineContinuationIfNeeded(after: resultMessageId, forceContinue: true)
         } else if result.interactiveRequest == nil,
                   !localAlpineAgentStopRequested {
-            scheduleLocalAlpineContinuationIfNeeded(after: resultMessageId, forceContinue: true)
+            if !scheduleLocalAlpineFinalSummary(after: resultMessageId) {
+                localAlpineAgentStopRequested = true
+            }
         } else {
             localAlpineAgentStopRequested = true
         }

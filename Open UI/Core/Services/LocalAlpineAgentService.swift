@@ -192,7 +192,7 @@ struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
                 command: result.command,
                 cwd: result.cwd,
                 exitCode: result.exitCode,
-                outputPreview: String(result.outputPreview.prefix(1_000))
+                outputPreview: String(result.outputPreview.prefix(8_000))
             )
         }
         guard !limitedResults.isEmpty,
@@ -505,7 +505,7 @@ actor LocalAlpineAgentService {
             command: command.trimmingCharacters(in: .whitespacesAndNewlines),
             cwd: cwd.trimmingCharacters(in: .whitespacesAndNewlines),
             exitCode: result.exitCode,
-            outputPreview: String(result.output.prefix(2_000))
+            outputPreview: String(result.output.prefix(8_000))
         )
     }
 

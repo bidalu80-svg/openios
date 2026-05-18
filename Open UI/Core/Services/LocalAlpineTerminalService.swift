@@ -177,9 +177,10 @@ actor LocalAlpineTerminalService {
 
         let runtimeCWD = normalizedRuntimePath(cwd)
         let compatibleCommand = compatibilityCommand(for: trimmed)
+        let bootstrappedCommand = bootstrappedShellCommand(for: compatibleCommand)
         let runtimeCommand = stdinInput.map {
-            wrappedCommandForInteractiveInput(command: compatibleCommand, stdinInput: $0)
-        } ?? compatibleCommand
+            wrappedCommandForInteractiveInput(command: bootstrappedCommand, stdinInput: $0)
+        } ?? bootstrappedCommand
         let result = await LocalAlpineNativeRuntime.shared.execute(
             LocalAlpineNativeCommand(
                 command: runtimeCommand,
@@ -330,6 +331,31 @@ actor LocalAlpineTerminalService {
         }
 
         return rewriteApkNodeAlias(in: command)
+    }
+
+    private func bootstrappedShellCommand(for command: String) -> String {
+        let script = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !script.isEmpty else { return command }
+        return """
+        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+        if [ -f /etc/profile ]; then
+          . /etc/profile >/dev/null 2>&1 || true
+        fi
+        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+        apk() {
+          command apk "$@"
+          status=$?
+          case "${1:-}" in
+            add|fix|upgrade)
+              hash -r 2>/dev/null || true
+              export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+              ;;
+          esac
+          return "$status"
+        }
+        hash -r 2>/dev/null || true
+        \(script)
+        """
     }
 
     private func interactiveInputWarning(for command: String) -> String? {
