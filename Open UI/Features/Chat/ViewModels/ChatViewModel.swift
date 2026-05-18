@@ -9159,6 +9159,23 @@ final class ChatViewModel {
             modelId: selectedModel?.id ?? selectedModelId ?? conversation?.model
         )
 
+        if localAlpineClientSideTask {
+            params.removeValue(forKey: "function_calling")
+            params.removeValue(forKey: "tool_choice")
+            params.removeValue(forKey: "tools")
+            if var modelItem = request.modelItem,
+               var info = modelItem["info"] as? [String: Any],
+               var modelParams = info["params"] as? [String: Any] {
+                modelParams.removeValue(forKey: "function_calling")
+                info["params"] = modelParams
+                modelItem["info"] = info
+                request.modelItem = modelItem
+            }
+            request.toolIds = []
+            request.toolServers = []
+            request.terminalId = nil
+        }
+
         if let fc = selectedModel?.functionCallingMode, fc == "native", !localAlpineClientSideTask {
             params["function_calling"] = "native"
         }
@@ -10240,11 +10257,16 @@ final class ChatViewModel {
         """
         Iexa has an on-device Local Alpine Linux terminal. You can really operate that local Alpine environment for the user by emitting `iexa_alpine` blocks; do not tell the user that this chat lacks terminal/file-system execution when this instruction is present.
 
+        Important protocol boundary:
+        - `iexa_alpine` is NOT an OpenAI/native/function tool registered on the server.
+        - Never call a tool named `iexa_alpine` through provider tool-call syntax. Never write "Tool iexa_alpine does not exist".
+        - The host app only detects and executes a literal fenced Markdown block whose language is `iexa_alpine`. If you need local execution, print that fenced block as normal assistant text.
+
         Environment facts:
         - Shell: Alpine Linux ash/busybox style shell. Prefer POSIX sh syntax.
         - Default working directory: `/mnt/iexa`.
         - `/mnt/iexa` is the shared writable project directory. Create project files there.
-        - Tool protocol: the only correct execution trigger is a fenced `iexa_alpine` block. Do not use OpenAI/ChatGPT tool-call syntax such as `to=local_alpine_exec code`; that is a legacy/provider artifact and should never be shown to the user.
+        - Tool protocol: the only correct execution trigger is a fenced `iexa_alpine` block. Do not use OpenAI/ChatGPT tool-call syntax such as `to=local_alpine_exec code` or native tool calls; those are legacy/provider artifacts and should never be shown to the user.
         - Package manager: `apk`. Do not install packages on every run. First check with `command -v ...` or version commands; only use `apk update && apk add --no-cache ...` when the output proves a dependency is missing.
         - Current bundled tool profile normally includes: `sh`/`ash`, `busybox`, `apk`, `wget`, `curl`, `python3`, `node`, `npm`, `gcc`, `g++`, `git`, and `vim`.
         - Common packages that may still be missing for generated projects: `py3-pip`, `make`, `build-base`, `linux-headers`, `cmake`, `pkgconf`, `zip`, `unzip`, and `openssl-dev`.
@@ -10252,7 +10274,7 @@ final class ChatViewModel {
 
         Operational rules:
         - Act like a Codex CLI style agent loop: understand the user's goal, choose one bounded next step, execute it, read the real output, then either continue with the next step or stop with a concise summary.
-        - Treat `iexa_alpine` as a real tool call, analogous to a CLI `tool_use`: emit one structured tool request, wait for the app's real tool result, then decide the next action from that result.
+        - Treat a fenced `iexa_alpine` block as the app's local execution request: emit one block as text, wait for the app's real result, then decide the next action from that result.
         - Resolve intent before acting. File-management requests such as delete/read/list/search/rename are not code-generation requests. If the user says "删除 hello.lua", delete exactly `/mnt/iexa/hello.lua` and verify the directory; do not create or run a demo Lua script.
         - For relative paths, treat them as inside `/mnt/iexa`. For destructive operations, stay inside `/mnt/iexa`, refuse the workspace root itself, act only on the explicit target, then list or read back enough output to prove the result.
         - For project/code-generation requests in any language, create the needed files under `/mnt/iexa`, include entrypoints and config/dependency files, check the relevant runtime/compiler/package manager, install only missing dependencies with `apk`/`npm`/`pip` as appropriate, then run a bounded verification command.
@@ -13653,6 +13675,32 @@ final class ChatViewModel {
         localAlpineFinishedContinuationMessageIds.insert(assistantMessageId)
 
         let rawContent = content
+        if !isFinalSummary,
+           Self.isLocalAlpineManualRunOrRefusalResponse(rawContent),
+           parentNeedsFollowUp,
+           let parentResultId,
+           localAlpineNoCommandContinuationRetries < localAlpineContinuationMaxNoCommandRetries {
+            localAlpineNoCommandContinuationRetries += 1
+            localAlpineAgentStopRequested = false
+            localAlpineContinuationTask = nil
+            localAlpineContinuationParentIds.remove(parentResultId)
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: "Local Alpine 协议已纠正，正在重新要求模型输出可执行围栏块...",
+                isStreaming: false,
+                statusHistory: [
+                    ChatStatusUpdate(
+                        action: "local_alpine_agent",
+                        description: "已纠正 Local Alpine 协议",
+                        done: true,
+                        occurredAt: .now
+                    )
+                ]
+            )
+            cleanupStreaming()
+            scheduleLocalAlpineContinuationIfNeeded(after: parentResultId, forceContinue: true)
+            return
+        }
         let doneDescription: String
         if isFinalSummary {
             doneDescription = "已整理本地 Alpine 回答"
@@ -13881,7 +13929,9 @@ final class ChatViewModel {
         - Never emit `to=local_alpine_exec code` or any other pseudo tool-call text. This app executes only `iexa_alpine`; use that exact fenced block.
         - Before the block, write at most one short visible sentence naming the current step. Do not reveal detailed hidden reasoning.
         Python Writes:
-        - For `.py` files, always use `iexa_alpine` JSON `write_files` with full-file `code_lines` or `content_base64`; this app's Python write guard only preserves indentation reliably on that structured path.
+        - For `.py` files, always use fenced `iexa_alpine` JSON `write_files` with full-file `code_lines` or `content_base64`; this app's Python write guard only preserves indentation reliably on that structured path.
+        - Never put `def main()` or `main()` inside a class unless the user explicitly asked for a class method. Top-level runnable Python must keep `def main():` and `if __name__ == "__main__": main()` at column 0.
+        - For `HTMLParser` examples, parser callback methods belong inside the parser class, but crawler orchestration such as `main()` belongs outside the class at top level.
         - Python writes are transactional: if the app reports Python AST/compile validation failed after its conservative repair attempt, do not run the broken file and do not patch one line. Rewrite the complete `.py` target through structured `write_files`, then verify again.
         - After writing Python, run `python3 -m py_compile <file>` or the requested script. If indentation/syntax fails, rewrite the complete target file through `write_files`, then verify again.
         Browser:

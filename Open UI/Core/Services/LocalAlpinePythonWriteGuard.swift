@@ -61,9 +61,9 @@ enum LocalAlpinePythonWriteGuard {
         let extracted: ExtractedCode
         switch source {
         case .codeLines, .contentLines, .contentBase64:
-            return (
+            extracted = ExtractedCode(
                 content: content,
-                notes: ["结构化 Python 源码按工具参数原样写入；未做 Markdown 提取、缩进猜测或自动重排。"]
+                notes: ["结构化 Python 源码按工具参数原样接收，未经过 Markdown 清洗或缩进重排。"]
             )
         case .content, .heredoc, .codeBlock:
             switch extractPythonCode(from: content, source: source) {
@@ -87,6 +87,10 @@ enum LocalAlpinePythonWriteGuard {
         let tabRepair = normalizeLeadingTabs(in: prepared)
         prepared = tabRepair.content
         notes.append(contentsOf: tabRepair.notes)
+
+        let topLevelRepair = repairCommonTopLevelPythonEntryPoints(in: prepared)
+        prepared = topLevelRepair.content
+        notes.append(contentsOf: topLevelRepair.notes)
 
         return (ensureTrailingNewline(prepared), notes)
     }
@@ -203,6 +207,158 @@ enum LocalAlpinePythonWriteGuard {
         guard !changedLines.isEmpty else { return (content, []) }
         let note = "已按 VS Code/Python 默认设置将行首 Tab 转换为 4 个空格：第 \(changedLines.prefix(12).map(String.init).joined(separator: ", ")) 行"
         return (normalized.joined(separator: "\n"), [note])
+    }
+
+    private static func repairCommonTopLevelPythonEntryPoints(in content: String) -> (content: String, notes: [String]) {
+        let lines = content.components(separatedBy: "\n")
+        var repaired = lines
+        var changed = false
+        var notes: [String] = []
+
+        if let hoisted = hoistMisnestedMainFunctionIfNeeded(repaired) {
+            repaired = hoisted.lines
+            changed = true
+            notes.append(hoisted.note)
+        }
+
+        for index in repaired.indices {
+            let stripped = repaired[index].trimmingCharacters(in: .whitespaces)
+            if stripped == "if __name__ == '__main__':"
+                || stripped == #"if __name__ == "__main__":"# {
+                let currentIndent = repaired[index].prefix { $0 == " " || $0 == "\t" }.count
+                if currentIndent > 0 {
+                    repaired[index] = stripped
+                    changed = true
+                    if index + 1 < repaired.count {
+                        let next = repaired[index + 1].trimmingCharacters(in: .whitespaces)
+                        if next == "main()" {
+                            repaired[index + 1] = "    main()"
+                            changed = true
+                        }
+                    }
+                }
+            }
+        }
+
+        guard changed else { return (content, []) }
+        if notes.isEmpty {
+            notes.append("已将常见 Python 入口 `if __name__ == '__main__': main()` 修正为文件顶层，避免被误缩进进 class/function。")
+        }
+        return (
+            repaired.joined(separator: "\n"),
+            notes
+        )
+    }
+
+    private static func hoistMisnestedMainFunctionIfNeeded(_ lines: [String]) -> (lines: [String], note: String)? {
+        guard hasTopLevelMainCall(lines), !hasTopLevelMainDefinition(lines) else { return nil }
+        guard let functionStart = lines.firstIndex(where: { line in
+            leadingWhitespaceWidth(line) > 0
+                && line.trimmingCharacters(in: .whitespaces).hasPrefix("def main(")
+        }) else { return nil }
+
+        let baseIndent = leadingWhitespaceWidth(lines[functionStart])
+        var end = functionStart + 1
+        while end < lines.count {
+            let line = lines[end]
+            let stripped = line.trimmingCharacters(in: .whitespaces)
+            if stripped.isEmpty {
+                end += 1
+                continue
+            }
+            if leadingWhitespaceWidth(line) <= baseIndent {
+                break
+            }
+            end += 1
+        }
+
+        var mainBlock = Array(lines[functionStart..<end]).map { removeIndentPrefix(baseIndent, from: $0) }
+        while mainBlock.last?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            mainBlock.removeLast()
+        }
+        guard !mainBlock.isEmpty else { return nil }
+
+        var repaired = lines
+        repaired.removeSubrange(functionStart..<end)
+        while repaired.indices.contains(functionStart),
+              repaired[functionStart].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              repaired.indices.contains(functionStart + 1),
+              repaired[functionStart + 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            repaired.remove(at: functionStart)
+        }
+
+        let insertIndex = repaired.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix("if __name__")
+        }) ?? repaired.count
+        var insertion = mainBlock
+        if insertIndex > 0,
+           repaired[insertIndex - 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            insertion.insert("", at: 0)
+        }
+        if insertIndex < repaired.count,
+           repaired[insertIndex].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            insertion.append("")
+        }
+        repaired.insert(contentsOf: insertion, at: insertIndex)
+
+        return (
+            repaired,
+            "检测到 `def main()` 被误缩进在 class/function 内，但文件顶层调用了 `main()`；已将 `main()` 函数提升到文件顶层。"
+        )
+    }
+
+    private static func hasTopLevelMainCall(_ lines: [String]) -> Bool {
+        for index in lines.indices {
+            let stripped = lines[index].trimmingCharacters(in: .whitespaces)
+            guard stripped == "if __name__ == '__main__':"
+                    || stripped == #"if __name__ == "__main__":"# else {
+                continue
+            }
+            let nextIndex = index + 1
+            if lines.indices.contains(nextIndex),
+               lines[nextIndex].trimmingCharacters(in: .whitespaces) == "main()" {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func hasTopLevelMainDefinition(_ lines: [String]) -> Bool {
+        lines.contains { line in
+            leadingWhitespaceWidth(line) == 0
+                && line.trimmingCharacters(in: .whitespaces).hasPrefix("def main(")
+        }
+    }
+
+    private static func leadingWhitespaceWidth(_ line: String) -> Int {
+        var width = 0
+        for character in line {
+            if character == " " {
+                width += 1
+            } else if character == "\t" {
+                width += 4
+            } else {
+                break
+            }
+        }
+        return width
+    }
+
+    private static func removeIndentPrefix(_ width: Int, from line: String) -> String {
+        var remaining = width
+        var index = line.startIndex
+        while index < line.endIndex, remaining > 0 {
+            let character = line[index]
+            if character == " " {
+                remaining -= 1
+            } else if character == "\t" {
+                remaining -= 4
+            } else {
+                break
+            }
+            index = line.index(after: index)
+        }
+        return String(line[index...])
     }
 
     private static func looksCollapsedIndentation(_ content: String) -> Bool {
