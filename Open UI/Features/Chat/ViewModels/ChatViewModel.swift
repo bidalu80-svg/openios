@@ -1900,8 +1900,10 @@ final class ChatViewModel {
         let terms = [
             "继续修复", "继续执行", "继续运行", "继续跑", "继续调试",
             "修复并运行", "修好再运行", "自动修复", "直接修复", "你来修复",
-            "直接改", "修复它", "把它修好", "继续 agent", "继续agent",
-            "继续处理", "接着修", "接着跑", "继续",
+            "直接改", "直接写入", "直接执行", "直接运行", "写入运行", "写入并运行",
+            "写入执行", "写入并执行", "修改执行", "修改并执行", "修改运行", "修改并运行",
+            "帮我修改执行", "帮我修改运行", "你直接写入运行", "修复它", "把它修好",
+            "继续 agent", "继续agent", "继续处理", "继续操作", "接着修", "接着跑", "继续",
             "修好", "修改代码", "改代码", "修代码", "修复代码", "重新运行",
             "再运行", "重跑", "改完运行", "改完再跑"
         ]
@@ -3939,6 +3941,7 @@ final class ChatViewModel {
         let shouldAutoOpenLocalAlpine = !shouldKeepMediaRoute && !shouldKeepNativeLinkRoute && !isLocalAlpineInterjection && (
             shouldAutoRouteExplicitLocalAlpineCommand(currentText)
                 || isExplicitLocalAlpineResume
+                || shouldUseLocalAlpineAgentForRequest(currentText, modelId: modelId)
         )
         if shouldAutoOpenLocalAlpine {
             selectedTerminalServer = .localAlpine
@@ -4853,6 +4856,13 @@ final class ChatViewModel {
             return true
         }
         return Self.isLocalAlpineFollowUpFileOperation(text, messages: conversation?.messages ?? [])
+    }
+
+    private func latestUserRequestsLocalAlpineAgent(modelId: String? = nil) -> Bool {
+        guard let latestUserText = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })?.content else { return false }
+        return shouldUseLocalAlpineAgentForRequest(latestUserText, modelId: modelId)
     }
 
     private static func shouldKeepNativeLinkResolverOffLocalAlpine(_ text: String) -> Bool {
@@ -9553,8 +9563,25 @@ final class ChatViewModel {
     }
 
     private static func localNativeToolSystemContext() -> String {
-        """
+        let calendar = Calendar.current
+        let now = Date()
+        let startOfToday = calendar.startOfDay(for: now)
+        let endOfToday = calendar.date(byAdding: .day, value: 1, to: startOfToday)
+            ?? startOfToday.addingTimeInterval(86_400)
+        let exampleEventEnd = calendar.date(byAdding: .hour, value: 1, to: now)
+            ?? now.addingTimeInterval(3_600)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = .current
+        let nowText = formatter.string(from: now)
+        let todayStartText = formatter.string(from: startOfToday)
+        let todayEndText = formatter.string(from: endOfToday)
+        let exampleEndText = formatter.string(from: exampleEventEnd)
+        let timezoneName = TimeZone.current.identifier
+        return """
         Iexa has on-device native iOS tools for location and calendar. These run locally on the user's device and do not require the remote server.
+
+        Current device time: \(nowText), timezone: \(timezoneName). For relative requests such as "今天", "现在", "明天", or "查看日历", calculate the date range from this current device time. Do not reuse stale sample dates.
 
         Use them only when the user asks to get/use their current location, query local calendar events, create a calendar event, or delete a calendar event. Do not emit this tool for ordinary conversation.
         To call a local native tool, output exactly one fenced `iexa_native` JSON block and no fake tool-call syntax.
@@ -9564,10 +9591,10 @@ final class ChatViewModel {
         {"action":"get_location"}
         ```
         ```iexa_native
-        {"action":"list_calendar_events","start":"2026-05-17T00:00:00+08:00","end":"2026-05-18T00:00:00+08:00"}
+        {"action":"list_calendar_events","start":"\(todayStartText)","end":"\(todayEndText)"}
         ```
         ```iexa_native
-        {"action":"create_calendar_event","title":"会议","start":"2026-05-18T09:00:00+08:00","end":"2026-05-18T10:00:00+08:00","location":"办公室","description":"讨论项目","alert_minutes":10}
+        {"action":"create_calendar_event","title":"会议","start":"\(nowText)","end":"\(exampleEndText)","location":"办公室","description":"讨论项目","alert_minutes":10}
         ```
         ```iexa_native
         {"action":"delete_calendar_event","id":"event-id-from-list"}
@@ -11085,8 +11112,11 @@ final class ChatViewModel {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content
         let localAlpineModelId = selectedModelId ?? conversation.model ?? ""
-        let localAlpineTerminalApplies = terminalEnabled
-            && selectedTerminalIsLocalAlpine
+        let latestUserNeedsLocalAlpine = latestUserTextForLocalAlpine.map {
+            shouldUseLocalAlpineAgentForRequest($0, modelId: localAlpineModelId)
+        } ?? false
+        let localAlpineTerminalApplies = ((terminalEnabled && selectedTerminalIsLocalAlpine)
+            || latestUserNeedsLocalAlpine)
             && !(latestUserTextForLocalAlpine.map {
                 shouldKeepMediaGenerationRequestOffLocalAlpine($0, modelId: localAlpineModelId)
             } ?? false)
@@ -11098,7 +11128,7 @@ final class ChatViewModel {
             guard let latestUserText = latestUserTextForLocalAlpine else {
                 return false
             }
-            return shouldUseLocalAlpineAgentForRequest(latestUserText)
+            return latestUserNeedsLocalAlpine || shouldUseLocalAlpineAgentForRequest(latestUserText)
         }()
         let memoryContext = await localMemorySystemContext()
         let workspaceContext: String? = {
@@ -11559,7 +11589,6 @@ final class ChatViewModel {
         guard error == nil else { return }
         guard !localAlpineAgentStopRequested else { return }
         guard !localAlpineAutoExecutionPaused else { return }
-        guard terminalEnabled, selectedTerminalIsLocalAlpine else { return }
         guard let message = conversation?.messages.first(where: { $0.id == messageId }),
               message.role == .assistant else { return }
         guard !localAlpineAgentExecutedMessageIds.contains(messageId) else { return }
@@ -11579,6 +11608,9 @@ final class ChatViewModel {
         let userRequestedExecution = latestUserText.map {
             shouldUseLocalAlpineAgentForRequest($0, modelId: effectiveModelId)
         } ?? false
+        guard (terminalEnabled && selectedTerminalIsLocalAlpine) || userRequestedExecution else {
+            return
+        }
 
         let executableContent: String
         if userRequestedExecution,
@@ -12287,6 +12319,9 @@ final class ChatViewModel {
         guard let userText = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalWorkspaceAgentResult($0)
         })?.content.lowercased() else { return false }
+        if shouldUseLocalAlpineAgentForRequest(userText) {
+            return false
+        }
         if Self.isExplicitLocalAlpineRequest(userText) || Self.localAlpineNaturalLanguageCommand(for: userText) != nil {
             return false
         }
@@ -12575,7 +12610,6 @@ final class ChatViewModel {
 
     @discardableResult
     private func scheduleLocalAlpineFinalSummary(after resultMessageId: String) -> Bool {
-        guard terminalEnabled, selectedTerminalIsLocalAlpine else { return false }
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return false }
         guard !localAlpineFinalSummaryParentIds.contains(resultMessageId) else { return false }
         guard !localAlpineContinuationParentIds.contains(resultMessageId) else { return false }
@@ -12610,7 +12644,6 @@ final class ChatViewModel {
     }
 
     private func scheduleLocalAlpineContinuationIfNeeded(after resultMessageId: String, forceContinue: Bool = false) {
-        guard terminalEnabled, selectedTerminalIsLocalAlpine else { return }
         guard !localAlpineAgentStopRequested else { return }
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
         if localAlpineStepsSinceLastUser() >= localAlpineAgentMaxSteps {
@@ -13217,8 +13250,10 @@ final class ChatViewModel {
         error: ChatMessageError? = nil
     ) {
         let displayContent = Self.cleanedProviderCitationArtifacts(content)
+        let shouldHandleLocalAlpineDisplay = (terminalEnabled && selectedTerminalIsLocalAlpine)
+            || latestUserRequestsLocalAlpineAgent(modelId: selectedModelId ?? conversation?.model)
         let visibleAlpineDisplayContent: String? = {
-            guard terminalEnabled && selectedTerminalIsLocalAlpine else { return nil }
+            guard shouldHandleLocalAlpineDisplay else { return nil }
             var visible = LocalAlpineAgentService.visibleContent(from: displayContent)
             if displayContent.localizedCaseInsensitiveContains("iexa_workspace")
                 || visible.localizedCaseInsensitiveContains("iexa_workspace") {
@@ -13230,8 +13265,7 @@ final class ChatViewModel {
             return visible
         }()
         let renderedDisplayContent = visibleAlpineDisplayContent ?? displayContent
-        let alpineInstructionIsHidden = terminalEnabled
-            && selectedTerminalIsLocalAlpine
+        let alpineInstructionIsHidden = shouldHandleLocalAlpineDisplay
             && Self.contentContainsLocalAlpineInstruction(displayContent)
             && visibleAlpineDisplayContent != nil
             && renderedDisplayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -13339,7 +13373,7 @@ final class ChatViewModel {
             }
         }
 
-        if terminalEnabled, selectedTerminalIsLocalAlpine,
+        if shouldHandleLocalAlpineDisplay,
            let alpineContent = completedAssistantContentForAgent {
             let visibleAlpineContent = LocalAlpineAgentService.visibleContent(from: alpineContent)
             if visibleAlpineContent != alpineContent,
@@ -13352,7 +13386,7 @@ final class ChatViewModel {
             }
         }
 
-        if terminalEnabled, selectedTerminalIsLocalAlpine,
+        if shouldHandleLocalAlpineDisplay,
            let workspaceContent = completedAssistantContentForAgent,
            workspaceContent.localizedCaseInsensitiveContains("iexa_workspace") {
             var visibleWorkspaceContent = LocalWorkspaceAgentService.visibleContent(from: workspaceContent)

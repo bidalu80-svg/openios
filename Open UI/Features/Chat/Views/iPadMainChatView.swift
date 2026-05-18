@@ -1649,9 +1649,9 @@ struct iPadSidebarContent: View {
                         }
                     }
 
-                    if !usesDirectProvider && dependencies.authViewModel.featurePermissions.calendar {
+                    if usesDirectProvider || dependencies.authViewModel.featurePermissions.calendar {
                         Button { showCalendar = true } label: {
-                            Label("Calendar", systemImage: "calendar")
+                            Label("日历", systemImage: "calendar")
                         }
                     }
 

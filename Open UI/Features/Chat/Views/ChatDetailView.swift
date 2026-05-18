@@ -1343,7 +1343,7 @@ struct ChatDetailView: View {
     ///
     /// All earlier messages render at their natural height.
     private var messagesList: some View {
-        let allMessages = viewModel.messages
+        let allMessages = viewModel.messages.filter { !isLocalNativeResultMessage($0) }
         let total = allMessages.count
 
         // ── Sliding window: compute the visible slice ──
@@ -1411,7 +1411,8 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func messageRow(message: ChatMessage, index: Int) -> some View {
-        let isLastAssistant = message.role == .assistant && index == viewModel.messages.count - 1
+        let lastVisibleMessageId = viewModel.messages.last(where: { !isLocalNativeResultMessage($0) })?.id
+        let isLastAssistant = message.role == .assistant && message.id == lastVisibleMessageId
         let userTextIsEmpty = message.role == .user
             && activeUserDisplayContent(for: message).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
@@ -1610,6 +1611,11 @@ struct ChatDetailView: View {
             || (message.model == "Local Alpine" && message.statusHistory.contains {
                 $0.action?.lowercased() == "local_alpine"
             })
+    }
+
+    private func isLocalNativeResultMessage(_ message: ChatMessage) -> Bool {
+        message.metadata?["iexa_local_native_result"] == "true"
+            || message.model == "Local Native"
     }
 
     @ViewBuilder

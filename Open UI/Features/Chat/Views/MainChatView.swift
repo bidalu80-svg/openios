@@ -2644,12 +2644,12 @@ struct MainChatView: View {
                         }
                     }
 
-                    if !usesDirectProvider && dependencies.authViewModel.featurePermissions.calendar {
+                    if usesDirectProvider || dependencies.authViewModel.featurePermissions.calendar {
                         Button {
                             closeDrawer()
                             showCalendar = true
                         } label: {
-                            Label("Calendar", systemImage: "calendar")
+                            Label("日历", systemImage: "calendar")
                         }
                     }
 
