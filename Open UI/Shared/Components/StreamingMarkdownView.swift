@@ -665,6 +665,12 @@ struct StreamingMarkdownView: View {
     }
 
     static func removeProviderCitationArtifacts(from text: String) -> String {
+        return transformOutsideFencedCode(in: text) { prose in
+            removeProviderCitationArtifactsFromProse(prose)
+        }
+    }
+
+    private static func removeProviderCitationArtifactsFromProse(_ text: String) -> String {
         var cleaned = text
         cleaned = removePrivateUseCharacters(from: cleaned)
         let patterns = [
@@ -684,6 +690,105 @@ struct StreamingMarkdownView: View {
             .replacingOccurrences(of: #"\n[ \t]+\n"#, with: "\n\n", options: .regularExpression)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
         return cleaned
+    }
+
+    private static func transformOutsideFencedCode(
+        in text: String,
+        transform: (String) -> String
+    ) -> String {
+        var result = ""
+        var cursor = text.startIndex
+
+        while let opening = nextFenceOpening(in: text, range: cursor..<text.endIndex) {
+            if cursor < opening.range.lowerBound {
+                result += transform(String(text[cursor..<opening.range.lowerBound]))
+            }
+
+            if let closing = closingFenceRange(
+                in: text,
+                marker: opening.marker,
+                searchStart: opening.range.upperBound
+            ) {
+                result += String(text[opening.range.lowerBound..<closing.upperBound])
+                cursor = closing.upperBound
+            } else {
+                result += String(text[opening.range.lowerBound..<text.endIndex])
+                return result
+            }
+        }
+
+        if cursor < text.endIndex {
+            result += transform(String(text[cursor..<text.endIndex]))
+        }
+        return result
+    }
+
+    private static func nextFenceOpening(
+        in text: String,
+        range: Range<String.Index>
+    ) -> (range: Range<String.Index>, marker: String)? {
+        var cursor = range.lowerBound
+        while cursor < range.upperBound,
+              let candidate = nextFenceMarker(in: text, range: cursor..<range.upperBound) {
+            let lineStart = startOfLine(in: text, before: candidate.range.lowerBound)
+            let prefix = text[lineStart..<candidate.range.lowerBound]
+            if prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return candidate
+            }
+            cursor = candidate.range.upperBound
+        }
+        return nil
+    }
+
+    private static func nextFenceMarker(
+        in text: String,
+        range: Range<String.Index>
+    ) -> (range: Range<String.Index>, marker: String)? {
+        let backtickRange = text.range(of: "```", range: range)
+        let tildeRange = text.range(of: "~~~", range: range)
+
+        switch (backtickRange, tildeRange) {
+        case let (.some(backtick), .some(tilde)):
+            return backtick.lowerBound <= tilde.lowerBound ? (backtick, "```") : (tilde, "~~~")
+        case let (.some(backtick), .none):
+            return (backtick, "```")
+        case let (.none, .some(tilde)):
+            return (tilde, "~~~")
+        case (.none, .none):
+            return nil
+        }
+    }
+
+    private static func closingFenceRange(
+        in text: String,
+        marker: String,
+        searchStart: String.Index
+    ) -> Range<String.Index>? {
+        var cursor = searchStart
+        while let fence = text.range(of: marker, range: cursor..<text.endIndex) {
+            let lineStart = startOfLine(in: text, before: fence.lowerBound)
+            let lineEnd = text[fence.upperBound...].firstIndex(of: "\n") ?? text.endIndex
+            let prefix = text[lineStart..<fence.lowerBound]
+            let suffix = text[fence.upperBound..<lineEnd]
+            if prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               suffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return fence
+            }
+            cursor = fence.upperBound
+        }
+        return nil
+    }
+
+    private static func startOfLine(in text: String, before index: String.Index) -> String.Index {
+        var cursor = index
+        while cursor > text.startIndex {
+            let previous = text.index(before: cursor)
+            if text[previous] == "\n" {
+                return cursor
+            }
+            cursor = previous
+        }
+        return text.startIndex
     }
 
     private static func removePrivateUseCharacters(from text: String) -> String {
