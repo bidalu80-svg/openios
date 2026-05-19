@@ -9,6 +9,7 @@ import SwiftUI
 struct PythonCodeBlockView: View {
 
     let code: String
+    var isStreaming: Bool = false
 
     // MARK: - Execution State
 
@@ -51,7 +52,12 @@ struct PythonCodeBlockView: View {
             // ── Header bar ──────────────────────────────────────────────────
             headerBar
 
-            SourceCodeTextView(code: visibleCode, language: "python", maxHeight: 420)
+            SourceCodeTextView(
+                code: visibleCode,
+                language: "python",
+                maxHeight: 420,
+                autoFollowTail: isStreaming
+            )
                 .background(Color(.secondarySystemBackground))
 
             // ── Output panel (shown after run) ──────────────────────────────
@@ -136,8 +142,9 @@ struct PythonCodeBlockView: View {
             }
             .buttonStyle(.plain)
 
-            // Run button
-            runButton
+            if !isStreaming {
+                runButton
+            }
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 14)

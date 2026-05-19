@@ -161,13 +161,11 @@ struct StreamingMarkdownView: View {
                 return result
             }
 
-            // ── Streaming code-block detection (html / svg) ───────────────────
-            // If the model is mid-way through a ```html or ```svg block (opening
-            // fence seen, closing fence not yet arrived), render a live preview
-            // instead of raw monospace text. This is the streaming analogue of
-            // parseCodeBlocks — it only fires when isStreaming=true and the block
-            // is incomplete. Once the closing ``` arrives, resolveSegments() falls
-            // through to parseSpecialBlocks() which handles the complete block.
+            // ── Streaming code-block detection ────────────────────────────────
+            // If the model is mid-way through an unclosed fenced code block,
+            // render it through the same native code-block component used after
+            // completion. This prevents MarkdownView from temporarily showing
+            // its own code view with line numbers and different indentation.
             if let streamingSeg = resolveStreamingCodeBlock(renderContent) {
                 return streamingSeg
             }
@@ -189,55 +187,99 @@ struct StreamingMarkdownView: View {
     /// Returns `nil` when no incomplete special block is found, letting the caller
     /// fall back to plain markdown rendering.
     private func resolveStreamingCodeBlock(_ text: String) -> [ContentSegment]? {
-        // We only care about html and svg — mermaid needs complete syntax to render.
-        let candidates: [(tag: String, makeSeg: (String) -> ContentSegment)] = [
-            ("```html\n",  { .html($0, isStreaming: true) }),
-            ("```svg\n",   { .svg($0, isStreaming: true) }),
-        ]
-
-        for (tag, makeSeg) in candidates {
-            guard let openRange = text.range(of: tag, options: .caseInsensitive) else { continue }
-
-            let contentStart = openRange.upperBound
-            let afterOpen = text[contentStart...]
-
-            // If the closing fence is already present, this is a complete block —
-            // parseSpecialBlocks (non-streaming path) handles it. Skip here.
-            if findClosingFence(in: text[contentStart...], from: contentStart) != nil { continue }
-
-            // Incomplete block — extract partial content
-            let partialContent = String(afterOpen)
-            // Anything before the opening fence is plain markdown
-            let before = String(text[text.startIndex..<openRange.lowerBound])
-
-            var result: [ContentSegment] = []
-            if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result.append(.markdown(before))
-            }
-            if !partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result.append(makeSeg(partialContent))
-            }
-            return result.isEmpty ? nil : result
-        }
-
-        guard let openRange = text.range(of: "```", options: .backwards) else { return nil }
+        guard let openRange = findUnclosedOpeningFence(in: text) else { return nil }
         let afterOpen = text[openRange.upperBound...]
-        guard findClosingFence(in: text[openRange.upperBound...], from: openRange.upperBound) == nil,
-              let newlineIdx = afterOpen.firstIndex(of: "\n") else { return nil }
 
-        let lang = afterOpen[afterOpen.startIndex..<newlineIdx]
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        let partialContent = String(afterOpen[afterOpen.index(after: newlineIdx)...])
-        guard shouldRenderCompactCodeModule(language: lang, code: partialContent) else { return nil }
-
-        let before = String(text[text.startIndex..<openRange.lowerBound])
-        var result: [ContentSegment] = []
-        if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            result.append(.markdown(before))
+        let rawLanguage: String
+        let rawPartialContent: String
+        if let newlineIdx = afterOpen.firstIndex(of: "\n") {
+            rawLanguage = afterOpen[afterOpen.startIndex..<newlineIdx]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            rawPartialContent = String(afterOpen[afterOpen.index(after: newlineIdx)...])
+        } else {
+            rawLanguage = afterOpen
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            rawPartialContent = ""
         }
-        result.append(.codeModule(language: lang, code: partialContent))
+
+        let recoveredBlock = recoveredStreamingCodeBlock(language: rawLanguage, content: rawPartialContent)
+
+        var result: [ContentSegment] = []
+        let before = String(text[text.startIndex..<openRange.lowerBound])
+        if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            result.append(contentsOf: parseSpecialBlocks(before))
+        }
+
+        result.append(streamingCodeSegment(language: recoveredBlock.language, code: recoveredBlock.content))
         return result
+    }
+
+    private func findUnclosedOpeningFence(in text: String) -> Range<String.Index>? {
+        var cursor = text.startIndex
+
+        while let openRange = text.range(of: "```", range: cursor..<text.endIndex) {
+            let afterOpen = text[openRange.upperBound...]
+            guard let newlineIdx = afterOpen.firstIndex(of: "\n") else {
+                return openRange
+            }
+
+            let contentStart = afterOpen.index(after: newlineIdx)
+            if let closeRange = findClosingFence(in: text[contentStart...], from: contentStart) {
+                cursor = closeRange.upperBound
+            } else {
+                return openRange
+            }
+        }
+
+        return nil
+    }
+
+    private func recoveredStreamingCodeBlock(language: String, content: String) -> ParsedBlock {
+        let trimmedLanguage = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard trimmedLanguage.isEmpty else {
+            return ParsedBlock(language: trimmedLanguage, content: content)
+        }
+
+        var lines = content.components(separatedBy: .newlines)
+        while let first = lines.first, first.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.removeFirst()
+        }
+        if let marker = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           isRecognizedCodeLanguage(marker) {
+            lines.removeFirst()
+            return ParsedBlock(language: marker, content: lines.joined(separator: "\n"))
+        }
+
+        return ParsedBlock(language: "text", content: content)
+    }
+
+    private func streamingCodeSegment(language: String, code: String) -> ContentSegment {
+        let normalizedLanguage = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        if chartLanguageTags.contains(normalizedLanguage), looksLikeChartJSON(code) {
+            return .chart(code)
+        }
+        if normalizedLanguage == "html" {
+            return .html(code, isStreaming: true)
+        }
+        if normalizedLanguage == "svg" {
+            return .svg(code, isStreaming: true)
+        }
+        if normalizedLanguage == "mermaid" {
+            return .mermaid(code)
+        }
+        if shouldRenderCompactCodeModule(language: normalizedLanguage, code: code) {
+            return .codeModule(language: normalizedLanguage, code: code)
+        }
+        if pythonLanguageTags.contains(normalizedLanguage) {
+            return .python(code)
+        }
+        if !normalizedLanguage.isEmpty {
+            return .codeBlock(language: normalizedLanguage, code: code)
+        }
+        return .codeBlock(language: "text", code: code)
     }
 
     /// Extracts the text that appears before `@@@VIZ-START` in the content.
@@ -302,11 +344,11 @@ struct StreamingMarkdownView: View {
         case .svg(let code, let streaming):
             SVGPreviewView(code: code, isStreaming: streaming)
         case .python(let code):
-            PythonCodeBlockView(code: code)
+            PythonCodeBlockView(code: code, isStreaming: isStreaming)
         case .codeModule(let language, let code):
             CompactCodeModuleView(code: code, language: language)
         case .codeBlock(let language, let code):
-            StandardCodeBlockView(code: code, language: language)
+            StandardCodeBlockView(code: code, language: language, isStreaming: isStreaming)
         case .markdownImage(let imageURL, let altText, let linkURL):
             MarkdownInlineImageView(
                 imageURL: imageURL,
@@ -772,7 +814,7 @@ struct StreamingMarkdownView: View {
             let isLinkedWebAsset = lang == "css" || lang == "js" || lang == "javascript"
             let isMermaid = lang == "mermaid" && codeContent.trimmingCharacters(in: .whitespacesAndNewlines).count >= 5
             let isSVG = lang == "svg" && looksLikeSVG(codeContent)
-            let isPython = pythonLanguageTags.contains(lang) && isLikelyRunnablePythonSource(codeContent)
+            let isPython = pythonLanguageTags.contains(lang)
             let isCompactModule = shouldRenderCompactCodeModule(language: lang, code: codeContent)
             let isStandardCodeBlock = normalizedBlock != nil
 
@@ -1104,6 +1146,7 @@ enum InlineDataPayloadSanitizer {
 private struct StandardCodeBlockView: View {
     let code: String
     let language: String
+    var isStreaming: Bool = false
 
     @Environment(\.theme) private var theme
     @State private var didCopy = false
@@ -1190,7 +1233,12 @@ private struct StandardCodeBlockView: View {
             .padding(.vertical, 10)
             .background(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.94))
 
-            SourceCodeTextView(code: visibleCode, language: displayLanguage, maxHeight: 480)
+            SourceCodeTextView(
+                code: visibleCode,
+                language: displayLanguage,
+                maxHeight: 480,
+                autoFollowTail: isStreaming
+            )
                 .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.22 : 0.42))
         }
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -1208,6 +1256,7 @@ struct SourceCodeTextView: View {
     let code: String
     var language: String? = nil
     var maxHeight: CGFloat = 420
+    var autoFollowTail: Bool = false
 
     @Environment(\.theme) private var theme
 
@@ -1228,7 +1277,8 @@ struct SourceCodeTextView: View {
             font: .monospacedSystemFont(ofSize: 13, weight: .regular),
             lineSpacing: 3.5,
             isDarkMode: theme.isDark,
-            maximumHeight: maxHeight
+            maximumHeight: maxHeight,
+            autoFollowTail: autoFollowTail
         )
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
@@ -1245,6 +1295,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
     let lineSpacing: CGFloat
     let isDarkMode: Bool
     let maximumHeight: CGFloat
+    let autoFollowTail: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -1286,25 +1337,51 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             || coordinator.lastLineSpacing != lineSpacing
             || coordinator.lastIsDarkMode != isDarkMode
             || coordinator.lastMaximumHeight != normalizedMaximumHeight
+            || coordinator.lastAutoFollowTail != autoFollowTail
             || !coordinator.lastTextColor.isEqual(textColor)
 
         guard shouldRebuild else { return }
 
         uiView.selectedTextRange = nil
+        let previousText = coordinator.lastText
+        let didAppendToExistingText = !previousText.isEmpty
+            && renderedText.hasPrefix(previousText)
+            && coordinator.lastLanguage == language
+            && coordinator.lastFontPointSize == font.pointSize
+            && coordinator.lastLineSpacing == lineSpacing
+            && coordinator.lastIsDarkMode == isDarkMode
+            && coordinator.lastMaximumHeight == normalizedMaximumHeight
+            && coordinator.lastTextColor.isEqual(textColor)
         uiView.textContainer.widthTracksTextView = true
         uiView.textContainer.lineBreakMode = .byWordWrapping
         uiView.isScrollEnabled = true
         uiView.showsVerticalScrollIndicator = true
         uiView.alwaysBounceVertical = true
 
-        uiView.attributedText = SourceCodeHighlighter.highlighted(
-            renderedText,
-            language: language,
-            font: font,
-            baseColor: textColor,
-            isDarkMode: isDarkMode,
-            lineSpacing: lineSpacing
-        )
+        if didAppendToExistingText {
+            let suffix = String(renderedText.dropFirst(previousText.count))
+            if !suffix.isEmpty {
+                uiView.textStorage.append(
+                    SourceCodeHighlighter.highlighted(
+                        suffix,
+                        language: language,
+                        font: font,
+                        baseColor: textColor,
+                        isDarkMode: isDarkMode,
+                        lineSpacing: lineSpacing
+                    )
+                )
+            }
+        } else {
+            uiView.attributedText = SourceCodeHighlighter.highlighted(
+                renderedText,
+                language: language,
+                font: font,
+                baseColor: textColor,
+                isDarkMode: isDarkMode,
+                lineSpacing: lineSpacing
+            )
+        }
 
         coordinator.lastText = renderedText
         coordinator.lastLanguage = language
@@ -1312,7 +1389,25 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         coordinator.lastLineSpacing = lineSpacing
         coordinator.lastIsDarkMode = isDarkMode
         coordinator.lastMaximumHeight = normalizedMaximumHeight
+        coordinator.lastAutoFollowTail = autoFollowTail
         coordinator.lastTextColor = textColor
+
+        if autoFollowTail {
+            DispatchQueue.main.async {
+                guard uiView.isScrollEnabled else { return }
+                UIView.performWithoutAnimation {
+                    uiView.layoutIfNeeded()
+                    let bottomOffsetY = max(
+                        -uiView.adjustedContentInset.top,
+                        uiView.contentSize.height - uiView.bounds.height + uiView.adjustedContentInset.bottom
+                    )
+                    uiView.setContentOffset(
+                        CGPoint(x: uiView.contentOffset.x, y: bottomOffsetY),
+                        animated: false
+                    )
+                }
+            }
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
@@ -1332,6 +1427,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         var lastLineSpacing: CGFloat = 0
         var lastIsDarkMode = false
         var lastMaximumHeight: CGFloat = -1
+        var lastAutoFollowTail = false
         var lastTextColor: UIColor = .clear
     }
 }
