@@ -524,10 +524,7 @@ struct PythonCodeBlockView: View {
     }
 
     private static func displayablePythonCode(_ code: String) -> String {
-        code
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .trimmingCharacters(in: .newlines)
+        CodeSourceFormatter.formattedForDisplay(code, language: "python")
     }
 
 }

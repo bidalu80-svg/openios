@@ -271,15 +271,21 @@ struct StreamingMarkdownView: View {
             return .mermaid(code)
         }
         if shouldRenderCompactCodeModule(language: normalizedLanguage, code: code) {
-            return .codeModule(language: normalizedLanguage, code: code)
+            return .codeModule(
+                language: normalizedLanguage,
+                code: CodeSourceFormatter.formattedForDisplay(code, language: normalizedLanguage)
+            )
         }
         if pythonLanguageTags.contains(normalizedLanguage) {
-            return .python(code)
+            return .python(CodeSourceFormatter.formattedForDisplay(code, language: normalizedLanguage))
         }
         if !normalizedLanguage.isEmpty {
-            return .codeBlock(language: normalizedLanguage, code: code)
+            return .codeBlock(
+                language: normalizedLanguage,
+                code: CodeSourceFormatter.formattedForDisplay(code, language: normalizedLanguage)
+            )
         }
-        return .codeBlock(language: "text", code: code)
+        return .codeBlock(language: "text", code: CodeSourceFormatter.formattedForDisplay(code, language: "text"))
     }
 
     /// Extracts the text that appears before `@@@VIZ-START` in the content.
@@ -824,13 +830,26 @@ struct StreamingMarkdownView: View {
                     units.append(.markdown(preceding))
                 }
                 if isChart { units.append(.segment(.chart(codeContent))) }
-                else if isCompactModule { units.append(.segment(.codeModule(language: lang, code: codeContent))) }
+                else if isCompactModule {
+                    units.append(.segment(.codeModule(
+                        language: lang,
+                        code: CodeSourceFormatter.formattedForDisplay(codeContent, language: lang)
+                    )))
+                }
                 else if isMermaid { units.append(.segment(.mermaid(codeContent))) }
                 else if isSVG { units.append(.segment(.svg(codeContent, isStreaming: false))) }
-                else if isPython { units.append(.segment(.python(codeContent))) }
+                else if isPython {
+                    units.append(.segment(.python(CodeSourceFormatter.formattedForDisplay(codeContent, language: lang))))
+                }
                 else if isHTML || isLinkedWebAsset { units.append(.block(ParsedBlock(language: lang, content: codeContent))) }
                 else if let normalizedBlock {
-                    units.append(.segment(.codeBlock(language: normalizedBlock.language, code: normalizedBlock.content)))
+                    units.append(.segment(.codeBlock(
+                        language: normalizedBlock.language,
+                        code: CodeSourceFormatter.formattedForDisplay(
+                            normalizedBlock.content,
+                            language: normalizedBlock.language
+                        )
+                    )))
                 }
                 else { units.append(.block(ParsedBlock(language: lang, content: codeContent))) }
                 remaining = remaining[closeRange.upperBound...]
@@ -885,7 +904,10 @@ struct StreamingMarkdownView: View {
         }
 
         func markdownBlock(_ block: ParsedBlock) -> ContentSegment {
-            .codeBlock(language: block.language, code: block.content)
+            .codeBlock(
+                language: block.language,
+                code: CodeSourceFormatter.formattedForDisplay(block.content, language: block.language)
+            )
         }
 
         func nextNonMarkdownWebBlockIndex(after start: Int) -> Int? {
@@ -1183,7 +1205,11 @@ private struct StandardCodeBlockView: View {
     }
 
     private var visibleCode: String {
-        InlineDataPayloadSanitizer.sanitizedDisplayText(code)
+        InlineDataPayloadSanitizer.sanitizedDisplayText(displayCode)
+    }
+
+    private var displayCode: String {
+        CodeSourceFormatter.formattedForDisplay(code, language: displayLanguage)
     }
 
     var body: some View {
@@ -1197,7 +1223,7 @@ private struct StandardCodeBlockView: View {
                 Spacer(minLength: 0)
 
                 Button {
-                    UIPasteboard.general.string = code
+                    UIPasteboard.general.string = displayCode
                     Haptics.notify(.success)
                     withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
                         didCopy = true
@@ -1247,7 +1273,7 @@ private struct StandardCodeBlockView: View {
                 .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.50 : 0.65), lineWidth: 0.8)
         )
         .sheet(isPresented: $showFullCode) {
-            FullCodeView(code: code, language: displayLanguage)
+            FullCodeView(code: displayCode, language: displayLanguage)
         }
     }
 }
