@@ -324,7 +324,7 @@ final class ChatViewModel {
     /// Settings takes effect immediately without a per-token UserDefaults read.
     private var streamingHapticsEnabled: Bool = true
     private var isChatWebSearchAllowed: Bool = false
-    private var chatWebSearchSettingsObserver: NSObjectProtocol?
+    @ObservationIgnored nonisolated(unsafe) private var chatWebSearchSettingsObserver: NSObjectProtocol?
     private var activeTaskId: String?
     private var recoveryTimer: Timer?
     /// Cancellable delay task for the initial recovery timer delay.
@@ -11854,7 +11854,7 @@ final class ChatViewModel {
             return
         } else if let latestUserText,
                   shouldUseLocalAlpineAgentForRequest(latestUserText, modelId: effectiveModelId),
-                  !Self.isLocalAlpineInterruptionOrMetaQuestion(latestUserText) {
+                  !Self.isLocalAlpineInterjection(latestUserText) {
             let correctionId = appendLocalAlpineProtocolCorrectionResult(
                 parentId: messageId,
                 reason: "The assistant answered a Local Alpine task without an executable iexa_alpine block."
