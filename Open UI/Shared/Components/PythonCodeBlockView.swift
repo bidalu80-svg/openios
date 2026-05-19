@@ -52,7 +52,7 @@ struct PythonCodeBlockView: View {
             // ── Header bar ──────────────────────────────────────────────────
             headerBar
 
-            CodeWebRendererView(
+            SourceCodeTextView(
                 code: visibleCode,
                 language: "python",
                 maxHeight: 420,

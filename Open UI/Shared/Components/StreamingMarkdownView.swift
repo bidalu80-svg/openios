@@ -1297,7 +1297,7 @@ private struct StandardCodeBlockView: View {
             .padding(.vertical, 10)
             .background(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.94))
 
-            CodeWebRendererView(
+            SourceCodeTextView(
                 code: visibleCode,
                 language: displayLanguage,
                 maxHeight: 480,
@@ -1372,9 +1372,6 @@ struct SourceCodeTextView: View {
         .padding(.vertical, verticalPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: contentHeight + verticalPadding * 2)
-        .onChange(of: visibleCode) { _ in
-            measuredContentHeight = 0
-        }
     }
 }
 
@@ -1592,7 +1589,7 @@ private enum SourceCodeHighlighter {
         let palette = SourceSyntaxPalette.palette(isDarkMode: isDarkMode, fallback: baseColor)
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineSpacing = lineSpacing
-        paragraphStyle.lineBreakMode = .byWordWrapping
+        paragraphStyle.lineBreakMode = .byClipping
 
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
@@ -2169,7 +2166,7 @@ struct FullCodeView: View {
     var body: some View {
         NavigationStack {
             GeometryReader { proxy in
-                CodeWebRendererView(
+                SourceCodeTextView(
                     code: code,
                     language: language,
                     maxHeight: max(240, proxy.size.height)

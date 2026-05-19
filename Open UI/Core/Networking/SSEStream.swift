@@ -36,12 +36,14 @@ struct SSEStream: AsyncSequence {
                     return nil
                 }
 
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Preserve leading spaces. Some compatible providers stream raw
+                // text lines or code deltas where indentation is significant.
+                let eventLine = line.trimmingCharacters(in: .newlines)
 
                 // Empty line = end of event block in SSE; skip
-                if trimmed.isEmpty { continue }
+                if eventLine.isEmpty { continue }
 
-                if let event = parseSSELine(trimmed) {
+                if let event = parseSSELine(eventLine) {
                     // Don't set `finished` on [DONE] – let the natural
                     // byte-stream close (server closes connection after
                     // the final [DONE]) terminate the iteration.  This
@@ -60,8 +62,12 @@ struct SSEStream: AsyncSequence {
             }
 
             // Standard SSE field parsing
-            if line.hasPrefix("data: ") {
-                let payload = String(line.dropFirst(6))
+            if line.hasPrefix("data:") {
+                var payloadStart = line.index(line.startIndex, offsetBy: 5)
+                if payloadStart < line.endIndex, line[payloadStart] == " " {
+                    payloadStart = line.index(after: payloadStart)
+                }
+                let payload = String(line[payloadStart...])
                 if payload == "[DONE]" {
                     return .done
                 }

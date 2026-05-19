@@ -2515,6 +2515,12 @@ final class ChatViewModel {
                         if !localNode.content.isEmpty && updated.content.isEmpty {
                             updated.content = localNode.content
                             updated.done = true
+                        } else if CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                            local: localNode.content,
+                            incoming: updated.content
+                        ) {
+                            updated.content = localNode.content
+                            updated.done = true
                         }
                         conversation?.history.nodes[id] = updated
                     }
@@ -2558,7 +2564,11 @@ final class ChatViewModel {
                     && !local.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 let skipContentUpdate = isLocallyComplete && isStreaming
 
-                if !skipContentUpdate && local.content != serverMsg.content {
+                let preserveLocalCodeIndentation = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                    local: local.content,
+                    incoming: serverMsg.content
+                )
+                if !skipContentUpdate && !preserveLocalCodeIndentation && local.content != serverMsg.content {
                     conversation!.messages[localIdx].content = serverMsg.content
                 }
                 let mergedFiles = Self.preservingInlineImageFiles(
@@ -2839,15 +2849,17 @@ final class ChatViewModel {
                        !serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         self.logger.info("Background poll: server completed (\(serverAssistant.content.count) chars)")
                         self.adoptServerMessages(serverConversation: refreshed)
+                        let finalAssistantContent = self.conversation?.messages
+                            .first(where: { $0.id == serverAssistant.id })?.content ?? serverAssistant.content
                         let lastUser = self.conversation?.messages.last(where: { $0.role == .user && !Self.isLocalWorkspaceAgentResult($0) })
                         self.recordTokenUsageForCompletedTurn(
                             assistantMessageId: serverAssistant.id,
                             userText: lastUser?.content ?? "",
-                            assistantText: serverAssistant.content,
+                            assistantText: finalAssistantContent,
                             userAttachments: [],
                             usage: serverAssistant.usage
                         )
-                        await self.sendCompletionNotificationIfNeeded(content: serverAssistant.content)
+                        await self.sendCompletionNotificationIfNeeded(content: finalAssistantContent)
                         self.cleanupStreaming()
                         self.endBackgroundTask()
                         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
@@ -3794,7 +3806,13 @@ final class ChatViewModel {
                     let serverConv = try await manager.fetchConversation(id: chatId)
                     if let serverAssistant = serverConv.messages.last(where: { $0.role == .assistant }),
                        let localIdx = self.conversation?.messages.firstIndex(where: { $0.id == serverAssistant.id }) {
-                        self.conversation?.messages[localIdx].content = serverAssistant.content
+                        let localContent = self.conversation?.messages[localIdx].content ?? ""
+                        if !CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                            local: localContent,
+                            incoming: serverAssistant.content
+                        ) {
+                            self.conversation?.messages[localIdx].content = serverAssistant.content
+                        }
                         self.conversation?.messages[localIdx].isStreaming = true
                     }
                     // Also update title if changed
@@ -4747,7 +4765,13 @@ final class ChatViewModel {
                             if let serverAssistant = refreshed.messages.last(where: { $0.role == .assistant }) {
                                 let serverContent = serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines)
                                 if !serverContent.isEmpty {
-                                    self.updateAssistantMessage(id: assistantMessageId, content: serverAssistant.content, isStreaming: true)
+                                    let localContent = self.conversation?.messages
+                                        .first(where: { $0.id == assistantMessageId })?.content ?? ""
+                                    let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                                        local: localContent,
+                                        incoming: serverAssistant.content
+                                    ) ? localContent : serverAssistant.content
+                                    self.updateAssistantMessage(id: assistantMessageId, content: protectedContent, isStreaming: true)
                                     // Check if content is still growing
                                     if serverContent.count > lastContentLength {
                                         lastContentLength = serverContent.count
@@ -4758,7 +4782,7 @@ final class ChatViewModel {
                                     // If content hasn't changed for 3 consecutive polls (4.5s), it's done
                                     if staleCount >= 3 {
                                         self.logger.info("Polling: content stable at \(serverContent.count) chars — finalizing")
-                                        self.updateAssistantMessage(id: assistantMessageId, content: serverAssistant.content, isStreaming: false)
+                                        self.updateAssistantMessage(id: assistantMessageId, content: protectedContent, isStreaming: false)
                                         self.hasFinishedStreaming = true
                                         self.isStreaming = false
                                         // Post-completion
@@ -7623,7 +7647,11 @@ final class ChatViewModel {
             case "chat:message", "replace":
                 let content = payload?["content"] as? String ?? ""
                 if !content.isEmpty {
-                    acc.replace(content)
+                    let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                        local: acc.content,
+                        incoming: content
+                    ) ? acc.content : content
+                    acc.replace(protectedContent)
                     updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
                 }
 
@@ -7698,7 +7726,11 @@ final class ChatViewModel {
 
         // Direct content field
         if let content = payload["content"] as? String, !content.isEmpty {
-            acc.replace(content)
+            let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                local: acc.content,
+                incoming: content
+            ) ? acc.content : content
+            acc.replace(protectedContent)
             updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
         }
 
@@ -7963,7 +7995,13 @@ final class ChatViewModel {
                 let refreshed = try await manager.fetchConversation(id: chatId)
                 if let lastAssistant = refreshed.messages.last(where: { $0.role == .assistant }),
                    !lastAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    acc.replace(lastAssistant.content)
+                    let localContent = conversation?.messages
+                        .first(where: { $0.id == assistantMessageId })?.content ?? acc.content
+                    let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                        local: localContent,
+                        incoming: lastAssistant.content
+                    ) ? localContent : lastAssistant.content
+                    acc.replace(protectedContent)
                     logger.info("Server poll \(attempt): got content (\(lastAssistant.content.count) chars)")
                     break
                 }
@@ -8082,16 +8120,24 @@ final class ChatViewModel {
                     // rather than dumping the entire server content at once.
                     if !serverContent.isEmpty && serverContent.count > localContent.count && !self.socketHasReceivedContent {
                         self.logger.info("Recovery: adopting server content (socket silent)")
-                        self.updateAssistantMessage(
-                            id: assistantMessageId, content: lastAssistant.content, isStreaming: true)
+                        if !CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                            local: localContent,
+                            incoming: lastAssistant.content
+                        ) {
+                            self.updateAssistantMessage(
+                                id: assistantMessageId, content: lastAssistant.content, isStreaming: true)
+                        }
                     }
 
                     // Server says streaming is done
                     if !lastAssistant.isStreaming && !serverContent.isEmpty {
                         self.logger.info("Recovery: server says done with \(serverContent.count) chars")
+                        let doneContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                            local: localContent,
+                            incoming: lastAssistant.content
+                        ) ? localContent : lastAssistant.content
                         self.updateAssistantMessage(
-                            id: assistantMessageId, content: lastAssistant.content, isStreaming: false)
-                        let doneContent = lastAssistant.content
+                            id: assistantMessageId, content: doneContent, isStreaming: false)
                         Task { await self.sendCompletionNotificationIfNeeded(content: doneContent) }
                         self.cleanupStreaming()
                         return
@@ -10691,7 +10737,13 @@ final class ChatViewModel {
                 }
                 let serverContent = serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !serverContent.isEmpty else { continue }
-                updateAssistantMessage(id: assistantMessageId, content: serverAssistant.content, isStreaming: true)
+                let localContent = conversation?.messages
+                    .first(where: { $0.id == assistantMessageId })?.content ?? ""
+                let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                    local: localContent,
+                    incoming: serverAssistant.content
+                ) ? localContent : serverAssistant.content
+                updateAssistantMessage(id: assistantMessageId, content: protectedContent, isStreaming: true)
                 if serverContent.count > lastContentLength {
                     lastContentLength = serverContent.count
                     staleCount = 0
@@ -10702,7 +10754,7 @@ final class ChatViewModel {
                     await finishClientWebSearchContinuation(
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
-                        content: serverAssistant.content,
+                        content: protectedContent,
                         usage: nil
                     )
                     await manager.sendChatCompleted(
@@ -12200,7 +12252,13 @@ final class ChatViewModel {
                 }
                 let serverContent = serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !serverContent.isEmpty else { continue }
-                updateAssistantMessage(id: assistantMessageId, content: serverAssistant.content, isStreaming: true)
+                let localContent = conversation?.messages
+                    .first(where: { $0.id == assistantMessageId })?.content ?? ""
+                let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                    local: localContent,
+                    incoming: serverAssistant.content
+                ) ? localContent : serverAssistant.content
+                updateAssistantMessage(id: assistantMessageId, content: protectedContent, isStreaming: true)
                 if serverContent.count > lastContentLength {
                     lastContentLength = serverContent.count
                     staleCount = 0
@@ -12211,7 +12269,7 @@ final class ChatViewModel {
                     await finishLocalNativeContinuation(
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
-                        content: serverAssistant.content,
+                        content: protectedContent,
                         usage: nil
                     )
                     await manager.sendChatCompleted(
@@ -13409,7 +13467,13 @@ final class ChatViewModel {
                 }
                 let serverContent = serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !serverContent.isEmpty else { continue }
-                updateAssistantMessage(id: assistantMessageId, content: serverAssistant.content, isStreaming: true)
+                let localContent = conversation?.messages
+                    .first(where: { $0.id == assistantMessageId })?.content ?? ""
+                let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                    local: localContent,
+                    incoming: serverAssistant.content
+                ) ? localContent : serverAssistant.content
+                updateAssistantMessage(id: assistantMessageId, content: protectedContent, isStreaming: true)
                 if serverContent.count > lastContentLength {
                     lastContentLength = serverContent.count
                     staleCount = 0
@@ -13420,7 +13484,7 @@ final class ChatViewModel {
                     await finishLocalAlpineContinuation(
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
-                        content: serverAssistant.content,
+                        content: protectedContent,
                         usage: nil
                     )
                     await manager.sendChatCompleted(
@@ -13848,7 +13912,13 @@ final class ChatViewModel {
             if let index = conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) {
                 let localContent = conversation?.messages[index].content.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 let serverContent = serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !serverContent.isEmpty && serverContent != localContent {
+                let rawLocalContent = conversation?.messages[index].content ?? ""
+                if !serverContent.isEmpty
+                    && serverContent != localContent
+                    && !CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                        local: rawLocalContent,
+                        incoming: serverAssistant.content
+                    ) {
                     conversation?.messages[index].content = serverAssistant.content
                 }
                 // Copy usage stats from server — the server stores them after
