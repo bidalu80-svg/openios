@@ -77,6 +77,14 @@ final class SharedDataService: Sendable {
         defaults?.set(serverURL, forKey: Keys.serverURL)
     }
 
+    /// Clears only the shared authentication marker used by widgets/extensions.
+    /// User-created local data such as notes, conversations, and files is kept.
+    func clearAuthState() {
+        defaults?.set(false, forKey: Keys.isAuthenticated)
+        defaults?.removeObject(forKey: Keys.userName)
+        defaults?.removeObject(forKey: Keys.serverURL)
+    }
+
     var isAuthenticated: Bool {
         defaults?.bool(forKey: Keys.isAuthenticated) ?? false
     }

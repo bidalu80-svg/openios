@@ -56,15 +56,25 @@ final class ServerConfigStore {
         guard let config = servers.first(where: { $0.id == id }) else { return }
         KeychainService.shared.deleteToken(forServer: config.url)
         KeychainService.shared.deleteToken(forServer: "cached_user_\(config.url)")
+        for account in config.savedAccounts {
+            KeychainService.shared.deleteToken(forServer: config.url, userId: account.userId)
+            KeychainService.shared.deleteToken(forServer: "cached_user_\(config.url)::\(account.userId)")
+        }
         servers.removeAll(where: { $0.id == id })
         saveServers()
     }
 
     /// Removes all server configurations and their Keychain data.
     func removeAllServers() {
+        // Keep this scoped to saved site credentials. Local files, models,
+        // Alpine dependencies, and other on-device storage must survive logout.
         for server in servers {
             KeychainService.shared.deleteToken(forServer: server.url)
             KeychainService.shared.deleteToken(forServer: "cached_user_\(server.url)")
+            for account in server.savedAccounts {
+                KeychainService.shared.deleteToken(forServer: server.url, userId: account.userId)
+                KeychainService.shared.deleteToken(forServer: "cached_user_\(server.url)::\(account.userId)")
+            }
         }
         servers.removeAll()
         saveServers()

@@ -89,7 +89,8 @@ struct ServerManagementView: View {
             titleVisibility: .visible
         ) {
             Button("移除并退出登录", role: .destructive) {
-                Task { await viewModel.signOutAndDisconnect() }
+                guard let serverId = activeServer?.id else { return }
+                Task { await viewModel.removeServer(id: serverId) }
             }
             Button("取消", role: .cancel) {}
         } message: {

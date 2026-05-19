@@ -2253,7 +2253,7 @@ struct SignOutConfirmationSheet: View {
 
                 signOutButton(
                     title: "退出并移除站点",
-                    subtitle: "清除所有连接数据",
+                    subtitle: "仅清除站点和登录信息",
                     icon: "trash.circle",
                     action: onSignOutAndRemove,
                     index: 1

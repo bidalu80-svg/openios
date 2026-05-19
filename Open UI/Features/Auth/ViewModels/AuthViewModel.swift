@@ -640,7 +640,10 @@ final class AuthViewModel {
     /// Disconnects from the current server and returns to server connection.
     func disconnect() {
         serverConfigStore.removeAllServers()
-        dependencies?.refreshServices()
+        // Rebuild networking for the empty-site state without clearing local
+        // files, downloaded models, or Local Alpine dependencies.
+        dependencies?.configureServicesForActiveServer(isServerSwitch: false)
+        SharedDataService.shared.clearAuthState()
         backendConfig = nil
         currentUser = nil
         phase = .serverConnection
@@ -1047,10 +1050,6 @@ final class AuthViewModel {
 
     /// Signs out and disconnects from the server entirely.
     func signOutAndDisconnect() async {
-        if serverConfigStore.activeServer?.providerType != .iexa {
-            await signOut()
-            return
-        }
         await signOut()
         disconnect()
     }
@@ -1781,7 +1780,10 @@ final class AuthViewModel {
             await switchToServer(nextServer)
         } else {
             // No more servers — go to the server connection screen
-            dependencies?.refreshServices()
+            // Do not treat this as a server switch: removing a site should not
+            // wipe local files, models, or Local Alpine dependencies.
+            dependencies?.configureServicesForActiveServer(isServerSwitch: false)
+            SharedDataService.shared.clearAuthState()
             serverURL = ""
             apiKey = ""
             phase = .serverConnection
