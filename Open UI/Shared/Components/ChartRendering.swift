@@ -970,10 +970,10 @@ struct HighlightedSourceView: View {
     var body: some View {
         Group {
             if maxHeight.isFinite {
-                SourceCodeTextView(code: truncatedCode, language: language, maxHeight: maxHeight)
+                CodeWebRendererView(code: truncatedCode, language: language, maxHeight: maxHeight)
             } else {
                 GeometryReader { proxy in
-                    SourceCodeTextView(
+                    CodeWebRendererView(
                         code: truncatedCode,
                         language: language,
                         maxHeight: max(240, proxy.size.height)

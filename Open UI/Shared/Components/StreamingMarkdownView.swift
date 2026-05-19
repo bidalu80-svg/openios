@@ -277,19 +277,19 @@ struct StreamingMarkdownView: View {
         if shouldRenderCompactCodeModule(language: normalizedLanguage, code: code) {
             return .codeModule(
                 language: normalizedLanguage,
-                code: CodeSourceFormatter.formattedForDisplay(code, language: normalizedLanguage)
+                code: code
             )
         }
         if pythonLanguageTags.contains(normalizedLanguage) {
-            return .python(CodeSourceFormatter.formattedForDisplay(code, language: normalizedLanguage))
+            return .python(code)
         }
         if !normalizedLanguage.isEmpty {
             return .codeBlock(
                 language: normalizedLanguage,
-                code: CodeSourceFormatter.formattedForDisplay(code, language: normalizedLanguage)
+                code: code
             )
         }
-        return .codeBlock(language: "text", code: CodeSourceFormatter.formattedForDisplay(code, language: "text"))
+        return .codeBlock(language: "text", code: code)
     }
 
     /// Extracts the text that appears before `@@@VIZ-START` in the content.
@@ -856,22 +856,19 @@ struct StreamingMarkdownView: View {
                 else if isCompactModule {
                     units.append(.segment(.codeModule(
                         language: lang,
-                        code: CodeSourceFormatter.formattedForDisplay(codeContent, language: lang)
+                        code: codeContent
                     )))
                 }
                 else if isMermaid { units.append(.segment(.mermaid(codeContent))) }
                 else if isSVG { units.append(.segment(.svg(codeContent, isStreaming: false))) }
                 else if isPython {
-                    units.append(.segment(.python(CodeSourceFormatter.formattedForDisplay(codeContent, language: lang))))
+                    units.append(.segment(.python(codeContent)))
                 }
                 else if isHTML || isLinkedWebAsset { units.append(.block(ParsedBlock(language: lang, content: codeContent))) }
                 else if let normalizedBlock {
                     units.append(.segment(.codeBlock(
                         language: normalizedBlock.language,
-                        code: CodeSourceFormatter.formattedForDisplay(
-                            normalizedBlock.content,
-                            language: normalizedBlock.language
-                        )
+                        code: normalizedBlock.content
                     )))
                 }
                 else { units.append(.block(ParsedBlock(language: lang, content: codeContent))) }
@@ -947,7 +944,7 @@ struct StreamingMarkdownView: View {
         func markdownBlock(_ block: ParsedBlock) -> ContentSegment {
             .codeBlock(
                 language: block.language,
-                code: CodeSourceFormatter.formattedForDisplay(block.content, language: block.language)
+                code: block.content
             )
         }
 
@@ -1250,7 +1247,7 @@ private struct StandardCodeBlockView: View {
     }
 
     private var displayCode: String {
-        CodeSourceFormatter.formattedForDisplay(code, language: displayLanguage)
+        code
     }
 
     var body: some View {
@@ -1300,7 +1297,7 @@ private struct StandardCodeBlockView: View {
             .padding(.vertical, 10)
             .background(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.94))
 
-            SourceCodeTextView(
+            CodeWebRendererView(
                 code: visibleCode,
                 language: displayLanguage,
                 maxHeight: 480,
@@ -2172,10 +2169,9 @@ struct FullCodeView: View {
     var body: some View {
         NavigationStack {
             GeometryReader { proxy in
-                HighlightedSourceView(
+                CodeWebRendererView(
                     code: code,
                     language: language,
-                    truncate: false,
                     maxHeight: max(240, proxy.size.height)
                 )
                 .navigationTitle(language)

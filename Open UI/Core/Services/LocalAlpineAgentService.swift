@@ -706,11 +706,7 @@ actor LocalAlpineAgentService {
             )
         }
         let content = file.content
-        let language = LocalCodeWriteGuard.language(forPath: target)
-        let normalizedContent = Self.isCodeTarget(target)
-            ? CodeSourceFormatter.formattedForWrite(content, language: language)
-            : content
-        guard let data = normalizedContent.data(using: .utf8) else {
+        guard let data = content.data(using: .utf8) else {
             return LocalAlpineProtectedWriteOutcome(
                 lines: ["- `\(target)` 写入失败：内容不是有效 UTF-8"],
                 writtenPath: nil,
@@ -724,35 +720,18 @@ actor LocalAlpineAgentService {
                 target: target,
                 cwd: cwd,
                 source: file.source,
-                initialNotes: writeNotes(
-                    original: content,
-                    normalized: normalizedContent,
-                    target: target,
-                    language: language
-                )
+                initialNotes: writeNotes(target: target)
             )
         }
 
         let writeOutcome = await writeFileBytes(
             data: data,
-            content: normalizedContent,
+            content: content,
             target: target,
             source: file.source,
-            notes: writeNotes(
-                original: content,
-                normalized: normalizedContent,
-                target: target,
-                language: language
-            )
+            notes: writeNotes(target: target)
         )
-        guard !writeOutcome.hadFailure else { return writeOutcome }
-        return await formatWrittenCodeFileIfPossible(
-            writeOutcome,
-            target: target,
-            cwd: cwd,
-            source: file.source,
-            language: language
-        )
+        return writeOutcome
     }
 
     private nonisolated static func isPythonTarget(_ path: String) -> Bool {
@@ -765,22 +744,11 @@ actor LocalAlpineAgentService {
         return language != "text" && language != "markdown"
     }
 
-    private nonisolated func writeNotes(
-        original: String,
-        normalized: String,
-        target: String,
-        language: String
-    ) -> [String] {
+    private nonisolated func writeNotes(target: String) -> [String] {
         guard Self.isCodeTarget(target) else {
             return ["按结构化写入内容原样落盘。"]
         }
-        if original == normalized {
-            return ["代码文件按结构化 UTF-8 字节写入；源码缩进已保持原样。"]
-        }
-        return [
-            "代码文件写入前已按 \(language) 走 APP 侧源码规范化入口。",
-            "已统一换行、去掉代码块外层共同缩进；内部源码缩进保持可运行结构。"
-        ]
+        return ["代码文件按结构化 UTF-8 字节原样写入；APP 不再重排源码缩进。"]
     }
 
     private func writeFileBytes(
@@ -831,121 +799,6 @@ actor LocalAlpineAgentService {
         }
     }
 
-    private func formatWrittenCodeFileIfPossible(
-        _ outcome: LocalAlpineProtectedWriteOutcome,
-        target: String,
-        cwd: String,
-        source: LocalAlpineAgentFileSource,
-        language: String
-    ) async -> LocalAlpineProtectedWriteOutcome {
-        guard !outcome.hadFailure,
-              let command = formatterCommand(for: target, language: language) else {
-            return outcome
-        }
-
-        let runtimeFile = runtimePath(forSharedPath: target)
-        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
-        if result.exitCode != 0 {
-            var lines = outcome.lines
-            let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            if output.contains("IEXA_FORMATTER_NOT_FOUND") {
-                lines.append("  - 未找到 \(language) formatter，已保持结构化写入后的源码缩进。")
-                return LocalAlpineProtectedWriteOutcome(
-                    lines: lines,
-                    writtenPath: outcome.writtenPath,
-                    writtenFile: outcome.writtenFile,
-                    hadFailure: false
-                )
-            }
-            lines.append("  - \(language) formatter 运行失败，已保留写入内容：\(String(output.prefix(600)))")
-            return LocalAlpineProtectedWriteOutcome(
-                lines: lines,
-                writtenPath: outcome.writtenPath,
-                writtenFile: outcome.writtenFile,
-                hadFailure: false
-            )
-        }
-
-        do {
-            let formattedData = try await LocalAlpineTerminalService.shared.readFile(path: target)
-            guard let formattedContent = String(data: formattedData, encoding: .utf8) else {
-                return outcome
-            }
-            var lines = outcome.lines
-            let formatterChangedBytes = outcome.writtenFile
-                .map { formattedData.count != $0.byteCount } ?? true
-            if formatterChangedBytes {
-                lines.append("  - 已用 \(language) formatter 格式化：\(splitFilePath(runtimeFile).fileName)。")
-            } else {
-                lines.append("  - \(language) formatter 已检查，源码格式无需调整。")
-            }
-            return LocalAlpineProtectedWriteOutcome(
-                lines: lines,
-                writtenPath: target,
-                writtenFile: LocalAlpineWrittenFile(
-                    path: target,
-                    content: formattedContent,
-                    source: source.displayName,
-                    byteCount: formattedData.count
-                ),
-                hadFailure: false
-            )
-        } catch {
-            var lines = outcome.lines
-            lines.append("  - formatter 后读回失败，已保留写入状态：\(error.localizedDescription)")
-            return LocalAlpineProtectedWriteOutcome(
-                lines: lines,
-                writtenPath: outcome.writtenPath,
-                writtenFile: outcome.writtenFile,
-                hadFailure: false
-            )
-        }
-    }
-
-    private func formatterCommand(for target: String, language: String) -> String? {
-        let file = shellSingleQuoted(runtimePath(forSharedPath: target))
-        switch language.lowercased() {
-        case "python":
-            return """
-            if command -v black >/dev/null 2>&1; then black --quiet \(file); else echo IEXA_FORMATTER_NOT_FOUND; exit 127; fi
-            """
-        case "javascript", "typescript", "tsx", "jsx", "json", "html", "css", "scss", "less", "yaml", "toml", "markdown":
-            return """
-            if command -v prettier >/dev/null 2>&1; then prettier --write \(file) >/dev/null; else echo IEXA_FORMATTER_NOT_FOUND; exit 127; fi
-            """
-        case "swift":
-            return """
-            if command -v swift-format >/dev/null 2>&1; then swift-format --in-place \(file); elif command -v swiftformat >/dev/null 2>&1; then swiftformat \(file); else echo IEXA_FORMATTER_NOT_FOUND; exit 127; fi
-            """
-        case "go":
-            return """
-            if command -v gofmt >/dev/null 2>&1; then gofmt -w \(file); else echo IEXA_FORMATTER_NOT_FOUND; exit 127; fi
-            """
-        case "rust":
-            return """
-            if command -v rustfmt >/dev/null 2>&1; then rustfmt \(file); else echo IEXA_FORMATTER_NOT_FOUND; exit 127; fi
-            """
-        case "c", "cpp", "java", "csharp":
-            return """
-            if command -v clang-format >/dev/null 2>&1; then clang-format -i \(file); else echo IEXA_FORMATTER_NOT_FOUND; exit 127; fi
-            """
-        case "bash":
-            return """
-            if command -v shfmt >/dev/null 2>&1; then shfmt -w \(file); else echo IEXA_FORMATTER_NOT_FOUND; exit 127; fi
-            """
-        case "ruby":
-            return """
-            if command -v rufo >/dev/null 2>&1; then rufo \(file) >/dev/null; elif command -v rubocop >/dev/null 2>&1; then rubocop -A \(file) >/dev/null; else echo IEXA_FORMATTER_NOT_FOUND; exit 127; fi
-            """
-        case "php":
-            return """
-            if command -v php-cs-fixer >/dev/null 2>&1; then php-cs-fixer fix \(file) --quiet; else echo IEXA_FORMATTER_NOT_FOUND; exit 127; fi
-            """
-        default:
-            return nil
-        }
-    }
-
     private func writeValidatedPythonFile(
         data: Data,
         target: String,
@@ -964,43 +817,6 @@ actor LocalAlpineAgentService {
 
         let validationResult = await validatePythonContent(content, cwd: cwd)
         guard validationResult.exitCode == 0 else {
-            if let normalizedContent = CodeSourceFormatter.normalizedForWrite(content, language: "python"),
-               normalizedContent != content,
-               let normalizedData = normalizedContent.data(using: .utf8) {
-                let normalizedValidation = await validatePythonContent(normalizedContent, cwd: cwd)
-                if normalizedValidation.exitCode == 0 {
-                    let normalizedWrite = await writeFileBytes(
-                        data: normalizedData,
-                        content: normalizedContent,
-                        target: target,
-                        source: source,
-                        notes: initialNotes + [
-                            "Python 原始内容语法/缩进校验失败；APP 已在写入前进行本地源码缩进规范化。",
-                            "规范化内容已重新通过 AST 语法校验并按 UTF-8 字节写入。"
-                        ]
-                    )
-                    guard !normalizedWrite.hadFailure else { return normalizedWrite }
-
-                    let formattedWrite = await formatWrittenCodeFileIfPossible(
-                        normalizedWrite,
-                        target: target,
-                        cwd: cwd,
-                        source: source,
-                        language: "python"
-                    )
-                    guard !formattedWrite.hadFailure else { return formattedWrite }
-
-                    var normalizedLines = formattedWrite.lines
-                    normalizedLines.append("  - Python 语法校验通过。")
-                    return LocalAlpineProtectedWriteOutcome(
-                        lines: normalizedLines,
-                        writtenPath: formattedWrite.writtenPath,
-                        writtenFile: formattedWrite.writtenFile,
-                        hadFailure: false
-                    )
-                }
-            }
-
             var lines = [
                 "- `\(target)` Python 写入已拒绝：原始内容语法/缩进校验未通过，目标文件未被覆盖。"
             ]
@@ -1039,22 +855,13 @@ actor LocalAlpineAgentService {
         )
         guard !directWrite.hadFailure else { return directWrite }
 
-        let formattedWrite = await formatWrittenCodeFileIfPossible(
-            directWrite,
-            target: target,
-            cwd: cwd,
-            source: source,
-            language: "python"
-        )
-        guard !formattedWrite.hadFailure else { return formattedWrite }
-
-        var lines = formattedWrite.lines
+        var lines = directWrite.lines
         lines.append("  - Python 语法校验通过。")
 
         return LocalAlpineProtectedWriteOutcome(
             lines: lines,
-            writtenPath: formattedWrite.writtenPath,
-            writtenFile: formattedWrite.writtenFile,
+            writtenPath: directWrite.writtenPath,
+            writtenFile: directWrite.writtenFile,
             hadFailure: false
         )
     }

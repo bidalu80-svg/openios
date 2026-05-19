@@ -52,7 +52,7 @@ struct PythonCodeBlockView: View {
             // ── Header bar ──────────────────────────────────────────────────
             headerBar
 
-            SourceCodeTextView(
+            CodeWebRendererView(
                 code: visibleCode,
                 language: "python",
                 maxHeight: 420,
@@ -524,7 +524,7 @@ struct PythonCodeBlockView: View {
     }
 
     private static func displayablePythonCode(_ code: String) -> String {
-        CodeSourceFormatter.formattedForDisplay(code, language: "python")
+        code
     }
 
 }
