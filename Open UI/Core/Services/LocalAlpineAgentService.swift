@@ -591,6 +591,20 @@ actor LocalAlpineAgentService {
 
     private func parseWriteFile(from object: Any) -> LocalAlpineAgentFile? {
         guard let dict = object as? [String: Any] else { return nil }
+        if dict["iexa_rejected_python_plain_content"] as? Bool == true,
+           let path = (dict["path"] as? String)
+            ?? (dict["file_path"] as? String)
+            ?? (dict["file"] as? String)
+            ?? (dict["name"] as? String)
+            ?? (dict["filename"] as? String)
+            ?? (dict["write_file"] as? String)
+            ?? (dict["target"] as? String) {
+            return LocalAlpineAgentFile(
+                path: path,
+                content: "",
+                source: .rejectedPythonPlainContent
+            )
+        }
         guard let path = (dict["path"] as? String)
             ?? (dict["file_path"] as? String)
             ?? (dict["file"] as? String)
@@ -671,6 +685,26 @@ actor LocalAlpineAgentService {
 
     private func writeProtectedFile(_ file: LocalAlpineAgentFile, cwd: String) async -> LocalAlpineProtectedWriteOutcome {
         let target = resolvedFilePath(file.path, cwd: cwd)
+        if Self.isPythonTarget(target), !file.source.isAllowedPythonWriteSource {
+            return LocalAlpineProtectedWriteOutcome(
+                lines: [
+                    "- `\(target)` Python 写入已拒绝：`.py` 文件不能使用 `\(file.source.displayName)` 来源写入。请重新输出完整 `iexa_alpine` JSON，并用 `write_files.code_lines` 或 `content_base64` 携带文件内容。目标文件未被覆盖。"
+                ],
+                writtenPath: nil,
+                writtenFile: nil,
+                hadFailure: true
+            )
+        }
+        if Self.isCodeTarget(target), !file.source.isAllowedCodeWriteSource {
+            return LocalAlpineProtectedWriteOutcome(
+                lines: [
+                    "- `\(target)` 代码文件写入已拒绝：不能使用 `\(file.source.displayName)` 来源写入代码文件。请改用 `write_files.code_lines`、`content_lines` 或 `content_base64`，目标文件未被覆盖。"
+                ],
+                writtenPath: nil,
+                writtenFile: nil,
+                hadFailure: true
+            )
+        }
         let content = file.content
         guard let data = content.data(using: .utf8) else {
             return LocalAlpineProtectedWriteOutcome(
@@ -680,7 +714,7 @@ actor LocalAlpineAgentService {
                 hadFailure: true
             )
         }
-        if target.lowercased().hasSuffix(".py") {
+        if Self.isPythonTarget(target) {
             return await writeValidatedPythonFile(
                 data: data,
                 target: target,
@@ -696,6 +730,16 @@ actor LocalAlpineAgentService {
             source: file.source,
             notes: ["按结构化写入内容原样落盘；未做缩进重排或格式化。"]
         )
+    }
+
+    private nonisolated static func isPythonTarget(_ path: String) -> Bool {
+        let lowercased = path.lowercased()
+        return lowercased.hasSuffix(".py") || lowercased.hasSuffix(".pyw")
+    }
+
+    private nonisolated static func isCodeTarget(_ path: String) -> Bool {
+        let language = LocalCodeWriteGuard.language(forPath: path)
+        return language != "text" && language != "markdown"
     }
 
     private func writeFileBytes(
@@ -1008,21 +1052,21 @@ actor LocalAlpineAgentService {
     }
 
     private func unsafeCodeFileWriteWarning(for command: String) -> String? {
-        guard Self.commandWritesPythonThroughShellText(command) else { return nil }
+        guard Self.commandWritesCodeThroughShellText(command) else { return nil }
         return """
-        Unsafe Python file write blocked.
+        Unsafe code file write blocked.
 
-        Python files are indentation-sensitive. Do not write `.py` files through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline Python writer scripts.
-        Re-send the complete file through structured `iexa_alpine` JSON `write_files` using `code_lines` or `content_base64`, then run `python3 -m py_compile <file>` before executing it.
+        Code files are indentation/escaping-sensitive. Do not write source files through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts.
+        Re-send the complete file through structured `iexa_alpine` JSON `write_files` using `code_lines`, `content_lines`, or `content_base64`, then run a bounded verification command before executing it.
         """
     }
 
-    private nonisolated static func commandWritesPythonThroughShellText(_ command: String) -> Bool {
-        let pythonFileTarget = #"(?:['"]?)[^'"\s;|&>]*\.(?:py|pyw)(?:['"]?)"#
+    private nonisolated static func commandWritesCodeThroughShellText(_ command: String) -> Bool {
+        let codeFileTarget = #"(?:['"]?)[^'"\s;|&>]*\.(?:py|pyw|js|jsx|ts|tsx|mjs|cjs|html|htm|css|scss|sass|swift|kt|kts|java|c|cc|cpp|cxx|h|hpp|cs|go|rs|rb|php|sh|bash|zsh|fish|pl|lua|r|sql|json|jsonc|yaml|yml|toml|xml)(?:['"]?)"#
         let redirectionWritePatterns = [
-            #"(?is)\b(?:cat|printf|echo)\b[\s\S]{0,800}(?:^|[^0-9])(?:>>?|1>)\s*"# + pythonFileTarget,
-            #"(?is)\bcat\b\s+<<-?\s*['"]?[A-Za-z0-9_.-]+['"]?[\s\S]{0,1200}(?:^|[^0-9])(?:>>?|1>)\s*"# + pythonFileTarget,
-            #"(?is)(?:^|[;&|]\s*)tee\s+(?:-[A-Za-z]+\s+)*"# + pythonFileTarget
+            #"(?is)\b(?:cat|printf|echo)\b[\s\S]{0,800}(?:^|[^0-9])(?:>>?|1>)\s*"# + codeFileTarget,
+            #"(?is)\bcat\b\s+<<-?\s*['"]?[A-Za-z0-9_.-]+['"]?[\s\S]{0,1200}(?:^|[^0-9])(?:>>?|1>)\s*"# + codeFileTarget,
+            #"(?is)(?:^|[;&|]\s*)tee\s+(?:-[A-Za-z]+\s+)*"# + codeFileTarget
         ]
         if redirectionWritePatterns.contains(where: {
             command.range(of: $0, options: .regularExpression) != nil
@@ -1030,10 +1074,10 @@ actor LocalAlpineAgentService {
             return true
         }
 
-        let quotedPythonFile = #"['"][^'"]*\.(?:py|pyw)['"]"#
+        let quotedCodeFile = #"['"][^'"]*\.(?:py|pyw|js|jsx|ts|tsx|mjs|cjs|html|htm|css|scss|sass|swift|kt|kts|java|c|cc|cpp|cxx|h|hpp|cs|go|rs|rb|php|sh|bash|zsh|fish|pl|lua|r|sql|json|jsonc|yaml|yml|toml|xml)['"]"#
         let pythonHeredocWritePatterns = [
-            #"(?is)\bpython3?\b[\s\S]{0,120}<<[\s\S]{0,2400}\bopen\s*\(\s*"# + quotedPythonFile + #"[\s\S]{0,160}['"][wax]\+?['"]"#,
-            #"(?is)\bpython3?\b[\s\S]{0,120}<<[\s\S]{0,2400}\b(?:Path\s*\(\s*)"# + quotedPythonFile + #"[\s\S]{0,240}\.(?:write_text|write_bytes)\s*\("#
+            #"(?is)\bpython3?\b[\s\S]{0,120}<<[\s\S]{0,2400}\bopen\s*\(\s*"# + quotedCodeFile + #"[\s\S]{0,160}['"][wax]\+?['"]"#,
+            #"(?is)\bpython3?\b[\s\S]{0,120}<<[\s\S]{0,2400}\b(?:Path\s*\(\s*)"# + quotedCodeFile + #"[\s\S]{0,240}\.(?:write_text|write_bytes)\s*\("#
         ]
 
         return pythonHeredocWritePatterns.contains { pattern in
@@ -1409,6 +1453,25 @@ private enum LocalAlpineAgentFileSource: Equatable {
     case contentBase64
     case heredoc
     case codeBlock
+    case rejectedPythonPlainContent
+
+    var isAllowedPythonWriteSource: Bool {
+        switch self {
+        case .codeLines, .contentBase64, .codeBlock:
+            return true
+        case .content, .contentLines, .heredoc, .rejectedPythonPlainContent:
+            return false
+        }
+    }
+
+    var isAllowedCodeWriteSource: Bool {
+        switch self {
+        case .codeLines, .contentLines, .contentBase64, .codeBlock:
+            return true
+        case .content, .heredoc, .rejectedPythonPlainContent:
+            return false
+        }
+    }
 
     var displayName: String {
         switch self {
@@ -1418,6 +1481,7 @@ private enum LocalAlpineAgentFileSource: Equatable {
         case .contentBase64: return "content_base64"
         case .heredoc: return "heredoc"
         case .codeBlock: return "code_block"
+        case .rejectedPythonPlainContent: return "rejected_python_plain_content"
         }
     }
 

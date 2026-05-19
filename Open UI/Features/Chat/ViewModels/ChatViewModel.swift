@@ -82,6 +82,8 @@ struct ChatContextBudgetStatus: Sendable, Equatable {
 final class ChatViewModel {
     // MARK: - Published State
 
+    private static let chatWebSearchEnabledKey = "chatWebSearchEnabled"
+
     /// Isolated store for streaming content. Only the actively streaming
     /// message view observes this — all other message views read from
     /// `conversation.messages` which stays frozen during streaming.
@@ -148,6 +150,12 @@ final class ChatViewModel {
     var webSearchEnabled: Bool = false {
         didSet {
             guard !suppressBuiltinFeatureTracking else { return }
+            if webSearchEnabled && !isChatWebSearchAllowed {
+                suppressBuiltinFeatureTracking = true
+                webSearchEnabled = false
+                suppressBuiltinFeatureTracking = false
+                return
+            }
             if webSearchEnabled {
                 userDisabledBuiltinFeatures.remove("web_search")
             } else {
@@ -315,6 +323,8 @@ final class ChatViewModel {
     /// Updated whenever UserDefaults.didChangeNotification fires so toggling in
     /// Settings takes effect immediately without a per-token UserDefaults read.
     private var streamingHapticsEnabled: Bool = true
+    private var isChatWebSearchAllowed: Bool = false
+    private var chatWebSearchSettingsObserver: NSObjectProtocol?
     private var activeTaskId: String?
     private var recoveryTimer: Timer?
     /// Cancellable delay task for the initial recovery timer delay.
@@ -348,7 +358,7 @@ final class ChatViewModel {
     private var clientWebSearchExecutedMessageIds: Set<String> = []
     private var clientWebSearchContinuationMessageIds: Set<String> = []
     private let localAlpineAgentMaxSteps = 10
-    private let localAlpineContinuationMaxNoCommandRetries = 1
+    private let localAlpineContinuationMaxNoCommandRetries = 3
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     @ObservationIgnored private var localAlpineInputContinuation: CheckedContinuation<String?, Never>?
@@ -1959,6 +1969,7 @@ final class ChatViewModel {
         setupMemorySettingObserver()
         setupFunctionsConfigObserver()
         setupStreamingHapticsObserver()
+        setupChatWebSearchSettingsObserver()
     }
 
     /// Registers the observer that handles retry requests posted by the
@@ -2021,6 +2032,33 @@ final class ChatViewModel {
             Task { @MainActor [weak self] in
                 self?.streamingHapticsEnabled = newValue
             }
+        }
+    }
+
+    private func setupChatWebSearchSettingsObserver() {
+        syncChatWebSearchPermission()
+        guard chatWebSearchSettingsObserver == nil else { return }
+        chatWebSearchSettingsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.syncChatWebSearchPermission()
+            }
+        }
+    }
+
+    private func syncChatWebSearchPermission() {
+        let allowed = UserDefaults.standard.object(forKey: Self.chatWebSearchEnabledKey) as? Bool ?? false
+        let changed = allowed != isChatWebSearchAllowed
+        isChatWebSearchAllowed = allowed
+        if !allowed, webSearchEnabled {
+            suppressBuiltinFeatureTracking = true
+            webSearchEnabled = false
+            suppressBuiltinFeatureTracking = false
+        } else if allowed, changed, !userDisabledBuiltinFeatures.contains("web_search") {
+            webSearchEnabled = true
         }
     }
 
@@ -2764,6 +2802,9 @@ final class ChatViewModel {
         }
         if let bgObserver {
             NotificationCenter.default.removeObserver(bgObserver)
+        }
+        if let chatWebSearchSettingsObserver {
+            NotificationCenter.default.removeObserver(chatWebSearchSettingsObserver)
         }
     }
 
@@ -3902,6 +3943,9 @@ final class ChatViewModel {
             errorMessage = "Please select a model first."
             return
         }
+        if isChatWebSearchAllowed && !userDisabledBuiltinFeatures.contains("web_search") {
+            webSearchEnabled = true
+        }
 
         // Process audio attachments depending on transcription mode.
         // Server mode: audio was already uploaded via /api/v1/files/?process=true —
@@ -4866,6 +4910,9 @@ final class ChatViewModel {
         if Self.isLocalAlpineFileWorkRequest(text) {
             return true
         }
+        if Self.isLocalAlpineEnvironmentInspectionRequest(text) {
+            return true
+        }
         return Self.isLocalAlpineFollowUpFileOperation(text, messages: conversation?.messages ?? [])
     }
 
@@ -4974,6 +5021,9 @@ final class ChatViewModel {
         if isLocalAlpineFileWorkRequest(normalized) {
             return true
         }
+        if isLocalAlpineEnvironmentInspectionRequest(normalized) {
+            return true
+        }
         if (normalized.contains("脚本") || normalized.contains("script"))
             && (normalized.contains("运行") || normalized.contains("执行") || normalized.contains("跑") || normalized.contains("run")) {
             return true
@@ -5058,6 +5108,34 @@ final class ChatViewModel {
         return false
     }
 
+    private static func isLocalAlpineEnvironmentInspectionRequest(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        let actionTerms = [
+            "看", "查看", "检查", "检测", "扫", "扫描", "列出", "有什么", "有哪些", "确认",
+            "check", "inspect", "detect", "scan", "list", "show", "what"
+        ]
+        let environmentTerms = [
+            "环境", "依赖", "工具", "版本", "运行时", "系统", "沙盒", "本地",
+            "environment", "dependency", "dependencies", "tool", "tools", "version",
+            "runtime", "system", "sandbox"
+        ]
+        let localTerms = [
+            "alpine", "local alpine", "/mnt/iexa", "终端", "沙盒", "本地", "命令",
+            "terminal", "shell"
+        ]
+        if containsAny(normalized, actionTerms)
+            && containsAny(normalized, environmentTerms)
+            && (containsAny(normalized, localTerms) || terminalEnvironmentHintIsEnough(normalized)) {
+            return true
+        }
+        return containsAny(normalized, ["当前环境", "沙盒环境", "alpine环境", "alpine 环境", "环境依赖", "依赖环境"])
+    }
+
+    private static func terminalEnvironmentHintIsEnough(_ normalized: String) -> Bool {
+        normalized.contains("当前") || normalized.contains("现在") || normalized.contains("this") || normalized.contains("current")
+    }
+
     private static func isLocalAlpineFollowUpFileOperation(_ text: String, messages: [ChatMessage]) -> Bool {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return false }
@@ -5092,82 +5170,6 @@ final class ChatViewModel {
         return normalized.range(of: fileReferencePattern, options: .regularExpression) != nil
     }
 
-    private static func fallbackLocalAlpineBlockForAssistantCode(content: String, userText: String) -> String? {
-        guard let code = firstRunnablePythonCodeBlock(in: content) else { return nil }
-        let normalizedCode = normalizedRunnableCodePayload(from: code)
-        guard !normalizedCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let encodedCode = normalizedCode.data(using: .utf8)?.base64EncodedString() else { return nil }
-
-        let fileName = pythonFileName(for: userText)
-        let command = pythonRunCommand(fileName: fileName, userText: userText)
-        let payload: [String: Any] = [
-            "iexa_alpine": [
-                [
-                    "cwd": "/mnt/iexa",
-                    "write_files": [
-                        [
-                            "path": fileName,
-                            "content_base64": encodedCode
-                        ]
-                    ],
-                    "command": command
-                ]
-            ]
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]),
-              let json = String(data: data, encoding: .utf8) else { return nil }
-        return """
-        ```iexa_alpine
-        \(json)
-        ```
-        """
-    }
-
-    private static func pythonFileName(for userText: String) -> String {
-        let lowercased = userText.lowercased()
-        if lowercased.contains("爬虫") || lowercased.contains("爬取")
-            || lowercased.contains("抓取") || lowercased.contains("crawler")
-            || lowercased.contains("crawl") || lowercased.contains("scrape") {
-            return "crawler.py"
-        }
-        return "script.py"
-    }
-
-    private static func fallbackLocalAlpineBlockForAssistantRunnableCode(content: String, userText: String) -> String? {
-        guard shouldUseAssistantRunnableCodeFallback(for: userText) else { return nil }
-        if let pythonFallback = fallbackLocalAlpineBlockForAssistantCode(content: content, userText: userText) {
-            return pythonFallback
-        }
-        guard let block = firstRunnableNonPythonCodeBlock(in: content) else { return nil }
-        let normalizedCode = normalizedRunnableCodePayload(from: block.code)
-        guard !normalizedCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let encodedCode = normalizedCode.data(using: .utf8)?.base64EncodedString() else { return nil }
-
-        let fileName = runnableFileName(for: block.language)
-        let command = runnableCommand(fileName: fileName, language: block.language)
-        let payload: [String: Any] = [
-            "iexa_alpine": [
-                [
-                    "cwd": "/mnt/iexa",
-                    "write_files": [
-                        [
-                            "path": fileName,
-                            "content_base64": encodedCode
-                        ]
-                    ],
-                    "command": command
-                ]
-            ]
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]),
-              let json = String(data: data, encoding: .utf8) else { return nil }
-        return """
-        ```iexa_alpine
-        \(json)
-        ```
-        """
-    }
-
     private static func fallbackLocalAlpineBlockForAssistantShellCode(content: String) -> String? {
         guard let shell = firstRunnableShellCodeBlock(in: content) else { return nil }
         let command = normalizedShellCodeBlock(shell)
@@ -5177,23 +5179,6 @@ final class ChatViewModel {
         \(command)
         ```
         """
-    }
-
-    private static func fallbackLocalAlpineBlockForLatestAssistantCode(
-        messages: [ChatMessage],
-        excludingMessageId: String? = nil,
-        userText: String
-    ) -> String? {
-        guard shouldUseAssistantRunnableCodeFallback(for: userText) else { return nil }
-        for message in messages.reversed() {
-            guard message.role == .assistant else { continue }
-            if let excludingMessageId, message.id == excludingMessageId { continue }
-            if isLocalAlpineAgentResult(message) || isLocalWorkspaceAgentResult(message) { continue }
-            if let fallback = fallbackLocalAlpineBlockForAssistantRunnableCode(content: message.content, userText: userText) {
-                return fallback
-            }
-        }
-        return nil
     }
 
     private func fallbackLocalAlpineBlockForFollowUpOperation(userText: String) -> String? {
@@ -5451,246 +5436,6 @@ final class ChatViewModel {
         """
     }
 
-    private struct LocalAlpineLanguageRunSpec {
-        let terms: [String]
-        let fileName: String
-        let codeLines: [String]
-        let command: String
-    }
-
-    private static func fallbackLocalAlpineBlockForLanguageRunRequest(for text: String) -> String? {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return nil }
-        guard shouldUseAssistantRunnableCodeFallback(for: normalized) else { return nil }
-        guard containsAny(normalized, ["写", "创建", "生成", "运行", "执行", "跑", "编译", "write", "create", "generate", "run", "execute", "compile"]) else {
-            return nil
-        }
-        guard let spec = localAlpineLanguageRunSpecs().first(where: { candidate in
-            candidate.terms.contains(where: { localAlpineTextContains(normalized, $0) || normalized.contains($0) })
-        }) else { return nil }
-
-        let payload: [String: Any] = [
-            "iexa_alpine": [
-                [
-                    "cwd": "/mnt/iexa",
-                    "write_files": [
-                        [
-                            "path": spec.fileName,
-                            "code_lines": spec.codeLines
-                        ]
-                    ],
-                    "command": spec.command
-                ]
-            ]
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]),
-              let json = String(data: data, encoding: .utf8) else { return nil }
-        return """
-        ```iexa_alpine
-        \(json)
-        ```
-        """
-    }
-
-    private static func localAlpineLanguageRunSpecs() -> [LocalAlpineLanguageRunSpec] {
-        [
-            LocalAlpineLanguageRunSpec(
-                terms: ["go", "golang", "go语言"],
-                fileName: "main.go",
-                codeLines: [
-                    "package main",
-                    "",
-                    "import \"fmt\"",
-                    "",
-                    "func main() {",
-                    "    fmt.Println(\"Hello from Go\")",
-                    "}"
-                ],
-                command: localAlpineInstallAndRunCommand(
-                    probes: ["go"],
-                    packages: ["go"],
-                    run: "go run main.go"
-                )
-            ),
-            LocalAlpineLanguageRunSpec(
-                terms: ["rust", "rs"],
-                fileName: "main.rs",
-                codeLines: [
-                    "fn main() {",
-                    "    println!(\"Hello from Rust\");",
-                    "}"
-                ],
-                command: localAlpineInstallAndRunCommand(
-                    probes: ["rustc"],
-                    packages: ["rust"],
-                    run: "rustc main.rs -o /tmp/iexa_rust_main && /tmp/iexa_rust_main"
-                )
-            ),
-            LocalAlpineLanguageRunSpec(
-                terms: ["java"],
-                fileName: "Main.java",
-                codeLines: [
-                    "public class Main {",
-                    "    public static void main(String[] args) {",
-                    "        System.out.println(\"Hello from Java\");",
-                    "    }",
-                    "}"
-                ],
-                command: localAlpineInstallAndRunCommand(
-                    probes: ["javac", "java"],
-                    packages: ["openjdk17"],
-                    run: "javac Main.java && java Main"
-                )
-            ),
-            LocalAlpineLanguageRunSpec(
-                terms: ["c语言", "c language", "clang c", "gcc", " c "],
-                fileName: "main.c",
-                codeLines: [
-                    "#include <stdio.h>",
-                    "",
-                    "int main(void) {",
-                    "    puts(\"Hello from C\");",
-                    "    return 0;",
-                    "}"
-                ],
-                command: localAlpineInstallAndRunCommand(
-                    probes: ["gcc"],
-                    packages: ["build-base"],
-                    run: "gcc main.c -o /tmp/iexa_c_main && /tmp/iexa_c_main"
-                )
-            ),
-            LocalAlpineLanguageRunSpec(
-                terms: ["c++", "cpp", "g++"],
-                fileName: "main.cpp",
-                codeLines: [
-                    "#include <iostream>",
-                    "",
-                    "int main() {",
-                    "    std::cout << \"Hello from C++\" << std::endl;",
-                    "    return 0;",
-                    "}"
-                ],
-                command: localAlpineInstallAndRunCommand(
-                    probes: ["g++"],
-                    packages: ["build-base"],
-                    run: "g++ main.cpp -o /tmp/iexa_cpp_main && /tmp/iexa_cpp_main"
-                )
-            ),
-            LocalAlpineLanguageRunSpec(
-                terms: ["javascript", "node", "nodejs", "js"],
-                fileName: "main.js",
-                codeLines: [
-                    "console.log(\"Hello from Node.js\");"
-                ],
-                command: localAlpineInstallAndRunCommand(
-                    probes: ["node"],
-                    packages: ["nodejs"],
-                    run: "node main.js"
-                )
-            ),
-            LocalAlpineLanguageRunSpec(
-                terms: ["python", "python3", "py"],
-                fileName: "script.py",
-                codeLines: [
-                    "print(\"Hello from Python\")"
-                ],
-                command: localAlpineInstallAndRunCommand(
-                    probes: ["python3"],
-                    packages: ["python3"],
-                    run: "python3 -m py_compile script.py && python3 script.py"
-                )
-            ),
-            LocalAlpineLanguageRunSpec(
-                terms: ["lua"],
-                fileName: "script.lua",
-                codeLines: [
-                    "print(\"Hello from Lua\")"
-                ],
-                command: localAlpineInstallAndRunCommand(
-                    probes: ["lua", "lua5.4"],
-                    packages: ["lua5.4"],
-                    run: "(lua script.lua 2>/dev/null || lua5.4 script.lua)"
-                )
-            ),
-            LocalAlpineLanguageRunSpec(
-                terms: ["ruby", "rb"],
-                fileName: "script.rb",
-                codeLines: [
-                    "puts \"Hello from Ruby\""
-                ],
-                command: localAlpineInstallAndRunCommand(
-                    probes: ["ruby"],
-                    packages: ["ruby"],
-                    run: "ruby script.rb"
-                )
-            ),
-            LocalAlpineLanguageRunSpec(
-                terms: ["php"],
-                fileName: "script.php",
-                codeLines: [
-                    "<?php",
-                    "echo \"Hello from PHP\\n\";"
-                ],
-                command: localAlpineInstallAndRunCommand(
-                    probes: ["php"],
-                    packages: ["php"],
-                    run: "php script.php"
-                )
-            ),
-            LocalAlpineLanguageRunSpec(
-                terms: ["shell", "bash", "sh"],
-                fileName: "script.sh",
-                codeLines: [
-                    "#!/bin/sh",
-                    "printf 'Hello from shell\\n'"
-                ],
-                command: "chmod +x script.sh && sh script.sh"
-            )
-        ]
-    }
-
-    private static func localAlpineInstallAndRunCommand(probes: [String], packages: [String], run: String) -> String {
-        let probeList = probes.joined(separator: " ")
-        let packageList = packages.joined(separator: " ")
-        return """
-        set -u
-        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-        cd /mnt/iexa
-        missing=0
-        for x in \(probeList); do
-          command -v "$x" >/dev/null 2>&1 && { printf 'found %s: ' "$x"; command -v "$x"; missing=0; break; }
-          missing=1
-        done
-        if [ "$missing" -ne 0 ]; then
-          apk update
-          apk add --no-cache \(packageList)
-          hash -r 2>/dev/null || true
-          export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-        fi
-        printf '\\n== tools ==\\n'
-        found=0
-        for x in \(probeList); do
-          if command -v "$x" >/dev/null 2>&1; then
-            found=1
-            printf '%s -> ' "$x"
-            command -v "$x"
-            "$x" --version 2>/dev/null | head -n 1 || "$x" -v 2>/dev/null | head -n 1 || true
-          fi
-        done
-        if [ "$found" -eq 0 ]; then
-          printf 'dependency still missing after apk add: \(probeList)\\n'
-          printf '\\n== PATH ==\\n%s\\n' "$PATH"
-          printf '\\n== matching files ==\\n'
-          for d in /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin; do
-            [ -d "$d" ] && find "$d" -maxdepth 1 -type f \\( -name '\(probes.first ?? "")' -o -name '\(probes.last ?? "")' \\) -print
-          done
-          exit 127
-        fi
-        printf '\\n== run ==\\n'
-        \(run)
-        """
-    }
-
     private static func isLocalAlpineManualRunOrRefusalResponse(_ content: String) -> Bool {
         let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return false }
@@ -5778,11 +5523,7 @@ final class ChatViewModel {
         guard let path = localAlpineWriteFilePath(from: dict),
               path.lowercased().hasSuffix(".py"),
               !hasStructuredLocalAlpinePayload(dict),
-              let content = plainLocalAlpineContent(from: dict) else {
-            return dict
-        }
-
-        guard let data = content.data(using: .utf8) else {
+              plainLocalAlpineContent(from: dict) != nil else {
             return dict
         }
 
@@ -5790,7 +5531,7 @@ final class ChatViewModel {
         ["content", "contents", "text", "body", "code"].forEach {
             updated.removeValue(forKey: $0)
         }
-        updated["content_base64"] = data.base64EncodedString()
+        updated["iexa_rejected_python_plain_content"] = true
         changed = true
         return updated
     }
@@ -5822,30 +5563,6 @@ final class ChatViewModel {
             ?? (dict["code"] as? String)
     }
 
-    private static func pythonCodeLines(from code: String) -> [String] {
-        normalizedRunnableCodePayload(from: code).components(separatedBy: .newlines)
-    }
-
-    private static func normalizedRunnableCodePayload(from code: String) -> String {
-        let normalized = code
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        var lines = normalized.components(separatedBy: "\n")
-        while let first = lines.first, first.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            lines.removeFirst()
-        }
-        while let last = lines.last, last.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            lines.removeLast()
-        }
-        return lines.joined(separator: "\n") + "\n"
-    }
-
-    private static func pythonRunCommand(fileName: String, userText: String) -> String {
-        let commandPath = shellQuoted(fileName)
-        let arguments = firstURL(in: userText).map { " \(shellQuoted($0))" } ?? ""
-        return "python3 -m py_compile \(commandPath) && python3 \(commandPath)\(arguments)"
-    }
-
     private static func firstURL(in text: String) -> String? {
         guard let regex = try? NSRegularExpression(pattern: #"https?://[^\s<>"')\]]+"#, options: [.caseInsensitive]) else {
             return nil
@@ -5854,117 +5571,6 @@ final class ChatViewModel {
         let fullRange = NSRange(location: 0, length: nsText.length)
         guard let match = regex.firstMatch(in: text, range: fullRange) else { return nil }
         return nsText.substring(with: match.range)
-    }
-
-    private static func firstRunnablePythonCodeBlock(in content: String) -> String? {
-        let nsContent = content as NSString
-        guard let regex = try? NSRegularExpression(
-            pattern: #"```([^\n`]*)\n([\s\S]*?)```"#,
-            options: [.caseInsensitive]
-        ) else { return nil }
-        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
-        for match in matches where match.numberOfRanges >= 3 {
-            let info = nsContent.substring(with: match.range(at: 1))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-            guard info == "py" || info.contains("python") else { continue }
-            let body = nsContent.substring(with: match.range(at: 2))
-                .replacingOccurrences(of: "\r\n", with: "\n")
-                .replacingOccurrences(of: "\r", with: "\n")
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\n"))
-            if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return body
-            }
-        }
-        return nil
-    }
-
-    private struct RunnableCodeBlock {
-        let language: String
-        let code: String
-    }
-
-    private static func firstRunnableNonPythonCodeBlock(in content: String) -> RunnableCodeBlock? {
-        let nsContent = content as NSString
-        guard let regex = try? NSRegularExpression(
-            pattern: #"```([^\n`]*)\n([\s\S]*?)```"#,
-            options: [.caseInsensitive]
-        ) else { return nil }
-        let supportedLanguages: Set<String> = [
-            "lua", "javascript", "js", "node", "mjs", "cjs",
-            "go", "golang", "rust", "rs", "java", "c", "cpp", "c++",
-            "ruby", "rb", "php", "bash", "sh", "shell"
-        ]
-        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
-        for match in matches where match.numberOfRanges >= 3 {
-            let info = nsContent.substring(with: match.range(at: 1))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-            let language = info.split(whereSeparator: { $0 == " " || $0 == "\t" }).first.map(String.init) ?? info
-            guard supportedLanguages.contains(language) else { continue }
-            let body = nsContent.substring(with: match.range(at: 2))
-                .replacingOccurrences(of: "\r\n", with: "\n")
-                .replacingOccurrences(of: "\r", with: "\n")
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\n"))
-            if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return RunnableCodeBlock(language: language, code: body)
-            }
-        }
-        return nil
-    }
-
-    private static func runnableFileName(for language: String) -> String {
-        switch language {
-        case "lua": return "script.lua"
-        case "javascript", "js", "node", "mjs", "cjs": return "script.js"
-        case "go", "golang": return "main.go"
-        case "rust", "rs": return "main.rs"
-        case "java": return "Main.java"
-        case "c": return "main.c"
-        case "cpp", "c++": return "main.cpp"
-        case "ruby", "rb": return "script.rb"
-        case "php": return "script.php"
-        case "bash", "sh", "shell": return "script.sh"
-        default: return "script.txt"
-        }
-    }
-
-    private static func runnableCommand(fileName: String, language: String) -> String {
-        let quotedFile = shellQuoted(fileName)
-        switch language {
-        case "lua":
-            return """
-            command -v lua >/dev/null 2>&1 || command -v lua5.4 >/dev/null 2>&1 || { apk update && apk add --no-cache lua5.4; }
-            if command -v lua >/dev/null 2>&1; then
-              lua \(quotedFile)
-            elif command -v lua5.4 >/dev/null 2>&1; then
-              lua5.4 \(quotedFile)
-            else
-              printf 'lua runtime missing\\n'
-              exit 127
-            fi
-            """
-        case "javascript", "js", "node", "mjs", "cjs":
-            return "command -v node >/dev/null 2>&1 || { apk update && apk add --no-cache nodejs; }\nnode \(quotedFile)"
-        case "go", "golang":
-            return "command -v go >/dev/null 2>&1 || { apk update && apk add --no-cache go; }\ngo run \(quotedFile)"
-        case "rust", "rs":
-            return "command -v rustc >/dev/null 2>&1 || { apk update && apk add --no-cache rust; }\nrustc \(quotedFile) -o /tmp/iexa_rust_main && /tmp/iexa_rust_main"
-        case "java":
-            return "command -v javac >/dev/null 2>&1 || { apk update && apk add --no-cache openjdk17; }\njavac \(quotedFile) && java Main"
-        case "c":
-            return "command -v gcc >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }\ngcc \(quotedFile) -o /tmp/iexa_c_main && /tmp/iexa_c_main"
-        case "cpp", "c++":
-            return "command -v g++ >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }\ng++ \(quotedFile) -o /tmp/iexa_cpp_main && /tmp/iexa_cpp_main"
-        case "ruby", "rb":
-            return "command -v ruby >/dev/null 2>&1 || { apk update && apk add --no-cache ruby; }\nruby \(quotedFile)"
-        case "php":
-            return "command -v php >/dev/null 2>&1 || { apk update && apk add --no-cache php; }\nphp \(quotedFile)"
-        case "bash", "sh", "shell":
-            return "sh \(quotedFile)"
-        default:
-            return "cat \(quotedFile)"
-        }
     }
 
     private static func firstRunnableShellCodeBlock(in content: String) -> String? {
@@ -6009,50 +5615,6 @@ final class ChatViewModel {
 
     private static func containsAny(_ text: String, _ terms: [String]) -> Bool {
         terms.contains { text.contains($0) }
-    }
-
-    private static func shouldUseAssistantRunnableCodeFallback(for text: String) -> Bool {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return false }
-        if isLocalAlpineFileManagementOnlyRequest(normalized) {
-            return false
-        }
-        let runnableTerms = [
-            "写", "创建", "生成", "运行", "执行", "跑", "测试", "验证", "编译", "构建",
-            "脚本", "项目", "代码", "write", "create", "generate", "run", "execute",
-            "test", "verify", "compile", "build", "script", "project", "code"
-        ]
-        return containsAny(normalized, runnableTerms)
-            || isLocalAlpineWebOrScriptTask(normalized)
-    }
-
-    private static func isLocalAlpineFileManagementOnlyRequest(_ text: String) -> Bool {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return false }
-
-        let hasFileReference = extractLocalAlpinePath(from: normalized) != nil
-            || normalized.range(
-                of: #"[a-z0-9_\-./]+\.(lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|swift|c|cpp|h|rs|go|java|kt|rb|php)"#,
-                options: [.regularExpression, .caseInsensitive]
-            ) != nil
-            || containsAny(normalized, ["文件", "目录", "/mnt/iexa", "file", "folder", "directory"])
-        guard hasFileReference else { return false }
-
-        if containsAny(normalized, ["删", "删除", "移除", "清理", "删掉", "删了", "delete", "remove", "rm "]) {
-            return true
-        }
-
-        let managementTerms = [
-            "读取", "打开", "查看", "检查", "列出", "列表", "搜索", "查找",
-            "read", "open", "show", "inspect", "list", "search", "find"
-        ]
-        guard containsAny(normalized, managementTerms) else { return false }
-
-        let creationOrRunTerms = [
-            "写", "创建", "生成", "运行", "跑", "测试", "编译", "构建",
-            "write", "create", "generate", "run", "test", "compile", "build"
-        ]
-        return !containsAny(normalized, creationOrRunTerms)
     }
 
     private static func extractLocalAlpinePath(from text: String) -> String? {
@@ -8894,7 +8456,7 @@ final class ChatViewModel {
 
         // Only enable features if admin has them on AND the user hasn't explicitly
         // turned them off this session. Never force-disable ones the user turned on.
-        if defaults.contains("web_search") && isTruthy("web_search")
+        if isChatWebSearchAllowed
             && !userDisabledBuiltinFeatures.contains("web_search") {
             webSearchEnabled = true
         }
@@ -8957,7 +8519,7 @@ final class ChatViewModel {
         // models correctly reflects per-model feature availability.
         // Suppress tracking so these internal resets don't pollute userDisabledBuiltinFeatures.
         suppressBuiltinFeatureTracking = true
-        webSearchEnabled = defaults.contains("web_search") && isTruthy("web_search")
+        webSearchEnabled = isChatWebSearchAllowed
         let nameSuggestsImageGeneration = shouldUseDirectImageGeneration(modelId: model.id)
             || shouldPreferChatNativeImageGeneration(modelId: model.id)
         imageGenerationEnabled = (defaults.contains("image_generation") && isTruthy("image_generation"))
@@ -10271,9 +9833,10 @@ final class ChatViewModel {
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
-        - For scripts/projects, prefer JSON `write_files` / `code_lines` inside `iexa_alpine` to create files, then run a bounded verification command. This keeps file bytes under the tool protocol instead of relying on chat rendering.
+        - For scripts/projects, use JSON `write_files` inside `iexa_alpine`, then run a bounded verification command. For code files, use `code_lines`, `content_lines`, or `content_base64`; never use plain `content`/`text`/`code` for source files because display text can corrupt indentation.
         - Python write protocol is mandatory: send the complete intended `.py` file through `iexa_alpine` JSON `write_files` using `code_lines` for normal files or `content_base64` for very long/complex content. Do not write Python through visible Markdown, partial snippets, shell heredocs, `echo`, or `cat > file.py` unless explicitly debugging the writer itself.
-        - Python `write_files` is byte-preserving: `code_lines`, `content_lines`, `content`, and `content_base64` are written exactly as provided. The app does not re-indent, normalize, or repair Python source.
+        - When showing copyable shell/Python examples to the user, make the fenced block itself directly runnable: no line numbers, no prompts like `$` or `>>>`, no explanatory text inside the fence, and keep indentation exactly as source code. For command-line Python heredocs, use one complete `bash`/`sh` block with the closing `EOF` included.
+        - Python `write_files` accepts only `code_lines` or `content_base64` for `.py`/`.pyw` targets. Plain `content`/`text`/`code` and `content_lines` are rejected for Python because they can come from display text. The app does not re-indent, normalize, or repair Python source.
         - The app treats Python AST/compile validation as the write gate. If that gate fails, the command after `write_files` is blocked; your next step must be a complete-file rewrite through structured `write_files`, not a line patch or a repeated run command.
         - When fixing an existing Python file after a syntax/indentation error, rewrite the complete corrected target Python file with `iexa_alpine` JSON `write_files`. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
         - Prefer complete structured Python writes for class/function bodies, then run the requested script or a bounded verification command.
@@ -10292,7 +9855,7 @@ final class ChatViewModel {
 
         Tool request schema:
         - To execute commands, include exactly one fenced block with language `iexa_alpine`. The block may contain POSIX shell, or JSON with one object or an `iexa_alpine` array.
-        - JSON objects support `cwd`, `write_files`, and `command`. `write_files` entries support `path` or `file_path`, plus `code_lines`, `content_lines`, `content`, or `content_base64`. The app preserves file content exactly; use `code_lines` or `content_base64` when indentation matters.
+        - JSON objects support `cwd`, `write_files`, and `command`. `write_files` entries support `path` or `file_path`, plus `code_lines`, `content_lines`, `content`, or `content_base64`. For code files use `code_lines`, `content_lines`, or `content_base64`; for Python targets use only `code_lines` or `content_base64`. Plain `content` is only for non-code text files.
         - For create/modify project tasks, prefer JSON `write_files` plus a verification `command` in the same object.
         - For read/list/delete/search tasks, prefer a minimal shell command scoped to `/mnt/iexa`.
         - The app will run the request locally on the device and append the real output. Do not output this block unless command execution is actually needed.
@@ -10425,6 +9988,7 @@ final class ChatViewModel {
         modelId: String,
         hasAttachments: Bool
     ) async {
+        guard isChatWebSearchAllowed else { return }
         guard !hasAttachments else { return }
         guard !WebLinkContextResolver.containsHTTPURL(text) else { return }
         guard !shouldUseDirectImageGeneration(modelId: modelId),
@@ -10627,7 +10191,7 @@ final class ChatViewModel {
         error: ChatMessageError?
     ) {
         guard error == nil else { return }
-        guard webSearchEnabled else { return }
+        guard isChatWebSearchAllowed, webSearchEnabled else { return }
         guard let message = conversation?.messages.first(where: { $0.id == messageId }),
               message.role == .assistant else { return }
         guard message.metadata?["iexa_client_web_search_result"] != "true" else { return }
@@ -10848,7 +10412,7 @@ final class ChatViewModel {
     }
 
     private func startClientWebSearchContinuation(after resultMessageId: String) {
-        guard webSearchEnabled else { return }
+        guard isChatWebSearchAllowed, webSearchEnabled else { return }
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
         guard !clientWebSearchContinuationMessageIds.contains(resultMessageId) else { return }
         clientWebSearchContinuationMessageIds.insert(resultMessageId)
@@ -11477,24 +11041,8 @@ final class ChatViewModel {
         """
     }
 
-    private func shouldResolveWebSearchContext(for text: String) -> Bool {
-        if webSearchEnabled { return true }
-
-        let normalized = text
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        guard !normalized.isEmpty else { return false }
-
-        let explicitSearchTerms = [
-            "联网搜索", "联网查", "上网搜索", "上网查", "网络搜索", "搜索一下", "搜一下",
-            "帮我搜", "帮我查", "查一下", "查查看", "实时搜索", "实时查询",
-            "最新", "今天", "今日", "现在", "目前", "刚刚", "新闻", "热搜",
-            "能联网", "可以联网", "能搜索", "可以搜索", "联网吗", "搜索吗",
-            "web search", "search the web", "internet search", "browse", "browser",
-            "google", "bing", "latest", "today", "current", "news"
-        ]
-        return explicitSearchTerms.contains { normalized.contains($0) }
+    private func shouldResolveWebSearchContext(for _: String) -> Bool {
+        isChatWebSearchAllowed && webSearchEnabled
     }
 
     private func isWebSearchCapabilityQuestion(_ text: String) -> Bool {
@@ -11837,7 +11385,7 @@ final class ChatViewModel {
         let alpineExecutionStateContext = shouldIncludeLocalAlpineContext
             ? Self.localAlpineExecutionStateSystemContext(from: conversation.messages)
             : nil
-        let webSearchToolContext = webSearchEnabled
+        let webSearchToolContext = isChatWebSearchAllowed && webSearchEnabled
             ? Self.clientWebSearchToolSystemContext()
             : nil
         let localSkillsContext = LocalSkillsService.shared.contextPrompt()
@@ -12304,6 +11852,18 @@ final class ChatViewModel {
             executableContent = normalized
         } else if message.metadata?["iexa_local_alpine_continuation"] == "true" {
             return
+        } else if let latestUserText,
+                  shouldUseLocalAlpineAgentForRequest(latestUserText, modelId: effectiveModelId),
+                  !Self.isLocalAlpineInterruptionOrMetaQuestion(latestUserText) {
+            let correctionId = appendLocalAlpineProtocolCorrectionResult(
+                parentId: messageId,
+                reason: "The assistant answered a Local Alpine task without an executable iexa_alpine block."
+            )
+            localAlpineNoCommandContinuationRetries += 1
+            localAlpineAgentExecutedMessageIds.insert(messageId)
+            localAlpineAgentStopRequested = false
+            scheduleLocalAlpineContinuationIfNeeded(after: correctionId, forceContinue: true)
+            return
         } else {
             return
         }
@@ -12765,6 +12325,34 @@ final class ChatViewModel {
                 "iexa_local_alpine_no_tool_call_stop": "true"
             ]
         )
+    }
+
+    @discardableResult
+    private func appendLocalAlpineProtocolCorrectionResult(parentId: String, reason: String) -> String {
+        let content = """
+        Local Alpine 执行结果
+
+        命令
+
+        ```text
+        IEXA_AGENT_KICKOFF
+        ```
+
+        退出码：`125`
+
+        输出
+
+        ```text
+        IEXA_AGENT_KICKOFF
+        \(reason)
+        NEXT_ACTION_REQUIRED: You must emit exactly one fenced iexa_alpine block now. Do not explain commands for the user to run manually. For environment/dependency inspection, execute commands such as uname, cat /etc/alpine-release, apk --version, apk info, command -v python3 node npm gcc g++ git curl wget, and ls -la /mnt/iexa.
+        ```
+        """
+        return appendAssistantResult(parentId: parentId, model: "Local Alpine", content: content, metadata: [
+            "iexa_local_alpine_result": "true",
+            "iexa_local_alpine_raw_result": content,
+            "iexa_local_alpine_protocol_correction": "true"
+        ])
     }
 
     private func repeatedLocalAlpineFailure(for content: String) -> LocalAlpineAgentCommandFailure? {
@@ -13628,6 +13216,10 @@ final class ChatViewModel {
             localAlpineAgentStopRequested = false
             localAlpineContinuationTask = nil
             localAlpineContinuationParentIds.remove(parentResultId)
+            let correctionId = appendLocalAlpineProtocolCorrectionResult(
+                parentId: assistantMessageId,
+                reason: "The assistant told the user to run commands manually instead of using the Local Alpine executor."
+            )
             updateAssistantMessage(
                 id: assistantMessageId,
                 content: "Local Alpine 协议已纠正，正在重新要求模型输出可执行围栏块...",
@@ -13642,7 +13234,7 @@ final class ChatViewModel {
                 ]
             )
             cleanupStreaming()
-            scheduleLocalAlpineContinuationIfNeeded(after: parentResultId, forceContinue: true)
+            scheduleLocalAlpineContinuationIfNeeded(after: correctionId, forceContinue: true)
             return
         }
         let doneDescription: String
@@ -13872,8 +13464,11 @@ final class ChatViewModel {
         - Use exactly one next tool action per assistant turn. For local shell/files, emit one `iexa_alpine` block. For current web facts, rely on the web-search context already injected by the app; if more current info is needed, ask for/perform a more precise search before guessing.
         - Never emit `to=local_alpine_exec code` or any other pseudo tool-call text. This app executes only `iexa_alpine`; use that exact fenced block.
         - Before the block, write at most one short visible sentence naming the current step. Do not reveal detailed hidden reasoning.
+        Code Writes:
+        - For source/code files, write through `write_files.code_lines`, `content_lines`, or `content_base64`; never plain `content`/`text`/`code`, because visible text can corrupt indentation or escapes.
         Python Writes:
         - For `.py` files, always use fenced `iexa_alpine` JSON `write_files` with full-file `code_lines` or `content_base64`; the app writes those bytes exactly and then validates the file before running commands.
+        - Copyable visible code blocks must be direct source text only: no line numbers, prompt markers, prose, or repaired-looking pseudo indentation. If using a shell heredoc, include the full command and closing delimiter in one block.
         - Never put `def main()` or `main()` inside a class unless the user explicitly asked for a class method. Top-level runnable Python must keep `def main():` and `if __name__ == "__main__": main()` at column 0.
         - For `HTMLParser` examples, parser callback methods belong inside the parser class, but crawler orchestration such as `main()` belongs outside the class at top level.
         - Python writes are transactional: if the app reports Python AST/compile validation failed, it did not overwrite the target file. Rewrite the complete `.py` target through structured `write_files`, then verify again.

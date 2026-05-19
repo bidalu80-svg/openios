@@ -51,7 +51,7 @@ struct PythonCodeBlockView: View {
             // ── Header bar ──────────────────────────────────────────────────
             headerBar
 
-            PythonSourceListingView(code: visibleCode)
+            SourceCodeTextView(code: visibleCode, maxHeight: 420)
                 .background(Color(.secondarySystemBackground))
 
             // ── Output panel (shown after run) ──────────────────────────────
@@ -523,47 +523,6 @@ struct PythonCodeBlockView: View {
             .trimmingCharacters(in: .newlines)
     }
 
-}
-
-private struct PythonSourceListingView: View {
-    let code: String
-
-    private var lines: [String] {
-        let normalized = code
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        return normalized.components(separatedBy: "\n")
-    }
-
-    private var gutterWidth: CGFloat {
-        CGFloat(max(2, String(lines.count).count)) * 9 + 16
-    }
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: true) {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(lines.enumerated()), id: \.offset) { offset, line in
-                    HStack(alignment: .top, spacing: 12) {
-                        Text("\(offset + 1)")
-                            .scaledFont(size: 12, weight: .semibold, design: .monospaced)
-                            .foregroundStyle(.secondary)
-                            .frame(width: gutterWidth, alignment: .trailing)
-
-                        Text(line.isEmpty ? " " : line)
-                            .scaledFont(size: 13, design: .monospaced)
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .textSelection(.enabled)
-                    }
-                    .frame(minHeight: 22, alignment: .leading)
-                }
-            }
-            .padding(.vertical, 12)
-            .padding(.trailing, 16)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
 }
 
 private struct PythonCodeRunOutcome {

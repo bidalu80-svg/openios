@@ -1,6 +1,53 @@
 import SwiftUI
 import UIKit
 
+private enum LunarCalendarDisplay {
+    private static let locale = Locale(identifier: "zh_CN")
+    private static let gregorianMonthDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.dateFormat = "M月d日"
+        return formatter
+    }()
+    private static let chineseCalendar: Calendar = {
+        var calendar = Calendar(identifier: .chinese)
+        calendar.locale = locale
+        return calendar
+    }()
+    private static let monthSymbols = [
+        "", "正月", "二月", "三月", "四月", "五月", "六月",
+        "七月", "八月", "九月", "十月", "冬月", "腊月"
+    ]
+    private static let daySymbols = [
+        "", "初一", "初二", "初三", "初四", "初五", "初六", "初七", "初八", "初九", "初十",
+        "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
+        "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十"
+    ]
+
+    static func compactDayText(for date: Date) -> String {
+        let components = chineseCalendar.dateComponents([.month, .day, .isLeapMonth], from: date)
+        guard let month = components.month,
+              let day = components.day,
+              month > 0,
+              month < monthSymbols.count,
+              day > 0,
+              day < daySymbols.count else {
+            return ""
+        }
+        if day == 1 {
+            return (components.isLeapMonth == true ? "闰" : "") + monthSymbols[month]
+        }
+        return daySymbols[day]
+    }
+
+    static func fullDayText(for date: Date) -> String {
+        let gregorian = gregorianMonthDayFormatter.string(from: date)
+        let lunar = compactDayText(for: date)
+        guard !lunar.isEmpty else { return gregorian }
+        return "\(gregorian) \(lunar)"
+    }
+}
+
 // MARK: - CalendarView (Sheet Root)
 
 struct CalendarView: View {
@@ -139,10 +186,17 @@ private struct CalendarContentView: View {
 
             Spacer()
 
-            Text(topBarTitle)
-                .font(.headline)
-                .foregroundStyle(theme.textPrimary)
-                .animation(.none, value: vm.viewMode)
+            VStack(spacing: 1) {
+                Text(topBarTitle)
+                    .font(.headline)
+                    .foregroundStyle(theme.textPrimary)
+                    .animation(.none, value: vm.viewMode)
+                Text(LunarCalendarDisplay.fullDayText(for: vm.selectedDate))
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(theme.textTertiary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
 
             Spacer()
 
@@ -210,7 +264,7 @@ private struct CalendarContentView: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 9)
     }
 
     private var topBarTitle: String {
@@ -402,20 +456,28 @@ private struct MiniMonthView: View {
                                     Text("\(dc.day ?? 0)")
                                         .font(.system(size: 9))
                                         .foregroundStyle(isToday ? .white : theme.textPrimary)
+                                    if !isToday {
+                                        Text(LunarCalendarDisplay.compactDayText(for: date))
+                                            .font(.system(size: 5.5, weight: .medium))
+                                            .foregroundStyle(theme.textTertiary)
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.75)
+                                            .offset(y: 7)
+                                    }
 
                                     if hasEvent && !isToday {
                                         Circle()
                                             .fill(theme.brandPrimary)
                                             .frame(width: 3, height: 3)
-                                            .offset(y: 6)
+                                            .offset(y: 11)
                                     }
                                 }
                                 .frame(maxWidth: .infinity)
-                                .frame(height: 16)
+                                .frame(height: 24)
                             } else {
                                 Color.clear
                                     .frame(maxWidth: .infinity)
-                                    .frame(height: 16)
+                                    .frame(height: 24)
                             }
                         }
                     }
@@ -462,9 +524,14 @@ private struct MonthView: View {
 
         return VStack(spacing: 0) {
             HStack {
-                Text(fmt.string(from: vm.selectedDate))
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(theme.textSecondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(fmt.string(from: vm.selectedDate))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(theme.textSecondary)
+                    Text(LunarCalendarDisplay.compactDayText(for: vm.selectedDate))
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(theme.textTertiary)
+                }
                 Spacer()
                 if !vm.eventsForSelectedDate.isEmpty {
                     Text("\(vm.eventsForSelectedDate.count) 个事件")
@@ -690,6 +757,11 @@ private struct WeekView: View {
                                 .font(.system(size: 15, weight: isToday ? .bold : .regular))
                                 .foregroundStyle(isToday ? .white : (isSelected ? theme.brandPrimary : theme.textPrimary))
                         }
+                        Text(LunarCalendarDisplay.compactDayText(for: day))
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(isToday ? theme.brandPrimary : theme.textTertiary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
@@ -918,7 +990,7 @@ private struct DayView: View {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(theme.brandPrimary)
-                        .frame(width: 32, height: 50)
+                        .frame(width: 32, height: 58)
                 }
                 .buttonStyle(.plain)
 
@@ -950,6 +1022,11 @@ private struct DayView: View {
                                     .font(.system(size: 15, weight: isSelected ? .bold : .regular))
                                     .foregroundStyle(isSelected ? .white : (isToday ? theme.brandPrimary : theme.textPrimary))
                             }
+                            Text(LunarCalendarDisplay.compactDayText(for: day))
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(theme.textTertiary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                             // Dot if has events
                             Circle()
                                 .fill(vm.hasEvents(on: day) ? theme.brandPrimary : Color.clear)
@@ -966,7 +1043,7 @@ private struct DayView: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(theme.brandPrimary)
-                        .frame(width: 32, height: 50)
+                        .frame(width: 32, height: 58)
                 }
                 .buttonStyle(.plain)
             }
@@ -1114,6 +1191,7 @@ private struct NativeCalendarView: UIViewRepresentable {
         calendarView.locale = Locale(identifier: "zh_CN")
         calendarView.fontDesign = .rounded
         calendarView.tintColor = UIColor(theme.brandPrimary)
+        calendarView.wantsDateDecorations = true
 
         calendarView.availableDateRange = DateInterval(
             start: Calendar.current.date(byAdding: .year, value: -10, to: Date()) ?? Date(),
@@ -1140,6 +1218,7 @@ private struct NativeCalendarView: UIViewRepresentable {
         calendarView.calendar = calendar
         calendarView.locale = Locale(identifier: "zh_CN")
         calendarView.tintColor = UIColor(theme.brandPrimary)
+        calendarView.wantsDateDecorations = true
         context.coordinator.vm = vm
 
         // BOUNCE-FIX: Only programmatically navigate when explicitly requested
@@ -1195,8 +1274,6 @@ private struct NativeCalendarView: UIViewRepresentable {
                 .filter { vm.visibleCalendarIds.contains($0.calendarId) }
                 .filter { cal.isDate($0.startAt, inSameDayAs: date) }
 
-            guard !dayEvents.isEmpty else { return nil }
-
             var seen = Set<String>()
             var colors: [UIColor] = []
             for event in dayEvents {
@@ -1207,10 +1284,13 @@ private struct NativeCalendarView: UIViewRepresentable {
                 }
             }
 
-            guard !colors.isEmpty else { return nil }
+            let lunarText = LunarCalendarDisplay.compactDayText(for: date)
+            let dotImage = colors.isEmpty ? nil : createDotImage(colors: colors)
+            guard !lunarText.isEmpty || dotImage != nil else { return nil }
 
-            let dotImage = createDotImage(colors: colors)
-            return .image(dotImage, color: nil, size: .medium)
+            return .customView {
+                Self.makeLunarDecorationView(lunarText: lunarText, dotImage: dotImage)
+            }
         }
 
         func calendarView(
@@ -1261,6 +1341,37 @@ private struct NativeCalendarView: UIViewRepresentable {
                     UIBezierPath(ovalIn: rect).fill()
                 }
             }
+        }
+
+        private static func makeLunarDecorationView(lunarText: String, dotImage: UIImage?) -> UIView {
+            let stack = UIStackView()
+            stack.axis = .vertical
+            stack.alignment = .center
+            stack.spacing = 1
+            stack.isUserInteractionEnabled = false
+
+            if !lunarText.isEmpty {
+                let label = UILabel()
+                label.text = lunarText
+                label.textAlignment = .center
+                label.font = .systemFont(ofSize: 8, weight: .medium)
+                label.textColor = .secondaryLabel
+                label.adjustsFontSizeToFitWidth = true
+                label.minimumScaleFactor = 0.7
+                label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                stack.addArrangedSubview(label)
+                label.widthAnchor.constraint(lessThanOrEqualToConstant: 40).isActive = true
+            }
+
+            if let dotImage {
+                let imageView = UIImageView(image: dotImage)
+                imageView.contentMode = .center
+                imageView.setContentHuggingPriority(.required, for: .vertical)
+                stack.addArrangedSubview(imageView)
+                imageView.heightAnchor.constraint(equalToConstant: 5).isActive = true
+            }
+
+            return stack
         }
     }
 }

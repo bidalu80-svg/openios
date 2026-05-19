@@ -108,7 +108,7 @@ struct SettingsView: View {
                         SettingsCell(
                             icon: "bubble.left.and.bubble.right",
                             title: "聊天行为",
-                            subtitle: "触感、标题、建议",
+                            subtitle: "触感、标题、联网搜索",
                             showDivider: false,
                             accessory: .chevron
                         ) {
@@ -583,6 +583,7 @@ struct ChatSettingsView: View {
     @AppStorage("expandThinkingWhileStreaming") private var expandThinkingWhileStreaming = true
     @AppStorage("citationShowDomain") private var citationShowDomain: Bool = true
     @AppStorage("desktopPetEnabled") private var desktopPetEnabled = false
+    @AppStorage("chatWebSearchEnabled") private var chatWebSearchEnabled = false
     @AppStorage("quickPills") private var quickPillsData: String = ""
     @State private var availableTools: [ToolItem] = []
     @State private var isLoadingTools = false
@@ -621,6 +622,15 @@ struct ChatSettingsView: View {
                     .scaledFont(size: 12, weight: .medium)
                     .foregroundStyle(theme.textTertiary)
                     .listRowSeparator(.hidden)
+            }
+
+            Section {
+                Toggle("联网搜索", isOn: $chatWebSearchEnabled)
+                    .tint(theme.brandPrimary)
+            } header: {
+                Text("联网搜索")
+            } footer: {
+                Text("关闭后聊天不会自动联网，也不会执行模型请求的网页搜索；开启后输入框里的网页搜索功能才可用。")
             }
 
             Section {

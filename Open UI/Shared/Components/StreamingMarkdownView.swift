@@ -1107,47 +1107,50 @@ private struct StandardCodeBlockView: View {
 
     @Environment(\.theme) private var theme
     @State private var didCopy = false
-    @State private var showFullCode = false
 
     private var displayLanguage: String {
         let value = language.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? "text" : value
     }
 
-    private var visibleCode: String {
-        InlineDataPayloadSanitizer.sanitizedDisplayText(code.trimmingCharacters(in: .newlines))
+    private var displayTitle: String {
+        switch displayLanguage.lowercased() {
+        case "bash", "sh", "shell", "zsh", "fish":
+            return "Bash"
+        case "python", "python3", "py":
+            return "Python"
+        case "javascript", "js":
+            return "JavaScript"
+        case "typescript", "ts":
+            return "TypeScript"
+        case "html":
+            return "HTML"
+        case "css":
+            return "CSS"
+        case "json", "jsonc":
+            return "JSON"
+        case "swift":
+            return "Swift"
+        case "text", "txt":
+            return "Text"
+        default:
+            return displayLanguage
+        }
     }
 
-    private var fencedCodeMarkdown: String {
-        let fence = visibleCode.contains("```") ? "````" : "```"
-        let body = visibleCode.isEmpty ? " " : visibleCode
-        return "\(fence)\(displayLanguage)\n\(body)\n\(fence)"
+    private var visibleCode: String {
+        InlineDataPayloadSanitizer.sanitizedDisplayText(code)
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "chevron.left.forwardslash.chevron.right")
+            HStack(spacing: 8) {
+                Text(displayTitle)
                     .scaledFont(size: 15, weight: .semibold)
                     .foregroundStyle(theme.textPrimary)
-
-                Text(displayLanguage)
-                    .scaledFont(size: 12, weight: .semibold, design: .monospaced)
-                    .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
 
                 Spacer(minLength: 0)
-
-                Button {
-                    showFullCode = true
-                    Haptics.play(.light)
-                } label: {
-                    Image(systemName: "eye")
-                        .scaledFont(size: 14, weight: .semibold)
-                        .foregroundStyle(theme.textSecondary)
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(.plain)
 
                 Button {
                     UIPasteboard.general.string = code
@@ -1172,21 +1175,41 @@ private struct StandardCodeBlockView: View {
                 .buttonStyle(.plain)
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(theme.surfaceContainer.opacity(theme.isDark ? 0.72 : 0.90))
+            .padding(.vertical, 10)
+            .background(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.94))
 
-            MarkdownView(fencedCodeMarkdown)
-                .codeBarHidden(true)
-            .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.22 : 0.42))
+            SourceCodeTextView(code: visibleCode, maxHeight: 480)
+                .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.22 : 0.42))
         }
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.50 : 0.65), lineWidth: 0.8)
         )
-        .sheet(isPresented: $showFullCode) {
-            FullCodeView(code: code, language: displayLanguage)
+    }
+}
+
+struct SourceCodeTextView: View {
+    let code: String
+    var maxHeight: CGFloat = 420
+
+    private var visibleCode: String {
+        code.isEmpty ? " " : code
+    }
+
+    var body: some View {
+        ScrollView([.horizontal, .vertical], showsIndicators: true) {
+            Text(verbatim: visibleCode)
+                .scaledFont(size: 13, design: .monospaced)
+                .lineSpacing(4)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: true, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+                .textSelection(.enabled)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxHeight: maxHeight)
     }
 }
 

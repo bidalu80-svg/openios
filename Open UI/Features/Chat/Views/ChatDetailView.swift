@@ -32,6 +32,7 @@ struct ChatDetailView: View {
     @AppStorage("tokenUsageVideoCountTotal") private var tokenUsageVideoCountTotal: Int = 0
     @AppStorage("tokenUsageExactMessagesTotal") private var tokenUsageExactMessagesTotal: Int = 0
     @AppStorage("tokenUsageEstimatedMessagesTotal") private var tokenUsageEstimatedMessagesTotal: Int = 0
+    @AppStorage("chatWebSearchEnabled") private var chatWebSearchEnabled = false
     @State private var editingModelDetail: ModelDetail? = nil
     @State private var isLoadingModelDetail = false
 
@@ -818,7 +819,7 @@ struct ChatDetailView: View {
                 webSearchEnabled: $vm.webSearchEnabled,
                 imageGenerationEnabled: $vm.imageGenerationEnabled,
                 codeInterpreterEnabled: $vm.codeInterpreterEnabled,
-                isWebSearchAvailable: dependencies.authViewModel.featurePermissions.webSearch && isFeatureAvailable("web_search", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableWebSearch),
+                isWebSearchAvailable: chatWebSearchEnabled,
                 isImageGenerationAvailable: dependencies.authViewModel.featurePermissions.imageGeneration && isFeatureAvailable("image_generation", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableImageGeneration),
                 isCodeInterpreterAvailable: dependencies.authViewModel.featurePermissions.codeInterpreter && isFeatureAvailable("code_interpreter", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableCodeInterpreter),
                 tools: vm.availableTools,
