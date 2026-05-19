@@ -330,7 +330,7 @@ actor LocalAlpineTerminalService {
             """
         }
 
-        return rewriteApkNodeAlias(in: command)
+        return protectSlowNPMVersionChecks(in: rewriteApkNodeAlias(in: command))
     }
 
     private func bootstrappedShellCommand(for command: String) -> String {
@@ -411,6 +411,48 @@ actor LocalAlpineTerminalService {
         }
         let rewritten = rewrittenLines.joined(separator: "\n")
         return rewritten == command ? command : rewritten
+    }
+
+    private func protectSlowNPMVersionChecks(in command: String) -> String {
+        var rewritten = command
+        let replacements = [
+            (#"(?<![\w./-])npm\s+--version(?![\w-])"#, "iexa_npm_version"),
+            (#"(?<![\w./-])npm\s+-v(?![\w-])"#, "iexa_npm_version")
+        ]
+        for (pattern, replacement) in replacements {
+            rewritten = rewritten.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
+        }
+        guard rewritten != command else { return command }
+        return """
+        iexa_npm_version() {
+          npm_path="$(command -v npm 2>/dev/null || true)"
+          if [ -z "$npm_path" ]; then
+            echo missing
+            return 0
+          fi
+          tmp="/tmp/iexa-npm-version-$$.out"
+          (npm --version >"$tmp" 2>&1) &
+          pid=$!
+          i=0
+          while kill -0 "$pid" >/dev/null 2>&1; do
+            if [ "$i" -ge 5 ]; then
+              kill "$pid" >/dev/null 2>&1 || true
+              wait "$pid" >/dev/null 2>&1 || true
+              rm -f "$tmp"
+              echo "present: $npm_path (npm --version timed out after 5 seconds)"
+              return 0
+            fi
+            sleep 1
+            i=$((i + 1))
+          done
+          wait "$pid"
+          status=$?
+          cat "$tmp" 2>/dev/null || true
+          rm -f "$tmp"
+          return "$status"
+        }
+        \(rewritten)
+        """
     }
 
     private func rewriteApkNodeAliasLine(_ line: String) -> String {
