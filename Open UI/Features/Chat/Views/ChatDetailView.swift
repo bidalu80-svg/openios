@@ -3768,39 +3768,14 @@ private struct ImageGenerationPlaceholderView: View {
     }
 
     private func placeholder(phase: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        return shape
             .fill(backgroundFill(phase: phase))
             .overlay {
-                ZStack {
-                    AngularGradient(
-                        gradient: Gradient(colors: basePalette(phase: phase).map { $0.opacity(theme.isDark ? 0.48 : 0.46) }),
-                        center: UnitPoint(
-                            x: CGFloat(0.50 + 0.14 * sin(Double(phase) * .pi * 2)),
-                            y: CGFloat(0.48 + 0.12 * cos(Double(phase) * .pi * 2))
-                        ),
-                        startAngle: .degrees(Double(phase) * 360),
-                        endAngle: .degrees(Double(phase) * 360 + 360)
-                    )
-                    .blur(radius: 22)
-                    .opacity(theme.isDark ? 0.70 : 0.82)
-
-                    RadialGradient(
-                        colors: [
-                            Color.white.opacity(theme.isDark ? 0.12 : 0.22),
-                            Color.white.opacity(0.02)
-                        ],
-                        center: UnitPoint(
-                            x: CGFloat(0.50 + 0.22 * cos(Double(phase) * .pi * 2.0 + 0.65)),
-                            y: CGFloat(0.46 + 0.18 * sin(Double(phase) * .pi * 2.0 + 1.20))
-                        ),
-                        startRadius: 20,
-                        endRadius: 260
-                    )
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                colorOverlay(phase: phase)
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                shape
                     .strokeBorder(Color.white.opacity(theme.isDark ? 0.10 : 0.46), lineWidth: 0.8)
             }
             .aspectRatio(1, contentMode: .fit)
@@ -3823,7 +3798,7 @@ private struct ImageGenerationPlaceholderView: View {
 
     private func backgroundFill(phase: CGFloat) -> LinearGradient {
         let angle = Double(phase) * .pi * 2
-        LinearGradient(
+        return LinearGradient(
             colors: basePalette(phase: phase).map { $0.opacity(theme.isDark ? 0.84 : 0.76) },
             startPoint: UnitPoint(
                 x: CGFloat(0.50 + 0.36 * cos(angle - 0.35)),
@@ -3834,6 +3809,43 @@ private struct ImageGenerationPlaceholderView: View {
                 y: CGFloat(0.50 + 0.36 * sin(angle + .pi))
             )
         )
+    }
+
+    private func colorOverlay(phase: CGFloat) -> some View {
+        let cycle = Double(phase) * .pi * 2
+        let palette = basePalette(phase: phase).map {
+            $0.opacity(theme.isDark ? 0.48 : 0.46)
+        }
+        let angularCenter = UnitPoint(
+            x: CGFloat(0.50 + 0.14 * sin(cycle)),
+            y: CGFloat(0.48 + 0.12 * cos(cycle))
+        )
+        let highlightCenter = UnitPoint(
+            x: CGFloat(0.50 + 0.22 * cos(cycle + 0.65)),
+            y: CGFloat(0.46 + 0.18 * sin(cycle + 1.20))
+        )
+
+        return ZStack {
+            AngularGradient(
+                gradient: Gradient(colors: palette),
+                center: angularCenter,
+                startAngle: .degrees(Double(phase) * 360),
+                endAngle: .degrees(Double(phase) * 360 + 360)
+            )
+            .blur(radius: 22)
+            .opacity(theme.isDark ? 0.70 : 0.82)
+
+            RadialGradient(
+                colors: [
+                    Color.white.opacity(theme.isDark ? 0.12 : 0.22),
+                    Color.white.opacity(0.02)
+                ],
+                center: highlightCenter,
+                startRadius: 20,
+                endRadius: 260
+            )
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private func phase(for date: Date) -> CGFloat {

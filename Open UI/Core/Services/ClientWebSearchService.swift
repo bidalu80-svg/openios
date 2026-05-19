@@ -103,6 +103,7 @@ MAX_DOCS = 4
 MAX_PAGE_CHARS = 5000
 MAX_COMBINED_DOC_CHARS = 18000
 DEADLINE = time.time() + 38
+SEARCHED_AT = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
 def time_left(default=6):
@@ -116,6 +117,17 @@ def clean_text(value):
     value = re.sub(r"(?is)<[^>]+>", " ", value)
     value = re.sub(r"\s+", " ", value)
     return value.strip()
+
+
+def search_needs_freshness(query):
+    text = re.sub(r"\s+", "", query or "").lower()
+    terms = [
+        "最新", "今天", "今日", "现在", "目前", "刚刚", "实时", "新闻", "热搜", "现价",
+        "价格", "油价", "天气", "气温", "股价", "汇率", "版本", "发布", "更新",
+        "latest", "today", "current", "now", "news", "breaking", "price", "weather",
+        "stock", "exchange", "rate", "release", "version", "updated",
+    ]
+    return any(term in text for term in terms)
 
 
 def multiline_text(value):
@@ -148,6 +160,8 @@ def fetch(url, limit=900000):
             "User-Agent": USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,application/json;q=0.7,*/*;q=0.4",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
         },
     )
     with urllib.request.urlopen(request, timeout=time_left()) as response:
@@ -209,21 +223,32 @@ def is_search_navigation(url):
 
 
 def search_bing_rss(query):
-    url = "https://www.bing.com/search?" + urllib.parse.urlencode({"q": query, "format": "rss", "setlang": "zh-Hans"})
+    params = {"q": query, "format": "rss", "setlang": "zh-Hans", "_": str(int(time.time()))}
+    if search_needs_freshness(query):
+        params["filters"] = 'ex1:"ez1"'
+    url = "https://www.bing.com/search?" + urllib.parse.urlencode(params)
     text, _, _ = fetch(url, limit=350000)
     found = []
     for block in re.findall(r"(?is)<item\b[^>]*>(.*?)</item>", text):
         title = first(block, r"(?is)<title[^>]*>(.*?)</title>")
         link = first(block, r"(?is)<link[^>]*>(.*?)</link>")
         snippet = first(block, r"(?is)<description[^>]*>(.*?)</description>")
+        published = clean_text(first(block, r"(?is)<pubDate[^>]*>(.*?)</pubDate>"))
+        if published and snippet:
+            snippet = f"{published} - {snippet}"
         parsed = item(title, link, snippet)
         if parsed:
+            if published:
+                parsed["published_time"] = published
             found.append(parsed)
     return found
 
 
 def search_duckduckgo(query):
-    url = "https://lite.duckduckgo.com/lite/?" + urllib.parse.urlencode({"q": query})
+    params = {"q": query}
+    if search_needs_freshness(query):
+        params["df"] = "d"
+    url = "https://lite.duckduckgo.com/lite/?" + urllib.parse.urlencode(params)
     text, _, _ = fetch(url, limit=450000)
     found = []
     for href, body in re.findall(r'(?is)<a[^>]+class=["\']result-link["\'][^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', text):
@@ -240,7 +265,7 @@ def search_duckduckgo(query):
 
 
 def search_baidu(query):
-    url = "https://www.baidu.com/s?" + urllib.parse.urlencode({"wd": query, "rn": "8"})
+    url = "https://www.baidu.com/s?" + urllib.parse.urlencode({"wd": query, "rn": "8", "ie": "utf-8", "_": str(int(time.time()))})
     text, _, _ = fetch(url, limit=500000)
     found = []
     blocks = re.findall(r'(?is)<div[^>]+class=["\'][^"\']*\bresult\b[^"\']*["\'][^>]*>(.*?)</div>\s*</div>', text)
@@ -309,15 +334,20 @@ def fetch_document(search_item):
         sections.append("Published/Updated: " + published)
     if desc:
         sections.append("Description: " + desc)
+    if search_item.get("published_time"):
+        sections.append("Search result time: " + search_item.get("published_time", ""))
     sections.append("Content excerpt:\n" + excerpt)
     metadata = {
         "title": title,
         "source": final_url,
         "link": final_url,
         "provider": "local_alpine_search_page",
+        "searched_at": SEARCHED_AT,
     }
     if published:
         metadata["published_time"] = published
+    elif search_item.get("published_time"):
+        metadata["published_time"] = search_item.get("published_time", "")
     if search_item.get("snippet"):
         metadata["search_snippet"] = search_item.get("snippet", "")
     return {"content": "\n".join(sections), "metadata": metadata}
@@ -331,16 +361,22 @@ def summary_doc(search_item):
         lines.append("URL: " + search_item["link"])
     if search_item.get("snippet"):
         lines.append("Search snippet: " + search_item["snippet"])
+    if search_item.get("published_time"):
+        lines.append("Search result time: " + search_item["published_time"])
     if not lines:
         return None
+    metadata = {
+        "title": search_item.get("title", ""),
+        "source": search_item.get("link", ""),
+        "link": search_item.get("link", ""),
+        "provider": "local_alpine_search_summary",
+        "searched_at": SEARCHED_AT,
+    }
+    if search_item.get("published_time"):
+        metadata["published_time"] = search_item.get("published_time", "")
     return {
         "content": "\n".join(lines),
-        "metadata": {
-            "title": search_item.get("title", ""),
-            "source": search_item.get("link", ""),
-            "link": search_item.get("link", ""),
-            "provider": "local_alpine_search_summary",
-        },
+        "metadata": metadata,
     }
 
 

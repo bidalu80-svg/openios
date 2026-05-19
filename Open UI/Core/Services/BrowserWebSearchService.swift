@@ -57,10 +57,16 @@ final class BrowserWebSearchService: NSObject {
 
     private func searchItems(for query: String) async -> [WebSearchResultItem] {
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let needsFreshness = Self.searchNeedsFreshness(query)
         let urls = [
-            "https://www.bing.com/search?q=\(encoded)&setlang=zh-Hans",
-            "https://duckduckgo.com/html/?q=\(encoded)",
-            "https://www.baidu.com/s?wd=\(encoded)&rn=10"
+            needsFreshness
+                ? "https://www.bing.com/search?q=\(encoded)&setlang=zh-Hans&filters=ex1%3a%22ez1%22&_=\(timestamp)"
+                : "https://www.bing.com/search?q=\(encoded)&setlang=zh-Hans&_=\(timestamp)",
+            needsFreshness
+                ? "https://duckduckgo.com/html/?q=\(encoded)&df=d"
+                : "https://duckduckgo.com/html/?q=\(encoded)",
+            "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)"
         ]
 
         for rawURL in urls {
@@ -107,16 +113,23 @@ final class BrowserWebSearchService: NSObject {
         } else if let snippet = item.snippet, !snippet.isEmpty {
             sections.append("Search snippet: \(snippet)")
         }
+        if !snapshot.published.isEmpty {
+            sections.append("Published/Updated: \(snapshot.published)")
+        }
         sections.append("Content excerpt:\n\(String(snapshot.text.prefix(5_000)))")
 
         var metadata = [
             "title": title,
             "source": snapshot.url.isEmpty ? rawLink : snapshot.url,
             "link": snapshot.url.isEmpty ? rawLink : snapshot.url,
-            "provider": "wkwebview_browser_page"
+            "provider": "wkwebview_browser_page",
+            "searched_at": ISO8601DateFormatter().string(from: Date())
         ]
         if let snippet = item.snippet, !snippet.isEmpty {
             metadata["search_snippet"] = snippet
+        }
+        if !snapshot.published.isEmpty {
+            metadata["published_time"] = snapshot.published
         }
         return WebSearchDocument(content: sections.joined(separator: "\n"), metadata: metadata)
     }
@@ -133,7 +146,8 @@ final class BrowserWebSearchService: NSObject {
                 "title": item.title ?? item.link ?? "Search result",
                 "source": item.link ?? "",
                 "link": item.link ?? "",
-                "provider": "wkwebview_browser_summary"
+                "provider": "wkwebview_browser_summary",
+                "searched_at": ISO8601DateFormatter().string(from: Date())
             ]
         )
     }
@@ -145,11 +159,14 @@ final class BrowserWebSearchService: NSObject {
         navigationContinuation = nil
 
         var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue(
             "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
             forHTTPHeaderField: "User-Agent"
         )
         request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
 
         return await withCheckedContinuation { continuation in
             navigationContinuation = continuation
@@ -259,7 +276,9 @@ final class BrowserWebSearchService: NSObject {
               if (!link || blocked(link)) continue;
               const title = text(anchor) || text(node.querySelector && node.querySelector('h2,h3')) || link;
               const snippetNode = node.querySelector && node.querySelector('.result__snippet, .b_caption p, .c-abstract, .content-right, .c-span-last, .cos-color-text, p, .snippet, .content, .result-snippet');
-              const snippet = text(snippetNode);
+              const dateNode = node.querySelector && node.querySelector('time, .news_dt, .c-color-gray2, .result__timestamp, .b_factrow, [aria-label*="Published"], [aria-label*="Updated"]');
+              const dateText = text(dateNode);
+              const snippet = [dateText, text(snippetNode)].filter(Boolean).join(' - ');
               candidates.push({ title, link, snippet });
             }
           }
@@ -306,9 +325,20 @@ final class BrowserWebSearchService: NSObject {
           const main = clone.querySelector('article, main, [role="main"]') || clone;
           const title = clean(document.title || document.querySelector('h1')?.innerText || '');
           const desc = clean(document.querySelector('meta[name="description"]')?.content || document.querySelector('meta[property="og:description"]')?.content || '');
+          const published = clean(
+            document.querySelector('meta[property="article:published_time"]')?.content ||
+            document.querySelector('meta[property="article:modified_time"]')?.content ||
+            document.querySelector('meta[name="date"]')?.content ||
+            document.querySelector('meta[name="pubdate"]')?.content ||
+            document.querySelector('meta[itemprop="datePublished"]')?.content ||
+            document.querySelector('meta[itemprop="dateModified"]')?.content ||
+            document.querySelector('time[datetime]')?.getAttribute('datetime') ||
+            document.querySelector('time')?.innerText ||
+            ''
+          );
           let text = (main.innerText || main.textContent || '').replace(/\\n{3,}/g, '\\n\\n');
           text = text.split('\\n').map(line => line.trim()).filter(line => line.length > 1).join('\\n');
-          return JSON.stringify({ title, url: location.href, description: desc, text: text.slice(0, 9000) });
+          return JSON.stringify({ title, url: location.href, description: desc, published, text: text.slice(0, 9000) });
         })();
         """
         guard let json = await evaluateString(script),
@@ -320,6 +350,7 @@ final class BrowserWebSearchService: NSObject {
             title: object["title"] as? String ?? "",
             url: object["url"] as? String ?? "",
             description: object["description"] as? String ?? "",
+            published: object["published"] as? String ?? "",
             text: object["text"] as? String ?? ""
         )
     }
@@ -342,6 +373,19 @@ final class BrowserWebSearchService: NSObject {
         query
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func searchNeedsFreshness(_ query: String) -> Bool {
+        let normalized = query
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return [
+            "最新", "今天", "今日", "现在", "目前", "刚刚", "实时", "新闻", "热搜", "现价",
+            "价格", "油价", "天气", "气温", "股价", "汇率", "版本", "发布", "更新",
+            "latest", "today", "current", "now", "news", "breaking", "price", "weather",
+            "stock", "exchange", "rate", "release", "version", "updated"
+        ].contains { normalized.contains($0) }
     }
 
     private static func isBlockedDocumentURL(_ url: URL) -> Bool {
@@ -383,5 +427,6 @@ private struct BrowserPageSnapshot {
     let title: String
     let url: String
     let description: String
+    let published: String
     let text: String
 }

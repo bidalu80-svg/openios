@@ -10095,8 +10095,9 @@ final class ChatViewModel {
             if let apiClient = manager?.apiClient {
                 queries = await webSearchQueries(for: query, userText: text, apiClient: apiClient, modelId: modelId)
             } else {
-                queries = Self.mergeSearchQueries(
-                    original: Self.preciseFallbackSearchQuery(for: text, originalQuery: query),
+                queries = Self.freshnessAwareWebSearchQueries(
+                    userText: text,
+                    originalQuery: query,
                     generated: Self.fallbackWebSearchQueries(for: text, originalQuery: query),
                     limit: 4
                 )
@@ -10185,7 +10186,12 @@ final class ChatViewModel {
         let serverConfig = activeChatStore?.serverTaskConfig ?? .default
         let fallbackQueries = Self.fallbackWebSearchQueries(for: userText, originalQuery: query)
         guard serverConfig.enableSearchQueryGeneration else {
-            return Self.mergeSearchQueries(original: Self.preciseFallbackSearchQuery(for: userText, originalQuery: query), generated: fallbackQueries, limit: 4)
+            return Self.freshnessAwareWebSearchQueries(
+                userText: userText,
+                originalQuery: query,
+                generated: fallbackQueries,
+                limit: 4
+            )
         }
 
         let taskModel = [
@@ -10203,14 +10209,20 @@ final class ChatViewModel {
                 context: recentUserContextForSearch(excluding: query),
                 maxQueries: 3
             )
-            return Self.mergeSearchQueries(
-                original: Self.preciseFallbackSearchQuery(for: userText, originalQuery: query),
+            return Self.freshnessAwareWebSearchQueries(
+                userText: userText,
+                originalQuery: query,
                 generated: generated + fallbackQueries,
                 limit: 4
             )
         } catch {
             logger.debug("Search query generation failed: \(error.localizedDescription)")
-            return Self.mergeSearchQueries(original: Self.preciseFallbackSearchQuery(for: userText, originalQuery: query), generated: fallbackQueries, limit: 4)
+            return Self.freshnessAwareWebSearchQueries(
+                userText: userText,
+                originalQuery: query,
+                generated: fallbackQueries,
+                limit: 4
+            )
         }
     }
 
@@ -10366,7 +10378,12 @@ final class ChatViewModel {
 
         do {
             let fallbackQueries = Self.fallbackWebSearchQueries(for: request.query, originalQuery: request.query)
-            let queries = Self.mergeSearchQueries(original: request.query, generated: request.queries + fallbackQueries, limit: 4)
+            let queries = Self.freshnessAwareWebSearchQueries(
+                userText: request.query,
+                originalQuery: request.query,
+                generated: request.queries + fallbackQueries,
+                limit: 4
+            )
             appendStatusUpdate(
                 id: resultMessageId,
                 status: ChatStatusUpdate(
@@ -10849,43 +10866,51 @@ final class ChatViewModel {
     private func shouldRetryWebSearch(_ result: WebSearchResponse, originalQuery: String) -> Bool {
         if result.loadedCount == 0 && result.items.count < 3 { return true }
         if result.items.count < 2 && result.docs.count < 2 { return true }
-        let normalized = originalQuery.lowercased()
-        let freshnessNeeded = [
-            "最新", "今天", "今日", "现在", "目前", "刚刚", "新闻", "热搜", "价格", "油价",
-            "天气", "股价", "汇率", "版本", "发布", "latest", "today", "current", "news",
-            "price", "release", "version"
-        ].contains { normalized.contains($0) }
-        return freshnessNeeded && !hasFreshWebSearchEvidence(result)
+        return Self.webSearchNeedsFreshness(originalQuery) && !hasFreshWebSearchEvidence(result)
     }
 
     private func hasFreshWebSearchEvidence(_ result: WebSearchResponse) -> Bool {
-        let currentYear = Calendar.current.component(.year, from: Date())
-        let freshYears = [(currentYear), (currentYear - 1)].map(String.init)
+        let now = Date()
+        let calendar = Calendar.current
+        let currentYear = calendar.component(.year, from: now)
+        let currentMonth = calendar.component(.month, from: now)
+        let currentDay = calendar.component(.day, from: now)
+        let currentYearText = String(currentYear)
+        let localizedMonthText = "\(currentYear)年\(currentMonth)月"
+        let localizedDateText = "\(currentYear)年\(currentMonth)月\(currentDay)日"
+        let isoMonthText = String(format: "%04d-%02d", currentYear, currentMonth)
+        let isoDateText = String(format: "%04d-%02d-%02d", currentYear, currentMonth, currentDay)
         let haystack = (
             result.items.map { [$0.title, $0.snippet, $0.link].compactMap { $0 }.joined(separator: " ") }
             + result.docs.map { doc in
-                let metadata = doc.metadata.values.joined(separator: " ")
-                return metadata + " " + String(doc.content.prefix(1_500))
+                let metadata = doc.metadata
+                    .filter { $0.key != "searched_at" && $0.key != "provider" }
+                    .map { $0.value }
+                    .joined(separator: " ")
+                return metadata + " " + String(doc.content.prefix(900))
             }
         )
         .joined(separator: "\n")
         .lowercased()
-        if freshYears.contains(where: { haystack.contains($0) }) { return true }
-        return ["today", "latest", "current", "updated", "published", "今天", "今日", "最新", "更新", "发布"].contains {
+        if [localizedDateText, isoDateText, localizedMonthText, isoMonthText, currentYearText].contains(where: { haystack.contains($0.lowercased()) }) {
+            return true
+        }
+        return ["today", "breaking", "last updated", "今天", "今日", "实时", "刚刚", "24小时"].contains {
             haystack.contains($0)
         }
     }
 
     private static func retryWebSearchQueries(original: String, existing: [String]) -> [String] {
-        let today = DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)
+        let today = localizedWebSearchDateText()
+        let isoDate = isoWebSearchDateText()
         let currentYear = Calendar.current.component(.year, from: Date())
         let precise = preciseFallbackSearchQuery(for: original, originalQuery: original)
         return mergeSearchQueries(
             original: "\(precise) 最新 \(today)",
             generated: [
-                "\(precise) official latest",
-                "\(precise) 官方 最新",
-                "\(precise) news today",
+                "\(precise) 最新 \(isoDate)",
+                "\(precise) 官方 更新 \(currentYear)",
+                "\(precise) news today \(currentYear)",
                 "\(precise) \(currentYear)"
             ],
             limit: 4
@@ -10927,6 +10952,77 @@ final class ChatViewModel {
             docs: Array(docs.prefix(8)),
             loadedCount: primary.loadedCount + retry.loadedCount
         )
+    }
+
+    private static func freshnessAwareWebSearchQueries(userText: String, originalQuery: String, generated: [String], limit: Int) -> [String] {
+        let precise = preciseFallbackSearchQuery(for: userText, originalQuery: originalQuery)
+        guard webSearchNeedsFreshness(userText) || webSearchNeedsFreshness(originalQuery) else {
+            return mergeSearchQueries(original: precise, generated: generated, limit: limit)
+        }
+
+        let today = localizedWebSearchDateText()
+        let isoDate = isoWebSearchDateText()
+        let currentYear = Calendar.current.component(.year, from: Date())
+        let hasCJK = containsCJK(precise)
+        let original = hasCJK ? "\(precise) 最新 \(today)" : "\(precise) latest \(currentYear)"
+        let freshGenerated = hasCJK
+            ? [
+                "\(precise) 最新 \(isoDate)",
+                "\(precise) 官方 更新 \(currentYear)",
+                "\(precise) 今天 24小时",
+                "\(precise) \(currentYear)"
+            ]
+            : [
+                "\(precise) latest \(isoDate)",
+                "\(precise) official updated \(currentYear)",
+                "\(precise) today last 24 hours",
+                "\(precise) \(currentYear)"
+            ]
+        return mergeSearchQueries(original: original, generated: freshGenerated + generated, limit: limit)
+    }
+
+    private static func webSearchNeedsFreshness(_ text: String) -> Bool {
+        let normalized = text
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+        return [
+            "最新", "今天", "今日", "现在", "目前", "刚刚", "新闻", "热搜", "实时", "现价",
+            "价格", "油价", "天气", "气温", "股价", "汇率", "版本", "发布", "更新",
+            "latest", "today", "current", "now", "news", "breaking", "price", "weather",
+            "stock", "exchange", "rate", "release", "version", "updated"
+        ].contains { normalized.contains($0) }
+    }
+
+    private static func localizedWebSearchDateText() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy年M月d日"
+        return formatter.string(from: Date())
+    }
+
+    private static func isoWebSearchDateText() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
+    private static func webSearchTimestampText() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy年M月d日 HH:mm:ss zzz"
+        return formatter.string(from: Date())
+    }
+
+    private static func containsCJK(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            (0x4E00...0x9FFF).contains(Int(scalar.value))
+        }
     }
 
     private static func mergeSearchQueries(original: String, generated: [String], limit: Int) -> [String] {
@@ -11189,12 +11285,13 @@ final class ChatViewModel {
 
         [内置浏览器联网搜索结果]
         查询：\(query)
+        搜索时间：\(Self.webSearchTimestampText())
         实际搜索词：
         \(queryLines)
 
         以下结果由 Iexa 客户端在发送本轮消息前，通过内置 WKWebView 浏览器搜索/读取网页取得；如果浏览器结果不足，客户端会合并本地 Alpine 抓取结果。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果。回答要求：
         - 先直接给结论，再补充必要来源和时间。
-        - 天气、油价、新闻、价格、版本等实时问题，必须说清楚信息日期/发布时间；资料不够精确就明确说“未在搜索结果中找到精确值”，不要编。
+        - 天气、油价、新闻、价格、版本等实时问题，必须说清楚信息日期/发布时间；如果结果没有当前日期/当前年份证据，先继续细化搜索，仍没有就明确说“未在搜索结果中找到精确值”，不要编。
         - 如果结果只是搜索页/中转页/摘要，或没有打开到可用正文，不要让用户自己去搜；请换更具体的关键词继续请求客户端搜索，或明确说明缺少可验证来源。
         - 如果用户明确让你“那你搜啊/你自己搜”，不要回答操作步骤给用户；应当直接基于搜索资料回答，资料不足就继续细化搜索。
         - 引用来源时使用普通链接或来源标题，不要输出 cite turn0search 之类隐藏引用标记，也不要输出无法显示的方框字符。
