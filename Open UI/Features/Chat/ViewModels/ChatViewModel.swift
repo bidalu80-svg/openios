@@ -13625,14 +13625,16 @@ final class ChatViewModel {
                 occurredAt: .now
             )
         ] : nil)
+        // Tool execution must see the raw assistant content; display cleanup can rewrite spaces inside JSON strings.
         var completedAssistantContentForAgent: String?
+        var completedAssistantDisplayContent: String?
 
         if isStreaming && streamingStore.streamingMessageId == id {
             // ── STREAMING PATH ──
             // Route content to the isolated StreamingContentStore.
             // This avoids mutating conversation.messages on every token,
             // which would invalidate ALL message views via @Observable.
-            streamingStore.updateContent(displayContent, displayContent: renderedDisplayContent)
+            streamingStore.updateContent(content, displayContent: renderedDisplayContent)
             if let sources { streamingStore.appendSources(sources) }
             if let statusHistory = effectiveStatusHistory {
                 for s in statusHistory { streamingStore.appendStatus(s) }
@@ -13648,6 +13650,7 @@ final class ChatViewModel {
                 // Streaming just ended — flush store to conversation
                 let result = streamingStore.endStreaming()
                 let finalContent = displayContent.isEmpty ? result.content : displayContent
+                let agentContent = content.isEmpty ? result.content : content
                 conversation?.messages[index].content = finalContent
                 conversation?.messages[index].isStreaming = false
                 // Merge sources from store into message
@@ -13685,7 +13688,8 @@ final class ChatViewModel {
                         if !result.statusHistory.isEmpty { node.statusHistory = result.statusHistory }
                     }
                 }
-                completedAssistantContentForAgent = finalContent
+                completedAssistantContentForAgent = agentContent
+                completedAssistantDisplayContent = finalContent
             } else {
                 // Normal non-streaming update (e.g., error before streaming started)
                 conversation?.messages[index].content = renderedDisplayContent
@@ -13698,7 +13702,8 @@ final class ChatViewModel {
                     }
                 }
                 if !isStreaming {
-                    completedAssistantContentForAgent = displayContent
+                    completedAssistantContentForAgent = content.isEmpty ? displayContent : content
+                    completedAssistantDisplayContent = displayContent
                 }
             }
             if let sources { conversation?.messages[index].sources = sources }
@@ -13722,9 +13727,10 @@ final class ChatViewModel {
         }
 
         if shouldHandleLocalAlpineDisplay,
-           let alpineContent = completedAssistantContentForAgent {
-            let visibleAlpineContent = LocalAlpineAgentService.visibleContent(from: alpineContent)
-            if visibleAlpineContent != alpineContent,
+           completedAssistantContentForAgent != nil,
+           let alpineDisplayContent = completedAssistantDisplayContent {
+            let visibleAlpineContent = LocalAlpineAgentService.visibleContent(from: alpineDisplayContent)
+            if visibleAlpineContent != alpineDisplayContent,
                let index = conversation?.messages.firstIndex(where: { $0.id == id }) {
                 conversation?.messages[index].content = visibleAlpineContent
                 conversation?.history.updateNode(id: id) { node in
@@ -13737,11 +13743,12 @@ final class ChatViewModel {
         if shouldHandleLocalAlpineDisplay,
            let workspaceContent = completedAssistantContentForAgent,
            workspaceContent.localizedCaseInsensitiveContains("iexa_workspace") {
-            var visibleWorkspaceContent = LocalWorkspaceAgentService.visibleContent(from: workspaceContent)
+            let workspaceDisplayContent = completedAssistantDisplayContent ?? displayContent
+            var visibleWorkspaceContent = LocalWorkspaceAgentService.visibleContent(from: workspaceDisplayContent)
             if visibleWorkspaceContent == "正在执行本地工作区操作..." {
                 visibleWorkspaceContent = "正在改用本地 Alpine 执行..."
             }
-            if visibleWorkspaceContent != workspaceContent,
+            if visibleWorkspaceContent != workspaceDisplayContent,
                let index = conversation?.messages.firstIndex(where: { $0.id == id }) {
                 conversation?.messages[index].content = visibleWorkspaceContent
                 conversation?.history.updateNode(id: id) { node in
@@ -13754,8 +13761,9 @@ final class ChatViewModel {
         if let workspaceContent = completedAssistantContentForAgent,
            workspaceContent.localizedCaseInsensitiveContains("iexa_workspace"),
            shouldExecuteLocalWorkspaceAgentForCurrentRequest() {
-            let visibleWorkspaceContent = LocalWorkspaceAgentService.visibleContent(from: workspaceContent)
-            if visibleWorkspaceContent != workspaceContent,
+            let workspaceDisplayContent = completedAssistantDisplayContent ?? displayContent
+            let visibleWorkspaceContent = LocalWorkspaceAgentService.visibleContent(from: workspaceDisplayContent)
+            if visibleWorkspaceContent != workspaceDisplayContent,
                let index = conversation?.messages.firstIndex(where: { $0.id == id }) {
                 conversation?.messages[index].content = visibleWorkspaceContent
                 conversation?.history.updateNode(id: id) { node in
@@ -13767,8 +13775,9 @@ final class ChatViewModel {
 
         if let nativeToolContent = completedAssistantContentForAgent,
            LocalNativeToolService.containsNativeToolBlock(nativeToolContent) {
-            let visibleNativeContent = LocalNativeToolService.visibleContent(from: nativeToolContent)
-            if visibleNativeContent != nativeToolContent,
+            let nativeDisplayContent = completedAssistantDisplayContent ?? displayContent
+            let visibleNativeContent = LocalNativeToolService.visibleContent(from: nativeDisplayContent)
+            if visibleNativeContent != nativeDisplayContent,
                let index = conversation?.messages.firstIndex(where: { $0.id == id }) {
                 conversation?.messages[index].content = visibleNativeContent
                 conversation?.history.updateNode(id: id) { node in
