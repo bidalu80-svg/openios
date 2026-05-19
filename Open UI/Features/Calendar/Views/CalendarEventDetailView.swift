@@ -8,8 +8,12 @@ struct CalendarEventDetailView: View {
 
     @State private var showDeleteConfirm = false
 
+    private var displayTitle: String {
+        CalendarDisplayLocalizer.eventTitle(event)
+    }
+
     private var calendarName: String {
-        vm.calendars.first(where: { $0.id == event.calendarId })?.name ?? "日历"
+        CalendarDisplayLocalizer.calendarName(vm.calendars.first(where: { $0.id == event.calendarId }))
     }
 
     private var calendarColor: Color {
@@ -65,7 +69,7 @@ struct CalendarEventDetailView: View {
                                 .frame(maxHeight: .infinity)
 
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(event.title)
+                                Text(displayTitle)
                                     .font(.title2.weight(.semibold))
                                     .foregroundStyle(theme.textPrimary)
 
@@ -90,15 +94,15 @@ struct CalendarEventDetailView: View {
 
                         if event.rrule != nil {
                             Divider().background(theme.divider).padding(.leading, 56)
-                            detailRow(icon: "repeat", title: "重复", value: event.rrule ?? "")
+                            detailRow(icon: "repeat", title: "重复", value: CalendarDisplayLocalizer.recurrence(event.rrule) ?? "")
                         }
 
-                        if let loc = event.location, !loc.isEmpty {
+                        if let loc = CalendarDisplayLocalizer.location(event.location) {
                             Divider().background(theme.divider).padding(.leading, 56)
                             detailRow(icon: "mappin", title: "地点", value: loc)
                         }
 
-                        if let desc = event.description, !desc.isEmpty {
+                        if let desc = CalendarDisplayLocalizer.note(event.description) {
                             Divider().background(theme.divider).padding(.leading, 56)
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack(alignment: .top, spacing: 16) {
@@ -167,7 +171,7 @@ struct CalendarEventDetailView: View {
                 }
             }
             .confirmationDialog(
-                "删除“\(event.title)”？",
+                "删除“\(displayTitle)”？",
                 isPresented: $showDeleteConfirm,
                 titleVisibility: .visible
             ) {

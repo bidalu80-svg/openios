@@ -40,9 +40,40 @@ private enum LunarCalendarDisplay {
         return daySymbols[day]
     }
 
+    static func fullLunarText(for date: Date) -> String {
+        let components = chineseCalendar.dateComponents([.month, .day, .isLeapMonth], from: date)
+        guard let month = components.month,
+              let day = components.day,
+              month > 0,
+              month < monthSymbols.count,
+              day > 0,
+              day < daySymbols.count else {
+            return ""
+        }
+        let leapPrefix = components.isLeapMonth == true ? "闰" : ""
+        return "农历\(leapPrefix)\(monthSymbols[month])\(daySymbols[day])"
+    }
+
+    static func monthAwareCompactText(for date: Date) -> String {
+        let components = chineseCalendar.dateComponents([.month, .day, .isLeapMonth], from: date)
+        guard let month = components.month,
+              let day = components.day,
+              month > 0,
+              month < monthSymbols.count,
+              day > 0,
+              day < daySymbols.count else {
+            return ""
+        }
+        if day == 1 {
+            let leapPrefix = components.isLeapMonth == true ? "闰" : ""
+            return "农历\(leapPrefix)\(monthSymbols[month])"
+        }
+        return daySymbols[day]
+    }
+
     static func fullDayText(for date: Date) -> String {
         let gregorian = gregorianMonthDayFormatter.string(from: date)
-        let lunar = compactDayText(for: date)
+        let lunar = fullLunarText(for: date)
         guard !lunar.isEmpty else { return gregorian }
         return "\(gregorian) \(lunar)"
     }
@@ -457,7 +488,7 @@ private struct MiniMonthView: View {
                                         .font(.system(size: 9))
                                         .foregroundStyle(isToday ? .white : theme.textPrimary)
                                     if !isToday {
-                                        Text(LunarCalendarDisplay.compactDayText(for: date))
+                                        Text(LunarCalendarDisplay.monthAwareCompactText(for: date))
                                             .font(.system(size: 5.5, weight: .medium))
                                             .foregroundStyle(theme.textTertiary)
                                             .lineLimit(1)
@@ -528,7 +559,7 @@ private struct MonthView: View {
                     Text(fmt.string(from: vm.selectedDate))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(theme.textSecondary)
-                    Text(LunarCalendarDisplay.compactDayText(for: vm.selectedDate))
+                    Text(LunarCalendarDisplay.fullLunarText(for: vm.selectedDate))
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(theme.textTertiary)
                 }
@@ -583,7 +614,7 @@ private struct MonthView: View {
                                 .fill(calendar.swiftUIColor)
                                 .frame(width: 10, height: 10)
                                 .opacity(vm.visibleCalendarIds.contains(calendar.id) ? 1 : 0.3)
-                            Text(calendar.name)
+                            Text(CalendarDisplayLocalizer.calendarName(calendar))
                                 .font(.caption)
                                 .foregroundStyle(
                                     vm.visibleCalendarIds.contains(calendar.id)
@@ -670,7 +701,7 @@ private struct WeekView: View {
                                             .fill((event.swiftUIColor ?? vm.color(for: event.calendarId)).opacity(0.85))
                                             .overlay(alignment: .topLeading) {
                                                 VStack(alignment: .leading, spacing: 1) {
-                                                    Text(event.title)
+                                                    Text(CalendarDisplayLocalizer.eventTitle(event))
                                                         .font(.system(size: 10, weight: .semibold))
                                                         .foregroundStyle(.white)
                                                         .lineLimit(1)
@@ -757,7 +788,7 @@ private struct WeekView: View {
                                 .font(.system(size: 15, weight: isToday ? .bold : .regular))
                                 .foregroundStyle(isToday ? .white : (isSelected ? theme.brandPrimary : theme.textPrimary))
                         }
-                        Text(LunarCalendarDisplay.compactDayText(for: day))
+                        Text(LunarCalendarDisplay.monthAwareCompactText(for: day))
                             .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(isToday ? theme.brandPrimary : theme.textTertiary)
                             .lineLimit(1)
@@ -806,7 +837,7 @@ private struct WeekView: View {
                 HStack(spacing: 4) {
                     ForEach(allDayEvents, id: \.id) { event in
                         Button { vm.selectedEvent = event } label: {
-                            Text(event.title)
+                            Text(CalendarDisplayLocalizer.eventTitle(event))
                                 .font(.caption2.weight(.medium))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 7)
@@ -1022,7 +1053,7 @@ private struct DayView: View {
                                     .font(.system(size: 15, weight: isSelected ? .bold : .regular))
                                     .foregroundStyle(isSelected ? .white : (isToday ? theme.brandPrimary : theme.textPrimary))
                             }
-                            Text(LunarCalendarDisplay.compactDayText(for: day))
+                            Text(LunarCalendarDisplay.monthAwareCompactText(for: day))
                                 .font(.system(size: 9, weight: .medium))
                                 .foregroundStyle(theme.textTertiary)
                                 .lineLimit(1)
@@ -1061,7 +1092,7 @@ private struct DayView: View {
                     Button {
                         vm.selectedEvent = event
                     } label: {
-                        Text(event.title)
+                        Text(CalendarDisplayLocalizer.eventTitle(event))
                             .font(.caption.weight(.medium))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 10)
@@ -1098,7 +1129,7 @@ private struct DayView: View {
                     .frame(width: 4)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(event.title)
+                    Text(CalendarDisplayLocalizer.eventTitle(event))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(2)
@@ -1284,7 +1315,7 @@ private struct NativeCalendarView: UIViewRepresentable {
                 }
             }
 
-            let lunarText = LunarCalendarDisplay.compactDayText(for: date)
+            let lunarText = LunarCalendarDisplay.monthAwareCompactText(for: date)
             let dotImage = colors.isEmpty ? nil : createDotImage(colors: colors)
             guard !lunarText.isEmpty || dotImage != nil else { return nil }
 
@@ -1401,7 +1432,7 @@ struct CalendarEventRow: View {
                 .frame(width: 3)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(event.title)
+                Text(CalendarDisplayLocalizer.eventTitle(event))
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)

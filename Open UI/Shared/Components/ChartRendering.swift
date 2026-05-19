@@ -946,15 +946,9 @@ private func makeBins(_ values: [Double], targetBins: Int) -> [HistogramBin] {
 
 // MARK: - Highlighted Source View (Headerless)
 
-/// A headerless syntax-highlighted code view using Highlightr.
-/// Used inside `ChartPreviewView` and `HTMLPreviewView` when they
-/// already provide their own toolbar (to avoid the double header
-/// that `DefaultCodeBlockStyle` would produce).
-///
-/// **Performance:** Shows plain monospaced text immediately (zero stutter),
-/// then highlights on a background thread and fades in the colored version.
-/// This prevents the scroll hitch that occurs when Highlightr runs
-/// synchronously on the main thread for large code blocks.
+/// A headerless syntax-highlighted code view.
+/// Used inside previews that already provide their own toolbar, so all source
+/// displays share the same indentation-preserving renderer as chat code blocks.
 struct HighlightedSourceView: View {
     let code: String
     let language: String
@@ -965,10 +959,6 @@ struct HighlightedSourceView: View {
     /// pass `.infinity` for fullscreen.
     var maxHeight: CGFloat = 400
 
-    @State private var highlightedCode: AttributedString?
-    @State private var lastHighlightedScheme: ColorScheme?
-    @Environment(\.colorScheme) private var colorScheme
-
     private let maxInlineChars = 3000
 
     private var truncatedCode: String {
@@ -978,36 +968,19 @@ struct HighlightedSourceView: View {
     }
 
     var body: some View {
-        ScrollView([.horizontal, .vertical]) {
-            Group {
-                if let highlighted = highlightedCode {
-                    Text(highlighted)
-                } else {
-                    Text(truncatedCode)
-                        .foregroundStyle(.primary)
+        Group {
+            if maxHeight.isFinite {
+                SourceCodeTextView(code: truncatedCode, language: language, maxHeight: maxHeight)
+            } else {
+                GeometryReader { proxy in
+                    SourceCodeTextView(
+                        code: truncatedCode,
+                        language: language,
+                        maxHeight: max(240, proxy.size.height)
+                    )
                 }
             }
-            .scaledFont(size: 13, design: .monospaced)
-            .lineSpacing(4)
-            .fixedSize(horizontal: true, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(16)
-            .textSelection(.enabled)
         }
-        .frame(maxHeight: maxHeight)
         .background(Color(.secondarySystemBackground))
-        .task(id: colorScheme) {
-            guard lastHighlightedScheme != colorScheme else { return }
-            await highlightAsync()
-        }
-    }
-
-    /// Plain monospaced text — Highlightr removed. Code blocks in the main
-    /// chat use the library's built-in HighlightSwift-based lazy highlighting.
-    /// This source view (chart/HTML "View Source") just shows plain text.
-    private func highlightAsync() async {
-        // No highlighting — plain monospaced text
-        highlightedCode = nil
-        lastHighlightedScheme = colorScheme
     }
 }

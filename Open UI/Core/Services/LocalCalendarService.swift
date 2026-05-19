@@ -197,7 +197,7 @@ final class LocalCalendarService {
             id: event.eventIdentifier ?? event.calendarItemIdentifier,
             calendarId: event.calendar.calendarIdentifier,
             userId: "local",
-            title: event.title ?? "Untitled Event",
+            title: event.title ?? "未命名事件",
             description: event.notes,
             startAt: event.startDate,
             endAt: event.endDate,

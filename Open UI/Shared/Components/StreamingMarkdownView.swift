@@ -1107,6 +1107,7 @@ private struct StandardCodeBlockView: View {
 
     @Environment(\.theme) private var theme
     @State private var didCopy = false
+    @State private var showFullCode = false
 
     private var displayLanguage: String {
         let value = language.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1173,12 +1174,23 @@ private struct StandardCodeBlockView: View {
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.plain)
+
+                Button {
+                    showFullCode = true
+                    Haptics.play(.light)
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .scaledFont(size: 14, weight: .semibold)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.94))
 
-            SourceCodeTextView(code: visibleCode, maxHeight: 480)
+            SourceCodeTextView(code: visibleCode, language: displayLanguage, maxHeight: 480)
                 .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.22 : 0.42))
         }
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -1186,30 +1198,255 @@ private struct StandardCodeBlockView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.50 : 0.65), lineWidth: 0.8)
         )
+        .sheet(isPresented: $showFullCode) {
+            FullCodeView(code: code, language: displayLanguage)
+        }
     }
 }
 
 struct SourceCodeTextView: View {
     let code: String
+    var language: String? = nil
     var maxHeight: CGFloat = 420
+
+    @Environment(\.theme) private var theme
 
     private var visibleCode: String {
         code.isEmpty ? " " : code
     }
 
+    private var normalizedLanguage: String {
+        let value = language?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? "text" : value
+    }
+
     var body: some View {
-        ScrollView([.horizontal, .vertical], showsIndicators: true) {
-            Text(verbatim: visibleCode)
-                .scaledFont(size: 13, design: .monospaced)
-                .lineSpacing(4)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: true, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(16)
-                .textSelection(.enabled)
-        }
+        HighlightedSourceTextView(
+            text: visibleCode,
+            language: normalizedLanguage,
+            textColor: UIColor(theme.codeText),
+            font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+            lineSpacing: 3.5,
+            isDarkMode: theme.isDark,
+            maximumHeight: maxHeight
+        )
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(maxHeight: maxHeight)
+    }
+}
+
+private struct HighlightedSourceTextView: UIViewRepresentable {
+    let text: String
+    let language: String
+    let textColor: UIColor
+    let font: UIFont
+    let lineSpacing: CGFloat
+    let isDarkMode: Bool
+    let maximumHeight: CGFloat
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = NoCaretSourceTextView()
+        textView.selectionEnabled = true
+        textView.backgroundColor = .clear
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isScrollEnabled = true
+        textView.alwaysBounceVertical = true
+        textView.scrollsToTop = false
+        textView.dataDetectorTypes = []
+        textView.showsVerticalScrollIndicator = true
+        textView.showsHorizontalScrollIndicator = false
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+        textView.textContainer.widthTracksTextView = true
+        textView.textContainer.lineBreakMode = .byWordWrapping
+        textView.layoutManager.allowsNonContiguousLayout = false
+        textView.adjustsFontForContentSizeCategory = false
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textView.setContentCompressionResistancePriority(.required, for: .vertical)
+        textView.setContentHuggingPriority(.required, for: .vertical)
+        textView.panGestureRecognizer.isEnabled = true
+        return textView
+    }
+
+    func updateUIView(_ uiView: UITextView, context: Context) {
+        let coordinator = context.coordinator
+        let renderedText = text.isEmpty ? " " : text
+        let normalizedMaximumHeight = maximumHeight.isFinite ? maximumHeight : -1
+        let shouldRebuild =
+            coordinator.lastText != renderedText
+            || coordinator.lastLanguage != language
+            || coordinator.lastFontPointSize != font.pointSize
+            || coordinator.lastLineSpacing != lineSpacing
+            || coordinator.lastIsDarkMode != isDarkMode
+            || coordinator.lastMaximumHeight != normalizedMaximumHeight
+            || !coordinator.lastTextColor.isEqual(textColor)
+
+        guard shouldRebuild else { return }
+
+        uiView.selectedTextRange = nil
+        uiView.textContainer.widthTracksTextView = true
+        uiView.textContainer.lineBreakMode = .byWordWrapping
+        uiView.isScrollEnabled = true
+        uiView.showsVerticalScrollIndicator = true
+        uiView.alwaysBounceVertical = true
+
+        uiView.attributedText = SourceCodeHighlighter.highlighted(
+            renderedText,
+            language: language,
+            font: font,
+            baseColor: textColor,
+            isDarkMode: isDarkMode,
+            lineSpacing: lineSpacing
+        )
+
+        coordinator.lastText = renderedText
+        coordinator.lastLanguage = language
+        coordinator.lastFontPointSize = font.pointSize
+        coordinator.lastLineSpacing = lineSpacing
+        coordinator.lastIsDarkMode = isDarkMode
+        coordinator.lastMaximumHeight = normalizedMaximumHeight
+        coordinator.lastTextColor = textColor
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+        let fallbackWidth = UIScreen.main.bounds.width - 64
+        let width = max(1, proposal.width ?? uiView.bounds.width.nonZero(or: fallbackWidth))
+        let fittingSize = uiView.sizeThatFits(
+            CGSize(width: width, height: UIView.layoutFittingExpandedSize.height)
+        )
+        let cappedHeight = maximumHeight.isFinite ? min(fittingSize.height, maximumHeight) : fittingSize.height
+        return CGSize(width: width, height: max(1, cappedHeight))
+    }
+
+    final class Coordinator: NSObject {
+        var lastText = ""
+        var lastLanguage = ""
+        var lastFontPointSize: CGFloat = 0
+        var lastLineSpacing: CGFloat = 0
+        var lastIsDarkMode = false
+        var lastMaximumHeight: CGFloat = -1
+        var lastTextColor: UIColor = .clear
+    }
+}
+
+private final class NoCaretSourceTextView: UITextView {
+    var selectionEnabled = true
+
+    override func caretRect(for position: UITextPosition) -> CGRect {
+        .zero
+    }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        guard selectionEnabled else { return false }
+        return super.canPerformAction(action, withSender: sender)
+    }
+}
+
+private extension CGFloat {
+    func nonZero(or fallback: CGFloat) -> CGFloat {
+        self > 1 ? self : fallback
+    }
+}
+
+private enum SourceCodeHighlighter {
+    static func highlighted(
+        _ code: String,
+        language: String,
+        font: UIFont,
+        baseColor: UIColor,
+        isDarkMode: Bool,
+        lineSpacing: CGFloat
+    ) -> NSAttributedString {
+        let palette = SourceSyntaxPalette.palette(isDarkMode: isDarkMode, fallback: baseColor)
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = lineSpacing
+        paragraphStyle.lineBreakMode = .byWordWrapping
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: palette.plain,
+            .paragraphStyle: paragraphStyle
+        ]
+        let output = NSMutableAttributedString(string: code, attributes: attributes)
+        let fullRange = NSRange(code.startIndex..<code.endIndex, in: code)
+        guard fullRange.length > 0 else { return output }
+
+        let keywords = keywordSet(for: language)
+        apply(color: palette.comment, pattern: #"(?m)#.*$|//.*$"#, in: output)
+        apply(color: palette.comment, pattern: #"(?s)/\*.*?\*/"#, in: output)
+        apply(color: palette.string, pattern: #""(\\.|[^"])*"|'(\\.|[^'])*'"#, in: output)
+        apply(color: palette.number, pattern: #"\b\d+(\.\d+)?\b"#, in: output)
+        if !keywords.isEmpty {
+            apply(color: palette.keyword, pattern: #"\b(\#(keywords.joined(separator: "|")))\b"#, in: output)
+        }
+        apply(color: palette.type, pattern: #"\b([A-Z][A-Za-z0-9_]*)\b"#, in: output)
+        apply(color: palette.function, pattern: #"\b([a-zA-Z_][A-Za-z0-9_]*)\s*(?=\()"#, in: output)
+
+        return output
+    }
+
+    private static func apply(color: UIColor, pattern: String, in output: NSMutableAttributedString) {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
+        let source = output.string
+        let fullRange = NSRange(source.startIndex..<source.endIndex, in: source)
+        for match in regex.matches(in: source, range: fullRange) {
+            output.addAttribute(.foregroundColor, value: color, range: match.range)
+        }
+    }
+
+    private static func keywordSet(for language: String) -> [String] {
+        switch language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "swift":
+            return ["let", "var", "func", "struct", "class", "enum", "if", "else", "guard", "return", "import", "protocol", "extension"]
+        case "python", "py":
+            return ["def", "class", "if", "elif", "else", "for", "while", "return", "import", "from", "try", "except", "with", "as"]
+        case "javascript", "js", "typescript", "ts":
+            return ["const", "let", "var", "function", "class", "if", "else", "return", "import", "export", "async", "await"]
+        case "json":
+            return ["true", "false", "null"]
+        default:
+            return ["if", "else", "for", "while", "return", "class", "func", "def", "const", "let", "var", "import"]
+        }
+    }
+}
+
+private struct SourceSyntaxPalette {
+    let plain: UIColor
+    let keyword: UIColor
+    let string: UIColor
+    let number: UIColor
+    let comment: UIColor
+    let function: UIColor
+    let type: UIColor
+
+    static func palette(isDarkMode: Bool, fallback: UIColor) -> SourceSyntaxPalette {
+        if isDarkMode {
+            return SourceSyntaxPalette(
+                plain: UIColor(red: 0.83, green: 0.84, blue: 0.86, alpha: 1),
+                keyword: UIColor(red: 0.63, green: 0.96, blue: 0.70, alpha: 1),
+                string: UIColor(red: 0.93, green: 0.80, blue: 0.48, alpha: 1),
+                number: UIColor(red: 0.76, green: 0.95, blue: 0.60, alpha: 1),
+                comment: UIColor(red: 0.58, green: 0.69, blue: 0.61, alpha: 1),
+                function: UIColor(red: 0.79, green: 0.95, blue: 0.67, alpha: 1),
+                type: UIColor(red: 0.55, green: 0.93, blue: 0.82, alpha: 1)
+            )
+        }
+        return SourceSyntaxPalette(
+            plain: fallback,
+            keyword: UIColor(red: 0.69, green: 0.00, blue: 0.86, alpha: 1),
+            string: UIColor(red: 0.64, green: 0.08, blue: 0.08, alpha: 1),
+            number: UIColor(red: 0.04, green: 0.53, blue: 0.34, alpha: 1),
+            comment: UIColor(red: 0.42, green: 0.45, blue: 0.49, alpha: 1),
+            function: UIColor(red: 0.47, green: 0.37, blue: 0.15, alpha: 1),
+            type: UIColor(red: 0.15, green: 0.50, blue: 0.60, alpha: 1)
+        )
     }
 }
 
@@ -1706,7 +1943,13 @@ struct FullCodeView: View {
 
     var body: some View {
         NavigationStack {
-            HighlightedSourceView(code: code, language: language, truncate: false, maxHeight: .infinity)
+            GeometryReader { proxy in
+                HighlightedSourceView(
+                    code: code,
+                    language: language,
+                    truncate: false,
+                    maxHeight: max(240, proxy.size.height)
+                )
                 .navigationTitle(language)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
@@ -1729,6 +1972,7 @@ struct FullCodeView: View {
                         }
                     }
                 }
+            }
         }
     }
 }

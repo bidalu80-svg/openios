@@ -379,12 +379,14 @@ struct WebLinkContextResolver: Sendable {
         ]
 
         var urls: [String] = []
-        var seen = Set<String>()
+        var seenImageKeys = Set<String>()
         for container in imageContainers {
             guard let images = container as? [[String: Any]] else { continue }
             for image in images {
-                for candidate in imageURLCandidates(from: image) where seen.insert(candidate).inserted {
-                    urls.append(candidate)
+                guard let selectedURL = imageURLCandidates(from: image).first else { continue }
+                let imageKey = imageDeduplicationKey(from: image, selectedURL: selectedURL)
+                if seenImageKeys.insert(imageKey).inserted {
+                    urls.append(selectedURL)
                 }
             }
         }
@@ -401,6 +403,48 @@ struct WebLinkContextResolver: Sendable {
                 index: offset + 1
             )
         }
+    }
+
+    private static func imageDeduplicationKey(from image: [String: Any], selectedURL: String) -> String {
+        for value in imageIdentityCandidates(from: image) {
+            let normalized = value
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\\u0026", with: "&")
+            guard !normalized.isEmpty else { continue }
+            return "id:\(normalized.lowercased())"
+        }
+        return "url:\(canonicalImageURLKey(selectedURL))"
+    }
+
+    private static func imageIdentityCandidates(from image: [String: Any]) -> [String] {
+        var values: [String] = []
+        for key in ["uri", "id", "image_id", "imageId", "oid", "url_key", "urlKey"] {
+            if let value = image[key] as? String, !value.isEmpty {
+                values.append(value)
+            }
+        }
+        for key in ["download_addr", "origin_url", "large", "cover"] {
+            if let nested = image[key] as? [String: Any],
+               let uri = nested["uri"] as? String,
+               !uri.isEmpty {
+                values.append(uri)
+            }
+        }
+        return values
+    }
+
+    private static func canonicalImageURLKey(_ raw: String) -> String {
+        guard var components = URLComponents(string: raw) else {
+            return raw
+                .replacingOccurrences(of: "\\u0026", with: "&")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+        }
+        components.query = nil
+        components.fragment = nil
+        components.scheme = components.scheme?.lowercased()
+        components.host = components.host?.lowercased()
+        return components.string?.lowercased() ?? raw.lowercased()
     }
 
     private static func imageURLCandidates(from image: [String: Any]) -> [String] {

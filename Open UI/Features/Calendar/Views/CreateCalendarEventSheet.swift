@@ -62,7 +62,7 @@ struct CreateCalendarEventSheet: View {
                                         Circle()
                                             .fill(cal.swiftUIColor)
                                             .frame(width: 10, height: 10)
-                                        Text(cal.name)
+                                        Text(CalendarDisplayLocalizer.calendarName(cal))
                                     }
                                     .tag(cal.id)
                                 }

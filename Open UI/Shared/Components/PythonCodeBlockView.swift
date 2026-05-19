@@ -51,7 +51,7 @@ struct PythonCodeBlockView: View {
             // ── Header bar ──────────────────────────────────────────────────
             headerBar
 
-            SourceCodeTextView(code: visibleCode, maxHeight: 420)
+            SourceCodeTextView(code: visibleCode, language: "python", maxHeight: 420)
                 .background(Color(.secondarySystemBackground))
 
             // ── Output panel (shown after run) ──────────────────────────────
@@ -169,7 +169,7 @@ struct PythonCodeBlockView: View {
             .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(isActive ? Color.gray : Color.accentColor)
+                    .fill(isActive ? Color.gray : (theme.isDark ? Color.white.opacity(0.16) : Color.black))
             )
         }
         .buttonStyle(.plain)
