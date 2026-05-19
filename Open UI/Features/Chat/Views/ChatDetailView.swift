@@ -3755,36 +3755,31 @@ private struct IsolatedStreamingStatus: View {
 private struct ImageGenerationPlaceholderView: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var colorPhase: CGFloat = 0
-
-    private var effectivePhase: CGFloat {
-        reduceMotion ? 0.18 : colorPhase
-    }
-
-    private var basePalette: [Color] {
-        let hue = Double(effectivePhase)
-        return [
-            Color(hue: hueOffset(hue, 0.54), saturation: 0.34, brightness: theme.isDark ? 0.72 : 1.00),
-            Color(hue: hueOffset(hue, 0.88), saturation: 0.30, brightness: theme.isDark ? 0.78 : 1.00),
-            Color(hue: hueOffset(hue, 0.12), saturation: 0.36, brightness: theme.isDark ? 0.76 : 1.00),
-            Color(hue: hueOffset(hue, 0.27), saturation: 0.28, brightness: theme.isDark ? 0.70 : 0.98),
-            Color(hue: hueOffset(hue, 0.67), saturation: 0.26, brightness: theme.isDark ? 0.74 : 1.00)
-        ]
-    }
+    private let animationPeriod: TimeInterval = 18
 
     var body: some View {
+        if reduceMotion {
+            placeholder(phase: 0.18)
+        } else {
+            TimelineView(.animation) { timeline in
+                placeholder(phase: phase(for: timeline.date))
+            }
+        }
+    }
+
+    private func placeholder(phase: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .fill(backgroundFill)
+            .fill(backgroundFill(phase: phase))
             .overlay {
                 ZStack {
                     AngularGradient(
-                        gradient: Gradient(colors: basePalette.map { $0.opacity(theme.isDark ? 0.48 : 0.46) }),
+                        gradient: Gradient(colors: basePalette(phase: phase).map { $0.opacity(theme.isDark ? 0.48 : 0.46) }),
                         center: UnitPoint(
-                            x: CGFloat(0.50 + 0.14 * sin(Double(effectivePhase) * .pi * 2)),
-                            y: CGFloat(0.48 + 0.12 * cos(Double(effectivePhase) * .pi * 2))
+                            x: CGFloat(0.50 + 0.14 * sin(Double(phase) * .pi * 2)),
+                            y: CGFloat(0.48 + 0.12 * cos(Double(phase) * .pi * 2))
                         ),
-                        startAngle: .degrees(Double(effectivePhase) * 360),
-                        endAngle: .degrees(Double(effectivePhase) * 360 + 360)
+                        startAngle: .degrees(Double(phase) * 360),
+                        endAngle: .degrees(Double(phase) * 360 + 360)
                     )
                     .blur(radius: 22)
                     .opacity(theme.isDark ? 0.70 : 0.82)
@@ -3795,8 +3790,8 @@ private struct ImageGenerationPlaceholderView: View {
                             Color.white.opacity(0.02)
                         ],
                         center: UnitPoint(
-                            x: 0.34 + 0.22 * effectivePhase,
-                            y: 0.26 + 0.18 * (1 - effectivePhase)
+                            x: CGFloat(0.50 + 0.22 * cos(Double(phase) * .pi * 2.0 + 0.65)),
+                            y: CGFloat(0.46 + 0.18 * sin(Double(phase) * .pi * 2.0 + 1.20))
                         ),
                         startRadius: 20,
                         endRadius: 260
@@ -3813,20 +3808,37 @@ private struct ImageGenerationPlaceholderView: View {
             .shadow(color: Color.black.opacity(theme.isDark ? 0.18 : 0.06), radius: 16, y: 8)
             .padding(.top, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .onAppear {
-                guard !reduceMotion else { return }
-                withAnimation(.linear(duration: 5.6).repeatForever(autoreverses: false)) {
-                    colorPhase = 1
-                }
-            }
     }
 
-    private var backgroundFill: LinearGradient {
+    private func basePalette(phase: CGFloat) -> [Color] {
+        let hue = Double(phase)
+        return [
+            Color(hue: hueOffset(hue, 0.54), saturation: 0.34, brightness: theme.isDark ? 0.72 : 1.00),
+            Color(hue: hueOffset(hue, 0.88), saturation: 0.30, brightness: theme.isDark ? 0.78 : 1.00),
+            Color(hue: hueOffset(hue, 0.12), saturation: 0.36, brightness: theme.isDark ? 0.76 : 1.00),
+            Color(hue: hueOffset(hue, 0.27), saturation: 0.28, brightness: theme.isDark ? 0.70 : 0.98),
+            Color(hue: hueOffset(hue, 0.67), saturation: 0.26, brightness: theme.isDark ? 0.74 : 1.00)
+        ]
+    }
+
+    private func backgroundFill(phase: CGFloat) -> LinearGradient {
+        let angle = Double(phase) * .pi * 2
         LinearGradient(
-            colors: basePalette.map { $0.opacity(theme.isDark ? 0.84 : 0.76) },
-            startPoint: UnitPoint(x: 0.10 + 0.74 * effectivePhase, y: 0.08),
-            endPoint: UnitPoint(x: 0.92 - 0.62 * effectivePhase, y: 0.96)
+            colors: basePalette(phase: phase).map { $0.opacity(theme.isDark ? 0.84 : 0.76) },
+            startPoint: UnitPoint(
+                x: CGFloat(0.50 + 0.36 * cos(angle - 0.35)),
+                y: CGFloat(0.50 + 0.36 * sin(angle - 0.35))
+            ),
+            endPoint: UnitPoint(
+                x: CGFloat(0.50 + 0.36 * cos(angle + .pi)),
+                y: CGFloat(0.50 + 0.36 * sin(angle + .pi))
+            )
         )
+    }
+
+    private func phase(for date: Date) -> CGFloat {
+        let progress = date.timeIntervalSinceReferenceDate / animationPeriod
+        return CGFloat(progress - floor(progress))
     }
 
     private func hueOffset(_ hue: Double, _ offset: Double) -> Double {
