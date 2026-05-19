@@ -10229,14 +10229,16 @@ final class ChatViewModel {
     private static func clientWebSearchToolSystemContext() -> String {
         """
         [Client web search tool]
-        When you need current web information, do not guess and do not ask the user to search manually. Request the iOS host app to search by emitting exactly one tool block:
+        When the user's original request explicitly contains the Chinese character "搜" or "查" and web information is needed, request the iOS host app to search by emitting exactly one tool block:
 
         ```iexa_web_search
         {"query":"具体搜索问题","queries":["可选搜索词 1","可选搜索词 2"]}
         ```
 
         Rules:
-        - Use this only when web evidence is actually needed, such as current prices, latest releases, live docs, news, website/API checks, or user explicitly asks you to search.
+        - Use this only when the user's original request explicitly contains "搜" or "查" and web evidence is actually needed.
+        - Prefer recent/current results when the topic needs freshness, but do not restrict the search to today's results unless the user explicitly asks for today or the last 24 hours.
+        - Do not emit this block only because the topic mentions latest, today, price, weather, news, current, or similar freshness words.
         - Do not emit this block for normal conversation, coding from local context, or questions you can answer from the provided files/results.
         - After the app appends `[客户端联网搜索结果]`, read those real results before deciding whether to answer or request one more more-specific search.
         [/Client web search tool]
@@ -10254,6 +10256,13 @@ final class ChatViewModel {
               message.role == .assistant else { return }
         guard message.metadata?["iexa_client_web_search_result"] != "true" else { return }
         guard !clientWebSearchExecutedMessageIds.contains(messageId) else { return }
+        let latestUserText = conversation?.messages.last(where: {
+            $0.role == .user
+                && $0.metadata?["iexa_client_web_search_result"] != "true"
+                && !Self.isLocalWorkspaceAgentResult($0)
+                && !Self.isLocalAlpineAgentResult($0)
+        })?.content ?? ""
+        guard Self.userExplicitlyRequestsWebSearch(latestUserText) else { return }
         guard let request = Self.clientWebSearchToolRequest(in: content) else { return }
 
         clientWebSearchExecutedMessageIds.insert(messageId)
@@ -10837,121 +10846,8 @@ final class ChatViewModel {
         queries: [String],
         assistantMessageId: String
     ) async throws -> (result: WebSearchResponse, queries: [String]) {
-        let first = try await ClientWebSearchService().search(queries: queries, originalQuery: query)
-        guard shouldRetryWebSearch(first, originalQuery: query) else {
-            return (first, queries)
-        }
-
-        let retryQueries = Self.retryWebSearchQueries(original: query, existing: queries)
-        guard !retryQueries.isEmpty else {
-            return (first, queries)
-        }
-
-        let mergedQueries = Self.mergeSearchQueries(original: queries.first ?? query, generated: Array(queries.dropFirst()) + retryQueries, limit: 7)
-        appendStatusUpdate(
-            id: assistantMessageId,
-            status: ChatStatusUpdate(
-                action: "browser_web_search",
-                description: "搜索结果偏少或可能过旧，正在补充搜索...",
-                done: false,
-                query: query,
-                queries: mergedQueries
-            )
-        )
-
-        let retry = try await ClientWebSearchService().search(queries: retryQueries, originalQuery: query)
-        return (mergeWebSearchResponses(first, retry), mergedQueries)
-    }
-
-    private func shouldRetryWebSearch(_ result: WebSearchResponse, originalQuery: String) -> Bool {
-        if result.loadedCount == 0 && result.items.count < 3 { return true }
-        if result.items.count < 2 && result.docs.count < 2 { return true }
-        return Self.webSearchNeedsFreshness(originalQuery) && !hasFreshWebSearchEvidence(result)
-    }
-
-    private func hasFreshWebSearchEvidence(_ result: WebSearchResponse) -> Bool {
-        let now = Date()
-        let calendar = Calendar.current
-        let currentYear = calendar.component(.year, from: now)
-        let currentMonth = calendar.component(.month, from: now)
-        let currentDay = calendar.component(.day, from: now)
-        let currentYearText = String(currentYear)
-        let localizedMonthText = "\(currentYear)年\(currentMonth)月"
-        let localizedDateText = "\(currentYear)年\(currentMonth)月\(currentDay)日"
-        let isoMonthText = String(format: "%04d-%02d", currentYear, currentMonth)
-        let isoDateText = String(format: "%04d-%02d-%02d", currentYear, currentMonth, currentDay)
-        let haystack = (
-            result.items.map { [$0.title, $0.snippet, $0.link].compactMap { $0 }.joined(separator: " ") }
-            + result.docs.map { doc in
-                let metadata = doc.metadata
-                    .filter { $0.key != "searched_at" && $0.key != "provider" }
-                    .map { $0.value }
-                    .joined(separator: " ")
-                return metadata + " " + String(doc.content.prefix(900))
-            }
-        )
-        .joined(separator: "\n")
-        .lowercased()
-        if [localizedDateText, isoDateText, localizedMonthText, isoMonthText, currentYearText].contains(where: { haystack.contains($0.lowercased()) }) {
-            return true
-        }
-        return ["today", "breaking", "last updated", "今天", "今日", "实时", "刚刚", "24小时"].contains {
-            haystack.contains($0)
-        }
-    }
-
-    private static func retryWebSearchQueries(original: String, existing: [String]) -> [String] {
-        let today = localizedWebSearchDateText()
-        let isoDate = isoWebSearchDateText()
-        let currentYear = Calendar.current.component(.year, from: Date())
-        let precise = preciseFallbackSearchQuery(for: original, originalQuery: original)
-        return mergeSearchQueries(
-            original: "\(precise) 最新 \(today)",
-            generated: [
-                "\(precise) 最新 \(isoDate)",
-                "\(precise) 官方 更新 \(currentYear)",
-                "\(precise) news today \(currentYear)",
-                "\(precise) \(currentYear)"
-            ],
-            limit: 4
-        )
-        .filter { candidate in
-            !existing.contains { $0.caseInsensitiveCompare(candidate) == .orderedSame }
-        }
-    }
-
-    private func mergeWebSearchResponses(_ primary: WebSearchResponse, _ retry: WebSearchResponse) -> WebSearchResponse {
-        var filenames: [String] = []
-        var seenFilenames = Set<String>()
-        for filename in primary.filenames + retry.filenames {
-            guard seenFilenames.insert(filename.lowercased()).inserted else { continue }
-            filenames.append(filename)
-        }
-
-        var items: [WebSearchResultItem] = []
-        var seenItems = Set<String>()
-        for item in primary.items + retry.items {
-            let key = (item.link ?? item.title ?? item.snippet ?? UUID().uuidString).lowercased()
-            guard seenItems.insert(key).inserted else { continue }
-            items.append(item)
-        }
-
-        var docs: [WebSearchDocument] = []
-        var seenDocs = Set<String>()
-        for doc in primary.docs + retry.docs {
-            let key = (doc.metadata["source"] ?? doc.metadata["link"] ?? String(doc.content.prefix(160))).lowercased()
-            guard seenDocs.insert(key).inserted else { continue }
-            docs.append(doc)
-        }
-
-        return WebSearchResponse(
-            status: primary.status || retry.status || !items.isEmpty || !docs.isEmpty,
-            collectionNames: Array(Set(primary.collectionNames + retry.collectionNames)),
-            filenames: filenames,
-            items: Array(items.prefix(10)),
-            docs: Array(docs.prefix(8)),
-            loadedCount: primary.loadedCount + retry.loadedCount
-        )
+        let result = try await ClientWebSearchService().search(queries: queries, originalQuery: query)
+        return (result, queries)
     }
 
     private static func freshnessAwareWebSearchQueries(userText: String, originalQuery: String, generated: [String], limit: Int) -> [String] {
@@ -10960,25 +10856,23 @@ final class ChatViewModel {
             return mergeSearchQueries(original: precise, generated: generated, limit: limit)
         }
 
-        let today = localizedWebSearchDateText()
-        let isoDate = isoWebSearchDateText()
         let currentYear = Calendar.current.component(.year, from: Date())
         let hasCJK = containsCJK(precise)
-        let original = hasCJK ? "\(precise) 最新 \(today)" : "\(precise) latest \(currentYear)"
-        let freshGenerated = hasCJK
+        var freshGenerated = hasCJK
             ? [
-                "\(precise) 最新 \(isoDate)",
+                "\(precise) 最新",
                 "\(precise) 官方 更新 \(currentYear)",
-                "\(precise) 今天 24小时",
                 "\(precise) \(currentYear)"
             ]
             : [
-                "\(precise) latest \(isoDate)",
+                "\(precise) latest",
                 "\(precise) official updated \(currentYear)",
-                "\(precise) today last 24 hours",
                 "\(precise) \(currentYear)"
             ]
-        return mergeSearchQueries(original: original, generated: freshGenerated + generated, limit: limit)
+        if webSearchNeedsDayScope(userText) || webSearchNeedsDayScope(originalQuery) {
+            freshGenerated.insert(hasCJK ? "\(precise) 今天" : "\(precise) today", at: 0)
+        }
+        return mergeSearchQueries(original: precise, generated: freshGenerated + generated, limit: limit)
     }
 
     private static func webSearchNeedsFreshness(_ text: String) -> Bool {
@@ -10989,26 +10883,21 @@ final class ChatViewModel {
         guard !normalized.isEmpty else { return false }
         return [
             "最新", "今天", "今日", "现在", "目前", "刚刚", "新闻", "热搜", "实时", "现价",
-            "价格", "油价", "天气", "气温", "股价", "汇率", "版本", "发布", "更新",
+            "油价", "天气", "气温", "股价", "汇率", "版本", "发布", "更新",
             "latest", "today", "current", "now", "news", "breaking", "price", "weather",
             "stock", "exchange", "rate", "release", "version", "updated"
         ].contains { normalized.contains($0) }
     }
 
-    private static func localizedWebSearchDateText() -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.timeZone = .current
-        formatter.dateFormat = "yyyy年M月d日"
-        return formatter.string(from: Date())
-    }
-
-    private static func isoWebSearchDateText() -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: Date())
+    private static func webSearchNeedsDayScope(_ text: String) -> Bool {
+        let normalized = text
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+        return [
+            "今天", "今日", "24小时", "一天内", "当天", "today", "last24hours", "past24hours"
+        ].contains { normalized.contains($0) }
     }
 
     private static func webSearchTimestampText() -> String {
@@ -11084,7 +10973,6 @@ final class ChatViewModel {
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        let today = DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .none)
         let precise = preciseFallbackSearchQuery(for: userText, originalQuery: originalQuery)
         var generated: [String] = []
 
@@ -11107,22 +10995,26 @@ final class ChatViewModel {
 
         if asksWeather {
             add("\(precise) 实时天气")
-            add("\(precise) 今天 温度 降雨 风力")
+            if Self.webSearchNeedsDayScope(userText) {
+                add("\(precise) 今天 温度 降雨 风力")
+            }
             add("中国天气 \(precise)")
         }
 
         if asksFuelPrice {
             add("\(precise) 今日油价 92 95 98 柴油")
-            add("\(precise) 最新油价 \(today)")
+            add("\(precise) 最新油价")
         }
 
         if asksNews {
-            add("\(precise) 最新消息 \(today)")
-            add("\(precise) 今天 新闻 24小时")
+            add("\(precise) 最新消息")
+            if Self.webSearchNeedsDayScope(userText) {
+                add("\(precise) 今天 新闻 24小时")
+            }
         }
 
         if ["价格", "股价", "汇率", "版本", "发布", "release", "version", "price", "stock"].contains(where: { normalized.contains($0) }) {
-            add("\(precise) 最新 \(today)")
+            add("\(precise) 最新")
             add("\(precise) 官方 最新")
         }
 
@@ -11189,8 +11081,16 @@ final class ChatViewModel {
         """
     }
 
-    private func shouldResolveWebSearchContext(for _: String) -> Bool {
-        isChatWebSearchAllowed && webSearchEnabled
+    private func shouldResolveWebSearchContext(for text: String) -> Bool {
+        isChatWebSearchAllowed && webSearchEnabled && Self.userExplicitlyRequestsWebSearch(text)
+    }
+
+    private static func userExplicitlyRequestsWebSearch(_ text: String) -> Bool {
+        let normalized = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+        return normalized.contains("搜") || normalized.contains("查")
     }
 
     private func isWebSearchCapabilityQuestion(_ text: String) -> Bool {
@@ -11220,7 +11120,7 @@ final class ChatViewModel {
         """
 
         [客户端联网搜索能力]
-        Iexa 客户端已接入内置浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明搜索由 iOS 内置浏览器工具执行，必要时会回退到本地 Alpine 抓取。当用户要求“搜索、联网查、最新、今天、实时、新闻”等内容时，客户端会先用 WKWebView 打开搜索页并读取网页内容，再把结果附加到本轮消息里给你使用。不要声称你无法联网或无法实时搜索。
+        Iexa 客户端已接入内置浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明搜索由 iOS 内置浏览器工具执行，必要时会回退到本地 Alpine 抓取。只有当用户原话明确包含“搜”或“查”时，客户端才会先用 WKWebView 打开搜索页并读取网页内容，再把结果附加到本轮消息里给你使用；“最新、今天、实时、新闻”等词本身不会自动触发联网。联网搜索会优先找较新的结果，但不会只限制到当天，除非用户明确要求今天或 24 小时内。不要声称你无法联网或无法实时搜索。
         [/客户端联网搜索能力]
         """
     }

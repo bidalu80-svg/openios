@@ -122,10 +122,8 @@ def clean_text(value):
 def search_needs_freshness(query):
     text = re.sub(r"\s+", "", query or "").lower()
     terms = [
-        "最新", "今天", "今日", "现在", "目前", "刚刚", "实时", "新闻", "热搜", "现价",
-        "价格", "油价", "天气", "气温", "股价", "汇率", "版本", "发布", "更新",
-        "latest", "today", "current", "now", "news", "breaking", "price", "weather",
-        "stock", "exchange", "rate", "release", "version", "updated",
+        "今天", "今日", "24小时", "一天内", "当天",
+        "today", "last24hours", "past24hours",
     ]
     return any(term in text for term in terms)
 
