@@ -256,16 +256,20 @@ struct StreamingMarkdownView: View {
     }
 
     private func streamingCodeSegment(language: String, code: String) -> ContentSegment {
+        codeSegmentForFence(language: language, code: code, isStreamingBlock: true)
+    }
+
+    private func codeSegmentForFence(language: String, code: String, isStreamingBlock: Bool) -> ContentSegment {
         let normalizedLanguage = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
         if chartLanguageTags.contains(normalizedLanguage), looksLikeChartJSON(code) {
             return .chart(code)
         }
         if normalizedLanguage == "html" {
-            return .html(code, isStreaming: true)
+            return .html(code, isStreaming: isStreamingBlock)
         }
         if normalizedLanguage == "svg" {
-            return .svg(code, isStreaming: true)
+            return .svg(code, isStreaming: isStreamingBlock)
         }
         if normalizedLanguage == "mermaid" {
             return .mermaid(code)
@@ -802,15 +806,34 @@ struct StreamingMarkdownView: View {
         while let openRange = remaining.range(of: "```") {
             let afterOpen = remaining[openRange.upperBound...]
             guard let newlineIdx = afterOpen.firstIndex(of: "\n") else {
-                units.append(.markdown(String(remaining)))
+                let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
+                if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    units.append(.markdown(preceding))
+                }
+                let rawLanguage = String(afterOpen).trimmingCharacters(in: .whitespacesAndNewlines)
+                units.append(.segment(.codeBlock(
+                    language: rawLanguage.isEmpty ? "text" : rawLanguage,
+                    code: ""
+                )))
                 return collapseParsedUnits(units, fallback: text)
             }
             let lang = afterOpen[afterOpen.startIndex..<newlineIdx]
-                .trimmingCharacters(in: .whitespaces).lowercased()
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let contentStart = afterOpen.index(after: newlineIdx)
             let searchArea = remaining[contentStart...]
             guard let closeRange = findClosingFence(in: searchArea, from: contentStart) else {
-                units.append(.markdown(String(remaining)))
+                let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
+                if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    units.append(.markdown(preceding))
+                }
+                let unclosedCode = String(searchArea)
+                if !unclosedCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    units.append(.segment(codeSegmentForFence(
+                        language: lang.isEmpty ? "text" : lang,
+                        code: unclosedCode,
+                        isStreamingBlock: isStreaming
+                    )))
+                }
                 return collapseParsedUnits(units, fallback: text)
             }
             let codeContent = String(remaining[contentStart..<closeRange.lowerBound])
@@ -876,18 +899,36 @@ struct StreamingMarkdownView: View {
     ) -> Range<String.Index>? {
         var cursor = searchArea.startIndex
         while let fence = searchArea.range(of: "```", range: cursor..<searchArea.endIndex) {
-            let isAtLineStart = fence.lowerBound == searchStart
-                || searchArea[searchArea.index(before: fence.lowerBound)] == "\n"
-                || searchArea[searchArea.index(before: fence.lowerBound)] == "\r"
+            let lineStart = startOfFenceLine(in: searchArea, before: fence.lowerBound, fallback: searchStart)
+            let prefixBeforeFence = searchArea[lineStart..<fence.lowerBound]
+            let isAtFenceLineStart = prefixBeforeFence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let afterFence = searchArea[fence.upperBound...]
             let suffixBeforeNewline = afterFence.prefix { $0 != "\n" && $0 != "\r" }
-            let isFenceOnlyLine = suffixBeforeNewline.trimmingCharacters(in: .whitespaces).isEmpty
-            if isAtLineStart && isFenceOnlyLine {
-                return fence
+            let isFenceOnlyLine = suffixBeforeNewline.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if isAtFenceLineStart && isFenceOnlyLine {
+                return lineStart..<fence.upperBound
             }
             cursor = fence.upperBound
         }
         return nil
+    }
+
+    private func startOfFenceLine(
+        in text: Substring,
+        before index: String.Index,
+        fallback: String.Index
+    ) -> String.Index {
+        guard index > text.startIndex else { return text.startIndex }
+
+        var cursor = index
+        while cursor > text.startIndex {
+            let previous = text.index(before: cursor)
+            if text[previous] == "\n" || text[previous] == "\r" {
+                return cursor
+            }
+            cursor = previous
+        }
+        return fallback
     }
 
     private func collapseParsedUnits(_ units: [EitherContent], fallback text: String) -> [ContentSegment] {
@@ -1285,6 +1326,7 @@ struct SourceCodeTextView: View {
     var autoFollowTail: Bool = false
 
     @Environment(\.theme) private var theme
+    @State private var measuredContentHeight: CGFloat = 0
 
     private var visibleCode: String {
         code.isEmpty ? " " : code
@@ -1295,7 +1337,24 @@ struct SourceCodeTextView: View {
         return value.isEmpty ? "text" : value
     }
 
+    private var verticalPadding: CGFloat { 14 }
+
+    private var contentMaxHeight: CGFloat {
+        max(48, maxHeight - verticalPadding * 2)
+    }
+
+    private var estimatedContentHeight: CGFloat {
+        let lineCount = max(1, visibleCode.components(separatedBy: "\n").count)
+        let lineHeight: CGFloat = 21
+        return min(contentMaxHeight, max(48, CGFloat(lineCount) * lineHeight + 2))
+    }
+
     var body: some View {
+        let contentHeight = min(
+            contentMaxHeight,
+            max(48, measuredContentHeight > 0 ? measuredContentHeight : estimatedContentHeight)
+        )
+
         HighlightedSourceTextView(
             text: visibleCode,
             language: normalizedLanguage,
@@ -1303,17 +1362,28 @@ struct SourceCodeTextView: View {
             font: .monospacedSystemFont(ofSize: 13, weight: .regular),
             lineSpacing: 3.5,
             isDarkMode: theme.isDark,
-            maximumHeight: maxHeight,
-            autoFollowTail: autoFollowTail
+            maximumHeight: contentMaxHeight,
+            autoFollowTail: autoFollowTail,
+            onHeightChange: { height in
+                let nextHeight = min(contentMaxHeight, max(48, height))
+                guard abs(measuredContentHeight - nextHeight) > 0.5 else { return }
+                measuredContentHeight = nextHeight
+            }
         )
+        .frame(height: contentHeight)
         .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        .padding(.vertical, verticalPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(maxHeight: maxHeight)
+        .frame(height: contentHeight + verticalPadding * 2)
+        .onChange(of: visibleCode) { _ in
+            measuredContentHeight = 0
+        }
     }
 }
 
 private struct HighlightedSourceTextView: UIViewRepresentable {
+    private static let unwrappedTextWidth: CGFloat = 12_000
+
     let text: String
     let language: String
     let textColor: UIColor
@@ -1322,6 +1392,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
     let isDarkMode: Bool
     let maximumHeight: CGFloat
     let autoFollowTail: Bool
+    var onHeightChange: (CGFloat) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -1338,17 +1409,23 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         textView.scrollsToTop = false
         textView.dataDetectorTypes = []
         textView.showsVerticalScrollIndicator = true
-        textView.showsHorizontalScrollIndicator = false
+        textView.showsHorizontalScrollIndicator = true
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
-        textView.textContainer.widthTracksTextView = true
-        textView.textContainer.lineBreakMode = .byWordWrapping
+        textView.textContainer.widthTracksTextView = false
+        textView.textContainer.heightTracksTextView = false
+        textView.textContainer.size = CGSize(
+            width: Self.unwrappedTextWidth,
+            height: UIView.layoutFittingExpandedSize.height
+        )
+        textView.textContainer.lineBreakMode = .byClipping
         textView.layoutManager.allowsNonContiguousLayout = false
         textView.adjustsFontForContentSizeCategory = false
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         textView.setContentCompressionResistancePriority(.required, for: .vertical)
         textView.setContentHuggingPriority(.required, for: .vertical)
         textView.panGestureRecognizer.isEnabled = true
+        textView.alwaysBounceHorizontal = true
         return textView
     }
 
@@ -1378,11 +1455,18 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             && coordinator.lastIsDarkMode == isDarkMode
             && coordinator.lastMaximumHeight == normalizedMaximumHeight
             && coordinator.lastTextColor.isEqual(textColor)
-        uiView.textContainer.widthTracksTextView = true
-        uiView.textContainer.lineBreakMode = .byWordWrapping
+        uiView.textContainer.widthTracksTextView = false
+        uiView.textContainer.heightTracksTextView = false
+        uiView.textContainer.size = CGSize(
+            width: Self.unwrappedTextWidth,
+            height: UIView.layoutFittingExpandedSize.height
+        )
+        uiView.textContainer.lineBreakMode = .byClipping
         uiView.isScrollEnabled = true
         uiView.showsVerticalScrollIndicator = true
+        uiView.showsHorizontalScrollIndicator = true
         uiView.alwaysBounceVertical = true
+        uiView.alwaysBounceHorizontal = true
 
         if didAppendToExistingText {
             let suffix = String(renderedText.dropFirst(previousText.count))
@@ -1407,6 +1491,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
                 isDarkMode: isDarkMode,
                 lineSpacing: lineSpacing
             )
+            uiView.setContentOffset(.zero, animated: false)
         }
 
         coordinator.lastText = renderedText
@@ -1434,16 +1519,37 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
                 }
             }
         }
+
+        DispatchQueue.main.async {
+            let measuredHeight = Self.measuredHeight(for: uiView, maximumHeight: maximumHeight)
+            onHeightChange(measuredHeight)
+            let needsVerticalScroll = measuredHeight >= maximumHeight - 0.5
+            uiView.isScrollEnabled = true
+            uiView.alwaysBounceVertical = needsVerticalScroll
+            uiView.showsVerticalScrollIndicator = needsVerticalScroll
+            uiView.alwaysBounceHorizontal = true
+            uiView.showsHorizontalScrollIndicator = true
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
         let fallbackWidth = UIScreen.main.bounds.width - 64
         let width = max(1, proposal.width ?? uiView.bounds.width.nonZero(or: fallbackWidth))
         let fittingSize = uiView.sizeThatFits(
-            CGSize(width: width, height: UIView.layoutFittingExpandedSize.height)
+            CGSize(width: Self.unwrappedTextWidth, height: UIView.layoutFittingExpandedSize.height)
         )
         let cappedHeight = maximumHeight.isFinite ? min(fittingSize.height, maximumHeight) : fittingSize.height
         return CGSize(width: width, height: max(1, cappedHeight))
+    }
+
+    private static func measuredHeight(for uiView: UITextView, maximumHeight: CGFloat) -> CGFloat {
+        let fittingSize = uiView.sizeThatFits(
+            CGSize(width: Self.unwrappedTextWidth, height: UIView.layoutFittingExpandedSize.height)
+        )
+        if maximumHeight.isFinite {
+            return min(fittingSize.height, maximumHeight)
+        }
+        return fittingSize.height
     }
 
     final class Coordinator: NSObject {

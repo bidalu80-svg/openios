@@ -145,7 +145,7 @@ enum CodeSourceFormatter {
 
             let next = splitLeadingWhitespace(nonEmpty[index + 1])
             let nextTrimmed = next.body.trimmingCharacters(in: .whitespaces)
-            if next.columns == 0,
+            if next.columns <= current.columns,
                !nextTrimmed.hasPrefix("#"),
                !isPythonDedentClause(nextTrimmed) {
                 return true
@@ -225,6 +225,7 @@ enum CodeSourceFormatter {
         var expectedLevel = 0
         var continuationLevel = 0
         var previousOpenedBlock = false
+        var previousClosedInnerBlock = false
         var changed = false
 
         for rawLine in rawLines {
@@ -233,7 +234,6 @@ enum CodeSourceFormatter {
             let trimmed = body.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else {
                 repairedLines.append("")
-                previousOpenedBlock = false
                 continue
             }
 
@@ -247,6 +247,19 @@ enum CodeSourceFormatter {
                     blockStack.removeLast()
                 }
                 expectedLevel = targetLevel
+            } else if parts.columns > 0,
+                      expectedLevel > 0,
+                      !previousOpenedBlock,
+                      !previousClosedInnerBlock {
+                let sourceLevel = max(0, parts.columns / 4)
+                if sourceLevel < expectedLevel {
+                    targetLevel = sourceLevel
+                    while let last = blockStack.last, last.level >= targetLevel {
+                        blockStack.removeLast()
+                    }
+                    expectedLevel = blockStack.last.map { $0.level + 1 } ?? 0
+                    targetLevel = expectedLevel
+                }
             } else if parts.columns == 0,
                       expectedLevel > 0,
                       !previousOpenedBlock,
@@ -270,6 +283,9 @@ enum CodeSourceFormatter {
             } else if previousOpenedBlock, parts.columns < targetColumns {
                 useColumns = targetColumns
                 changed = true
+            } else if previousClosedInnerBlock, parts.columns < targetColumns {
+                useColumns = targetColumns
+                changed = true
             } else {
                 useColumns = parts.columns
             }
@@ -281,13 +297,18 @@ enum CodeSourceFormatter {
                 blockStack.append((kind: pythonBlockKind(trimmed), level: blockLevel))
                 expectedLevel = blockLevel + 1
                 previousOpenedBlock = true
+                previousClosedInnerBlock = false
             } else {
-                if parts.columns > 0 {
-                    let currentLevel = useColumns / 4
-                    while let last = blockStack.last, last.level >= currentLevel {
-                        blockStack.removeLast()
-                    }
+                if isPythonTerminalStatement(trimmed),
+                   let last = blockStack.last,
+                   last.kind != "def",
+                   last.kind != "class" {
+                    blockStack.removeLast()
                     expectedLevel = blockStack.last.map { $0.level + 1 } ?? 0
+                    previousClosedInnerBlock = true
+                } else {
+                    expectedLevel = blockStack.last.map { $0.level + 1 } ?? 0
+                    previousClosedInnerBlock = false
                 }
                 previousOpenedBlock = false
             }
@@ -346,8 +367,8 @@ enum CodeSourceFormatter {
     }
 
     private static func isPythonBlockHeader(_ line: String) -> Bool {
-        guard line.hasSuffix(":") else { return false }
-        let lowered = line.lowercased()
+        let lowered = pythonLineWithoutTrailingComment(line).lowercased()
+        guard lowered.hasSuffix(":") else { return false }
         if lowered.hasPrefix("#") { return false }
         return lowered.range(
             of: #"^(?:async\s+def|def|class|if|elif|else|for|async\s+for|while|try|except|finally|with|async\s+with|match|case)\b"#,
@@ -360,6 +381,50 @@ enum CodeSourceFormatter {
             of: #"^(?:elif\b.*|else|except\b.*|finally|case\b.*)\s*:\s*(?:#.*)?$"#,
             options: [.regularExpression, .caseInsensitive]
         ) != nil
+    }
+
+    private static func isPythonTerminalStatement(_ line: String) -> Bool {
+        let lowered = pythonLineWithoutTrailingComment(line).lowercased()
+        return lowered.range(
+            of: #"^(?:return\b.*|raise\b.*|break\b|continue\b|pass\b)$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func pythonLineWithoutTrailingComment(_ line: String) -> String {
+        var inSingleQuote = false
+        var inDoubleQuote = false
+        var escaped = false
+        var result = ""
+
+        for character in line {
+            if escaped {
+                result.append(character)
+                escaped = false
+                continue
+            }
+            if character == "\\" {
+                result.append(character)
+                escaped = true
+                continue
+            }
+            if character == "'", !inDoubleQuote {
+                inSingleQuote.toggle()
+                result.append(character)
+                continue
+            }
+            if character == "\"", !inSingleQuote {
+                inDoubleQuote.toggle()
+                result.append(character)
+                continue
+            }
+            if character == "#", !inSingleQuote, !inDoubleQuote {
+                break
+            }
+            result.append(character)
+        }
+
+        return result.trimmingCharacters(in: .whitespaces)
     }
 
     private static func pythonStructuralLevelForFlattenedLine(

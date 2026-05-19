@@ -193,9 +193,8 @@ enum ToolCallParser {
             // Text before this details block
             if match.start > currentPos {
                 let textBefore = String(content[currentPos..<match.start])
-                    .replacingOccurrences(of: "\n\n\n+", with: "\n\n", options: .regularExpression)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !textBefore.isEmpty {
+                    .normalizingToolSurroundingText()
+                if !textBefore.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     segments.append(.text(textBefore))
                 }
             }
@@ -225,9 +224,8 @@ enum ToolCallParser {
         // Remaining text after the last details block
         if currentPos < content.endIndex {
             let remaining = String(content[currentPos...])
-                .replacingOccurrences(of: "\n\n\n+", with: "\n\n", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !remaining.isEmpty {
+                .normalizingToolSurroundingText()
+            if !remaining.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 segments.append(.text(remaining))
             }
         }
@@ -2906,5 +2904,20 @@ struct AssistantMessageContent: View {
             )
         }
         return cleaned
+    }
+}
+
+private extension String {
+    func normalizingToolSurroundingText() -> String {
+        var result = contains("```")
+            ? self
+            : replacingOccurrences(of: "\n\n\n+", with: "\n\n", options: .regularExpression)
+        while let first = result.first, first.isWhitespace {
+            result.removeFirst()
+        }
+        while let last = result.last, last.isWhitespace {
+            result.removeLast()
+        }
+        return result
     }
 }

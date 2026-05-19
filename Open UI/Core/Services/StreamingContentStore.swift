@@ -629,7 +629,7 @@ final class StreamingContentStore {
         // In both cases only advance when the new candidate is ≥ proseBoundaryHysteresis
         // chars ahead of the current value to prevent per-paragraph layout snaps.
         let newDC = displayContent
-        if !newDC.contains("@@@VIZ-START") {
+        if !newDC.contains("@@@VIZ-START"), !Self.hasAnyCodeFence(in: newDC) {
             if frozenToolBoundaryOffset == 0 && !newDC.contains("<details") {
                 // Pure-prose path: search full displayContent.
                 let candidate = Self.lastParagraphBoundary(in: newDC)
@@ -822,6 +822,10 @@ final class StreamingContentStore {
         guard fenceCount % 2 == 0 else { return 0 }
 
         return text.distance(from: text.startIndex, to: boundaryIdx)
+    }
+
+    private static func hasAnyCodeFence(in text: String) -> Bool {
+        text.contains("```")
     }
 
 }

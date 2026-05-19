@@ -4063,7 +4063,8 @@ private struct IsolatedAssistantMessage: View {
 
                 if proseFreezeOffset > 0,
                    displayContent.count >= proseFreezeOffset,
-                   !Self.requiresFullAssistantRouting(displayContent) {
+                   !Self.requiresFullAssistantRouting(displayContent),
+                   !Self.containsCodeFence(displayContent) {
                     let dc = displayContent
                     let splitIdx = dc.index(dc.startIndex, offsetBy: proseFreezeOffset)
                     let frozenProse = String(dc[..<splitIdx])
@@ -4120,6 +4121,10 @@ private struct IsolatedAssistantMessage: View {
             || lower.contains("<|end_of_thought|>")
             || text.contains("◁think▷")
             || text.contains("◁/think▷")
+    }
+
+    private static func containsCodeFence(_ text: String) -> Bool {
+        text.contains("```")
     }
 
     // MARK: - Static Preprocessing (no ChatDetailView dependency)
