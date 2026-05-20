@@ -10899,8 +10899,7 @@ final class ChatViewModel {
         content: String,
         usage: [String: Any]?
     ) async {
-        let finalAnswer = Self.cleanedClientWebSearchAnswer(content)
-        let trimmed = finalAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             updateAssistantMessage(
                 id: assistantMessageId,
@@ -10914,7 +10913,7 @@ final class ChatViewModel {
 
         updateAssistantMessage(
             id: assistantMessageId,
-            content: finalAnswer,
+            content: content,
             isStreaming: false,
             statusHistory: [
                 ChatStatusUpdate(
@@ -10926,7 +10925,7 @@ final class ChatViewModel {
             ]
         )
         normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
-        let finalContent = conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? finalAnswer
+        let finalContent = conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? content
         applyUsage(usage, toMessageId: assistantMessageId)
         let lastUser = conversation?.messages.last(where: {
             $0.role == .user && $0.metadata?["iexa_client_web_search_result"] != "true"
@@ -11021,7 +11020,6 @@ final class ChatViewModel {
         The latest `[客户端联网搜索结果]` message is real iOS host-side web search output. Read it as the source of truth.
         - Answer the user directly from the search results.
         - If the results are insufficient, you may emit exactly one more-specific `iexa_web_search` block; otherwise do not emit any tool block.
-        - Never emit `image_group`, image search, carousel JSON, or any media/tool JSON while summarizing web search results.
         - Do not claim you cannot browse. Do not invent dates, prices, APIs, or news not present in the results.
         - Cite source titles or URLs plainly when useful.
         [/Client web search continuation]
@@ -11036,21 +11034,6 @@ final class ChatViewModel {
         } else {
             messages.insert(["role": "system", "content": instruction], at: 0)
         }
-    }
-
-    private static func cleanedClientWebSearchAnswer(_ text: String) -> String {
-        var output = text
-        let patterns = [
-            #"(?is)```(?:json)?\s*image_group\s*\{[\s\S]*?\}\s*```"#,
-            #"(?is)```(?:json)?\s*\{[\s\S]*?"image_group"[\s\S]*?\}\s*```"#,
-            #"(?is)\bimage_group\s*\{[\s\S]*?\}\s*(?=\n{2,}|$)"#
-        ]
-        for pattern in patterns {
-            output = output.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
-        }
-        return output
-            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func recentUserContextForSearch(excluding query: String) -> String? {
@@ -11346,7 +11329,7 @@ final class ChatViewModel {
         """
 
         [客户端联网搜索能力]
-        Iexa 客户端已接入内置浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明搜索由 iOS 内置 WKWebView 浏览器工具执行。只有当用户原话明确包含“搜”或“查”时，客户端才会先用 WKWebView 打开搜索页并读取网页内容，再把结果附加到本轮消息里给你使用；“最新、今天、实时、新闻”等词本身不会自动触发联网。联网搜索会优先找较新的结果，但不会只限制到当天，除非用户明确要求今天或 24 小时内。不要声称你无法联网或无法实时搜索。
+        Iexa 客户端已接入内置浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明搜索由 iOS 内置浏览器工具执行，必要时会回退到本地 Alpine 抓取。只有当用户原话明确包含“搜”或“查”时，客户端才会先用 WKWebView 打开搜索页并读取网页内容，再把结果附加到本轮消息里给你使用；“最新、今天、实时、新闻”等词本身不会自动触发联网。联网搜索会优先找较新的结果，但不会只限制到当天，除非用户明确要求今天或 24 小时内。不要声称你无法联网或无法实时搜索。
         [/客户端联网搜索能力]
         """
     }
@@ -11415,7 +11398,7 @@ final class ChatViewModel {
         实际搜索词：
         \(queryLines)
 
-        以下结果由 Iexa 客户端在发送本轮消息前，通过内置 WKWebView 浏览器搜索/读取网页取得。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果。回答要求：
+        以下结果由 Iexa 客户端在发送本轮消息前，通过内置 WKWebView 浏览器搜索/读取网页取得；如果浏览器结果不足，客户端会合并本地 Alpine 抓取结果。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果。回答要求：
         - 先直接给结论，再补充必要来源和时间。
         - 天气、油价、新闻、价格、版本等实时问题，必须说清楚信息日期/发布时间；如果结果没有当前日期/当前年份证据，先继续细化搜索，仍没有就明确说“未在搜索结果中找到精确值”，不要编。
         - 如果结果只是搜索页/中转页/摘要，或没有打开到可用正文，不要让用户自己去搜；请换更具体的关键词继续请求客户端搜索，或明确说明缺少可验证来源。
@@ -13820,11 +13803,7 @@ final class ChatViewModel {
         statusHistory: [ChatStatusUpdate]? = nil,
         error: ChatMessageError? = nil
     ) {
-        let isClientWebSearchContinuation = conversation?.messages.first(where: { $0.id == id })?
-            .metadata?["iexa_client_web_search_continuation"] == "true"
-        let displayContent = isClientWebSearchContinuation
-            ? Self.cleanedClientWebSearchAnswer(Self.cleanedProviderCitationArtifacts(content))
-            : Self.cleanedProviderCitationArtifacts(content)
+        let displayContent = Self.cleanedProviderCitationArtifacts(content)
         let shouldHandleLocalAlpineDisplay = (terminalEnabled && selectedTerminalIsLocalAlpine)
             || latestUserRequestsLocalAlpineAgent(modelId: selectedModelId ?? conversation?.model)
         let visibleAlpineDisplayContent: String? = {
