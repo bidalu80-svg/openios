@@ -51,63 +51,6 @@ actor LocalAlpineTerminalService {
         )
     }
 
-    func startInteractiveSession(cwd: String = "/mnt/iexa") async -> LocalAlpineCommandResult {
-        let status = status()
-        guard let rootArchiveURL = bundledRootFSURL() else {
-            return LocalAlpineCommandResult(
-                command: "terminal",
-                output: "Local Alpine rootfs is missing from the app bundle: \(rootArchiveName)",
-                exitCode: 127,
-                interactiveRequest: nil
-            )
-        }
-        guard status.isRuntimeLinked else {
-            return LocalAlpineCommandResult(
-                command: "terminal",
-                output: "Local Alpine native runtime adapter is present, but no iSH core implementation is linked into this build.",
-                exitCode: 126,
-                interactiveRequest: nil
-            )
-        }
-
-        do {
-            let workspaceURL = try ensureWorkspaceDirectory()
-            _ = try ensureSharedWorkspaceDirectory()
-            let runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
-            try ensureResolverConfiguration(in: runtimeRootFSURL)
-            let exitCode = await LocalAlpineNativeTerminalSession.shared.start(
-                cwd: normalizedRuntimePath(cwd),
-                rootArchiveURL: runtimeRootFSURL,
-                workspaceURL: workspaceURL
-            )
-            return LocalAlpineCommandResult(
-                command: "terminal",
-                output: exitCode == 0 ? "" : "Local Alpine terminal session failed to start: \(exitCode)",
-                exitCode: exitCode,
-                interactiveRequest: nil
-            )
-        } catch {
-            return LocalAlpineCommandResult(
-                command: "terminal",
-                output: "Local Alpine terminal session could not be prepared: \(error.localizedDescription)",
-                exitCode: 127,
-                interactiveRequest: nil
-            )
-        }
-    }
-
-    func sendInteractiveInput(_ text: String) async {
-        await LocalAlpineNativeTerminalSession.shared.send(text)
-    }
-
-    func readInteractiveOutput() async -> String {
-        await LocalAlpineNativeTerminalSession.shared.readOutput()
-    }
-
-    func stopInteractiveSession() async {
-        await LocalAlpineNativeTerminalSession.shared.stop()
-    }
-
     func listFiles(path: String) async throws -> [TerminalFileItem] {
         let root = try ensureSharedWorkspaceDirectory()
         let directory = try resolve(path: path, root: root, allowRoot: true)

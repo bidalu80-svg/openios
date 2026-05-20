@@ -19,22 +19,6 @@ char *iexa_local_alpine_execute(
     int32_t *exit_code
 );
 
-int32_t iexa_local_alpine_session_start(
-    const char *cwd,
-    const char *root_archive_path,
-    const char *workspace_path,
-    const char *time_zone
-);
-
-int32_t iexa_local_alpine_session_send_input(
-    const char *input,
-    int32_t length
-);
-
-char *iexa_local_alpine_session_read_output(void);
-
-void iexa_local_alpine_session_stop(void);
-
 void iexa_local_alpine_free(char *buffer);
 
 #ifdef __cplusplus

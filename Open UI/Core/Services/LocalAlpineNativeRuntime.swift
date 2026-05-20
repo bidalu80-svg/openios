@@ -16,26 +16,6 @@ private func iexaLocalAlpineExecute(
 @_silgen_name("iexa_local_alpine_free")
 private func iexaLocalAlpineFree(_ buffer: UnsafeMutablePointer<CChar>)
 
-@_silgen_name("iexa_local_alpine_session_start")
-private func iexaLocalAlpineSessionStart(
-    _ cwd: UnsafePointer<CChar>,
-    _ rootArchivePath: UnsafePointer<CChar>,
-    _ workspacePath: UnsafePointer<CChar>,
-    _ timeZone: UnsafePointer<CChar>
-) -> Int32
-
-@_silgen_name("iexa_local_alpine_session_send_input")
-private func iexaLocalAlpineSessionSendInput(
-    _ input: UnsafePointer<CChar>,
-    _ length: Int32
-) -> Int32
-
-@_silgen_name("iexa_local_alpine_session_read_output")
-private func iexaLocalAlpineSessionReadOutput() -> UnsafeMutablePointer<CChar>?
-
-@_silgen_name("iexa_local_alpine_session_stop")
-private func iexaLocalAlpineSessionStop()
-
 nonisolated struct LocalAlpineNativeCommand: Sendable {
     let command: String
     let cwd: String
@@ -141,61 +121,5 @@ nonisolated struct LocalAlpineNativeRuntime: Sendable {
             return "UTC\(sign)\(hours)"
         }
         return String(format: "UTC%@%d:%02d", sign, hours, minutes)
-    }
-}
-
-actor LocalAlpineNativeTerminalSession {
-    static let shared = LocalAlpineNativeTerminalSession()
-
-    private var isStarted = false
-
-    func start(cwd: String, rootArchiveURL: URL, workspaceURL: URL) async -> Int {
-        guard LocalAlpineNativeRuntime.shared.isLinked else { return 126 }
-
-        let result = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let status = cwd.withCString { cwdCString in
-                    rootArchiveURL.path.withCString { rootArchiveCString in
-                        workspaceURL.path.withCString { workspaceCString in
-                            LocalAlpineNativeRuntime.currentPOSIXTimeZone().withCString { timeZoneCString in
-                                iexaLocalAlpineSessionStart(
-                                    cwdCString,
-                                    rootArchiveCString,
-                                    workspaceCString,
-                                    timeZoneCString
-                                )
-                            }
-                        }
-                    }
-                }
-                continuation.resume(returning: Int(status))
-            }
-        }
-        isStarted = result == 0
-        return result
-    }
-
-    func send(_ text: String) async {
-        guard isStarted, let data = text.data(using: .utf8), !data.isEmpty else { return }
-        _ = data.withUnsafeBytes { rawBuffer in
-            guard let base = rawBuffer.bindMemory(to: CChar.self).baseAddress else { return Int32(1) }
-            return iexaLocalAlpineSessionSendInput(base, Int32(data.count))
-        }
-    }
-
-    func readOutput() async -> String {
-        guard isStarted else { return "" }
-        let outputPointer = iexaLocalAlpineSessionReadOutput()
-        let output = outputPointer.map { String(cString: $0) } ?? ""
-        if let outputPointer {
-            iexaLocalAlpineFree(outputPointer)
-        }
-        return output
-    }
-
-    func stop() async {
-        guard isStarted else { return }
-        iexaLocalAlpineSessionStop()
-        isStarted = false
     }
 }
