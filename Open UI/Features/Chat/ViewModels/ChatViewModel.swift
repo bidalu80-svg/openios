@@ -10899,7 +10899,8 @@ final class ChatViewModel {
         content: String,
         usage: [String: Any]?
     ) async {
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalAnswer = Self.cleanedClientWebSearchAnswer(content)
+        let trimmed = finalAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             updateAssistantMessage(
                 id: assistantMessageId,
@@ -10913,7 +10914,7 @@ final class ChatViewModel {
 
         updateAssistantMessage(
             id: assistantMessageId,
-            content: content,
+            content: finalAnswer,
             isStreaming: false,
             statusHistory: [
                 ChatStatusUpdate(
@@ -10925,7 +10926,7 @@ final class ChatViewModel {
             ]
         )
         normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
-        let finalContent = conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? content
+        let finalContent = conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? finalAnswer
         applyUsage(usage, toMessageId: assistantMessageId)
         let lastUser = conversation?.messages.last(where: {
             $0.role == .user && $0.metadata?["iexa_client_web_search_result"] != "true"
@@ -11020,6 +11021,7 @@ final class ChatViewModel {
         The latest `[客户端联网搜索结果]` message is real iOS host-side web search output. Read it as the source of truth.
         - Answer the user directly from the search results.
         - If the results are insufficient, you may emit exactly one more-specific `iexa_web_search` block; otherwise do not emit any tool block.
+        - Never emit `image_group`, image search, carousel JSON, or any media/tool JSON while summarizing web search results.
         - Do not claim you cannot browse. Do not invent dates, prices, APIs, or news not present in the results.
         - Cite source titles or URLs plainly when useful.
         [/Client web search continuation]
@@ -11034,6 +11036,21 @@ final class ChatViewModel {
         } else {
             messages.insert(["role": "system", "content": instruction], at: 0)
         }
+    }
+
+    private static func cleanedClientWebSearchAnswer(_ text: String) -> String {
+        var output = text
+        let patterns = [
+            #"(?is)```(?:json)?\s*image_group\s*\{[\s\S]*?\}\s*```"#,
+            #"(?is)```(?:json)?\s*\{[\s\S]*?"image_group"[\s\S]*?\}\s*```"#,
+            #"(?is)\bimage_group\s*\{[\s\S]*?\}\s*(?=\n{2,}|$)"#
+        ]
+        for pattern in patterns {
+            output = output.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        return output
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func recentUserContextForSearch(excluding query: String) -> String? {
@@ -13803,7 +13820,7 @@ final class ChatViewModel {
         statusHistory: [ChatStatusUpdate]? = nil,
         error: ChatMessageError? = nil
     ) {
-        let displayContent = Self.cleanedProviderCitationArtifacts(content)
+        let displayContent = Self.cleanedVisibleAssistantContent(content)
         let shouldHandleLocalAlpineDisplay = (terminalEnabled && selectedTerminalIsLocalAlpine)
             || latestUserRequestsLocalAlpineAgent(modelId: selectedModelId ?? conversation?.model)
         let visibleAlpineDisplayContent: String? = {
@@ -14029,6 +14046,10 @@ final class ChatViewModel {
 
     private static func cleanedProviderCitationArtifacts(_ text: String) -> String {
         StreamingMarkdownView.removeProviderCitationArtifacts(from: text)
+    }
+
+    private static func cleanedVisibleAssistantContent(_ text: String) -> String {
+        cleanedClientWebSearchAnswer(cleanedProviderCitationArtifacts(text))
     }
 
     /// Fires a subtle haptic pulse during token streaming, throttled via

@@ -8,9 +8,9 @@ final class BrowserWebSearchService: NSObject {
     static let shared = BrowserWebSearchService()
 
     private let logger = Logger(subsystem: "com.openui", category: "BrowserWebSearch")
-    private let maxQueries = 4
-    private let maxSearchItems = 10
-    private let maxDocuments = 5
+    private let maxQueries = 2
+    private let maxSearchItems = 8
+    private let maxDocuments = 2
     private var webView: WKWebView?
     private var navigationContinuation: CheckedContinuation<Bool, Never>?
     private var timeoutTask: Task<Void, Never>?
@@ -77,7 +77,7 @@ final class BrowserWebSearchService: NSObject {
 
         for (index, rawURL) in Self.searchURLs(for: query).enumerated() {
             guard let url = URL(string: rawURL),
-                  await load(url: url, timeout: 14) else {
+                  await load(url: url, timeout: 6) else {
                 continue
             }
             await settleLoadedPage(scroll: false)
@@ -95,7 +95,8 @@ final class BrowserWebSearchService: NSObject {
                 if items.count >= maxSearchItems * 2 { break }
             }
             if items.count >= maxSearchItems * 2 { break }
-            if index >= 1 && items.count >= maxSearchItems { break }
+            if items.count >= maxSearchItems { break }
+            if index >= 1 && items.count >= 4 { break }
         }
         return items
     }
@@ -105,20 +106,23 @@ final class BrowserWebSearchService: NSObject {
         let timestamp = Int(Date().timeIntervalSince1970)
         let needsDayScope = searchNeedsFreshness(query)
 
+        let baiduURL = "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)"
+        let bingURL = needsDayScope
+            ? "https://www.bing.com/search?q=\(encoded)&setlang=zh-Hans&count=10&filters=ex1%3a%22ez1%22&_=\(timestamp)"
+            : "https://www.bing.com/search?q=\(encoded)&setlang=zh-Hans&count=10&_=\(timestamp)"
+        let duckLiteURL = needsDayScope
+            ? "https://lite.duckduckgo.com/lite/?q=\(encoded)&df=d"
+            : "https://lite.duckduckgo.com/lite/?q=\(encoded)"
+
+        if containsCJK(query) {
+            return [baiduURL, bingURL, duckLiteURL]
+        }
         return [
-            needsDayScope
-                ? "https://www.bing.com/search?q=\(encoded)&setlang=zh-Hans&count=10&filters=ex1%3a%22ez1%22&_=\(timestamp)"
-                : "https://www.bing.com/search?q=\(encoded)&setlang=zh-Hans&count=10&_=\(timestamp)",
+            bingURL,
+            baiduURL,
             needsDayScope
                 ? "https://duckduckgo.com/html/?q=\(encoded)&df=d"
-                : "https://duckduckgo.com/html/?q=\(encoded)",
-            needsDayScope
-                ? "https://lite.duckduckgo.com/lite/?q=\(encoded)&df=d"
-                : "https://lite.duckduckgo.com/lite/?q=\(encoded)",
-            needsDayScope
-                ? "https://www.google.com/search?q=\(encoded)&hl=zh-CN&num=10&tbs=qdr:d"
-                : "https://www.google.com/search?q=\(encoded)&hl=zh-CN&num=10",
-            "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)"
+                : "https://duckduckgo.com/html/?q=\(encoded)"
         ]
     }
 
@@ -136,7 +140,7 @@ final class BrowserWebSearchService: NSObject {
             return nil
         }
 
-        guard await load(url: url, timeout: 16) else {
+        guard await load(url: url, timeout: 7) else {
             return summaryDocument(for: item)
         }
         await settleLoadedPage(scroll: true)
@@ -258,7 +262,7 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private func settleLoadedPage(scroll: Bool) async {
-        try? await Task.sleep(nanoseconds: 600_000_000)
+        try? await Task.sleep(nanoseconds: 300_000_000)
         guard scroll else { return }
         _ = await evaluateString(
             """
@@ -274,7 +278,7 @@ final class BrowserWebSearchService: NSObject {
             })();
             """
         )
-        try? await Task.sleep(nanoseconds: 500_000_000)
+        try? await Task.sleep(nanoseconds: 300_000_000)
     }
 
     private func evaluateSearchItems() async -> [WebSearchResultItem] {
