@@ -1452,6 +1452,7 @@ struct SourceCodeTextView: View {
     }
 
     var body: some View {
+        let contentWidth = Self.contentWidth(for: visibleCode)
         let contentHeight = min(
             contentMaxHeight,
             max(48, measuredContentHeight > 0 ? measuredContentHeight : estimatedContentHeight)
@@ -1465,6 +1466,7 @@ struct SourceCodeTextView: View {
             lineSpacing: 3.5,
             isDarkMode: theme.isDark,
             maximumHeight: contentMaxHeight,
+            contentWidth: contentWidth,
             autoFollowTail: autoFollowTail,
             onHeightChange: { height in
                 let nextHeight = min(contentMaxHeight, max(48, height))
@@ -1478,11 +1480,19 @@ struct SourceCodeTextView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: contentHeight + verticalPadding * 2)
     }
+
+    private static func contentWidth(for code: String) -> CGFloat {
+        let longestLineCount = code
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(\.count)
+            .max() ?? 1
+        // 13pt monospaced glyphs average just under 8pt wide; use a slightly
+        // generous width so deeply indented code can scroll all the way to EOL.
+        return max(UIScreen.main.bounds.width, CGFloat(longestLineCount + 8) * 8.4)
+    }
 }
 
 private struct HighlightedSourceTextView: UIViewRepresentable {
-    private static let unwrappedTextWidth: CGFloat = 12_000
-
     let text: String
     let language: String
     let textColor: UIColor
@@ -1490,6 +1500,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
     let lineSpacing: CGFloat
     let isDarkMode: Bool
     let maximumHeight: CGFloat
+    let contentWidth: CGFloat
     let autoFollowTail: Bool
     var onHeightChange: (CGFloat) -> Void = { _ in }
 
@@ -1513,10 +1524,6 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = false
         textView.textContainer.heightTracksTextView = false
-        textView.textContainer.size = CGSize(
-            width: Self.unwrappedTextWidth,
-            height: UIView.layoutFittingExpandedSize.height
-        )
         textView.textContainer.lineBreakMode = .byClipping
         textView.layoutManager.allowsNonContiguousLayout = false
         textView.adjustsFontForContentSizeCategory = false
@@ -1539,6 +1546,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             || coordinator.lastLineSpacing != lineSpacing
             || coordinator.lastIsDarkMode != isDarkMode
             || coordinator.lastMaximumHeight != normalizedMaximumHeight
+            || coordinator.lastContentWidth != contentWidth
             || coordinator.lastAutoFollowTail != autoFollowTail
             || !coordinator.lastTextColor.isEqual(textColor)
 
@@ -1553,12 +1561,20 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             && coordinator.lastLineSpacing == lineSpacing
             && coordinator.lastIsDarkMode == isDarkMode
             && coordinator.lastMaximumHeight == normalizedMaximumHeight
+            && coordinator.lastContentWidth == contentWidth
             && coordinator.lastTextColor.isEqual(textColor)
         uiView.textContainer.widthTracksTextView = false
         uiView.textContainer.heightTracksTextView = false
         uiView.textContainer.size = CGSize(
-            width: Self.unwrappedTextWidth,
+            width: contentWidth,
             height: UIView.layoutFittingExpandedSize.height
+        )
+        if let sourceTextView = uiView as? NoCaretSourceTextView {
+            sourceTextView.minimumContentWidth = contentWidth
+        }
+        uiView.contentSize = CGSize(
+            width: contentWidth,
+            height: max(uiView.contentSize.height, 1)
         )
         uiView.textContainer.lineBreakMode = .byClipping
         uiView.isScrollEnabled = true
@@ -1599,6 +1615,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         coordinator.lastLineSpacing = lineSpacing
         coordinator.lastIsDarkMode = isDarkMode
         coordinator.lastMaximumHeight = normalizedMaximumHeight
+        coordinator.lastContentWidth = contentWidth
         coordinator.lastAutoFollowTail = autoFollowTail
         coordinator.lastTextColor = textColor
 
@@ -1622,6 +1639,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         DispatchQueue.main.async {
             let measuredHeight = Self.measuredHeight(for: uiView, maximumHeight: maximumHeight)
             onHeightChange(measuredHeight)
+            uiView.contentSize.width = max(uiView.contentSize.width, contentWidth)
             let needsVerticalScroll = measuredHeight >= maximumHeight - 0.5
             uiView.isScrollEnabled = true
             uiView.alwaysBounceVertical = needsVerticalScroll
@@ -1635,15 +1653,16 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         let fallbackWidth = UIScreen.main.bounds.width - 64
         let width = max(1, proposal.width ?? uiView.bounds.width.nonZero(or: fallbackWidth))
         let fittingSize = uiView.sizeThatFits(
-            CGSize(width: Self.unwrappedTextWidth, height: UIView.layoutFittingExpandedSize.height)
+            CGSize(width: contentWidth, height: UIView.layoutFittingExpandedSize.height)
         )
         let cappedHeight = maximumHeight.isFinite ? min(fittingSize.height, maximumHeight) : fittingSize.height
         return CGSize(width: width, height: max(1, cappedHeight))
     }
 
     private static func measuredHeight(for uiView: UITextView, maximumHeight: CGFloat) -> CGFloat {
+        let width = max(uiView.textContainer.size.width, uiView.bounds.width)
         let fittingSize = uiView.sizeThatFits(
-            CGSize(width: Self.unwrappedTextWidth, height: UIView.layoutFittingExpandedSize.height)
+            CGSize(width: width, height: UIView.layoutFittingExpandedSize.height)
         )
         if maximumHeight.isFinite {
             return min(fittingSize.height, maximumHeight)
@@ -1658,6 +1677,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         var lastLineSpacing: CGFloat = 0
         var lastIsDarkMode = false
         var lastMaximumHeight: CGFloat = -1
+        var lastContentWidth: CGFloat = 0
         var lastAutoFollowTail = false
         var lastTextColor: UIColor = .clear
     }
@@ -1665,9 +1685,23 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
 
 private final class NoCaretSourceTextView: UITextView {
     var selectionEnabled = true
+    var minimumContentWidth: CGFloat = 0
 
     override func caretRect(for position: UITextPosition) -> CGRect {
         .zero
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard minimumContentWidth > bounds.width else { return }
+        textContainer.widthTracksTextView = false
+        textContainer.size = CGSize(
+            width: minimumContentWidth,
+            height: UIView.layoutFittingExpandedSize.height
+        )
+        if contentSize.width < minimumContentWidth {
+            contentSize.width = minimumContentWidth
+        }
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {

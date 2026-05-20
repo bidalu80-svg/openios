@@ -6849,6 +6849,9 @@ final class ChatViewModel {
 
         // 6. Re-derive the flat messages list from the tree.
         conversation!.rederiveMessages()
+        if let newAssistantIndex = conversation?.messages.firstIndex(where: { $0.id == newAssistantId }) {
+            conversation?.messages[newAssistantIndex].isStreaming = true
+        }
 
         // Reset the task list — the new regen branch starts with no tasks.
         tasks = []
@@ -6859,6 +6862,7 @@ final class ChatViewModel {
 
         // 8. Get the user message (parentId) for the API messages build.
         guard conversation?.messages.contains(where: { $0.role == .user }) == true else { return }
+        guard let userNode = conversation!.history.nodes[parentId] else { return }
         let apiMessages = await buildAPIMessagesAsync()
         appendContextCompressionStatusIfNeeded(to: newAssistantId)
         let effectiveChatId = conversationId ?? conversation?.id
@@ -6881,39 +6885,126 @@ final class ChatViewModel {
         recoveryTimer?.invalidate()
         recoveryTimer = nil
 
-        guard let socket = socketService else {
-            updateAssistantMessage(id: newAssistantId, content: "No connection available.",
-                                   isStreaming: false, error: ChatMessageError(content: "No socket"))
-            isStreaming = false
+        if isOpenAICompatibleProvider {
+            let capturedNewAssistantId = newAssistantId
+            let capturedUserNode = userNode
+
+            streamingTask = Task { [weak self] in
+                guard let self, let manager = self.manager else { return }
+                let acc = ContentAccumulator()
+                var exactUsage: [String: Any]?
+
+                do {
+                    var request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
+                    await self.populateCommonRequestFields(&request)
+                    let sseStream = try await manager.sendMessageStreaming(request: request)
+
+                    for try await event in sseStream {
+                        if Task.isCancelled { break }
+
+                        if let usage = event.usage, !usage.isEmpty {
+                            exactUsage = usage
+                        }
+
+                        if let delta = event.contentDelta, !delta.isEmpty {
+                            acc.append(delta)
+                            self.updateAssistantMessage(
+                                id: capturedNewAssistantId,
+                                content: acc.content,
+                                isStreaming: true
+                            )
+                        }
+
+                        if event.isFinished { break }
+                    }
+                } catch {
+                    if !Task.isCancelled {
+                        self.updateAssistantMessage(
+                            id: capturedNewAssistantId,
+                            content: acc.content,
+                            isStreaming: false,
+                            error: ChatMessageError(content: Self.localizedGenerationError(error))
+                        )
+                        self.cleanupStreaming()
+                        await self.persistLocalConversationIfNeeded()
+                        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                    }
+                    return
+                }
+
+                if Task.isCancelled { return }
+
+                if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.updateAssistantMessage(
+                        id: capturedNewAssistantId,
+                        content: "",
+                        isStreaming: false,
+                        error: ChatMessageError(content: "未收到模型回复或图片数据，请重试。")
+                    )
+                    self.cleanupStreaming()
+                    await self.persistLocalConversationIfNeeded()
+                    return
+                }
+
+                self.updateAssistantMessage(id: capturedNewAssistantId, content: acc.content, isStreaming: false)
+                self.normalizeAssistantGeneratedMedia(messageId: capturedNewAssistantId)
+                let normalizedContent = self.conversation?.messages
+                    .first(where: { $0.id == capturedNewAssistantId })?.content ?? acc.content
+                self.applyUsage(exactUsage, toMessageId: capturedNewAssistantId)
+                self.recordTokenUsageForCompletedTurn(
+                    assistantMessageId: capturedNewAssistantId,
+                    userText: capturedUserNode.content,
+                    assistantText: normalizedContent,
+                    userAttachments: [],
+                    usage: exactUsage
+                )
+                self.hasFinishedStreaming = true
+                self.isStreaming = false
+                self.selfInitiatedStream = false
+                self.activeTaskId = nil
+                self.lastTaskExtractionLength = 0
+                await self.persistLocalConversationIfNeeded()
+                await self.sendCompletionNotificationIfNeeded(content: normalizedContent)
+                NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            }
             return
         }
-        if !socket.isConnected {
-            let ok = await socket.ensureConnected(timeout: 10.0)
-            if !ok {
-                updateAssistantMessage(
-                    id: newAssistantId,
-                    content: "Unable to connect. Check your connection.",
-                    isStreaming: false,
-                    error: ChatMessageError(content: "Connection failed"))
-                isStreaming = false
-                return
+
+        let socket = socketService
+        var socketConnected = socket?.isConnected ?? false
+
+        if let socket, !socketConnected {
+            appendStatusUpdate(id: newAssistantId,
+                status: ChatStatusUpdate(action: "reconnecting", description: "Reconnecting to server...", done: false))
+
+            for (attempt, timeout) in [(1, 5.0), (2, 8.0), (3, 12.0)] as [(Int, TimeInterval)] {
+                socketConnected = await socket.ensureConnected(timeout: timeout)
+                if socketConnected { break }
+                logger.warning("Regenerate socket connect attempt \(attempt) failed, retrying...")
             }
+
+            appendStatusUpdate(id: newAssistantId,
+                status: ChatStatusUpdate(
+                    action: "reconnecting",
+                    description: socketConnected ? "Connected" : "Using direct connection",
+                    done: true
+                ))
         }
 
-        let socketSessionId = socket.sid ?? sessionId
+        let usePollingFallback = !socketConnected
+        let socketSessionId = socket?.sid ?? sessionId
 
-        // Get the user message node to build user_message dict for the request.
-        // The parentId of the new assistant IS the user message ID.
-        guard let userNode = conversation!.history.nodes[parentId] else { return }
-
-        registerSocketHandlers(
-            socket: socket, assistantMessageId: newAssistantId,
-            modelId: modelId, socketSessionId: socketSessionId,
-            effectiveChatId: effectiveChatId)
+        if socketConnected, let socket {
+            registerSocketHandlers(
+                socket: socket, assistantMessageId: newAssistantId,
+                modelId: modelId, socketSessionId: socketSessionId,
+                effectiveChatId: effectiveChatId)
+        }
 
         let capturedNewAssistantId = newAssistantId
         let capturedParentId = parentId
         let capturedUserNode = userNode
+        let capturedUsePollingFallback = usePollingFallback
 
         streamingTask = Task { [weak self] in
             guard let self, let manager = self.manager else { return }
@@ -6941,7 +7032,33 @@ final class ChatViewModel {
                 // Populate all common request fields
                 await self.populateCommonRequestFields(&request)
 
-                if request.isPipeModel {
+                if capturedUsePollingFallback {
+                    self.logger.info("Regenerate: using HTTP + polling fallback (no socket)")
+                    let json = try await manager.sendMessageHTTP(request: request)
+
+                    if let err = json["error"] as? String, !err.isEmpty {
+                        self.updateAssistantMessage(id: capturedNewAssistantId, content: "",
+                                                     isStreaming: false, error: ChatMessageError(content: err))
+                        self.cleanupStreaming()
+                        return
+                    }
+                    if let detail = json["detail"] as? String, !detail.isEmpty, json["choices"] == nil {
+                        self.updateAssistantMessage(id: capturedNewAssistantId, content: "",
+                                                     isStreaming: false, error: ChatMessageError(content: detail))
+                        self.cleanupStreaming()
+                        return
+                    }
+                    if let taskId = json["task_id"] as? String {
+                        self.activeTaskId = taskId
+                    }
+
+                    await self.pollRegeneratedAssistantUntilStable(
+                        assistantMessageId: capturedNewAssistantId,
+                        modelId: modelId,
+                        socketSessionId: socketSessionId,
+                        effectiveChatId: effectiveChatId
+                    )
+                } else if request.isPipeModel {
                     // ── PIPE MODEL SSE PATH (regeneration) ──
                     self.logger.info("Regenerate: using pipe model SSE path for \(modelId)")
                     let acc = ContentAccumulator()
@@ -6999,6 +7116,7 @@ final class ChatViewModel {
                     }
 
                     self.logger.info("Regenerate HTTP POST done – waiting for socket events")
+                    self.startRecoveryTimer(assistantMessageId: capturedNewAssistantId, chatId: effectiveChatId)
                 }
             } catch {
                 if !Task.isCancelled {
@@ -8064,6 +8182,97 @@ final class ChatViewModel {
         // as finishStreamingSuccessfully. The server's chatCompleted has the
         // authoritative state; pushing our local copy would corrupt tool results.
         cleanupStreaming()
+    }
+
+    private func pollRegeneratedAssistantUntilStable(
+        assistantMessageId: String,
+        modelId: String,
+        socketSessionId: String,
+        effectiveChatId: String?
+    ) async {
+        guard let chatId = effectiveChatId, let manager else {
+            updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: false,
+                                   error: ChatMessageError(content: "No connection available."))
+            cleanupStreaming()
+            return
+        }
+
+        var lastContentLength = 0
+        var staleCount = 0
+        var latestRefreshed: Conversation?
+
+        for _ in 0..<40 {
+            if Task.isCancelled { break }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if Task.isCancelled { break }
+
+            do {
+                let refreshed = try await manager.fetchConversation(id: chatId)
+                latestRefreshed = refreshed
+                if let serverAssistant = refreshed.messages.last(where: { $0.role == .assistant }) {
+                    let serverContent = serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !serverContent.isEmpty {
+                        let localContent = conversation?.messages
+                            .first(where: { $0.id == assistantMessageId })?.content ?? ""
+                        let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
+                            local: localContent,
+                            incoming: serverAssistant.content
+                        ) ? localContent : serverAssistant.content
+                        updateAssistantMessage(id: assistantMessageId, content: protectedContent, isStreaming: true)
+
+                        if serverContent.count > lastContentLength {
+                            lastContentLength = serverContent.count
+                            staleCount = 0
+                        } else {
+                            staleCount += 1
+                        }
+
+                        if staleCount >= 3 {
+                            updateAssistantMessage(id: assistantMessageId, content: protectedContent, isStreaming: false)
+                            if let latestRefreshed {
+                                adoptServerMessages(serverConversation: latestRefreshed)
+                            }
+                            normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+                            await manager.sendChatCompleted(
+                                chatId: chatId,
+                                messageId: assistantMessageId,
+                                model: modelId,
+                                sessionId: socketSessionId,
+                                messages: buildSimpleAPIMessages()
+                            )
+                            try? await refreshConversationMetadata(
+                                chatId: chatId,
+                                assistantMessageId: assistantMessageId
+                            )
+                            cleanupStreaming()
+                            let finalContent = conversation?.messages
+                                .first(where: { $0.id == assistantMessageId })?.content ?? protectedContent
+                            await sendCompletionNotificationIfNeeded(content: finalContent)
+                            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                            return
+                        }
+                    }
+                }
+            } catch {
+                logger.warning("Regenerate polling failed: \(error.localizedDescription)")
+            }
+        }
+
+        let finalContent = conversation?.messages
+            .first(where: { $0.id == assistantMessageId })?.content ?? ""
+        if finalContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: "",
+                isStreaming: false,
+                error: ChatMessageError(content: "未收到模型回复或图片数据，请重试。")
+            )
+        } else {
+            updateAssistantMessage(id: assistantMessageId, content: finalContent, isStreaming: false)
+            normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+        }
+        cleanupStreaming()
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
     }
 
     // MARK: - Recovery Timer

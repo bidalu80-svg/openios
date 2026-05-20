@@ -1478,7 +1478,10 @@ struct ChatDetailView: View {
 
             // ── Inline error ──
             if let error = message.error {
-                messageErrorView(error.content ?? String(localized: "An error occurred"))
+                messageErrorView(
+                    error.content ?? String(localized: "An error occurred"),
+                    retryMessageId: message.id
+                )
                     .padding(.horizontal, Spacing.screenPadding)
             }
 
@@ -2709,7 +2712,7 @@ struct ChatDetailView: View {
 
     // MARK: - Message Error View
 
-    private func messageErrorView(_ text: String) -> some View {
+    private func messageErrorView(_ text: String, retryMessageId: String) -> some View {
         HStack(spacing: Spacing.sm) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .scaledFont(size: 12)
@@ -2719,7 +2722,7 @@ struct ChatDetailView: View {
                 .foregroundStyle(theme.error)
             Spacer()
             if !viewModel.isStreaming {
-                Button { Task { await viewModel.regenerateLastResponse() } } label: {
+                Button { Task { await viewModel.regenerateResponse(messageId: retryMessageId) } } label: {
                     Text("重试").scaledFont(size: 12, weight: .medium).foregroundStyle(theme.brandPrimary)
                 }
             }
