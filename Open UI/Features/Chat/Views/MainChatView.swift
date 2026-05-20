@@ -2881,7 +2881,7 @@ let conversationId: String?
                     HStack(spacing: Spacing.xs) {
                         if let model = vm.selectedModel {
                             ModelAvatar(
-                                size: 22,
+                                size: 25,
                                 imageURL: vm.resolvedImageURL(for: model),
                                 label: model.shortName,
                                 authToken: vm.serverAuthToken

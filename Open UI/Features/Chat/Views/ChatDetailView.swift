@@ -558,7 +558,7 @@ struct ChatDetailView: View {
             HStack(spacing: Spacing.sm) {
                 modelSelectorButton
                 if viewModel.isTemporaryChat {
-                    Image(systemName: "eye.slash.fill")
+                    Image(systemName: "bolt.fill")
                         .scaledFont(size: 12, weight: .semibold)
                         .foregroundStyle(theme.warning)
                 }
@@ -589,7 +589,7 @@ struct ChatDetailView: View {
                     }
                     Haptics.play(.light)
                 } label: {
-                    Image(systemName: viewModel.isTemporaryChat ? "eye.slash.fill" : "eye")
+                    Image(systemName: viewModel.isTemporaryChat ? "bolt.fill" : "bolt")
                         .scaledFont(size: 13, weight: .medium)
                         .foregroundStyle(viewModel.isTemporaryChat ? theme.warning : theme.textTertiary)
                         .frame(width: 34, height: 34)
@@ -618,7 +618,7 @@ struct ChatDetailView: View {
                     HStack(spacing: Spacing.xs) {
                         if let model = viewModel.selectedModel {
                             ModelAvatar(
-                                size: 22,
+                                size: 25,
                                 imageURL: viewModel.resolvedImageURL(for: model),
                                 label: model.shortName,
                                 authToken: viewModel.serverAuthToken
@@ -1553,10 +1553,10 @@ struct ChatDetailView: View {
         let model = resolveModel(for: message)
         return HStack(spacing: Spacing.sm) {
             if let m = model {
-                ModelAvatar(size: 22, imageURL: viewModel.resolvedImageURL(for: m),
+                ModelAvatar(size: 26, imageURL: viewModel.resolvedImageURL(for: m),
                             label: m.shortName, authToken: viewModel.serverAuthToken)
             } else {
-                ModelAvatar(size: 22, label: message.model)
+                ModelAvatar(size: 26, label: message.model)
             }
             Text(model?.shortName ?? message.model ?? String(localized: "Assistant"))
                 .scaledFont(size: 12, weight: .medium)
@@ -1874,14 +1874,14 @@ struct ChatDetailView: View {
                 ZStack {
                     if let model = viewModel.selectedModel {
                         ModelAvatar(
-                            size: 52,
+                            size: 58,
                             imageURL: viewModel.resolvedImageURL(for: model),
                             label: model.shortName,
                             authToken: viewModel.serverAuthToken
                         )
                         .transition(.scale.combined(with: .opacity))
                     } else {
-                        ModelAvatar(size: 52, label: nil)
+                        ModelAvatar(size: 58, label: nil)
                             .transition(.scale.combined(with: .opacity))
                     }
                 }
@@ -1900,7 +1900,7 @@ struct ChatDetailView: View {
 
                 if viewModel.isTemporaryChat {
                     HStack(spacing: 5) {
-                        Image(systemName: "eye.slash.fill")
+                        Image(systemName: "bolt.fill")
                             .scaledFont(size: 10, weight: .semibold)
                         Text("Temporary Chat")
                             .scaledFont(size: 11, weight: .semibold)

@@ -222,11 +222,7 @@ struct ServerConnectionView: View {
                                 .frame(width: 130, height: 130)
                                 .scaleEffect(logoScale * 1.1)
 
-                            Image("AppIconImage")
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: 72, height: 72)
-                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            IexaLogoMark(size: 78)
                                 .scaleEffect(logoScale)
                         }
                         .opacity(logoOpacity)
