@@ -317,8 +317,8 @@ actor LocalAlpineTerminalService {
 
             let passthroughOptions: Set<String> = ["-s", "-S", "-sS", "-L"]
             let parts = rest.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-            let unsupportedOption = parts.dropLast().contains { $0.hasPrefix("-") && !passthroughOptions.contains($0) }
-            guard !unsupportedOption, let url = parts.last, !url.hasPrefix("-") else { return command }
+            let canApplyWgetFallback = !parts.dropLast().contains { $0.hasPrefix("-") && !passthroughOptions.contains($0) }
+            guard canApplyWgetFallback, let url = parts.last, !url.hasPrefix("-") else { return command }
 
             let escapedURL = shellSingleQuoted(url)
             return """

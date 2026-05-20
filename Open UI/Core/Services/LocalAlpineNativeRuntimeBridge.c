@@ -94,7 +94,9 @@ static bool contains_case_insensitive(const char *value, const char *needle) {
     return false;
 }
 
-static int command_timeout_seconds(const char *command) {
+// This is only a timeout policy. It is not a command allowlist: commands are
+// still passed through to /bin/sh -c below.
+static int timeout_seconds_for_command(const char *command) {
     if (contains_case_insensitive(command, "apk add") ||
         contains_case_insensitive(command, "apk upgrade") ||
         contains_case_insensitive(command, "apk fix")) {
@@ -103,9 +105,9 @@ static int command_timeout_seconds(const char *command) {
     if (contains_case_insensitive(command, "apk update") ||
         contains_case_insensitive(command, "curl ") ||
         contains_case_insensitive(command, "wget ")) {
-        return 120;
+        return 300;
     }
-    return 60;
+    return 300;
 }
 
 static int ensure_directory(const char *path) {
@@ -183,6 +185,25 @@ static void capture_append_locked(const void *bytes, size_t length) {
     memcpy(capture_buffer + capture_length, bytes, length);
     capture_length += length;
     capture_buffer[capture_length] = '\0';
+}
+
+static void wait_for_capture_settle_locked(void) {
+    size_t previous_length = capture_length;
+    int stable_intervals = 0;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        pthread_mutex_unlock(&capture_lock);
+        usleep(50000);
+        pthread_mutex_lock(&capture_lock);
+        if (capture_length == previous_length) {
+            stable_intervals++;
+            if (stable_intervals >= 2) {
+                return;
+            }
+        } else {
+            stable_intervals = 0;
+            previous_length = capture_length;
+        }
+    }
 }
 
 static int headless_tty_init(struct tty *tty) {
@@ -479,7 +500,7 @@ char *iexa_local_alpine_execute(
     capture_pid = current->pid;
     task_start(current);
 
-    int timeout_seconds = command_timeout_seconds(command);
+    int timeout_seconds = timeout_seconds_for_command(command);
     pthread_mutex_lock(&capture_lock);
     while (!capture_finished) {
         struct timespec timeout;
@@ -497,11 +518,7 @@ char *iexa_local_alpine_execute(
             break;
         }
     }
-    if (capture_buffer == NULL || capture_length == 0) {
-        char message[256];
-        snprintf(message, sizeof(message), "Local Alpine command exited without output. pid=%d shell=%s cwd=%s", capture_pid, shell, cwd != NULL ? cwd : "");
-        capture_append_locked(message, strlen(message));
-    }
+    wait_for_capture_settle_locked();
     char *output = iexa_dup_output(capture_buffer != NULL ? capture_buffer : "");
     int completed_exit_code = capture_exit_code;
     pthread_mutex_unlock(&capture_lock);

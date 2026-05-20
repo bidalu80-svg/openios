@@ -13,6 +13,10 @@ struct LocalAlpineTerminalConsoleView: View {
     @State private var pendingInteractiveRequest: LocalAlpineInteractiveRequest?
     @State private var pendingInteractiveInput = ""
     @State private var isCommandFocused = false
+    @State private var focusRequestID = UUID()
+    @State private var textControlRequest: LocalAlpineTextControlRequest?
+    @State private var commandHistory: [String] = []
+    @State private var historyCursor: Int?
 
     private let prompt = "root@iexa:~#"
     @State private var cwd = "/mnt/iexa"
@@ -33,14 +37,23 @@ struct LocalAlpineTerminalConsoleView: View {
                             ForEach(entries) { entry in
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("\(prompt) \(entry.command)")
-                                        .font(.system(size: 16, weight: .regular, design: .monospaced))
+                                        .font(.system(size: 22, weight: .regular, design: .monospaced))
                                         .foregroundStyle(.white.opacity(0.9))
                                         .textSelection(.enabled)
 
                                     if !entry.output.isEmpty {
                                         Text(entry.output)
-                                            .font(.system(size: 15, weight: .regular, design: .monospaced))
+                                            .font(.system(size: 21, weight: .regular, design: .monospaced))
                                             .foregroundStyle(.white.opacity(0.72))
+                                            .textSelection(.enabled)
+                                    } else if entry.isRunning {
+                                        Text("执行中...")
+                                            .font(.system(size: 21, weight: .regular, design: .monospaced))
+                                            .foregroundStyle(.white.opacity(0.45))
+                                    } else if let exitCode = entry.exitCode, exitCode != 0 {
+                                        Text("[exit \(exitCode), no output]")
+                                            .font(.system(size: 21, weight: .regular, design: .monospaced))
+                                            .foregroundStyle(.white.opacity(0.45))
                                             .textSelection(.enabled)
                                     }
                                 }
@@ -66,10 +79,15 @@ struct LocalAlpineTerminalConsoleView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            isCommandFocused = true
+            refocusCommandLine()
         }
         .task {
-            isCommandFocused = true
+            refocusCommandLine()
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if isCommandFocused || !commandInput.isEmpty {
+                terminalAccessoryBar
+            }
         }
         .sheet(item: $pendingInteractiveRequest) { request in
             ActionInputSheet(
@@ -114,6 +132,8 @@ struct LocalAlpineTerminalConsoleView: View {
 
             Button {
                 entries.removeAll()
+                commandInput = ""
+                refocusCommandLine()
                 Haptics.play(.light)
             } label: {
                 Image(systemName: "paintbrush")
@@ -130,21 +150,102 @@ struct LocalAlpineTerminalConsoleView: View {
     private var commandLine: some View {
         HStack(alignment: .center, spacing: 8) {
             Text(prompt)
-                .font(.system(size: 16, weight: .regular, design: .monospaced))
+                .font(.system(size: 22, weight: .regular, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.9))
 
             LocalAlpineConsoleTextField(
                 text: $commandInput,
                 isFocused: $isCommandFocused,
+                focusRequestID: focusRequestID,
+                controlRequest: textControlRequest,
                 isEnabled: !isRunning,
                 textColor: .white,
                 onReturn: {
                     Task { await executeCurrentCommand() }
                 }
             )
-            .frame(minWidth: 28, maxWidth: .infinity, minHeight: 28)
+            .frame(minWidth: 28, maxWidth: .infinity, minHeight: 34)
         }
         .padding(.top, 2)
+    }
+
+    private var terminalAccessoryBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                accessoryButton(title: "隐藏", systemImage: "keyboard.chevron.compact.down") {
+                    isCommandFocused = false
+                }
+                accessoryButton(title: "粘贴", systemImage: "doc.on.clipboard") {
+                    pasteIntoCommandLine()
+                }
+                accessoryTextButton("Esc") {
+                    sendTextControl(.insert("\u{1B}"))
+                }
+                accessoryTextButton("Tab") {
+                    sendTextControl(.insert("\t"))
+                }
+                accessoryTextButton("^ Ctrl") {
+                    Haptics.play(.light)
+                    refocusCommandLine()
+                }
+                accessoryTextButton("^ ↑") {
+                    showPreviousHistoryCommand()
+                }
+                accessoryTextButton("⌄ ↓") {
+                    showNextHistoryCommand()
+                }
+                accessoryTextButton("‹ ←") {
+                    sendTextControl(.moveLeft)
+                }
+                accessoryTextButton("› →") {
+                    sendTextControl(.moveRight)
+                }
+                accessoryTextButton("⊗ C-c") {
+                    handleControlC()
+                }
+                accessoryTextButton("⌫ C-d") {
+                    handleControlD()
+                }
+                accessoryTextButton("⏸ C-z") {
+                    handleControlZ()
+                }
+                accessoryTextButton("▣ Files") {
+                    runShortcutCommand("ls -la")
+                }
+                accessoryTextButton("◉ Rootfs") {
+                    runShortcutCommand("pwd && ls -la /")
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 10)
+        }
+        .background(Color(red: 0.13, green: 0.13, blue: 0.13))
+    }
+
+    private func accessoryButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color(red: 0.24, green: 0.82, blue: 0.36))
+                .lineLimit(1)
+                .frame(height: 36)
+                .padding(.horizontal, 12)
+                .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func accessoryTextButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color(red: 0.24, green: 0.82, blue: 0.36))
+                .lineLimit(1)
+                .frame(height: 36)
+                .padding(.horizontal, 14)
+                .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     private func executeCurrentCommand() async {
@@ -152,6 +253,8 @@ struct LocalAlpineTerminalConsoleView: View {
         guard !command.isEmpty, !isRunning else { return }
 
         commandInput = ""
+        commandHistory.append(command)
+        historyCursor = nil
         isRunning = true
         Haptics.play(.light)
 
@@ -177,7 +280,7 @@ struct LocalAlpineTerminalConsoleView: View {
 
     private func applyResult(_ result: LocalAlpineCommandResult) {
         if let index = entries.indices.last {
-            entries[index].output = result.output
+            entries[index].output = visibleOutput(for: result)
             entries[index].exitCode = result.exitCode
             entries[index].isRunning = result.interactiveRequest != nil
         }
@@ -190,7 +293,7 @@ struct LocalAlpineTerminalConsoleView: View {
         }
 
         isRunning = false
-        isCommandFocused = true
+        refocusCommandLine()
     }
 
     private func appendSystemOutput(_ output: String, exitCode: Int?) {
@@ -200,7 +303,130 @@ struct LocalAlpineTerminalConsoleView: View {
             entries[index].isRunning = false
         }
         isRunning = false
-        isCommandFocused = true
+        refocusCommandLine()
+    }
+
+    private func appendRunningNotice(_ output: String) {
+        if let index = entries.indices.last {
+            entries[index].output += entries[index].output.isEmpty ? output : "\n\(output)"
+        }
+    }
+
+    private func visibleOutput(for result: LocalAlpineCommandResult) -> String {
+        let output = result.output.trimmingCharacters(in: .newlines)
+        guard output.isEmpty else { return result.output }
+        if result.exitCode == 0 {
+            return ""
+        }
+        if let exitCode = result.exitCode {
+            return "[exit \(exitCode), no output]"
+        }
+        return "[command finished without output]"
+    }
+
+    private func refocusCommandLine() {
+        isCommandFocused = false
+        focusRequestID = UUID()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            isCommandFocused = true
+            focusRequestID = UUID()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            isCommandFocused = true
+            focusRequestID = UUID()
+        }
+    }
+
+    private func pasteIntoCommandLine() {
+        guard let pasted = UIPasteboard.general.string, !pasted.isEmpty else {
+            refocusCommandLine()
+            return
+        }
+        sendTextControl(.insert(pasted))
+    }
+
+    private func sendTextControl(_ action: LocalAlpineTextControlAction) {
+        textControlRequest = LocalAlpineTextControlRequest(action: action)
+        refocusCommandLine()
+    }
+
+    private func showPreviousHistoryCommand() {
+        guard !commandHistory.isEmpty else {
+            refocusCommandLine()
+            return
+        }
+        let nextIndex: Int
+        if let historyCursor {
+            nextIndex = max(0, historyCursor - 1)
+        } else {
+            nextIndex = commandHistory.count - 1
+        }
+        historyCursor = nextIndex
+        commandInput = commandHistory[nextIndex]
+        sendTextControl(.moveToEnd)
+    }
+
+    private func showNextHistoryCommand() {
+        guard !commandHistory.isEmpty else {
+            refocusCommandLine()
+            return
+        }
+        guard let historyCursor else {
+            commandInput = ""
+            refocusCommandLine()
+            return
+        }
+        let nextIndex = historyCursor + 1
+        if nextIndex >= commandHistory.count {
+            self.historyCursor = nil
+            commandInput = ""
+        } else {
+            self.historyCursor = nextIndex
+            commandInput = commandHistory[nextIndex]
+        }
+        sendTextControl(.moveToEnd)
+    }
+
+    private func handleControlC() {
+        if isRunning {
+            appendRunningNotice("[Ctrl-C 已记录；当前本地执行会在命令返回或超时后结束]")
+        } else if !commandInput.isEmpty {
+            entries.append(LocalAlpineConsoleEntry(command: commandInput, output: "^C", exitCode: 130, isRunning: false))
+            commandInput = ""
+            historyCursor = nil
+            refocusCommandLine()
+        } else {
+            entries.append(LocalAlpineConsoleEntry(command: "^C", output: "", exitCode: 130, isRunning: false))
+            refocusCommandLine()
+        }
+        Haptics.play(.light)
+    }
+
+    private func handleControlD() {
+        if commandInput.isEmpty {
+            onDismiss()
+        } else {
+            commandInput = ""
+            historyCursor = nil
+            refocusCommandLine()
+        }
+        Haptics.play(.light)
+    }
+
+    private func handleControlZ() {
+        if isRunning {
+            appendRunningNotice("[Ctrl-Z 已记录；当前本地终端暂不挂起进程]")
+        } else {
+            entries.append(LocalAlpineConsoleEntry(command: "^Z", output: "[Ctrl-Z 已记录；当前本地终端暂不挂起进程]", exitCode: 148, isRunning: false))
+        }
+        refocusCommandLine()
+        Haptics.play(.light)
+    }
+
+    private func runShortcutCommand(_ command: String) {
+        guard !isRunning else { return }
+        commandInput = command
+        Task { await executeCurrentCommand() }
     }
 
     private func updateWorkingDirectory(after command: String, result: LocalAlpineCommandResult) {
@@ -257,16 +483,30 @@ private struct LocalAlpineConsoleEntry: Identifiable {
     var isRunning: Bool
 }
 
+private struct LocalAlpineTextControlRequest: Equatable {
+    let id = UUID()
+    let action: LocalAlpineTextControlAction
+}
+
+private enum LocalAlpineTextControlAction: Equatable {
+    case insert(String)
+    case moveLeft
+    case moveRight
+    case moveToEnd
+}
+
 private struct LocalAlpineConsoleTextField: UIViewRepresentable {
     @Binding var text: String
     @Binding var isFocused: Bool
+    var focusRequestID: UUID
+    var controlRequest: LocalAlpineTextControlRequest?
     var isEnabled: Bool
     var textColor: UIColor
     var onReturn: () -> Void
 
     func makeUIView(context: Context) -> UITextField {
         let field = UITextField()
-        field.font = .monospacedSystemFont(ofSize: 16, weight: .regular)
+        field.font = .monospacedSystemFont(ofSize: 22, weight: .regular)
         field.textColor = textColor
         field.tintColor = UIColor(white: 0.78, alpha: 1)
         field.backgroundColor = .clear
@@ -289,15 +529,24 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
         }
         field.isEnabled = isEnabled
         field.textColor = textColor
-        if isFocused, !field.isFirstResponder, isEnabled {
+        if let controlRequest,
+           context.coordinator.lastControlRequestID != controlRequest.id {
+            context.coordinator.lastControlRequestID = controlRequest.id
+            context.coordinator.apply(controlRequest.action, to: field)
+            text = field.text ?? ""
+        }
+
+        let shouldFocus = isEnabled && (isFocused || context.coordinator.lastFocusRequestID != focusRequestID)
+        if shouldFocus, !field.isFirstResponder {
             DispatchQueue.main.async {
                 field.becomeFirstResponder()
             }
-        } else if !isFocused, field.isFirstResponder {
+        } else if (!isFocused || !isEnabled), field.isFirstResponder {
             DispatchQueue.main.async {
                 field.resignFirstResponder()
             }
         }
+        context.coordinator.lastFocusRequestID = focusRequestID
     }
 
     func makeCoordinator() -> Coordinator {
@@ -308,6 +557,8 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
         @Binding var text: String
         @Binding var isFocused: Bool
         var onReturn: () -> Void
+        var lastFocusRequestID: UUID?
+        var lastControlRequestID: UUID?
 
         init(text: Binding<String>, isFocused: Binding<Bool>, onReturn: @escaping () -> Void) {
             _text = text
@@ -330,6 +581,30 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
         func textFieldShouldReturn(_ textField: UITextField) -> Bool {
             onReturn()
             return false
+        }
+
+        func apply(_ action: LocalAlpineTextControlAction, to field: UITextField) {
+            if !field.isFirstResponder {
+                field.becomeFirstResponder()
+            }
+
+            switch action {
+            case .insert(let value):
+                field.insertText(value)
+            case .moveLeft:
+                moveCursor(in: field, offset: -1)
+            case .moveRight:
+                moveCursor(in: field, offset: 1)
+            case .moveToEnd:
+                let end = field.endOfDocument
+                field.selectedTextRange = field.textRange(from: end, to: end)
+            }
+        }
+
+        private func moveCursor(in field: UITextField, offset: Int) {
+            guard let range = field.selectedTextRange,
+                  let position = field.position(from: range.start, offset: offset) else { return }
+            field.selectedTextRange = field.textRange(from: position, to: position)
         }
     }
 }
