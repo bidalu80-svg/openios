@@ -19,6 +19,7 @@ struct LocalAlpineTerminalConsoleView: View {
     @State private var historyCursor: Int?
 
     private let prompt = "root@iexa:~#"
+    private let terminalGreen = Color(red: 0.24, green: 0.82, blue: 0.36)
     @State private var cwd = "/mnt/iexa"
 
     var body: some View {
@@ -44,7 +45,7 @@ struct LocalAlpineTerminalConsoleView: View {
                                     if !entry.output.isEmpty {
                                         Text(entry.output)
                                             .font(.system(size: 21, weight: .regular, design: .monospaced))
-                                            .foregroundStyle(.white.opacity(0.72))
+                                            .foregroundStyle(terminalGreen.opacity(0.88))
                                             .textSelection(.enabled)
                                     } else if entry.isRunning {
                                         Text("执行中...")
@@ -160,6 +161,7 @@ struct LocalAlpineTerminalConsoleView: View {
                 controlRequest: textControlRequest,
                 isEnabled: !isRunning,
                 textColor: .white,
+                cursorColor: UIColor(red: 0.24, green: 0.82, blue: 0.36, alpha: 1),
                 onReturn: {
                     Task { await executeCurrentCommand() }
                 }
@@ -502,13 +504,14 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
     var controlRequest: LocalAlpineTextControlRequest?
     var isEnabled: Bool
     var textColor: UIColor
+    var cursorColor: UIColor
     var onReturn: () -> Void
 
     func makeUIView(context: Context) -> UITextField {
-        let field = UITextField()
+        let field = LocalAlpineConsoleInputField()
         field.font = .monospacedSystemFont(ofSize: 22, weight: .regular)
         field.textColor = textColor
-        field.tintColor = UIColor(white: 0.78, alpha: 1)
+        field.tintColor = cursorColor
         field.backgroundColor = .clear
         field.borderStyle = .none
         field.autocapitalizationType = .none
@@ -529,6 +532,7 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
         }
         field.isEnabled = isEnabled
         field.textColor = textColor
+        field.tintColor = cursorColor
         if let controlRequest,
            context.coordinator.lastControlRequestID != controlRequest.id {
             context.coordinator.lastControlRequestID = controlRequest.id
@@ -606,6 +610,16 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
                   let position = field.position(from: range.start, offset: offset) else { return }
             field.selectedTextRange = field.textRange(from: position, to: position)
         }
+    }
+}
+
+private final class LocalAlpineConsoleInputField: UITextField {
+    override func caretRect(for position: UITextPosition) -> CGRect {
+        var rect = super.caretRect(for: position)
+        rect.origin.y = max(0, rect.origin.y + 2)
+        rect.size.width = 9
+        rect.size.height = max(22, rect.size.height - 4)
+        return rect
     }
 }
 
