@@ -32,6 +32,9 @@ struct MainChatView: View {
     /// Controls the calendar sheet presentation.
     @State private var showCalendar = false
 
+    /// Controls the local Alpine terminal presentation.
+    @State private var showLocalAlpineTerminal = false
+
     /// Controls the automations sheet presentation.
     @State private var showAutomations = false
 
@@ -693,6 +696,13 @@ struct MainChatView: View {
                 CalendarView()
                     .environment(dependencies)
                     .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+            }
+            // Local Alpine terminal
+            .fullScreenCover(isPresented: $showLocalAlpineTerminal) {
+                LocalAlpineTerminalConsoleView {
+                    showLocalAlpineTerminal = false
+                }
+                .preferredColorScheme(.dark)
             }
             // Automations sheet
             .sheet(isPresented: $showAutomations) {
@@ -2651,6 +2661,13 @@ struct MainChatView: View {
                         } label: {
                             Label("日历", systemImage: "calendar")
                         }
+                    }
+
+                    Button {
+                        closeDrawer()
+                        showLocalAlpineTerminal = true
+                    } label: {
+                        Label("终端功能", systemImage: "terminal")
                     }
 
                     if !usesDirectProvider && dependencies.authViewModel.featurePermissions.automations {

@@ -2,6 +2,338 @@ import SwiftUI
 import UniformTypeIdentifiers
 import QuickLook
 
+// MARK: - Local Alpine Terminal Console
+
+struct LocalAlpineTerminalConsoleView: View {
+    var onDismiss: () -> Void
+
+    @State private var commandInput = ""
+    @State private var entries: [LocalAlpineConsoleEntry] = []
+    @State private var isRunning = false
+    @State private var pendingInteractiveRequest: LocalAlpineInteractiveRequest?
+    @State private var pendingInteractiveInput = ""
+    @State private var isCommandFocused = false
+
+    private let prompt = "root@iexa:~#"
+    @State private var cwd = "/mnt/iexa"
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                headerBar
+                    .padding(.horizontal, 22)
+                    .padding(.top, 14)
+                    .padding(.bottom, 8)
+
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(entries) { entry in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(prompt) \(entry.command)")
+                                        .font(.system(size: 16, weight: .regular, design: .monospaced))
+                                        .foregroundStyle(.white.opacity(0.9))
+                                        .textSelection(.enabled)
+
+                                    if !entry.output.isEmpty {
+                                        Text(entry.output)
+                                            .font(.system(size: 15, weight: .regular, design: .monospaced))
+                                            .foregroundStyle(.white.opacity(0.72))
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .id(entry.id)
+                            }
+
+                            commandLine
+                                .id("commandLine")
+                        }
+                        .padding(.horizontal, 2)
+                        .padding(.top, 6)
+                        .padding(.bottom, 24)
+                    }
+                    .onChange(of: entries.count) { _, _ in
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            proxy.scrollTo("commandLine", anchor: .bottom)
+                        }
+                    }
+                }
+                .padding(.horizontal, 2)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            isCommandFocused = true
+        }
+        .task {
+            isCommandFocused = true
+        }
+        .sheet(item: $pendingInteractiveRequest) { request in
+            ActionInputSheet(
+                request: ActionInputRequest(
+                    title: request.title,
+                    message: request.message,
+                    placeholder: request.placeholder,
+                    defaultValue: request.defaultValue
+                ),
+                text: $pendingInteractiveInput,
+                onConfirm: {
+                    let input = pendingInteractiveInput
+                    Task { await continueInteractiveCommand(request, input: input) }
+                },
+                onCancel: {
+                    pendingInteractiveRequest = nil
+                    pendingInteractiveInput = ""
+                    appendSystemOutput("[已取消输入]", exitCode: 124)
+                }
+            )
+            .presentationDetents([.height(300)])
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled()
+        }
+    }
+
+    private var headerBar: some View {
+        HStack {
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 34, weight: .light))
+                    .foregroundStyle(Color.blue)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("关闭")
+
+            Spacer()
+
+            Button {
+                entries.removeAll()
+                Haptics.play(.light)
+            } label: {
+                Image(systemName: "paintbrush")
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundStyle(Color.blue)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("清空")
+        }
+    }
+
+    private var commandLine: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Text(prompt)
+                .font(.system(size: 16, weight: .regular, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.9))
+
+            LocalAlpineConsoleTextField(
+                text: $commandInput,
+                isFocused: $isCommandFocused,
+                isEnabled: !isRunning,
+                textColor: .white,
+                onReturn: {
+                    Task { await executeCurrentCommand() }
+                }
+            )
+            .frame(minWidth: 28, maxWidth: .infinity, minHeight: 28)
+        }
+        .padding(.top, 2)
+    }
+
+    private func executeCurrentCommand() async {
+        let command = commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty, !isRunning else { return }
+
+        commandInput = ""
+        isRunning = true
+        Haptics.play(.light)
+
+        entries.append(LocalAlpineConsoleEntry(command: command, output: "", exitCode: nil, isRunning: true))
+        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
+        applyResult(result)
+        updateWorkingDirectory(after: command, result: result)
+    }
+
+    private func continueInteractiveCommand(_ request: LocalAlpineInteractiveRequest, input: String) async {
+        pendingInteractiveRequest = nil
+        pendingInteractiveInput = ""
+        isRunning = true
+
+        let result = await LocalAlpineTerminalService.shared.execute(
+            command: request.command,
+            cwd: request.cwd,
+            stdinInput: input
+        )
+        applyResult(result)
+        updateWorkingDirectory(after: request.command, result: result)
+    }
+
+    private func applyResult(_ result: LocalAlpineCommandResult) {
+        if let index = entries.indices.last {
+            entries[index].output = result.output
+            entries[index].exitCode = result.exitCode
+            entries[index].isRunning = result.interactiveRequest != nil
+        }
+
+        if let request = result.interactiveRequest {
+            pendingInteractiveInput = request.defaultValue
+            pendingInteractiveRequest = request
+            isRunning = false
+            return
+        }
+
+        isRunning = false
+        isCommandFocused = true
+    }
+
+    private func appendSystemOutput(_ output: String, exitCode: Int?) {
+        if let index = entries.indices.last {
+            entries[index].output += entries[index].output.isEmpty ? output : "\n\(output)"
+            entries[index].exitCode = exitCode
+            entries[index].isRunning = false
+        }
+        isRunning = false
+        isCommandFocused = true
+    }
+
+    private func updateWorkingDirectory(after command: String, result: LocalAlpineCommandResult) {
+        guard result.exitCode == 0, result.interactiveRequest == nil else { return }
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("cd ") || trimmed == "cd" || trimmed == "cd ~" else { return }
+
+        let target = trimmed == "cd" || trimmed == "cd ~"
+            ? "/mnt/iexa"
+            : String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return }
+        guard target.range(of: #"[;&|`$<>(){}]"#, options: .regularExpression) == nil else { return }
+
+        if target == "/" || target == "/mnt/iexa" || target == "~" {
+            cwd = "/mnt/iexa"
+        } else if target.hasPrefix("/mnt/iexa") {
+            cwd = normalizedConsolePath(target)
+        } else if target.hasPrefix("/") {
+            cwd = normalizedConsolePath("/mnt/iexa\(target)")
+        } else if target == ".." {
+            let parent = URL(fileURLWithPath: cwd).deletingLastPathComponent().path
+            cwd = parent.hasPrefix("/mnt/iexa") ? parent : "/mnt/iexa"
+        } else if target.hasPrefix("../") {
+            var path = cwd
+            for component in target.split(separator: "/").map(String.init) {
+                if component == ".." {
+                    let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
+                    path = parent.hasPrefix("/mnt/iexa") ? parent : "/mnt/iexa"
+                } else if component != "." {
+                    path += "/\(component)"
+                }
+            }
+            cwd = normalizedConsolePath(path)
+        } else {
+            cwd = normalizedConsolePath(cwd + "/" + target)
+        }
+    }
+
+    private func normalizedConsolePath(_ rawPath: String) -> String {
+        var path = rawPath.replacingOccurrences(of: "\\", with: "/")
+        while path.contains("//") {
+            path = path.replacingOccurrences(of: "//", with: "/")
+        }
+        guard path.hasPrefix("/mnt/iexa") else { return "/mnt/iexa" }
+        return path
+    }
+}
+
+private struct LocalAlpineConsoleEntry: Identifiable {
+    let id = UUID()
+    let command: String
+    var output: String
+    var exitCode: Int?
+    var isRunning: Bool
+}
+
+private struct LocalAlpineConsoleTextField: UIViewRepresentable {
+    @Binding var text: String
+    @Binding var isFocused: Bool
+    var isEnabled: Bool
+    var textColor: UIColor
+    var onReturn: () -> Void
+
+    func makeUIView(context: Context) -> UITextField {
+        let field = UITextField()
+        field.font = .monospacedSystemFont(ofSize: 16, weight: .regular)
+        field.textColor = textColor
+        field.tintColor = UIColor(white: 0.78, alpha: 1)
+        field.backgroundColor = .clear
+        field.borderStyle = .none
+        field.autocapitalizationType = .none
+        field.autocorrectionType = .no
+        field.spellCheckingType = .no
+        field.smartDashesType = .no
+        field.smartQuotesType = .no
+        field.returnKeyType = .default
+        field.keyboardAppearance = .dark
+        field.delegate = context.coordinator
+        field.addTarget(context.coordinator, action: #selector(Coordinator.textChanged(_:)), for: .editingChanged)
+        return field
+    }
+
+    func updateUIView(_ field: UITextField, context: Context) {
+        if field.text != text {
+            field.text = text
+        }
+        field.isEnabled = isEnabled
+        field.textColor = textColor
+        if isFocused, !field.isFirstResponder, isEnabled {
+            DispatchQueue.main.async {
+                field.becomeFirstResponder()
+            }
+        } else if !isFocused, field.isFirstResponder {
+            DispatchQueue.main.async {
+                field.resignFirstResponder()
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, isFocused: $isFocused, onReturn: onReturn)
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        @Binding var text: String
+        @Binding var isFocused: Bool
+        var onReturn: () -> Void
+
+        init(text: Binding<String>, isFocused: Binding<Bool>, onReturn: @escaping () -> Void) {
+            _text = text
+            _isFocused = isFocused
+            self.onReturn = onReturn
+        }
+
+        @objc func textChanged(_ field: UITextField) {
+            text = field.text ?? ""
+        }
+
+        func textFieldDidBeginEditing(_ textField: UITextField) {
+            isFocused = true
+        }
+
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            isFocused = false
+        }
+
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            onReturn()
+            return false
+        }
+    }
+}
+
 // MARK: - Terminal Browser View
 
 /// A slide-over file browser panel for the terminal server.

@@ -47,6 +47,9 @@ struct iPadMainChatView: View {
     /// Whether the calendar sheet is visible.
     @State private var showCalendar = false
 
+    /// Whether the local Alpine terminal is visible.
+    @State private var showLocalAlpineTerminal = false
+
     /// Whether the automations sheet is visible.
     @State private var showAutomations = false
 
@@ -336,6 +339,13 @@ struct iPadMainChatView: View {
                 .environment(dependencies)
                 .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
         }
+        // Local Alpine terminal
+        .fullScreenCover(isPresented: $showLocalAlpineTerminal) {
+            LocalAlpineTerminalConsoleView {
+                showLocalAlpineTerminal = false
+            }
+            .preferredColorScheme(.dark)
+        }
         // Automations sheet
         .sheet(isPresented: $showAutomations) {
             AutomationsListView()
@@ -368,6 +378,7 @@ struct iPadMainChatView: View {
             showWorkspace: $showWorkspace,
             showMemories: $showMemories,
             showCalendar: $showCalendar,
+            showLocalAlpineTerminal: $showLocalAlpineTerminal,
             showAutomations: $showAutomations,
             showAdminConsole: $showAdminConsole,
             showDeleteAllConfirmation: $showDeleteAllConfirmation,
@@ -720,6 +731,7 @@ struct iPadSidebarContent: View {
     @Binding var showWorkspace: Bool
     @Binding var showMemories: Bool
     @Binding var showCalendar: Bool
+    @Binding var showLocalAlpineTerminal: Bool
     @Binding var showAutomations: Bool
     @Binding var showAdminConsole: Bool
     @Binding var showDeleteAllConfirmation: Bool
@@ -1653,6 +1665,10 @@ struct iPadSidebarContent: View {
                         Button { showCalendar = true } label: {
                             Label("日历", systemImage: "calendar")
                         }
+                    }
+
+                    Button { showLocalAlpineTerminal = true } label: {
+                        Label("终端功能", systemImage: "terminal")
                     }
 
                     if !usesDirectProvider && dependencies.authViewModel.featurePermissions.automations {
