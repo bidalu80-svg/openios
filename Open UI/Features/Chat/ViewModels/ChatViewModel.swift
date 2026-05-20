@@ -13820,7 +13820,11 @@ final class ChatViewModel {
         statusHistory: [ChatStatusUpdate]? = nil,
         error: ChatMessageError? = nil
     ) {
-        let displayContent = Self.cleanedVisibleAssistantContent(content)
+        let isClientWebSearchContinuation = conversation?.messages.first(where: { $0.id == id })?
+            .metadata?["iexa_client_web_search_continuation"] == "true"
+        let displayContent = isClientWebSearchContinuation
+            ? Self.cleanedClientWebSearchAnswer(Self.cleanedProviderCitationArtifacts(content))
+            : Self.cleanedProviderCitationArtifacts(content)
         let shouldHandleLocalAlpineDisplay = (terminalEnabled && selectedTerminalIsLocalAlpine)
             || latestUserRequestsLocalAlpineAgent(modelId: selectedModelId ?? conversation?.model)
         let visibleAlpineDisplayContent: String? = {
@@ -14046,10 +14050,6 @@ final class ChatViewModel {
 
     private static func cleanedProviderCitationArtifacts(_ text: String) -> String {
         StreamingMarkdownView.removeProviderCitationArtifacts(from: text)
-    }
-
-    private static func cleanedVisibleAssistantContent(_ text: String) -> String {
-        cleanedClientWebSearchAnswer(cleanedProviderCitationArtifacts(text))
     }
 
     /// Fires a subtle haptic pulse during token streaming, throttled via
