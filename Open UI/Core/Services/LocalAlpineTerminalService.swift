@@ -51,6 +51,10 @@ actor LocalAlpineTerminalService {
         )
     }
 
+    nonisolated func interruptRunningCommand() -> Bool {
+        LocalAlpineNativeRuntime.shared.interrupt()
+    }
+
     func listFiles(path: String) async throws -> [TerminalFileItem] {
         let root = try ensureSharedWorkspaceDirectory()
         let directory = try resolve(path: path, root: root, allowRoot: true)

@@ -3,6 +3,9 @@ import Foundation
 @_silgen_name("iexa_local_alpine_runtime_available")
 private func iexaLocalAlpineRuntimeAvailable() -> Int32
 
+@_silgen_name("iexa_local_alpine_interrupt")
+private func iexaLocalAlpineInterrupt() -> Int32
+
 @_silgen_name("iexa_local_alpine_execute")
 private func iexaLocalAlpineExecute(
     _ command: UnsafePointer<CChar>,
@@ -43,6 +46,11 @@ nonisolated struct LocalAlpineNativeRuntime: Sendable {
 
     var isLinked: Bool {
         iexaLocalAlpineRuntimeAvailable() == 1
+    }
+
+    func interrupt() -> Bool {
+        guard isLinked else { return false }
+        return iexaLocalAlpineInterrupt() == 1
     }
 
     func execute(_ command: LocalAlpineNativeCommand) async -> LocalAlpineCommandResult {

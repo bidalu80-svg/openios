@@ -208,9 +208,6 @@ struct LocalAlpineTerminalConsoleView: View {
                 accessoryTextButton("⌫ C-d") {
                     handleControlD()
                 }
-                accessoryTextButton("⏸ C-z") {
-                    handleControlZ()
-                }
                 accessoryTextButton("▣ Files") {
                     runShortcutCommand("ls -la")
                 }
@@ -391,7 +388,8 @@ struct LocalAlpineTerminalConsoleView: View {
 
     private func handleControlC() {
         if isRunning {
-            appendRunningNotice("[Ctrl-C 已记录；当前本地执行会在命令返回或超时后结束]")
+            let sent = LocalAlpineTerminalService.shared.interruptRunningCommand()
+            appendRunningNotice(sent ? "^C" : "[Ctrl-C 发送失败；当前命令会在返回或超时后结束]")
         } else if !commandInput.isEmpty {
             entries.append(LocalAlpineConsoleEntry(command: commandInput, output: "^C", exitCode: 130, isRunning: false))
             commandInput = ""
@@ -412,16 +410,6 @@ struct LocalAlpineTerminalConsoleView: View {
             historyCursor = nil
             refocusCommandLine()
         }
-        Haptics.play(.light)
-    }
-
-    private func handleControlZ() {
-        if isRunning {
-            appendRunningNotice("[Ctrl-Z 已记录；当前本地终端暂不挂起进程]")
-        } else {
-            entries.append(LocalAlpineConsoleEntry(command: "^Z", output: "[Ctrl-Z 已记录；当前本地终端暂不挂起进程]", exitCode: 148, isRunning: false))
-        }
-        refocusCommandLine()
         Haptics.play(.light)
     }
 

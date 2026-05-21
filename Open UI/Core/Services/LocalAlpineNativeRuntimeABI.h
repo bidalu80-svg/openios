@@ -10,6 +10,8 @@ extern "C" {
 
 int32_t iexa_local_alpine_runtime_available(void);
 
+int32_t iexa_local_alpine_interrupt(void);
+
 char *iexa_local_alpine_execute(
     const char *command,
     const char *cwd,

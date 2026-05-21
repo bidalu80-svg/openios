@@ -53,6 +53,7 @@ static bool append_env_entry(char *buffer, size_t buffer_size, size_t *offset, c
 #include "kernel/init.h"
 #include "kernel/calls.h"
 #include "kernel/fs.h"
+#include "kernel/signal.h"
 #include "kernel/task.h"
 #include "misc.h"
 #include "fs/path.h"
@@ -73,6 +74,7 @@ static size_t capture_capacity = 0;
 static bool capture_finished = false;
 static int capture_exit_code = 126;
 static int capture_pid = 0;
+static int capture_pgid = 0;
 
 static bool contains_case_insensitive(const char *value, const char *needle) {
     if (value == NULL || needle == NULL || needle[0] == '\0') {
@@ -140,6 +142,7 @@ static void capture_reset(void) {
     capture_finished = false;
     capture_exit_code = 126;
     capture_pid = 0;
+    capture_pgid = 0;
 }
 
 static void capture_append(const void *bytes, size_t length) {
@@ -407,6 +410,36 @@ int32_t iexa_local_alpine_runtime_available(void) {
     return 1;
 }
 
+int32_t iexa_local_alpine_interrupt(void) {
+    int pgid = 0;
+    int pid = 0;
+
+    pthread_mutex_lock(&capture_lock);
+    if (!capture_finished) {
+        pgid = capture_pgid;
+        pid = capture_pid;
+    }
+    pthread_mutex_unlock(&capture_lock);
+
+    if (pgid > 0) {
+        return send_group_signal((dword_t) pgid, SIGINT_, SIGINFO_NIL) == 0 ? 1 : 0;
+    }
+
+    if (pid > 0) {
+        lock(&pids_lock);
+        struct task *task = pid_get_task((dword_t) pid);
+        if (task == NULL) {
+            unlock(&pids_lock);
+            return 0;
+        }
+        send_signal(task, SIGINT_, SIGINFO_NIL);
+        unlock(&pids_lock);
+        return 1;
+    }
+
+    return 0;
+}
+
 char *iexa_local_alpine_execute(
     const char *command,
     const char *cwd,
@@ -497,7 +530,10 @@ char *iexa_local_alpine_execute(
         return iexa_dup_output(message);
     }
 
+    pthread_mutex_lock(&capture_lock);
     capture_pid = current->pid;
+    capture_pgid = current->group != NULL ? (int) current->group->pgid : current->pid;
+    pthread_mutex_unlock(&capture_lock);
     task_start(current);
 
     int timeout_seconds = timeout_seconds_for_command(command);
@@ -534,6 +570,10 @@ char *iexa_local_alpine_execute(
 #else
 
 int32_t iexa_local_alpine_runtime_available(void) {
+    return 0;
+}
+
+int32_t iexa_local_alpine_interrupt(void) {
     return 0;
 }
 
