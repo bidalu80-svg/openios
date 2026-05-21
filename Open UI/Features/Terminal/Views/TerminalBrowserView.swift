@@ -42,22 +42,22 @@ struct LocalAlpineTerminalConsoleView: View {
                             ForEach(entries) { entry in
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("\(prompt) \(entry.command)")
-                                        .font(.system(size: 22, weight: .regular, design: .monospaced))
+                                        .font(.system(size: 18, weight: .regular, design: .monospaced))
                                         .foregroundStyle(.white.opacity(0.9))
                                         .textSelection(.enabled)
 
                                     if !entry.output.isEmpty {
                                         Text(entry.output)
-                                            .font(.system(size: 21, weight: .regular, design: .monospaced))
+                                            .font(.system(size: 17, weight: .regular, design: .monospaced))
                                             .foregroundStyle(terminalGreen.opacity(0.88))
                                             .textSelection(.enabled)
                                     } else if entry.isRunning {
                                         Text("执行中...")
-                                            .font(.system(size: 21, weight: .regular, design: .monospaced))
+                                            .font(.system(size: 17, weight: .regular, design: .monospaced))
                                             .foregroundStyle(.white.opacity(0.45))
                                     } else if let exitCode = entry.exitCode, exitCode != 0 {
                                         Text("[exit \(exitCode), no output]")
-                                            .font(.system(size: 21, weight: .regular, design: .monospaced))
+                                            .font(.system(size: 17, weight: .regular, design: .monospaced))
                                             .foregroundStyle(.white.opacity(0.45))
                                             .textSelection(.enabled)
                                     }
@@ -582,16 +582,20 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UITextView {
         let view = LocalAlpineConsoleInputView()
-        view.font = .monospacedSystemFont(ofSize: 22, weight: .regular)
+        view.font = .monospacedSystemFont(ofSize: 18, weight: .regular)
         view.textColor = textColor
         view.tintColor = cursorColor
         view.backgroundColor = .clear
         view.textContainerInset = .zero
         view.textContainer.lineFragmentPadding = 0
+        view.textContainer.widthTracksTextView = true
+        view.textContainer.heightTracksTextView = false
         view.textContainer.lineBreakMode = .byCharWrapping
         view.isScrollEnabled = false
         view.showsVerticalScrollIndicator = false
+        view.showsHorizontalScrollIndicator = false
         view.alwaysBounceVertical = false
+        view.alwaysBounceHorizontal = false
         view.clipsToBounds = false
         view.autocapitalizationType = .none
         view.autocorrectionType = .no
@@ -796,7 +800,8 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
         func updateHeight(for view: UITextView) {
             let width = max(24, view.bounds.width)
             let fittingSize = CGSize(width: width, height: .greatestFiniteMagnitude)
-            let height = max(34, min(180, ceil(view.sizeThatFits(fittingSize).height)))
+            let maxHeight: CGFloat = 360
+            let height = max(34, min(maxHeight, ceil(view.sizeThatFits(fittingSize).height)))
             if abs(measuredHeight - height) > 0.5 {
                 DispatchQueue.main.async {
                     self.measuredHeight = height
@@ -901,8 +906,8 @@ private final class LocalAlpineConsoleInputView: UITextView {
     override func caretRect(for position: UITextPosition) -> CGRect {
         var rect = super.caretRect(for: position)
         rect.origin.y = max(0, rect.origin.y + 2)
-        rect.size.width = 9
-        rect.size.height = max(22, rect.size.height - 4)
+        rect.size.width = 8
+        rect.size.height = max(18, rect.size.height - 3)
         return rect
     }
 }
