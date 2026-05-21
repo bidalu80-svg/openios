@@ -17,6 +17,7 @@ struct LocalAlpineTerminalConsoleView: View {
     @State private var textControlRequest: LocalAlpineTextControlRequest?
     @State private var commandHistory: [String] = []
     @State private var historyCursor: Int?
+    @State private var isControlLatched = false
 
     private let prompt = "root@iexa:~#"
     private let terminalGreen = Color(red: 0.24, green: 0.82, blue: 0.36)
@@ -149,10 +150,12 @@ struct LocalAlpineTerminalConsoleView: View {
     }
 
     private var commandLine: some View {
-        HStack(alignment: .center, spacing: 8) {
-            Text(prompt)
+        HStack(alignment: .center, spacing: 0) {
+            Text("\(prompt) ")
                 .font(.system(size: 22, weight: .regular, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.9))
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
 
             LocalAlpineConsoleTextField(
                 text: $commandInput,
@@ -162,12 +165,19 @@ struct LocalAlpineTerminalConsoleView: View {
                 isEnabled: !isRunning,
                 textColor: .white,
                 cursorColor: UIColor(red: 0.24, green: 0.82, blue: 0.36, alpha: 1),
+                controlLatch: $isControlLatched,
                 onReturn: {
                     Task { await executeCurrentCommand() }
+                },
+                onControlCharacter: { character in
+                    handleControlCharacter(character)
                 }
             )
-            .frame(minWidth: 28, maxWidth: .infinity, minHeight: 34)
+            .frame(minWidth: 24, maxWidth: .infinity, minHeight: 34)
+            .clipped()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipped()
         .padding(.top, 2)
     }
 
@@ -181,12 +191,13 @@ struct LocalAlpineTerminalConsoleView: View {
                     pasteIntoCommandLine()
                 }
                 accessoryTextButton("Esc") {
-                    sendTextControl(.insert("\u{1B}"))
+                    cancelCurrentInput()
                 }
                 accessoryTextButton("Tab") {
-                    sendTextControl(.insert("\t"))
+                    sendTextControl(.insert("    "))
                 }
-                accessoryTextButton("^ Ctrl") {
+                accessoryTextButton("^ Ctrl", active: isControlLatched) {
+                    isControlLatched.toggle()
                     Haptics.play(.light)
                     refocusCommandLine()
                 }
@@ -234,15 +245,15 @@ struct LocalAlpineTerminalConsoleView: View {
         .buttonStyle(.plain)
     }
 
-    private func accessoryTextButton(_ title: String, action: @escaping () -> Void) -> some View {
+    private func accessoryTextButton(_ title: String, active: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Color(red: 0.24, green: 0.82, blue: 0.36))
+                .foregroundStyle(active ? Color.black : Color(red: 0.24, green: 0.82, blue: 0.36))
                 .lineLimit(1)
                 .frame(height: 36)
                 .padding(.horizontal, 14)
-                .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(active ? Color(red: 0.24, green: 0.82, blue: 0.36) : Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -341,12 +352,51 @@ struct LocalAlpineTerminalConsoleView: View {
             refocusCommandLine()
             return
         }
-        sendTextControl(.insert(pasted))
+        let inlinePaste = sanitizedInlineCommandText(pasted)
+        guard !inlinePaste.isEmpty else {
+            refocusCommandLine()
+            return
+        }
+        isControlLatched = false
+        sendTextControl(.insert(inlinePaste))
+    }
+
+    private func sanitizedInlineCommandText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+    }
+
+    private func cancelCurrentInput() {
+        commandInput = ""
+        historyCursor = nil
+        isControlLatched = false
+        refocusCommandLine()
     }
 
     private func sendTextControl(_ action: LocalAlpineTextControlAction) {
+        isControlLatched = false
         textControlRequest = LocalAlpineTextControlRequest(action: action)
         refocusCommandLine()
+    }
+
+    private func handleControlCharacter(_ character: Character) {
+        switch String(character).lowercased() {
+        case "a":
+            sendTextControl(.moveToStart)
+        case "c":
+            handleControlC()
+        case "d":
+            handleControlD()
+        case "e":
+            sendTextControl(.moveToEnd)
+        case "u":
+            cancelCurrentInput()
+        default:
+            isControlLatched = false
+            refocusCommandLine()
+        }
     }
 
     private func showPreviousHistoryCommand() {
@@ -403,13 +453,12 @@ struct LocalAlpineTerminalConsoleView: View {
     }
 
     private func handleControlD() {
-        if commandInput.isEmpty {
-            onDismiss()
-        } else {
-            commandInput = ""
-            historyCursor = nil
+        guard !commandInput.isEmpty else {
             refocusCommandLine()
+            Haptics.play(.light)
+            return
         }
+        sendTextControl(.deleteBackward)
         Haptics.play(.light)
     }
 
@@ -482,7 +531,9 @@ private enum LocalAlpineTextControlAction: Equatable {
     case insert(String)
     case moveLeft
     case moveRight
+    case moveToStart
     case moveToEnd
+    case deleteBackward
 }
 
 private struct LocalAlpineConsoleTextField: UIViewRepresentable {
@@ -493,7 +544,9 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
     var isEnabled: Bool
     var textColor: UIColor
     var cursorColor: UIColor
+    @Binding var controlLatch: Bool
     var onReturn: () -> Void
+    var onControlCharacter: (Character) -> Void
 
     func makeUIView(context: Context) -> UITextField {
         let field = LocalAlpineConsoleInputField()
@@ -502,6 +555,7 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
         field.tintColor = cursorColor
         field.backgroundColor = .clear
         field.borderStyle = .none
+        field.clipsToBounds = true
         field.autocapitalizationType = .none
         field.autocorrectionType = .no
         field.spellCheckingType = .no
@@ -509,6 +563,8 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
         field.smartQuotesType = .no
         field.returnKeyType = .default
         field.keyboardAppearance = .dark
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
         field.delegate = context.coordinator
         field.addTarget(context.coordinator, action: #selector(Coordinator.textChanged(_:)), for: .editingChanged)
         return field
@@ -521,6 +577,7 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
         field.isEnabled = isEnabled
         field.textColor = textColor
         field.tintColor = cursorColor
+        field.clipsToBounds = true
         if let controlRequest,
            context.coordinator.lastControlRequestID != controlRequest.id {
             context.coordinator.lastControlRequestID = controlRequest.id
@@ -542,20 +599,30 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, isFocused: $isFocused, onReturn: onReturn)
+        Coordinator(text: $text, isFocused: $isFocused, controlLatch: $controlLatch, onReturn: onReturn, onControlCharacter: onControlCharacter)
     }
 
     final class Coordinator: NSObject, UITextFieldDelegate {
         @Binding var text: String
         @Binding var isFocused: Bool
+        @Binding var controlLatch: Bool
         var onReturn: () -> Void
+        var onControlCharacter: (Character) -> Void
         var lastFocusRequestID: UUID?
         var lastControlRequestID: UUID?
 
-        init(text: Binding<String>, isFocused: Binding<Bool>, onReturn: @escaping () -> Void) {
+        init(
+            text: Binding<String>,
+            isFocused: Binding<Bool>,
+            controlLatch: Binding<Bool>,
+            onReturn: @escaping () -> Void,
+            onControlCharacter: @escaping (Character) -> Void
+        ) {
             _text = text
             _isFocused = isFocused
+            _controlLatch = controlLatch
             self.onReturn = onReturn
+            self.onControlCharacter = onControlCharacter
         }
 
         @objc func textChanged(_ field: UITextField) {
@@ -575,6 +642,24 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
             return false
         }
 
+        func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
+            if let controlCharacter = controlCharacter(from: string) {
+                controlLatch = false
+                onControlCharacter(controlCharacter)
+                return false
+            }
+            if controlLatch {
+                controlLatch = false
+            }
+
+            let sanitized = Self.sanitizedInlineText(string)
+            guard sanitized == string else {
+                replaceCharacters(in: textField, range: range, with: sanitized)
+                return false
+            }
+            return true
+        }
+
         func apply(_ action: LocalAlpineTextControlAction, to field: UITextField) {
             if !field.isFirstResponder {
                 field.becomeFirstResponder()
@@ -582,15 +667,52 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
 
             switch action {
             case .insert(let value):
-                field.insertText(value)
+                let sanitized = Self.sanitizedInlineText(value)
+                if !sanitized.isEmpty {
+                    field.insertText(sanitized)
+                }
             case .moveLeft:
                 moveCursor(in: field, offset: -1)
             case .moveRight:
                 moveCursor(in: field, offset: 1)
+            case .moveToStart:
+                let start = field.beginningOfDocument
+                field.selectedTextRange = field.textRange(from: start, to: start)
             case .moveToEnd:
                 let end = field.endOfDocument
                 field.selectedTextRange = field.textRange(from: end, to: end)
+            case .deleteBackward:
+                field.deleteBackward()
             }
+        }
+
+        private func controlCharacter(from string: String) -> Character? {
+            guard controlLatch, string.count == 1, let scalar = string.unicodeScalars.first else { return nil }
+            let value = scalar.value
+            guard (65...90).contains(value) || (97...122).contains(value) else { return nil }
+            return Character(String(scalar).lowercased())
+        }
+
+        private static func sanitizedInlineText(_ text: String) -> String {
+            text
+                .replacingOccurrences(of: "\r\n", with: " ")
+                .replacingOccurrences(of: "\r", with: " ")
+                .replacingOccurrences(of: "\n", with: " ")
+        }
+
+        private func replaceCharacters(in field: UITextField, range: NSRange, with replacement: String) {
+            guard let currentText = field.text,
+                  let swiftRange = Range(range, in: currentText) else {
+                field.insertText(replacement)
+                text = field.text ?? ""
+                return
+            }
+
+            field.text = currentText.replacingCharacters(in: swiftRange, with: replacement)
+            if let position = field.position(from: field.beginningOfDocument, offset: range.location + replacement.utf16.count) {
+                field.selectedTextRange = field.textRange(from: position, to: position)
+            }
+            text = field.text ?? ""
         }
 
         private func moveCursor(in field: UITextField, offset: Int) {
