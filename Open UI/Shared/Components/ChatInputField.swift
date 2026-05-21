@@ -700,18 +700,18 @@ struct ChatInputField: View {
                 HStack(spacing: 6) {
                     Image(systemName: contextBudgetStatus.isCompressed ? "arrow.down.forward.and.arrow.up.backward" : "memorychip")
                         .scaledFont(size: 10, weight: .semibold)
-                    Text(contextBudgetStatus.isCompressed ? "已压缩上下文" : "上下文")
+                    Text(contextBudgetStatus.isCompressed ? "已压缩窗口" : "窗口")
                         .scaledFont(size: 11, weight: .semibold)
                         .lineLimit(1)
                     Text(contextBudgetStatus.percentageText)
                         .scaledFont(size: 11, weight: .semibold)
                         .monospacedDigit()
                 }
-                .foregroundStyle(contextBudgetColor)
+                .foregroundStyle(contextBudgetForegroundColor)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 5)
-                .background(Capsule().fill(contextBudgetColor.opacity(0.11)))
-                .overlay(Capsule().strokeBorder(contextBudgetColor.opacity(0.35), lineWidth: 0.75))
+                .background(Capsule().fill(contextBudgetBackgroundColor))
+                .overlay(Capsule().strokeBorder(contextBudgetBorderColor, lineWidth: 0.75))
             }
             .buttonStyle(.plain)
             .popover(isPresented: $showContextBudgetPopover) {
@@ -745,7 +745,28 @@ struct ChatInputField: View {
         if contextBudgetStatus.isOverLimit { return theme.error }
         if contextBudgetStatus.isNearLimit { return theme.warning }
         if contextBudgetStatus.isCompressed { return theme.brandPrimary }
-        return theme.textTertiary
+        return theme.brandPrimary
+    }
+
+    private var contextBudgetForegroundColor: Color {
+        if contextBudgetStatus.isOverLimit || contextBudgetStatus.isNearLimit {
+            return contextBudgetColor
+        }
+        return theme.brandPrimary
+    }
+
+    private var contextBudgetBackgroundColor: Color {
+        if contextBudgetStatus.isOverLimit || contextBudgetStatus.isNearLimit {
+            return contextBudgetColor.opacity(0.11)
+        }
+        return theme.brandPrimary.opacity(0.11)
+    }
+
+    private var contextBudgetBorderColor: Color {
+        if contextBudgetStatus.isOverLimit || contextBudgetStatus.isNearLimit {
+            return contextBudgetColor.opacity(0.35)
+        }
+        return theme.brandPrimary.opacity(0.35)
     }
 
     private static func formatCompactTokenCount(_ value: Int) -> String {
@@ -818,8 +839,8 @@ struct ChatInputField: View {
                 if isWebSearchAvailable {
                     pills.append(QuickPill(
                         id: "web",
-                        icon: "magnifyingglass",
-                        label: "Web",
+                        icon: "globe",
+                        label: "联网搜索",
                         isActive: webSearchEnabled,
                         action: {
                             withAnimation(.easeOut(duration: 0.15)) {
