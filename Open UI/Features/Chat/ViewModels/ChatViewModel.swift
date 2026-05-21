@@ -11039,7 +11039,8 @@ final class ChatViewModel {
         let localSkillsContext = LocalSkillsService.shared.contextPrompt()
         let localNativeToolContext = latestUserTextForLocalAlpine.map(Self.shouldExposeLocalNativeTools)
             == true ? Self.localNativeToolSystemContext() : nil
-        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localNativeToolContext, localSkillsContext, memoryContext]
+        let feedbackPreferenceContext = AssistantFeedbackPreferenceStore.systemContext()
+        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localNativeToolContext, localSkillsContext, memoryContext, feedbackPreferenceContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")

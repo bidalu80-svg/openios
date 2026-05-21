@@ -10,6 +10,11 @@ import os.log
 
 // MARK: - Chat Detail View
 
+private struct MessageShareItem: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
 struct ChatDetailView: View {
     @Environment(AppDependencyContainer.self) private var dependencies
     @Environment(AppRouter.self) private var router
@@ -74,6 +79,7 @@ struct ChatDetailView: View {
     @State private var showCopiedToast = false
     @State private var activeActionMessageId: String?
     @State private var activeVersionIndex: [String: Int] = [:]
+    @State private var assistantFeedbackVoteOverrides: [String: AssistantFeedbackVote] = [:]
 
     // MARK: Action event handling (dynamic input/confirmation/notification)
 
@@ -161,6 +167,7 @@ struct ChatDetailView: View {
     // MARK: File download & preview
     @State private var isDownloadingFile = false
     @State private var downloadedFileURL: URL?
+    @State private var messageShareItem: MessageShareItem?
     @State private var showDownloadError = false
     @State private var downloadErrorMessage = ""
     /// URL for QuickLook in-app file preview (PDF, images, docs, etc.)
@@ -506,6 +513,9 @@ struct ChatDetailView: View {
         )
         .sheet(item: $downloadedFileURL) { url in
             ShareSheetView(activityItems: [url])
+        }
+        .sheet(item: $messageShareItem) { item in
+            ShareSheetView(activityItems: [item.text])
         }
         // In-app file preview using QuickLook (PDFs, images, docs, etc.)
         .quickLookPreview($previewFileURL)
@@ -2126,6 +2136,32 @@ struct ChatDetailView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Copy")
 
+            let feedbackVote = assistantFeedbackVoteOverrides[message.id]
+                ?? AssistantFeedbackPreferenceStore.vote(for: message.id)
+            Button {
+                recordAssistantFeedback(.liked, for: message)
+            } label: {
+                compactActionIcon(icon: "hand.thumbsup", isActive: feedbackVote == .liked)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Like")
+
+            Button {
+                recordAssistantFeedback(.disliked, for: message)
+            } label: {
+                compactActionIcon(icon: "hand.thumbsdown", isActive: feedbackVote == .disliked)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dislike")
+
+            Button {
+                shareMessage(message)
+            } label: {
+                compactActionIcon(icon: "square.and.arrow.up", isActive: false)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Share")
+
             // Version switcher (only when siblings exist and not overriding with a user edit version)
             if totalVersions > 1 && !viewModel.isStreaming && assistantContentOverride[message.id] == nil {
                 HStack(spacing: 2) {
@@ -3300,7 +3336,7 @@ struct ChatDetailView: View {
         return .bool(true)
     }
 
-    private func copyMessage(_ message: ChatMessage) {
+    private func cleanedMessageTextForSharing(_ message: ChatMessage) -> String {
         var clean = message.content
         if let re = try? NSRegularExpression(pattern: #"<details[^>]*>.*?</details>"#, options: [.dotMatchesLineSeparators]) {
             clean = re.stringByReplacingMatches(in: clean, range: NSRange(clean.startIndex..., in: clean), withTemplate: "")
@@ -3314,6 +3350,11 @@ struct ChatDetailView: View {
                 clean += "\n[\(i+1)] \(src.resolvedURL ?? src.title ?? "Source \(i+1)")"
             }
         }
+        return clean
+    }
+
+    private func copyMessage(_ message: ChatMessage) {
+        let clean = cleanedMessageTextForSharing(message)
         UIPasteboard.general.string = clean
         Haptics.notify(.success)
         withAnimation(MicroAnimation.gentle) { showCopiedToast = true }
@@ -3321,6 +3362,25 @@ struct ChatDetailView: View {
             try? await Task.sleep(for: .seconds(2))
             withAnimation(MicroAnimation.gentle) { showCopiedToast = false }
         }
+    }
+
+    private func shareMessage(_ message: ChatMessage) {
+        let text = cleanedMessageTextForSharing(message)
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        messageShareItem = MessageShareItem(text: text)
+        Haptics.play(.light)
+    }
+
+    private func recordAssistantFeedback(_ vote: AssistantFeedbackVote, for message: ChatMessage) {
+        assistantFeedbackVoteOverrides[message.id] = vote
+        AssistantFeedbackPreferenceStore.setVote(
+            vote,
+            messageId: message.id,
+            conversationId: viewModel.conversation?.id,
+            model: message.model ?? viewModel.selectedModelId,
+            content: message.content
+        )
+        Haptics.notify(.success)
     }
 
     // MARK: - Attachment Processing
