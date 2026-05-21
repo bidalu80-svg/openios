@@ -1406,7 +1406,8 @@ private struct StandardCodeBlockView: View {
                 code: visibleCode,
                 language: displayLanguage,
                 maxHeight: 480,
-                autoFollowTail: isStreaming
+                autoFollowTail: isStreaming,
+                wrapLines: true
             )
                 .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.22 : 0.42))
         }
@@ -1426,6 +1427,7 @@ struct SourceCodeTextView: View {
     var language: String? = nil
     var maxHeight: CGFloat = 420
     var autoFollowTail: Bool = false
+    var wrapLines: Bool = false
 
     @Environment(\.theme) private var theme
     @State private var measuredContentHeight: CGFloat = 0
@@ -1469,6 +1471,7 @@ struct SourceCodeTextView: View {
             maximumHeight: contentMaxHeight,
             contentWidth: contentWidth,
             autoFollowTail: autoFollowTail,
+            wrapLines: wrapLines,
             onHeightChange: { height in
                 let nextHeight = min(contentMaxHeight, max(48, height))
                 guard abs(measuredContentHeight - nextHeight) > 0.5 else { return }
@@ -1502,6 +1505,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
     let maximumHeight: CGFloat
     let contentWidth: CGFloat
     let autoFollowTail: Bool
+    let wrapLines: Bool
     var onHeightChange: (CGFloat) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
@@ -1524,9 +1528,9 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         textView.scrollIndicatorInsets = textView.contentInset
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
-        textView.textContainer.widthTracksTextView = false
+        textView.textContainer.widthTracksTextView = true
         textView.textContainer.heightTracksTextView = false
-        textView.textContainer.lineBreakMode = .byClipping
+        textView.textContainer.lineBreakMode = .byCharWrapping
         textView.layoutManager.allowsNonContiguousLayout = false
         textView.adjustsFontForContentSizeCategory = false
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -1550,6 +1554,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             || coordinator.lastMaximumHeight != normalizedMaximumHeight
             || coordinator.lastContentWidth != contentWidth
             || coordinator.lastAutoFollowTail != autoFollowTail
+            || coordinator.lastWrapLines != wrapLines
             || !coordinator.lastTextColor.isEqual(textColor)
 
         guard shouldRebuild else { return }
@@ -1564,26 +1569,19 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             && coordinator.lastIsDarkMode == isDarkMode
             && coordinator.lastMaximumHeight == normalizedMaximumHeight
             && coordinator.lastContentWidth == contentWidth
+            && coordinator.lastWrapLines == wrapLines
             && coordinator.lastTextColor.isEqual(textColor)
-        uiView.textContainer.widthTracksTextView = false
+        Self.configureTextContainer(uiView, preferredWidth: contentWidth, wrapLines: wrapLines)
         uiView.textContainer.heightTracksTextView = false
-        uiView.textContainer.size = CGSize(
-            width: contentWidth,
-            height: UIView.layoutFittingExpandedSize.height
-        )
         if let sourceTextView = uiView as? NoCaretSourceTextView {
+            sourceTextView.wrapLines = wrapLines
             sourceTextView.minimumContentWidth = contentWidth
         }
-        uiView.contentSize = CGSize(
-            width: contentWidth + uiView.adjustedContentInset.right,
-            height: max(uiView.contentSize.height, 1)
-        )
-        uiView.textContainer.lineBreakMode = .byClipping
         uiView.isScrollEnabled = true
         uiView.showsVerticalScrollIndicator = true
-        uiView.showsHorizontalScrollIndicator = true
+        uiView.showsHorizontalScrollIndicator = !wrapLines
         uiView.alwaysBounceVertical = true
-        uiView.alwaysBounceHorizontal = true
+        uiView.alwaysBounceHorizontal = !wrapLines
 
         if didAppendToExistingText {
             let suffix = String(renderedText.dropFirst(previousText.count))
@@ -1595,7 +1593,8 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
                         font: font,
                         baseColor: textColor,
                         isDarkMode: isDarkMode,
-                        lineSpacing: lineSpacing
+                        lineSpacing: lineSpacing,
+                        lineBreakMode: wrapLines ? .byCharWrapping : .byClipping
                     )
                 )
             }
@@ -1606,11 +1605,12 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
                 font: font,
                 baseColor: textColor,
                 isDarkMode: isDarkMode,
-                lineSpacing: lineSpacing
+                lineSpacing: lineSpacing,
+                lineBreakMode: wrapLines ? .byCharWrapping : .byClipping
             )
             uiView.setContentOffset(.zero, animated: false)
         }
-        Self.updateHorizontalContentMetrics(uiView, preferredWidth: contentWidth)
+        Self.updateHorizontalContentMetrics(uiView, preferredWidth: contentWidth, wrapLines: wrapLines)
 
         coordinator.lastText = renderedText
         coordinator.lastLanguage = language
@@ -1620,6 +1620,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         coordinator.lastMaximumHeight = normalizedMaximumHeight
         coordinator.lastContentWidth = contentWidth
         coordinator.lastAutoFollowTail = autoFollowTail
+        coordinator.lastWrapLines = wrapLines
         coordinator.lastTextColor = textColor
 
         if autoFollowTail {
@@ -1640,15 +1641,19 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         }
 
         DispatchQueue.main.async {
-            let measuredHeight = Self.measuredHeight(for: uiView, maximumHeight: maximumHeight)
+            let measuredHeight = Self.measuredHeight(
+                for: uiView,
+                maximumHeight: maximumHeight,
+                wrapLines: wrapLines
+            )
             onHeightChange(measuredHeight)
-            Self.updateHorizontalContentMetrics(uiView, preferredWidth: contentWidth)
+            Self.updateHorizontalContentMetrics(uiView, preferredWidth: contentWidth, wrapLines: wrapLines)
             let needsVerticalScroll = measuredHeight >= maximumHeight - 0.5
             uiView.isScrollEnabled = true
             uiView.alwaysBounceVertical = needsVerticalScroll
             uiView.showsVerticalScrollIndicator = needsVerticalScroll
-            uiView.alwaysBounceHorizontal = true
-            uiView.showsHorizontalScrollIndicator = true
+            uiView.alwaysBounceHorizontal = !wrapLines
+            uiView.showsHorizontalScrollIndicator = !wrapLines
         }
     }
 
@@ -1656,14 +1661,19 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         let fallbackWidth = UIScreen.main.bounds.width - 64
         let width = max(1, proposal.width ?? uiView.bounds.width.nonZero(or: fallbackWidth))
         let fittingSize = uiView.sizeThatFits(
-            CGSize(width: contentWidth, height: UIView.layoutFittingExpandedSize.height)
+            CGSize(
+                width: wrapLines ? width : contentWidth,
+                height: UIView.layoutFittingExpandedSize.height
+            )
         )
         let cappedHeight = maximumHeight.isFinite ? min(fittingSize.height, maximumHeight) : fittingSize.height
         return CGSize(width: width, height: max(1, cappedHeight))
     }
 
-    private static func measuredHeight(for uiView: UITextView, maximumHeight: CGFloat) -> CGFloat {
-        let width = max(uiView.textContainer.size.width, uiView.bounds.width)
+    private static func measuredHeight(for uiView: UITextView, maximumHeight: CGFloat, wrapLines: Bool) -> CGFloat {
+        let width = wrapLines
+            ? max(1, uiView.bounds.width)
+            : max(uiView.textContainer.size.width, uiView.bounds.width)
         let fittingSize = uiView.sizeThatFits(
             CGSize(width: width, height: UIView.layoutFittingExpandedSize.height)
         )
@@ -1673,7 +1683,37 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         return fittingSize.height
     }
 
-    private static func updateHorizontalContentMetrics(_ uiView: UITextView, preferredWidth: CGFloat) {
+    private static func configureTextContainer(_ uiView: UITextView, preferredWidth: CGFloat, wrapLines: Bool) {
+        uiView.textContainer.widthTracksTextView = wrapLines
+        uiView.textContainer.heightTracksTextView = false
+        uiView.textContainer.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+        if !wrapLines {
+            uiView.textContainer.size = CGSize(
+                width: preferredWidth,
+                height: UIView.layoutFittingExpandedSize.height
+            )
+            uiView.contentSize = CGSize(
+                width: preferredWidth + uiView.adjustedContentInset.right,
+                height: max(uiView.contentSize.height, 1)
+            )
+        }
+    }
+
+    private static func updateHorizontalContentMetrics(_ uiView: UITextView, preferredWidth: CGFloat, wrapLines: Bool) {
+        if wrapLines {
+            uiView.textContainer.widthTracksTextView = true
+            uiView.textContainer.lineBreakMode = .byCharWrapping
+            uiView.alwaysBounceHorizontal = false
+            uiView.showsHorizontalScrollIndicator = false
+            if abs(uiView.contentOffset.x + uiView.adjustedContentInset.left) > 0.5 {
+                uiView.setContentOffset(
+                    CGPoint(x: -uiView.adjustedContentInset.left, y: uiView.contentOffset.y),
+                    animated: false
+                )
+            }
+            return
+        }
+
         uiView.layoutManager.ensureLayout(for: uiView.textContainer)
 
         let measuredWidth = measuredLineWidth(for: uiView.attributedText)
@@ -1741,6 +1781,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         var lastMaximumHeight: CGFloat = -1
         var lastContentWidth: CGFloat = 0
         var lastAutoFollowTail = false
+        var lastWrapLines = true
         var lastTextColor: UIColor = .clear
     }
 }
@@ -1748,6 +1789,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
 private final class NoCaretSourceTextView: UITextView {
     var selectionEnabled = true
     var minimumContentWidth: CGFloat = 0
+    var wrapLines = true
 
     override func caretRect(for position: UITextPosition) -> CGRect {
         .zero
@@ -1755,6 +1797,11 @@ private final class NoCaretSourceTextView: UITextView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard !wrapLines else {
+            textContainer.widthTracksTextView = true
+            textContainer.lineBreakMode = .byCharWrapping
+            return
+        }
         guard minimumContentWidth > bounds.width else { return }
         textContainer.widthTracksTextView = false
         textContainer.size = CGSize(
@@ -1785,12 +1832,13 @@ private enum SourceCodeHighlighter {
         font: UIFont,
         baseColor: UIColor,
         isDarkMode: Bool,
-        lineSpacing: CGFloat
+        lineSpacing: CGFloat,
+        lineBreakMode: NSLineBreakMode
     ) -> NSAttributedString {
         let palette = SourceSyntaxPalette.palette(isDarkMode: isDarkMode, fallback: baseColor)
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineSpacing = lineSpacing
-        paragraphStyle.lineBreakMode = .byClipping
+        paragraphStyle.lineBreakMode = lineBreakMode
 
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
@@ -2370,7 +2418,8 @@ struct FullCodeView: View {
                 SourceCodeTextView(
                     code: code,
                     language: language,
-                    maxHeight: max(240, proxy.size.height)
+                    maxHeight: max(240, proxy.size.height),
+                    wrapLines: true
                 )
                 .navigationTitle(language)
                 .navigationBarTitleDisplayMode(.inline)
