@@ -1488,7 +1488,7 @@ struct SourceCodeTextView: View {
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { (String($0) as NSString).size(withAttributes: attributes).width }
             .max() ?? 1
-        return ceil(max(UIScreen.main.bounds.width, maxLineWidth + 64))
+        return ceil(max(UIScreen.main.bounds.width, maxLineWidth + 96))
     }
 }
 
@@ -1674,9 +1674,12 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
     }
 
     private static func updateHorizontalContentMetrics(_ uiView: UITextView, preferredWidth: CGFloat) {
+        uiView.layoutManager.ensureLayout(for: uiView.textContainer)
+
         let measuredWidth = measuredLineWidth(for: uiView.attributedText)
         let viewportWidth = max(1, uiView.bounds.width)
-        let requiredWidth = ceil(max(preferredWidth, measuredWidth + 56, viewportWidth + 1))
+        let trailingPadding: CGFloat = 96
+        let requiredWidth = ceil(max(preferredWidth, measuredWidth + trailingPadding, viewportWidth + 1))
 
         uiView.textContainer.widthTracksTextView = false
         uiView.textContainer.size = CGSize(
@@ -1687,10 +1690,12 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             sourceTextView.minimumContentWidth = requiredWidth
         }
 
-        uiView.contentSize.width = max(
-            uiView.contentSize.width,
-            requiredWidth + uiView.adjustedContentInset.right
-        )
+        let scrollableWidth = requiredWidth
+            + uiView.textContainerInset.left
+            + uiView.textContainerInset.right
+        if abs(uiView.contentSize.width - scrollableWidth) > 0.5 {
+            uiView.contentSize.width = scrollableWidth
+        }
 
         let maximumOffsetX = max(
             -uiView.adjustedContentInset.left,

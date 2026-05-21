@@ -44,12 +44,16 @@ struct LocalAlpineTerminalConsoleView: View {
                                     Text("\(prompt) \(entry.command)")
                                         .font(.system(size: 18, weight: .regular, design: .monospaced))
                                         .foregroundStyle(.white.opacity(0.9))
+                                        .lineLimit(nil)
+                                        .fixedSize(horizontal: false, vertical: true)
                                         .textSelection(.enabled)
 
                                     if !entry.output.isEmpty {
                                         Text(entry.output)
                                             .font(.system(size: 17, weight: .regular, design: .monospaced))
                                             .foregroundStyle(terminalGreen.opacity(0.88))
+                                            .lineLimit(nil)
+                                            .fixedSize(horizontal: false, vertical: true)
                                             .textSelection(.enabled)
                                     } else if entry.isRunning {
                                         Text("执行中...")
@@ -377,6 +381,11 @@ struct LocalAlpineTerminalConsoleView: View {
 
     private func sanitizedInlineCommandText(_ text: String) -> String {
         text
+            .replacingOccurrences(
+                of: #"\\[ \t]*\r?\n[ \t]*"#,
+                with: " ",
+                options: .regularExpression
+            )
             .replacingOccurrences(of: "\r\n", with: " ")
             .replacingOccurrences(of: "\r", with: " ")
             .replacingOccurrences(of: "\n", with: " ")
@@ -775,6 +784,11 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
 
         private static func sanitizedInlineText(_ text: String) -> String {
             text
+                .replacingOccurrences(
+                    of: #"\\[ \t]*\r?\n[ \t]*"#,
+                    with: " ",
+                    options: .regularExpression
+                )
                 .replacingOccurrences(of: "\r\n", with: " ")
                 .replacingOccurrences(of: "\r", with: " ")
                 .replacingOccurrences(of: "\n", with: " ")
@@ -801,10 +815,23 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
             let width = max(24, view.bounds.width)
             let fittingSize = CGSize(width: width, height: .greatestFiniteMagnitude)
             let maxHeight: CGFloat = 360
-            let height = max(34, min(maxHeight, ceil(view.sizeThatFits(fittingSize).height)))
+            let contentHeight = ceil(view.sizeThatFits(fittingSize).height)
+            let needsInternalScroll = contentHeight > maxHeight + 0.5
+            if view.isScrollEnabled != needsInternalScroll {
+                view.isScrollEnabled = needsInternalScroll
+            }
+            view.showsVerticalScrollIndicator = needsInternalScroll
+            view.alwaysBounceVertical = needsInternalScroll
+
+            let height = max(34, min(maxHeight, contentHeight))
             if abs(measuredHeight - height) > 0.5 {
                 DispatchQueue.main.async {
                     self.measuredHeight = height
+                }
+            }
+            if needsInternalScroll {
+                DispatchQueue.main.async {
+                    view.scrollRangeToVisible(view.selectedNSRange)
                 }
             }
         }
