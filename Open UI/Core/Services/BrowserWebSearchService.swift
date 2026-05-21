@@ -59,22 +59,35 @@ final class BrowserWebSearchService: NSObject {
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
         let timestamp = Int(Date().timeIntervalSince1970)
         let needsFreshness = Self.searchNeedsFreshness(query)
-        let urls = [
-            needsFreshness
-                ? "https://www.bing.com/search?q=\(encoded)&setlang=zh-Hans&filters=ex1%3a%22ez1%22&_=\(timestamp)"
-                : "https://www.bing.com/search?q=\(encoded)&setlang=zh-Hans&_=\(timestamp)",
-            needsFreshness
-                ? "https://duckduckgo.com/html/?q=\(encoded)&df=d"
-                : "https://duckduckgo.com/html/?q=\(encoded)",
-            "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)"
+        let pages: [SearchPage] = [
+            SearchPage(url: "https://www.so.com/s?q=\(encoded)&ie=utf-8&_=\(timestamp)", timeout: 9, settleDelay: 600_000_000),
+            SearchPage(url: "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)", timeout: 9, settleDelay: 600_000_000),
+            SearchPage(url: "https://so.toutiao.com/search?keyword=\(encoded)&pd=information&dvpf=pc&_=\(timestamp)", timeout: 10, settleDelay: 900_000_000),
+            SearchPage(url: "https://www.sogou.com/web?query=\(encoded)&ie=utf8&_=\(timestamp)", timeout: 10, settleDelay: 900_000_000),
+            SearchPage(url: "https://metaso.cn/?q=\(encoded)", timeout: 10, settleDelay: 1_200_000_000),
+            SearchPage(url: "https://quark.sm.cn/s?q=\(encoded)", timeout: 7, settleDelay: 600_000_000),
+            SearchPage(
+                url: needsFreshness
+                    ? "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&filters=ex1%3a%22ez1%22&_=\(timestamp)"
+                    : "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&_=\(timestamp)",
+                timeout: 10,
+                settleDelay: 700_000_000
+            ),
+            SearchPage(
+                url: needsFreshness
+                    ? "https://duckduckgo.com/html/?q=\(encoded)&df=d"
+                    : "https://duckduckgo.com/html/?q=\(encoded)",
+                timeout: 8,
+                settleDelay: 700_000_000
+            )
         ]
 
-        for rawURL in urls {
-            guard let url = URL(string: rawURL),
-                  await load(url: url, timeout: 14) else {
+        for page in pages {
+            guard let url = URL(string: page.url),
+                  await load(url: url, timeout: page.timeout) else {
                 continue
             }
-            try? await Task.sleep(nanoseconds: 700_000_000)
+            try? await Task.sleep(nanoseconds: page.settleDelay)
             let items = await evaluateSearchItems().filter { item in
                 guard let link = item.link, let url = URL(string: link) else { return false }
                 return !Self.isBlockedDocumentURL(url)
@@ -218,9 +231,39 @@ final class BrowserWebSearchService: NSObject {
     private func evaluateSearchItems() async -> [WebSearchResultItem] {
         let script = """
         (() => {
-          const blockedHosts = new Set(['duckduckgo.com', 'www.duckduckgo.com', 'bing.com', 'www.bing.com', 'cn.bing.com', 'google.com', 'www.google.com', 'baidu.com', 'www.baidu.com']);
+          const blockedHosts = new Set([
+            'duckduckgo.com', 'www.duckduckgo.com',
+            'bing.com', 'www.bing.com', 'cn.bing.com',
+            'google.com', 'www.google.com',
+            'baidu.com', 'www.baidu.com',
+            'so.com', 'www.so.com', 'm.so.com',
+            'sogou.com', 'www.sogou.com', 'm.sogou.com',
+            'so.toutiao.com',
+            'metaso.cn', 'www.metaso.cn',
+            'quark.sm.cn', 'm.sm.cn', 'sm.cn'
+          ]);
           function text(node) {
             return (node && node.innerText || node && node.textContent || '').replace(/\\s+/g, ' ').trim();
+          }
+          function cleanHTML(raw) {
+            const div = document.createElement('div');
+            div.innerHTML = raw || '';
+            return text(div);
+          }
+          function parseDataTools(node) {
+            let current = node;
+            while (current && current !== document.body) {
+              const raw = current.getAttribute && (current.getAttribute('data-tools') || current.getAttribute('data-log') || current.getAttribute('data-item'));
+              if (raw) {
+                try {
+                  const data = JSON.parse(raw.replace(/&quot;/g, '"'));
+                  const value = data.url || data.href || data.link || data.linkUrl || data.source_url || data.article_url;
+                  if (value) return value;
+                } catch (_) {}
+              }
+              current = current.parentElement;
+            }
+            return '';
           }
           function absolutize(raw) {
             try {
@@ -239,17 +282,36 @@ final class BrowserWebSearchService: NSObject {
                 if (q && /^https?:/i.test(q)) return q;
                 return '';
               }
+              if (url.hostname.endsWith('so.com') || url.hostname.endsWith('sogou.com')) {
+                const q = url.searchParams.get('url') || url.searchParams.get('u') || url.searchParams.get('target') || url.searchParams.get('link');
+                if (q && /^https?:/i.test(q)) return decodeURIComponent(q);
+                if (['/s', '/web', '/link', '/link2url'].includes(url.pathname)) return '';
+              }
+              if (url.hostname === 'so.toutiao.com') return '';
+              if (url.hostname.endsWith('metaso.cn') && (url.pathname === '/' || url.pathname.startsWith('/search'))) return '';
+              if (url.hostname.endsWith('sm.cn') && (url.pathname === '/s' || url.pathname.includes('punish'))) return '';
               return url.href;
             } catch (_) {
               return '';
             }
+          }
+          function linkFor(anchor, node) {
+            const attrs = ['href', 'data-url', 'data-href', 'data-link', 'data-pcurl', 'data-mu'];
+            for (const attr of attrs) {
+              const raw = anchor && anchor.getAttribute && anchor.getAttribute(attr);
+              const link = absolutize(raw);
+              if (link) return link;
+            }
+            const toolLink = absolutize(parseDataTools(node || anchor));
+            if (toolLink) return toolLink;
+            return '';
           }
           function blocked(raw) {
             try {
               const url = new URL(raw);
               if (!/^https?:$/.test(url.protocol)) return true;
               if (url.hostname.endsWith('baidu.com')) return true;
-              if (blockedHosts.has(url.hostname) && ['/search', '/html/', '/', '/s', '/link', '/url', '/ck/a'].includes(url.pathname)) return true;
+              if (blockedHosts.has(url.hostname) && ['/search', '/html/', '/', '/s', '/web', '/link', '/link2url', '/url', '/ck/a'].includes(url.pathname)) return true;
               return /\\.(jpg|jpeg|png|gif|webp|avif|svg|mp4|mov|mp3|zip|rar|7z|ipa|apk|dmg|pdf)(\\?|$)/i.test(url.pathname);
             } catch (_) {
               return true;
@@ -260,6 +322,13 @@ final class BrowserWebSearchService: NSObject {
             '.result',
             '.c-container',
             '.result-op',
+            '.res-list',
+            '.vrResult',
+            '.resultLink',
+            '.s-result-list [data-druid-card-data-id]',
+            '.search-result',
+            '.search-result-card',
+            '.result-item',
             '.results_links',
             'li.b_algo',
             'article',
@@ -272,19 +341,34 @@ final class BrowserWebSearchService: NSObject {
             for (const node of document.querySelectorAll(selector)) {
               let anchor = node.matches && node.matches('a[href]') ? node : node.querySelector && node.querySelector('a[href]');
               if (!anchor) continue;
-              const link = absolutize(anchor.getAttribute('href') || anchor.href);
+              const link = linkFor(anchor, node);
               if (!link || blocked(link)) continue;
               const title = text(anchor) || text(node.querySelector && node.querySelector('h2,h3')) || link;
-              const snippetNode = node.querySelector && node.querySelector('.result__snippet, .b_caption p, .c-abstract, .content-right, .c-span-last, .cos-color-text, p, .snippet, .content, .result-snippet');
+              const snippetNode = node.querySelector && node.querySelector('.result__snippet, .b_caption p, .c-abstract, .content-right, .c-span-last, .cos-color-text, p, .snippet, .content, .result-snippet, .res-desc, .summary, .abstract, .text-default');
               const dateNode = node.querySelector && node.querySelector('time, .news_dt, .c-color-gray2, .result__timestamp, .b_factrow, [aria-label*="Published"], [aria-label*="Updated"]');
               const dateText = text(dateNode);
               const snippet = [dateText, text(snippetNode)].filter(Boolean).join(' - ');
               candidates.push({ title, link, snippet });
             }
           }
+          for (const script of document.querySelectorAll('script[type="application/json"], script[data-druid-card-data-id]')) {
+            try {
+              const raw = script.textContent || '';
+              if (!raw.includes('article_url') && !raw.includes('source_url') && !raw.includes('open_url')) continue;
+              const object = JSON.parse(raw);
+              const data = object.data || object;
+              const display = data.display || {};
+              const title = cleanHTML(data.title || data.emphasized?.title || display.title?.text || display.title?.marked || '');
+              const link = absolutize(data.article_url || data.source_url || data.open_url || data.share_url || data.ttsearch_msite_url || display.info?.url || '');
+              const snippet = cleanHTML(data.abstract || data.summary || data.emphasized?.summary || display.summary?.text || display.summary?.marked || '');
+              if (title && link && !blocked(link)) {
+                candidates.push({ title, link, snippet });
+              }
+            } catch (_) {}
+          }
           if (candidates.length === 0) {
             for (const anchor of document.querySelectorAll('a[href]')) {
-              const link = absolutize(anchor.getAttribute('href') || anchor.href);
+              const link = linkFor(anchor, anchor);
               const title = text(anchor);
               if (!link || !title || title.length < 3 || blocked(link)) continue;
               candidates.push({ title, link, snippet: '' });
@@ -391,6 +475,23 @@ final class BrowserWebSearchService: NSObject {
         if host == "baidu.com" || host.hasSuffix(".baidu.com") {
             return true
         }
+        if host == "so.com" || host.hasSuffix(".so.com") {
+            return ["/s", "/search", "/link", "/link2url", "/"].contains(url.path.lowercased())
+        }
+        if host == "sogou.com" || host.hasSuffix(".sogou.com") {
+            return ["/web", "/link", "/link2url", "/"].contains(url.path.lowercased())
+        }
+        if host == "so.toutiao.com" {
+            return true
+        }
+        if host == "metaso.cn" || host.hasSuffix(".metaso.cn") {
+            let path = url.path.lowercased()
+            return path == "/" || path.hasPrefix("/search")
+        }
+        if host == "sm.cn" || host.hasSuffix(".sm.cn") {
+            let path = url.path.lowercased()
+            return path == "/s" || path.contains("punish")
+        }
         if ["duckduckgo.com", "www.duckduckgo.com", "bing.com", "www.bing.com", "cn.bing.com", "google.com", "www.google.com"].contains(host),
            ["/search", "/html/", "/", "/s", "/link", "/url", "/ck/a"].contains(url.path.lowercased()) {
             return true
@@ -427,4 +528,10 @@ private struct BrowserPageSnapshot {
     let description: String
     let published: String
     let text: String
+}
+
+private struct SearchPage {
+    let url: String
+    let timeout: TimeInterval
+    let settleDelay: UInt64
 }
