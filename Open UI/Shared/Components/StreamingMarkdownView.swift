@@ -1573,6 +1573,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             && coordinator.lastTextColor.isEqual(textColor)
         Self.configureTextContainer(uiView, preferredWidth: contentWidth, wrapLines: wrapLines)
         uiView.textContainer.heightTracksTextView = false
+        Self.configureScrollInsets(uiView, wrapLines: wrapLines)
         if let sourceTextView = uiView as? NoCaretSourceTextView {
             sourceTextView.wrapLines = wrapLines
             sourceTextView.minimumContentWidth = contentWidth
@@ -1687,15 +1688,30 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         uiView.textContainer.widthTracksTextView = wrapLines
         uiView.textContainer.heightTracksTextView = false
         uiView.textContainer.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
-        if !wrapLines {
+        if wrapLines {
             uiView.textContainer.size = CGSize(
-                width: preferredWidth,
+                width: max(1, uiView.bounds.width),
                 height: UIView.layoutFittingExpandedSize.height
             )
-            uiView.contentSize = CGSize(
-                width: preferredWidth + uiView.adjustedContentInset.right,
-                height: max(uiView.contentSize.height, 1)
-            )
+            return
+        }
+        uiView.textContainer.size = CGSize(
+            width: preferredWidth,
+            height: UIView.layoutFittingExpandedSize.height
+        )
+        uiView.contentSize = CGSize(
+            width: preferredWidth + uiView.adjustedContentInset.right,
+            height: max(uiView.contentSize.height, 1)
+        )
+    }
+
+    private static func configureScrollInsets(_ uiView: UITextView, wrapLines: Bool) {
+        let inset = wrapLines
+            ? UIEdgeInsets.zero
+            : UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 24)
+        if uiView.contentInset != inset {
+            uiView.contentInset = inset
+            uiView.scrollIndicatorInsets = inset
         }
     }
 
@@ -1705,9 +1721,18 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             uiView.textContainer.lineBreakMode = .byCharWrapping
             uiView.alwaysBounceHorizontal = false
             uiView.showsHorizontalScrollIndicator = false
-            if abs(uiView.contentOffset.x + uiView.adjustedContentInset.left) > 0.5 {
+            let viewportWidth = max(1, uiView.bounds.width)
+            uiView.textContainer.size = CGSize(
+                width: viewportWidth,
+                height: UIView.layoutFittingExpandedSize.height
+            )
+            if abs(uiView.contentSize.width - viewportWidth) > 0.5 {
+                uiView.contentSize.width = viewportWidth
+            }
+            let leftOffset = -uiView.adjustedContentInset.left
+            if abs(uiView.contentOffset.x - leftOffset) > 0.5 {
                 uiView.setContentOffset(
-                    CGPoint(x: -uiView.adjustedContentInset.left, y: uiView.contentOffset.y),
+                    CGPoint(x: leftOffset, y: uiView.contentOffset.y),
                     animated: false
                 )
             }
@@ -1800,6 +1825,18 @@ private final class NoCaretSourceTextView: UITextView {
         guard !wrapLines else {
             textContainer.widthTracksTextView = true
             textContainer.lineBreakMode = .byCharWrapping
+            let viewportWidth = max(1, bounds.width)
+            textContainer.size = CGSize(
+                width: viewportWidth,
+                height: UIView.layoutFittingExpandedSize.height
+            )
+            if abs(contentSize.width - viewportWidth) > 0.5 {
+                contentSize.width = viewportWidth
+            }
+            let leftOffset = -adjustedContentInset.left
+            if abs(contentOffset.x - leftOffset) > 0.5 {
+                setContentOffset(CGPoint(x: leftOffset, y: contentOffset.y), animated: false)
+            }
             return
         }
         guard minimumContentWidth > bounds.width else { return }
