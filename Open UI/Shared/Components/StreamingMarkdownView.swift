@@ -1610,6 +1610,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             )
             uiView.setContentOffset(.zero, animated: false)
         }
+        Self.updateHorizontalContentMetrics(uiView, preferredWidth: contentWidth)
 
         coordinator.lastText = renderedText
         coordinator.lastLanguage = language
@@ -1641,7 +1642,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         DispatchQueue.main.async {
             let measuredHeight = Self.measuredHeight(for: uiView, maximumHeight: maximumHeight)
             onHeightChange(measuredHeight)
-            uiView.contentSize.width = max(uiView.contentSize.width, contentWidth + uiView.adjustedContentInset.right)
+            Self.updateHorizontalContentMetrics(uiView, preferredWidth: contentWidth)
             let needsVerticalScroll = measuredHeight >= maximumHeight - 0.5
             uiView.isScrollEnabled = true
             uiView.alwaysBounceVertical = needsVerticalScroll
@@ -1670,6 +1671,60 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             return min(fittingSize.height, maximumHeight)
         }
         return fittingSize.height
+    }
+
+    private static func updateHorizontalContentMetrics(_ uiView: UITextView, preferredWidth: CGFloat) {
+        let measuredWidth = measuredLineWidth(for: uiView.attributedText)
+        let viewportWidth = max(1, uiView.bounds.width)
+        let requiredWidth = ceil(max(preferredWidth, measuredWidth + 56, viewportWidth + 1))
+
+        uiView.textContainer.widthTracksTextView = false
+        uiView.textContainer.size = CGSize(
+            width: requiredWidth,
+            height: UIView.layoutFittingExpandedSize.height
+        )
+        if let sourceTextView = uiView as? NoCaretSourceTextView {
+            sourceTextView.minimumContentWidth = requiredWidth
+        }
+
+        uiView.contentSize.width = max(
+            uiView.contentSize.width,
+            requiredWidth + uiView.adjustedContentInset.right
+        )
+
+        let maximumOffsetX = max(
+            -uiView.adjustedContentInset.left,
+            uiView.contentSize.width - uiView.bounds.width + uiView.adjustedContentInset.right
+        )
+        if uiView.contentOffset.x > maximumOffsetX {
+            uiView.setContentOffset(
+                CGPoint(x: maximumOffsetX, y: uiView.contentOffset.y),
+                animated: false
+            )
+        }
+    }
+
+    private static func measuredLineWidth(for attributedText: NSAttributedString?) -> CGFloat {
+        guard let attributedText, attributedText.length > 0 else { return 1 }
+        var maxWidth: CGFloat = 1
+        let fullText = attributedText.string as NSString
+        fullText.enumerateSubstrings(
+            in: NSRange(location: 0, length: fullText.length),
+            options: [.byLines, .substringNotRequired]
+        ) { _, range, _, _ in
+            guard range.length > 0 else { return }
+            let line = attributedText.attributedSubstring(from: range)
+            let width = line.boundingRect(
+                with: CGSize(
+                    width: CGFloat.greatestFiniteMagnitude,
+                    height: CGFloat.greatestFiniteMagnitude
+                ),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            ).width
+            maxWidth = max(maxWidth, width)
+        }
+        return ceil(maxWidth)
     }
 
     final class Coordinator: NSObject {

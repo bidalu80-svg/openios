@@ -22,6 +22,14 @@ final class BrowserWebSearchService: NSObject {
             .filter { !$0.isEmpty }
         guard !normalizedQueries.isEmpty else { return WebSearchResponse() }
 
+        let githubSearchSeed = Self.githubSearchSeed(
+            originalQuery: originalQuery,
+            queries: normalizedQueries
+        )
+        let githubSearchTask = githubSearchSeed.map { seed in
+            Task { await Self.githubRepositoryResults(for: seed) }
+        }
+
         var items: [WebSearchResultItem] = []
         var docs: [WebSearchDocument] = []
         var seenLinks = Set<String>()
@@ -43,6 +51,31 @@ final class BrowserWebSearchService: NSObject {
             if items.count >= 8 { break }
         }
 
+        if let githubItems = await githubSearchTask?.value, !githubItems.isEmpty {
+            var githubCollected: [WebSearchResultItem] = []
+            var githubDocs: [WebSearchDocument] = []
+
+            for item in githubItems {
+                guard let link = item.link?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !link.isEmpty,
+                      seenLinks.insert(link.lowercased()).inserted else {
+                    continue
+                }
+                githubCollected.append(item)
+                if githubDocs.count < 4, let doc = await fetchDocument(for: item) {
+                    githubDocs.append(doc)
+                }
+                if githubCollected.count >= 8 { break }
+            }
+
+            if !githubCollected.isEmpty {
+                items = Array((githubCollected + items).prefix(8))
+            }
+            if !githubDocs.isEmpty {
+                docs = Array((githubDocs + docs).prefix(4))
+            }
+        }
+
         guard !items.isEmpty || !docs.isEmpty else { return WebSearchResponse() }
         let filenames = items.compactMap(\.link)
         return WebSearchResponse(
@@ -60,29 +93,31 @@ final class BrowserWebSearchService: NSObject {
         let timestamp = Int(Date().timeIntervalSince1970)
         let needsFreshness = Self.searchNeedsFreshness(query)
         let pages: [SearchPage] = [
-            SearchPage(url: "https://www.so.com/s?q=\(encoded)&ie=utf-8&_=\(timestamp)", timeout: 9, settleDelay: 600_000_000),
-            SearchPage(url: "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)", timeout: 9, settleDelay: 600_000_000),
-            SearchPage(url: "https://so.toutiao.com/search?keyword=\(encoded)&pd=information&dvpf=pc&_=\(timestamp)", timeout: 10, settleDelay: 900_000_000),
-            SearchPage(url: "https://www.sogou.com/web?query=\(encoded)&ie=utf8&_=\(timestamp)", timeout: 10, settleDelay: 900_000_000),
-            SearchPage(url: "https://metaso.cn/?q=\(encoded)", timeout: 10, settleDelay: 1_200_000_000),
-            SearchPage(url: "https://quark.sm.cn/s?q=\(encoded)", timeout: 7, settleDelay: 600_000_000),
+            SearchPage(url: "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)", timeout: 9, settleDelay: 600_000_000, resultLimit: 2),
+            SearchPage(url: "https://www.so.com/s?q=\(encoded)&ie=utf-8&_=\(timestamp)", timeout: 9, settleDelay: 600_000_000, resultLimit: 2),
+            SearchPage(url: "https://www.sogou.com/web?query=\(encoded)&ie=utf8&_=\(timestamp)", timeout: 10, settleDelay: 900_000_000, resultLimit: 2),
+            SearchPage(url: "https://quark.sm.cn/s?q=\(encoded)", timeout: 7, settleDelay: 600_000_000, resultLimit: 2),
+            SearchPage(url: "https://metaso.cn/?q=\(encoded)", timeout: 10, settleDelay: 1_200_000_000, resultLimit: 1),
+            SearchPage(url: "https://so.toutiao.com/search?keyword=\(encoded)&pd=information&dvpf=pc&_=\(timestamp)", timeout: 10, settleDelay: 900_000_000, resultLimit: 1),
             SearchPage(
                 url: needsFreshness
                     ? "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&filters=ex1%3a%22ez1%22&_=\(timestamp)"
                     : "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&_=\(timestamp)",
                 timeout: 10,
-                settleDelay: 700_000_000
+                settleDelay: 700_000_000,
+                resultLimit: 1
             ),
             SearchPage(
                 url: needsFreshness
                     ? "https://duckduckgo.com/html/?q=\(encoded)&df=d"
                     : "https://duckduckgo.com/html/?q=\(encoded)",
                 timeout: 8,
-                settleDelay: 700_000_000
+                settleDelay: 700_000_000,
+                resultLimit: 1
             )
         ]
 
-        var collected: [WebSearchResultItem] = []
+        var pageBuckets: [[WebSearchResultItem]] = []
         var seenLinks = Set<String>()
 
         for page in pages {
@@ -96,17 +131,37 @@ final class BrowserWebSearchService: NSObject {
                 return !Self.isBlockedDocumentURL(url)
                     && !Self.isLowValueSearchResult(item)
             }
+            var pageItems: [WebSearchResultItem] = []
             for item in items {
                 guard let link = item.link?.trimmingCharacters(in: .whitespacesAndNewlines),
                       !link.isEmpty,
                       seenLinks.insert(link.lowercased()).inserted else {
                     continue
                 }
-                collected.append(item)
+                pageItems.append(item)
+                if pageItems.count >= page.resultLimit {
+                    break
+                }
+            }
+            if !pageItems.isEmpty {
+                pageBuckets.append(pageItems)
+            }
+        }
+
+        var collected: [WebSearchResultItem] = []
+        var round = 0
+        while collected.count < 8 {
+            var appendedAny = false
+            for bucket in pageBuckets {
+                guard round < bucket.count else { continue }
+                collected.append(bucket[round])
+                appendedAny = true
                 if collected.count >= 8 {
                     return collected
                 }
             }
+            if !appendedAny { break }
+            round += 1
         }
         return collected
     }
@@ -117,6 +172,10 @@ final class BrowserWebSearchService: NSObject {
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               !Self.isBlockedDocumentURL(url) else {
             return nil
+        }
+
+        if Self.isGitHubRepositoryURL(url) {
+            return summaryDocument(for: item)
         }
 
         guard await load(url: url, timeout: 16) else {
@@ -545,6 +604,114 @@ final class BrowserWebSearchService: NSObject {
         ]
         return tokens.contains { value.contains($0) }
     }
+
+    private static func githubSearchSeed(originalQuery: String?, queries: [String]) -> String? {
+        let candidates = [originalQuery]
+            .compactMap { $0 }
+            + queries
+        for candidate in candidates {
+            let normalized = normalizedQuery(candidate)
+            guard !normalized.isEmpty,
+                  shouldUseGitHubSearch(for: normalized) else {
+                continue
+            }
+            return normalized
+        }
+        return nil
+    }
+
+    private static func shouldUseGitHubSearch(for query: String) -> Bool {
+        let normalized = query
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+
+        let triggers = [
+            "github", "github.com",
+            "开源", "源码", "源代码",
+            "仓库", "代码仓库",
+            "open source", "source code",
+            "repository"
+        ]
+        return triggers.contains { normalized.contains($0) }
+    }
+
+    private static func isGitHubRepositoryURL(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased(),
+              host == "github.com" || host.hasSuffix(".github.com") else {
+            return false
+        }
+        let components = url.pathComponents.filter { $0 != "/" }
+        guard components.count >= 2 else { return false }
+        let first = components[0].lowercased()
+        let reserved = [
+            "search", "topics", "about", "pricing", "login", "join", "orgs",
+            "apps", "collections", "features", "marketplace", "sponsors",
+            "settings", "contact", "site", "explore", "trending"
+        ]
+        return !reserved.contains(first)
+    }
+
+    private static func githubRepositoryResults(for query: String) async -> [WebSearchResultItem] {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return [] }
+
+        var components = URLComponents(string: "https://api.github.com/search/repositories")
+        components?.queryItems = [
+            URLQueryItem(name: "q", value: normalized),
+            URLQueryItem(name: "per_page", value: "5")
+        ]
+        if searchNeedsFreshness(normalized) {
+            components?.queryItems?.append(URLQueryItem(name: "sort", value: "updated"))
+            components?.queryItems?.append(URLQueryItem(name: "order", value: "desc"))
+        }
+        guard let url = components?.url else { return [] }
+
+        var request = URLRequest(url: url, timeoutInterval: 5)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("OpenRelay/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode),
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let items = json["items"] as? [[String: Any]] else {
+                return []
+            }
+
+            return items.compactMap { entry in
+                let fullName = (entry["full_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ?? (entry["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ?? ""
+                let htmlURL = (entry["html_url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ?? ""
+                guard !fullName.isEmpty || !htmlURL.isEmpty else { return nil }
+
+                let description = (entry["description"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let language = (entry["language"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let stars = entry["stargazers_count"] as? Int ?? 0
+                let updatedAt = (entry["updated_at"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                var snippetParts: [String] = []
+                if !description.isEmpty { snippetParts.append(description) }
+                if stars > 0 { snippetParts.append("stars \(stars)") }
+                if !language.isEmpty { snippetParts.append(language) }
+                if !updatedAt.isEmpty { snippetParts.append(updatedAt) }
+
+                return WebSearchResultItem(json: [
+                    "title": fullName.isEmpty ? htmlURL : fullName,
+                    "link": htmlURL,
+                    "snippet": snippetParts.joined(separator: " · ")
+                ])
+            }
+        } catch {
+            return []
+        }
+    }
 }
 
 extension BrowserWebSearchService: WKNavigationDelegate {
@@ -579,4 +746,5 @@ private struct SearchPage {
     let url: String
     let timeout: TimeInterval
     let settleDelay: UInt64
+    let resultLimit: Int
 }
