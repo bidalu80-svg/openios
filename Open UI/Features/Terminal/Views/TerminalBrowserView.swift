@@ -18,6 +18,7 @@ struct LocalAlpineTerminalConsoleView: View {
     @State private var commandHistory: [String] = []
     @State private var historyCursor: Int?
     @State private var isControlLatched = false
+    @State private var isAccessoryBarHidden = false
 
     private let prompt = "root@iexa:~#"
     private let terminalGreen = Color(red: 0.24, green: 0.82, blue: 0.36)
@@ -87,7 +88,7 @@ struct LocalAlpineTerminalConsoleView: View {
             refocusCommandLine()
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if isCommandFocused || !commandInput.isEmpty {
+            if !isAccessoryBarHidden && (isCommandFocused || !commandInput.isEmpty) {
                 terminalAccessoryBar
             }
         }
@@ -135,6 +136,9 @@ struct LocalAlpineTerminalConsoleView: View {
             Button {
                 entries.removeAll()
                 commandInput = ""
+                historyCursor = nil
+                isControlLatched = false
+                isAccessoryBarHidden = false
                 refocusCommandLine()
                 Haptics.play(.light)
             } label: {
@@ -186,6 +190,8 @@ struct LocalAlpineTerminalConsoleView: View {
             HStack(spacing: 10) {
                 accessoryButton(title: "隐藏", systemImage: "keyboard.chevron.compact.down") {
                     isCommandFocused = false
+                    isControlLatched = false
+                    isAccessoryBarHidden = true
                 }
                 accessoryButton(title: "粘贴", systemImage: "doc.on.clipboard") {
                     pasteIntoCommandLine()
@@ -215,6 +221,9 @@ struct LocalAlpineTerminalConsoleView: View {
                 }
                 accessoryTextButton("⊗ C-c") {
                     handleControlC()
+                }
+                accessoryTextButton("Ⅱ C-z") {
+                    handleControlZ()
                 }
                 accessoryTextButton("⌫ C-d") {
                     handleControlD()
@@ -265,6 +274,7 @@ struct LocalAlpineTerminalConsoleView: View {
         commandInput = ""
         commandHistory.append(command)
         historyCursor = nil
+        isControlLatched = false
         isRunning = true
         Haptics.play(.light)
 
@@ -335,6 +345,7 @@ struct LocalAlpineTerminalConsoleView: View {
     }
 
     private func refocusCommandLine() {
+        isAccessoryBarHidden = false
         isCommandFocused = false
         focusRequestID = UUID()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -393,6 +404,8 @@ struct LocalAlpineTerminalConsoleView: View {
             sendTextControl(.moveToEnd)
         case "u":
             cancelCurrentInput()
+        case "z":
+            handleControlZ()
         default:
             isControlLatched = false
             refocusCommandLine()
@@ -437,6 +450,7 @@ struct LocalAlpineTerminalConsoleView: View {
     }
 
     private func handleControlC() {
+        isControlLatched = false
         if isRunning {
             let sent = LocalAlpineTerminalService.shared.interruptRunningCommand()
             appendRunningNotice(sent ? "^C" : "[Ctrl-C 发送失败；当前命令会在返回或超时后结束]")
@@ -452,13 +466,23 @@ struct LocalAlpineTerminalConsoleView: View {
         Haptics.play(.light)
     }
 
+    private func handleControlZ() {
+        isControlLatched = false
+        if isRunning {
+            appendRunningNotice("[Ctrl-Z 暂停在当前本地执行模式不可用；请用 C-c 中断]")
+        }
+        refocusCommandLine()
+        Haptics.play(.light)
+    }
+
     private func handleControlD() {
+        isControlLatched = false
         guard !commandInput.isEmpty else {
             refocusCommandLine()
             Haptics.play(.light)
             return
         }
-        sendTextControl(.deleteBackward)
+        sendTextControl(.deleteForward)
         Haptics.play(.light)
     }
 
@@ -534,6 +558,7 @@ private enum LocalAlpineTextControlAction: Equatable {
     case moveToStart
     case moveToEnd
     case deleteBackward
+    case deleteForward
 }
 
 private struct LocalAlpineConsoleTextField: UIViewRepresentable {
@@ -683,6 +708,8 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
                 field.selectedTextRange = field.textRange(from: end, to: end)
             case .deleteBackward:
                 field.deleteBackward()
+            case .deleteForward:
+                deleteForward(in: field)
             }
         }
 
@@ -712,6 +739,19 @@ private struct LocalAlpineConsoleTextField: UIViewRepresentable {
             if let position = field.position(from: field.beginningOfDocument, offset: range.location + replacement.utf16.count) {
                 field.selectedTextRange = field.textRange(from: position, to: position)
             }
+            text = field.text ?? ""
+        }
+
+        private func deleteForward(in field: UITextField) {
+            guard let selectedRange = field.selectedTextRange else { return }
+            if !selectedRange.isEmpty {
+                field.replace(selectedRange, withText: "")
+                text = field.text ?? ""
+                return
+            }
+            guard let nextPosition = field.position(from: selectedRange.start, offset: 1),
+                  let deleteRange = field.textRange(from: selectedRange.start, to: nextPosition) else { return }
+            field.replace(deleteRange, withText: "")
             text = field.text ?? ""
         }
 
