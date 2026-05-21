@@ -161,34 +161,26 @@ struct LocalAlpineTerminalConsoleView: View {
     }
 
     private var commandLine: some View {
-        HStack(alignment: .top, spacing: 0) {
-            Text("\(prompt) ")
-                .font(.system(size: 22, weight: .regular, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.9))
-                .fixedSize(horizontal: true, vertical: false)
-                .layoutPriority(1)
-                .padding(.top, 1)
-
-            LocalAlpineConsoleTextView(
-                text: $commandInput,
-                isFocused: $isCommandFocused,
-                measuredHeight: $commandInputHeight,
-                focusRequestID: focusRequestID,
-                controlRequest: textControlRequest,
-                isEnabled: !isRunning,
-                textColor: .white,
-                cursorColor: UIColor(red: 0.24, green: 0.82, blue: 0.36, alpha: 1),
-                controlLatch: $isControlLatched,
-                onReturn: {
-                    Task { await executeCurrentCommand() }
-                },
-                onControlCharacter: { character in
-                    handleControlCharacter(character)
-                }
-            )
-            .frame(minWidth: 24, maxWidth: .infinity)
-            .frame(height: commandInputHeight)
-        }
+        LocalAlpineConsoleTextView(
+            prompt: "\(prompt) ",
+            text: $commandInput,
+            isFocused: $isCommandFocused,
+            measuredHeight: $commandInputHeight,
+            focusRequestID: focusRequestID,
+            controlRequest: textControlRequest,
+            isEnabled: !isRunning,
+            textColor: .white,
+            cursorColor: UIColor(red: 0.24, green: 0.82, blue: 0.36, alpha: 1),
+            controlLatch: $isControlLatched,
+            onReturn: {
+                Task { await executeCurrentCommand() }
+            },
+            onControlCharacter: { character in
+                handleControlCharacter(character)
+            }
+        )
+        .frame(minWidth: 24, maxWidth: .infinity)
+        .frame(height: commandInputHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 2)
     }
@@ -575,6 +567,7 @@ private enum LocalAlpineTextControlAction: Equatable {
 }
 
 private struct LocalAlpineConsoleTextView: UIViewRepresentable {
+    var prompt: String
     @Binding var text: String
     @Binding var isFocused: Bool
     @Binding var measuredHeight: CGFloat
@@ -614,8 +607,12 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: UITextView, context: Context) {
-        if view.text != text {
-            view.text = text
+        context.coordinator.prompt = prompt
+        let displayedText = prompt + text
+        let previousCommandCursorOffset = context.coordinator.commandCursorOffset(in: view)
+        if view.text != displayedText {
+            view.text = displayedText
+            context.coordinator.setCommandCursorOffset(previousCommandCursorOffset ?? text.utf16.count, in: view)
         }
         view.isEditable = isEnabled
         view.isSelectable = isEnabled
@@ -625,7 +622,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
            context.coordinator.lastControlRequestID != controlRequest.id {
             context.coordinator.lastControlRequestID = controlRequest.id
             context.coordinator.apply(controlRequest.action, to: view)
-            text = view.text ?? ""
+            text = context.coordinator.commandText(in: view)
         }
         context.coordinator.updateHeight(for: view)
 
@@ -644,6 +641,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
+            prompt: prompt,
             text: $text,
             isFocused: $isFocused,
             measuredHeight: $measuredHeight,
@@ -654,6 +652,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
+        var prompt: String
         @Binding var text: String
         @Binding var isFocused: Bool
         @Binding var measuredHeight: CGFloat
@@ -664,6 +663,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
         var lastControlRequestID: UUID?
 
         init(
+            prompt: String,
             text: Binding<String>,
             isFocused: Binding<Bool>,
             measuredHeight: Binding<CGFloat>,
@@ -671,6 +671,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
             onReturn: @escaping () -> Void,
             onControlCharacter: @escaping (Character) -> Void
         ) {
+            self.prompt = prompt
             _text = text
             _isFocused = isFocused
             _measuredHeight = measuredHeight
@@ -680,12 +681,24 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
         }
 
         func textViewDidChange(_ textView: UITextView) {
-            text = textView.text ?? ""
+            guard (textView.text ?? "").hasPrefix(prompt) else {
+                textView.text = prompt + text
+                setCommandCursorOffset(text.utf16.count, in: textView)
+                updateHeight(for: textView)
+                return
+            }
+            text = commandText(in: textView)
+            if fullCursorOffset(in: textView) < promptUTF16Length {
+                setCommandCursorOffset(0, in: textView)
+            }
             updateHeight(for: textView)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
             isFocused = true
+            if fullCursorOffset(in: textView) < promptUTF16Length {
+                setCommandCursorOffset(0, in: textView)
+            }
         }
 
         func textViewDidEndEditing(_ textView: UITextView) {
@@ -702,13 +715,18 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
                 controlLatch = false
             }
 
+            if string == "\n" || string == "\r" || string == "\r\n" {
+                onReturn()
+                return false
+            }
+
             let sanitized = Self.sanitizedInlineText(string)
             guard sanitized == string else {
-                if string == "\n" || string == "\r" || string == "\r\n" {
-                    onReturn()
-                } else {
-                    replaceCharacters(in: textView, range: range, with: sanitized)
-                }
+                replaceCharacters(in: textView, range: range, with: sanitized)
+                return false
+            }
+            guard isEditableCommandRange(range) else {
+                replaceCharacters(in: textView, range: range, with: string)
                 return false
             }
             return true
@@ -723,7 +741,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
             case .insert(let value):
                 let sanitized = Self.sanitizedInlineText(value)
                 if !sanitized.isEmpty {
-                    view.insertText(sanitized)
+                    replaceCharacters(in: view, range: view.selectedNSRange, with: sanitized)
                 }
             case .moveLeft:
                 moveCursor(in: view, offset: -1)
@@ -736,11 +754,11 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
                 let end = view.endOfDocument
                 view.selectedTextRange = view.textRange(from: end, to: end)
             case .deleteBackward:
-                view.deleteBackward()
+                deleteBackward(in: view)
             case .deleteForward:
                 deleteForward(in: view)
             }
-            text = view.text ?? ""
+            text = commandText(in: view)
             updateHeight(for: view)
         }
 
@@ -760,18 +778,18 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
 
         private func replaceCharacters(in view: UITextView, range: NSRange, with replacement: String) {
             guard let currentText = view.text,
-                  let swiftRange = Range(range, in: currentText) else {
-                view.insertText(replacement)
-                text = view.text ?? ""
+                  let swiftRange = Range(editableCommandRange(from: range, in: view), in: currentText) else {
+                setCommandCursorOffset(text.utf16.count, in: view)
                 updateHeight(for: view)
                 return
             }
 
             view.text = currentText.replacingCharacters(in: swiftRange, with: replacement)
-            if let position = view.position(from: view.beginningOfDocument, offset: range.location + replacement.utf16.count) {
+            let cursorOffset = editableCommandRange(from: range, in: view).location + replacement.utf16.count
+            if let position = view.position(from: view.beginningOfDocument, offset: cursorOffset) {
                 view.selectedTextRange = view.textRange(from: position, to: position)
             }
-            text = view.text ?? ""
+            text = commandText(in: view)
             updateHeight(for: view)
         }
 
@@ -789,23 +807,93 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
         private func deleteForward(in view: UITextView) {
             guard let selectedRange = view.selectedTextRange else { return }
             if !selectedRange.isEmpty {
-                view.replace(selectedRange, withText: "")
-                text = view.text ?? ""
+                replaceCharacters(in: view, range: view.selectedNSRange, with: "")
                 updateHeight(for: view)
                 return
             }
+            if fullCursorOffset(in: view) < promptUTF16Length {
+                setCommandCursorOffset(0, in: view)
+            }
+            guard let selectedRange = view.selectedTextRange else { return }
             guard let nextPosition = view.position(from: selectedRange.start, offset: 1),
                   let deleteRange = view.textRange(from: selectedRange.start, to: nextPosition) else { return }
             view.replace(deleteRange, withText: "")
-            text = view.text ?? ""
+            text = commandText(in: view)
+            if fullCursorOffset(in: view) < promptUTF16Length {
+                setCommandCursorOffset(0, in: view)
+            }
+            updateHeight(for: view)
+        }
+
+        private func deleteBackward(in view: UITextView) {
+            if let range = view.selectedTextRange, !range.isEmpty {
+                replaceCharacters(in: view, range: view.selectedNSRange, with: "")
+                return
+            }
+            guard fullCursorOffset(in: view) > promptUTF16Length else {
+                setCommandCursorOffset(0, in: view)
+                return
+            }
+            view.deleteBackward()
+            text = commandText(in: view)
             updateHeight(for: view)
         }
 
         private func moveCursor(in view: UITextView, offset: Int) {
             guard let range = view.selectedTextRange,
-                  let position = view.position(from: range.start, offset: offset) else { return }
+                  let rawPosition = view.position(from: range.start, offset: offset) else { return }
+            let rawOffset = view.offset(from: view.beginningOfDocument, to: rawPosition)
+            let clampedOffset = max(promptUTF16Length, rawOffset)
+            guard let position = view.position(from: view.beginningOfDocument, offset: clampedOffset) else { return }
             view.selectedTextRange = view.textRange(from: position, to: position)
         }
+
+        func commandText(in view: UITextView) -> String {
+            let fullText = view.text ?? ""
+            guard fullText.hasPrefix(prompt) else { return text }
+            return String(fullText.dropFirst(prompt.count))
+        }
+
+        func commandCursorOffset(in view: UITextView) -> Int? {
+            guard let range = view.selectedTextRange else { return nil }
+            return max(0, view.offset(from: view.beginningOfDocument, to: range.start) - promptUTF16Length)
+        }
+
+        func setCommandCursorOffset(_ commandOffset: Int, in view: UITextView) {
+            let fullLength = (view.text ?? "").utf16.count
+            let offset = min(max(promptUTF16Length, promptUTF16Length + commandOffset), fullLength)
+            guard let position = view.position(from: view.beginningOfDocument, offset: offset) else { return }
+            view.selectedTextRange = view.textRange(from: position, to: position)
+        }
+
+        private var promptUTF16Length: Int {
+            (prompt as NSString).length
+        }
+
+        private func fullCursorOffset(in view: UITextView) -> Int {
+            guard let range = view.selectedTextRange else { return promptUTF16Length }
+            return view.offset(from: view.beginningOfDocument, to: range.start)
+        }
+
+        private func isEditableCommandRange(_ range: NSRange) -> Bool {
+            range.location >= promptUTF16Length
+        }
+
+        private func editableCommandRange(from range: NSRange, in view: UITextView) -> NSRange {
+            let fullLength = ((view.text ?? "") as NSString).length
+            let start = max(promptUTF16Length, min(range.location, fullLength))
+            let rawEnd = min(range.location + range.length, fullLength)
+            return NSRange(location: start, length: max(0, rawEnd - start))
+        }
+    }
+}
+
+private extension UITextView {
+    var selectedNSRange: NSRange {
+        guard let range = selectedTextRange else { return NSRange(location: 0, length: 0) }
+        let location = offset(from: beginningOfDocument, to: range.start)
+        let length = offset(from: range.start, to: range.end)
+        return NSRange(location: location, length: length)
     }
 }
 

@@ -1440,6 +1440,7 @@ struct SourceCodeTextView: View {
     }
 
     private var verticalPadding: CGFloat { 14 }
+    private static let codeFont = UIFont.monospacedSystemFont(ofSize: 13, weight: .regular)
 
     private var contentMaxHeight: CGFloat {
         max(48, maxHeight - verticalPadding * 2)
@@ -1452,7 +1453,7 @@ struct SourceCodeTextView: View {
     }
 
     var body: some View {
-        let contentWidth = Self.contentWidth(for: visibleCode)
+        let contentWidth = Self.contentWidth(for: visibleCode, font: Self.codeFont)
         let contentHeight = min(
             contentMaxHeight,
             max(48, measuredContentHeight > 0 ? measuredContentHeight : estimatedContentHeight)
@@ -1462,7 +1463,7 @@ struct SourceCodeTextView: View {
             text: visibleCode,
             language: normalizedLanguage,
             textColor: UIColor(theme.codeText),
-            font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+            font: Self.codeFont,
             lineSpacing: 3.5,
             isDarkMode: theme.isDark,
             maximumHeight: contentMaxHeight,
@@ -1481,14 +1482,13 @@ struct SourceCodeTextView: View {
         .frame(height: contentHeight + verticalPadding * 2)
     }
 
-    private static func contentWidth(for code: String) -> CGFloat {
-        let longestLineCount = code
+    private static func contentWidth(for code: String, font: UIFont) -> CGFloat {
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let maxLineWidth = code
             .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(\.count)
+            .map { (String($0) as NSString).size(withAttributes: attributes).width }
             .max() ?? 1
-        // 13pt monospaced glyphs average just under 8pt wide; use a slightly
-        // generous width so deeply indented code can scroll all the way to EOL.
-        return max(UIScreen.main.bounds.width, CGFloat(longestLineCount + 8) * 8.4)
+        return ceil(max(UIScreen.main.bounds.width, maxLineWidth + 64))
     }
 }
 
@@ -1520,6 +1520,8 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         textView.dataDetectorTypes = []
         textView.showsVerticalScrollIndicator = true
         textView.showsHorizontalScrollIndicator = true
+        textView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 24)
+        textView.scrollIndicatorInsets = textView.contentInset
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = false
@@ -1573,7 +1575,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             sourceTextView.minimumContentWidth = contentWidth
         }
         uiView.contentSize = CGSize(
-            width: contentWidth,
+            width: contentWidth + uiView.adjustedContentInset.right,
             height: max(uiView.contentSize.height, 1)
         )
         uiView.textContainer.lineBreakMode = .byClipping
@@ -1639,7 +1641,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         DispatchQueue.main.async {
             let measuredHeight = Self.measuredHeight(for: uiView, maximumHeight: maximumHeight)
             onHeightChange(measuredHeight)
-            uiView.contentSize.width = max(uiView.contentSize.width, contentWidth)
+            uiView.contentSize.width = max(uiView.contentSize.width, contentWidth + uiView.adjustedContentInset.right)
             let needsVerticalScroll = measuredHeight >= maximumHeight - 0.5
             uiView.isScrollEnabled = true
             uiView.alwaysBounceVertical = needsVerticalScroll
