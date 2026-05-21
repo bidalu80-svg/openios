@@ -11,6 +11,7 @@ final class MarkdownViewCoordinator {
     var lastText: String = ""
     var lastPreprocessedContent: MarkdownTextView.PreprocessedContent?
     var lastTheme: MarkdownTheme = .default
+    var lastCitationIconRefreshToken: Int = 0
 
     /// Incremental parser used only during streaming (`codeBlockAutoScroll == true`).
     /// Maintains a cached stable prefix so only the short live tail is re-parsed

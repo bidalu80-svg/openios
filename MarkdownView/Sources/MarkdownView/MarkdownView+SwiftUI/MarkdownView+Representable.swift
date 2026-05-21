@@ -15,6 +15,7 @@ import SwiftUI
         let theme: MarkdownTheme
         var codeBlockAutoScroll: Bool = false
         var codeBlockBarHidden: Bool = false
+        let citationIconRefreshToken: Int
         let width: CGFloat
         @Binding var measuredHeight: CGFloat
 
@@ -43,6 +44,7 @@ import SwiftUI
     struct MarkdownViewRepresentable: NSViewRepresentable, MarkdownViewRepresentableBase {
         let contentSource: MarkdownView.ContentSource
         let theme: MarkdownTheme
+        let citationIconRefreshToken: Int
         let width: CGFloat
         @Binding var measuredHeight: CGFloat
 

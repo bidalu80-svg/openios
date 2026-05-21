@@ -26,6 +26,7 @@ public struct MarkdownView: View {
     public var codeBlockBarHidden: Bool = false
 
     @State private var measuredHeight: CGFloat = 0
+    @State private var citationIconRefreshToken = 0
 
     public init(_ text: String, theme: MarkdownTheme = .default) {
         contentSource = .text(text)
@@ -61,6 +62,7 @@ public struct MarkdownView: View {
                     theme: theme,
                     codeBlockAutoScroll: codeBlockAutoScroll,
                     codeBlockBarHidden: codeBlockBarHidden,
+                    citationIconRefreshToken: citationIconRefreshToken,
                     width: proxy.size.width,
                     measuredHeight: $measuredHeight
                 )
@@ -72,10 +74,23 @@ public struct MarkdownView: View {
             }
         }
         .frame(height: measuredHeight)
+        .onReceive(NotificationCenter.default.publisher(for: .markdownCitationIconDidUpdate)) { _ in
+            guard !codeBlockAutoScroll, containsCitationLink else { return }
+            citationIconRefreshToken &+= 1
+        }
         // Animate height growth smoothly so the layout expands with a gentle easeOut
         // rather than jumping. Only applies when measuredHeight actually grows (new lines)
         // — this is the correct place because measuredHeight @State lives here and is
         // set via DispatchQueue.main.async, bypassing any .animation() applied outside.
         .animation(.easeOut(duration: 0.15), value: measuredHeight)
+    }
+
+    private var containsCitationLink: Bool {
+        switch contentSource {
+        case .text(let text):
+            return text.contains("#cite")
+        case .preprocessed:
+            return true
+        }
     }
 }

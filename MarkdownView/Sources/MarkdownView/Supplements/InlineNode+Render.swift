@@ -86,43 +86,24 @@ extension MarkdownInlineNode {
             )
             return ans
         case let .link(destination, children):
-            // Citation pill badge: links ending with #cite get special small styling
+            // Inline citations: links ending with #cite render as a favicon badge.
             let isCitation = destination.hasSuffix("#cite")
             let cleanDestination = isCitation ? String(destination.dropLast(5)) : destination
+
+            if isCitation {
+                return renderCitationIcon(destination: cleanDestination, theme: theme)
+            }
 
             let ans = NSMutableAttributedString()
             children.map { $0.render(theme: theme, context: context, viewProvider: viewProvider) }.forEach { ans.append($0) }
 
-            if isCitation {
-                // Small subscript-style pill badge for inline citations
-                let citationFont = theme.fonts.body.withSize(theme.fonts.body.pointSize * 0.65)
-                ans.addAttributes(
-                    [
-                        .link: cleanDestination,
-                        .foregroundColor: theme.colors.highlight,
-                        .font: citationFont,
-                        .baselineOffset: theme.fonts.body.pointSize * 0.25,
-                        .backgroundColor: theme.colors.highlight.withAlphaComponent(0.12),
-                    ],
-                    range: NSRange(location: 0, length: ans.length)
-                )
-                // Pad with thin spaces for pill appearance
-                let thinSpace = NSAttributedString(string: "\u{2009}", attributes: [
-                    .font: citationFont,
-                    .baselineOffset: theme.fonts.body.pointSize * 0.25,
-                    .backgroundColor: theme.colors.highlight.withAlphaComponent(0.12),
-                ])
-                ans.insert(thinSpace, at: 0)
-                ans.append(thinSpace)
-            } else {
-                ans.addAttributes(
-                    [
-                        .link: cleanDestination,
-                        .foregroundColor: theme.colors.highlight,
-                    ],
-                    range: NSRange(location: 0, length: ans.length)
-                )
-            }
+            ans.addAttributes(
+                [
+                    .link: cleanDestination,
+                    .foregroundColor: theme.colors.highlight,
+                ],
+                range: NSRange(location: 0, length: ans.length)
+            )
             return ans
         case let .image(source, _): // children => alternative text can be ignored?
             return NSAttributedString(
@@ -216,5 +197,91 @@ extension MarkdownInlineNode {
                 )
             }
         }
+    }
+
+    private func renderCitationIcon(destination: String, theme: MarkdownTheme) -> NSAttributedString {
+        let iconSide = max(13, min(18, theme.fonts.body.pointSize * 0.84))
+        let attachmentSize = CGSize(width: iconSide, height: iconSide)
+        let identifier = "citation-icon-\(destination)-\(UUID().uuidString)"
+        let sourceURL = URL(string: destination)
+
+        let drawingCallback = LTXLineDrawingAction { context, line, lineOrigin in
+            let glyphRuns = CTLineGetGlyphRuns(line) as NSArray
+            var runOffsetX: CGFloat = 0
+            for i in 0 ..< glyphRuns.count {
+                let run = glyphRuns[i] as! CTRun
+                let attributes = CTRunGetAttributes(run) as! [NSAttributedString.Key: Any]
+                if attributes[.contextIdentifier] as? String == identifier {
+                    break
+                }
+                runOffsetX += CTRunGetTypographicBounds(run, CFRange(location: 0, length: 0), nil, nil, nil)
+            }
+
+            var ascent: CGFloat = 0
+            var descent: CGFloat = 0
+            CTLineGetTypographicBounds(line, &ascent, &descent, nil)
+            let lineHeight = ascent + descent
+            let rect = CGRect(
+                x: lineOrigin.x + runOffsetX,
+                y: lineOrigin.y - descent + (lineHeight - attachmentSize.height) / 2,
+                width: attachmentSize.width,
+                height: attachmentSize.height
+            )
+
+            let image = sourceURL.flatMap {
+                MarkdownCitationIconProvider.shared.icon(for: $0, pointSize: iconSide)
+            }
+            Self.drawCitationIcon(
+                image: image,
+                fallbackColor: theme.colors.highlight,
+                in: rect,
+                context: context
+            )
+        }
+
+        let attachment = LTXAttachment.hold(attrString: .init(string: ""))
+        attachment.size = attachmentSize
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            LTXAttachmentAttributeName: attachment,
+            LTXLineDrawingCallbackName: drawingCallback,
+            kCTRunDelegateAttributeName as NSAttributedString.Key: attachment.runDelegate,
+            .contextIdentifier: identifier,
+            .link: destination,
+        ]
+
+        return NSAttributedString(string: LTXReplacementText, attributes: attributes)
+    }
+
+    private static func drawCitationIcon(
+        image: PlatformImage?,
+        fallbackColor: PlatformColor,
+        in rect: CGRect,
+        context: CGContext
+    ) {
+        #if canImport(UIKit)
+            context.saveGState()
+            context.translateBy(x: 0, y: rect.origin.y + rect.size.height)
+            context.scaleBy(x: 1, y: -1)
+            context.translateBy(x: 0, y: -rect.origin.y)
+            if let image {
+                image.draw(in: rect)
+            } else if let globe = UIImage(
+                systemName: "globe",
+                withConfiguration: UIImage.SymbolConfiguration(pointSize: rect.height, weight: .semibold)
+            )?.withTintColor(fallbackColor, renderingMode: .alwaysOriginal) {
+                globe.draw(in: rect)
+            }
+            context.restoreGState()
+        #elseif canImport(AppKit)
+            if let image {
+                image.draw(in: rect)
+            } else if let globe = NSImage(systemSymbolName: "globe", accessibilityDescription: nil) {
+                NSGraphicsContext.saveGraphicsState()
+                fallbackColor.set()
+                globe.draw(in: rect, from: .zero, operation: .sourceAtop, fraction: 1)
+                NSGraphicsContext.restoreGraphicsState()
+            }
+        #endif
     }
 }

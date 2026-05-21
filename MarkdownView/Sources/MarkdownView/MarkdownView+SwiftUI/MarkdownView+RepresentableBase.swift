@@ -16,6 +16,8 @@ protocol MarkdownViewRepresentableBase {
     var codeBlockAutoScroll: Bool { get }
     /// When true, the built-in code block header bar is hidden for all code blocks.
     var codeBlockBarHidden: Bool { get }
+    /// Forces a redraw when async citation favicons finish loading.
+    var citationIconRefreshToken: Int { get }
     var width: CGFloat { get }
     var heightBinding: Binding<CGFloat> { get }
 }
@@ -63,11 +65,13 @@ extension MarkdownViewRepresentableBase {
         let content: MarkdownTextView.PreprocessedContent
 
         let isStreaming = codeBlockAutoScroll
+        let citationIconChanged = coordinator.lastCitationIconRefreshToken != citationIconRefreshToken
 
         switch contentSource {
         case let .text(text):
             needsUpdate = coordinator.lastText != text
                 || coordinator.lastTheme != theme
+                || citationIconChanged
             if needsUpdate {
                 if isStreaming {
                     // Incremental path: only re-parse the short live tail each tick.
@@ -92,6 +96,7 @@ extension MarkdownViewRepresentableBase {
         case let .preprocessed(preprocessedContent):
             needsUpdate = coordinator.lastPreprocessedContent !== preprocessedContent
                 || coordinator.lastTheme != theme
+                || citationIconChanged
             content = preprocessedContent
             if needsUpdate {
                 coordinator.lastText = ""
@@ -104,6 +109,7 @@ extension MarkdownViewRepresentableBase {
             view.setMarkdownManually(content)
             view.invalidateIntrinsicContentSize()
             coordinator.lastTheme = theme
+            coordinator.lastCitationIconRefreshToken = citationIconRefreshToken
             // Content just changed — reset the height throttle timestamp so the
             // very first measurement after a content change is never skipped.
             coordinator.lastHeightMeasureTime = 0

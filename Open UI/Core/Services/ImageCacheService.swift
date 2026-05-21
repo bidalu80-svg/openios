@@ -198,7 +198,7 @@ actor ImageCacheService {
     /// - Parameter url: The image URL to look up.
     /// - Returns: The cached `UIImage` from memory only, or `nil` if not in memory.
     /// Called from SwiftUI view `init` — always on the main actor.
-    @MainActor func cachedImageSync(for url: URL) -> UIImage? {
+    nonisolated func cachedImageSync(for url: URL) -> UIImage? {
         let key = cacheKeySync(for: url)
         return memoryCache.object(forKey: key as NSString)
     }

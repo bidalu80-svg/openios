@@ -2,6 +2,7 @@ import SwiftUI
 import WidgetKit
 import BackgroundTasks
 import UIKit
+import MarkdownView
 
 // MLX is always present when either audio framework is linked.
 // Import it unconditionally so we can set Memory.cacheLimit at startup
@@ -95,6 +96,10 @@ struct Open_UIApp: App {
         #if canImport(MLX)
         Memory.cacheLimit = 20 * 1024 * 1024  // 20 MB
         #endif
+
+        MarkdownCitationIconProvider.shared.setProvider { sourceURL, pointSize in
+            MarkdownCitationIconBridge.shared.icon(for: sourceURL, pointSize: pointSize)
+        }
 
         // Remove the default circular/pill-shaped backgrounds from navigation
         // bar toolbar buttons that iOS adds in dark mode (iOS 15+).

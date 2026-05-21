@@ -20,4 +20,7 @@ public extension Notification.Name {
     /// handle the URL internally (e.g. authenticated file download) or open
     /// it externally in Safari.
     static let markdownLinkTapped = Notification.Name("markdownLinkTapped")
+
+    /// Posted when an inline citation favicon finishes loading.
+    static let markdownCitationIconDidUpdate = Notification.Name("markdownCitationIconDidUpdate")
 }
