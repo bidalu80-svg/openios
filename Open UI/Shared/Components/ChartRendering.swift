@@ -958,6 +958,9 @@ struct HighlightedSourceView: View {
     /// Maximum height for the scroll container. Defaults to 400 for inline,
     /// pass `.infinity` for fullscreen.
     var maxHeight: CGFloat = 400
+    /// Chat source views should wrap visually so long lines are never hidden
+    /// behind a horizontally-scrolled text viewport.
+    var wrapLines: Bool = true
 
     private let maxInlineChars = 3000
 
@@ -970,13 +973,19 @@ struct HighlightedSourceView: View {
     var body: some View {
         Group {
             if maxHeight.isFinite {
-                SourceCodeTextView(code: truncatedCode, language: language, maxHeight: maxHeight)
+                SourceCodeTextView(
+                    code: truncatedCode,
+                    language: language,
+                    maxHeight: maxHeight,
+                    wrapLines: wrapLines
+                )
             } else {
                 GeometryReader { proxy in
                     SourceCodeTextView(
                         code: truncatedCode,
                         language: language,
-                        maxHeight: max(240, proxy.size.height)
+                        maxHeight: max(240, proxy.size.height),
+                        wrapLines: wrapLines
                     )
                 }
             }
