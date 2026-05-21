@@ -82,6 +82,9 @@ final class BrowserWebSearchService: NSObject {
             )
         ]
 
+        var collected: [WebSearchResultItem] = []
+        var seenLinks = Set<String>()
+
         for page in pages {
             guard let url = URL(string: page.url),
                   await load(url: url, timeout: page.timeout) else {
@@ -91,12 +94,21 @@ final class BrowserWebSearchService: NSObject {
             let items = await evaluateSearchItems().filter { item in
                 guard let link = item.link, let url = URL(string: link) else { return false }
                 return !Self.isBlockedDocumentURL(url)
+                    && !Self.isLowValueSearchResult(item)
             }
-            if !items.isEmpty {
-                return items
+            for item in items {
+                guard let link = item.link?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !link.isEmpty,
+                      seenLinks.insert(link.lowercased()).inserted else {
+                    continue
+                }
+                collected.append(item)
+                if collected.count >= 8 {
+                    return collected
+                }
             }
         }
-        return []
+        return collected
     }
 
     private func fetchDocument(for item: WebSearchResultItem) async -> WebSearchDocument? {
@@ -309,13 +321,19 @@ final class BrowserWebSearchService: NSObject {
           function blocked(raw) {
             try {
               const url = new URL(raw);
+              const text = decodeURIComponent((url.href || '').toLowerCase());
               if (!/^https?:$/.test(url.protocol)) return true;
               if (url.hostname.endsWith('baidu.com')) return true;
               if (blockedHosts.has(url.hostname) && ['/search', '/html/', '/', '/s', '/web', '/link', '/link2url', '/url', '/ck/a'].includes(url.pathname)) return true;
+              if (/(feedback|complain|jubao|report|login|passport|captcha|punish|help|service|privacy|agreement)/i.test(text)) return true;
               return /\\.(jpg|jpeg|png|gif|webp|avif|svg|mp4|mov|mp3|zip|rar|7z|ipa|apk|dmg|pdf)(\\?|$)/i.test(url.pathname);
             } catch (_) {
               return true;
             }
+          }
+          function lowValue(item) {
+            const value = `${item.title || ''} ${item.link || ''} ${item.snippet || ''}`.toLowerCase();
+            return /意见反馈|用户反馈|反馈中心|投诉|举报|登录|注册|验证码|captcha|punish|隐私政策|服务协议|帮助中心|下载客户端|打开app|打开 app/i.test(value);
           }
           const candidates = [];
           const selectors = [
@@ -379,6 +397,7 @@ final class BrowserWebSearchService: NSObject {
           for (const item of candidates) {
             const key = item.link.toLowerCase();
             if (seen.has(key)) continue;
+            if (lowValue(item)) continue;
             seen.add(key);
             out.push(item);
             if (out.length >= 8) break;
@@ -472,6 +491,14 @@ final class BrowserWebSearchService: NSObject {
 
     private static func isBlockedDocumentURL(_ url: URL) -> Bool {
         let host = url.host?.lowercased() ?? ""
+        let absolute = url.absoluteString.lowercased()
+        let lowValuePathTokens = [
+            "feedback", "complain", "jubao", "report", "login", "passport",
+            "captcha", "punish", "help", "service", "privacy", "agreement"
+        ]
+        if lowValuePathTokens.contains(where: { absolute.contains($0) }) {
+            return true
+        }
         if host == "baidu.com" || host.hasSuffix(".baidu.com") {
             return true
         }
@@ -499,6 +526,24 @@ final class BrowserWebSearchService: NSObject {
         let path = url.path.lowercased()
         let blockedExt = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg", ".mp4", ".mov", ".mp3", ".zip", ".rar", ".7z", ".ipa", ".apk", ".dmg", ".pdf"]
         return blockedExt.contains { path.hasSuffix($0) }
+    }
+
+    private static func isLowValueSearchResult(_ item: WebSearchResultItem) -> Bool {
+        let value = [
+            item.title ?? "",
+            item.link ?? "",
+            item.snippet ?? ""
+        ]
+        .joined(separator: " ")
+        .lowercased()
+
+        let tokens = [
+            "意见反馈", "用户反馈", "反馈中心", "投诉", "举报",
+            "登录", "注册", "验证码", "隐私政策", "服务协议", "帮助中心",
+            "下载客户端", "打开app", "打开 app",
+            "feedback", "complain", "report", "login", "passport", "captcha", "punish"
+        ]
+        return tokens.contains { value.contains($0) }
     }
 }
 
