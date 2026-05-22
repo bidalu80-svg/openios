@@ -63,6 +63,7 @@ struct StreamingMarkdownView: View {
     private var scaledTheme: MarkdownTheme {
         let scale = accessibilityScale.scale(for: .content)
         var theme = MarkdownTheme.default
+        theme.colors.selectionBackground = UIColor.systemBlue.withAlphaComponent(0.22)
         if abs(scale - 1.0) > 0.01 {
             theme.align(to: Self.baseBodyFontSize * scale)
         }
@@ -1516,6 +1517,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         let textView = NoCaretSourceTextView()
         textView.selectionEnabled = true
         textView.backgroundColor = .clear
+        textView.tintColor = .systemBlue
         textView.isEditable = false
         textView.isSelectable = true
         textView.isScrollEnabled = true
@@ -1579,6 +1581,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             sourceTextView.minimumContentWidth = contentWidth
         }
         uiView.isScrollEnabled = true
+        uiView.tintColor = .systemBlue
         uiView.showsVerticalScrollIndicator = true
         uiView.showsHorizontalScrollIndicator = !wrapLines
         uiView.alwaysBounceVertical = true

@@ -27,6 +27,9 @@ import MarkdownParser
         }
 
         public internal(set) weak var trackedScrollView: UIScrollView? // for selection updating
+        var selectionLoupeView: UIView?
+        var selectionLoupeHideWorkItem: DispatchWorkItem?
+        var lastSelectionRangeForLoupe: NSRange?
 
         // Block-level render cache: stores rendered output per MarkdownBlockNode so
         // unchanged blocks can be reused on the next streaming update without re-rendering.

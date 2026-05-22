@@ -11,11 +11,19 @@ import Litext
     import UIKit
 
     extension MarkdownTextView: LTXLabelDelegate {
-        public func ltxLabelSelectionDidChange(_: Litext.LTXLabel, selection _: NSRange?) {
-            // reserved for future use
+        public func ltxLabelSelectionDidChange(_ label: Litext.LTXLabel, selection: NSRange?) {
+            guard let selection, selection.length > 0 else {
+                hideSelectionLoupe()
+                lastSelectionRangeForLoupe = selection
+                return
+            }
+            showSelectionLoupe(for: label, selection: selection)
+            lastSelectionRangeForLoupe = selection
         }
 
         public func ltxLabelDetectedUserEventMovingAtLocation(_ label: Litext.LTXLabel, location: CGPoint) {
+            showSelectionLoupe(for: label, location: location)
+
             guard let scrollView = trackedScrollView else { return }
             guard scrollView.contentSize.height > scrollView.bounds.height else { return }
 
@@ -59,6 +67,145 @@ import Litext
             } else if let string = link as? String {
                 linkHandler?(.string(string), range, location)
             }
+        }
+    }
+
+    private extension MarkdownTextView {
+        func showSelectionLoupe(for label: LTXLabel, selection: NSRange) {
+            guard let location = selectionLoupeLocation(in: label, selection: selection) else { return }
+            showSelectionLoupe(for: label, location: location)
+        }
+
+        func showSelectionLoupe(for label: LTXLabel, location: CGPoint) {
+            guard window != nil, bounds.width > 1, bounds.height > 1 else { return }
+            guard let image = selectionLoupeImage(from: label, around: location) else { return }
+
+            let loupe: MarkdownSelectionLoupeView
+            if let existing = selectionLoupeView as? MarkdownSelectionLoupeView {
+                loupe = existing
+            } else {
+                loupe = MarkdownSelectionLoupeView()
+                selectionLoupeView = loupe
+                addSubview(loupe)
+            }
+
+            let anchor = label.convert(location, to: self)
+            let size = CGSize(width: 132, height: 58)
+            let horizontalPadding: CGFloat = 8
+            var originX = anchor.x - size.width / 2
+            originX = min(max(horizontalPadding, originX), max(horizontalPadding, bounds.width - size.width - horizontalPadding))
+
+            var originY = anchor.y - size.height - 28
+            if originY < 8 {
+                originY = anchor.y + 28
+            }
+
+            loupe.frame = CGRect(origin: CGPoint(x: originX, y: originY), size: size)
+            loupe.update(image: image)
+            loupe.alpha = 1
+
+            selectionLoupeHideWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self, weak loupe] in
+                UIView.animate(withDuration: 0.16) {
+                    loupe?.alpha = 0
+                } completion: { _ in
+                    guard self?.selectionLoupeView === loupe else { return }
+                    loupe?.removeFromSuperview()
+                    self?.selectionLoupeView = nil
+                }
+            }
+            selectionLoupeHideWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.85, execute: workItem)
+        }
+
+        func hideSelectionLoupe() {
+            selectionLoupeHideWorkItem?.cancel()
+            selectionLoupeHideWorkItem = nil
+            selectionLoupeView?.removeFromSuperview()
+            selectionLoupeView = nil
+        }
+
+        func selectionLoupeLocation(in label: LTXLabel, selection: NSRange) -> CGPoint? {
+            let handles = label.subviews.compactMap { $0 as? LTXSelectionHandle }.filter { !$0.isHidden }
+            let currentEnd = selection.location + selection.length
+            let wantsStartHandle: Bool = {
+                guard let previous = lastSelectionRangeForLoupe else { return false }
+                return selection.location != previous.location
+                    && currentEnd == previous.location + previous.length
+            }()
+
+            if let handle = handles.first(where: { wantsStartHandle ? $0.type == .start : $0.type == .end }) {
+                switch handle.type {
+                case .start:
+                    return CGPoint(x: handle.frame.maxX + 2, y: handle.frame.midY)
+                case .end:
+                    return CGPoint(x: handle.frame.minX - 2, y: handle.frame.midY)
+                }
+            }
+
+            if let handle = handles.last {
+                return CGPoint(x: handle.frame.midX, y: handle.frame.midY)
+            }
+            return nil
+        }
+
+        func selectionLoupeImage(from label: LTXLabel, around location: CGPoint) -> UIImage? {
+            let sourceSize = CGSize(width: 86, height: 42)
+            var crop = CGRect(
+                x: location.x - sourceSize.width / 2,
+                y: location.y - sourceSize.height / 2,
+                width: min(sourceSize.width, max(1, label.bounds.width)),
+                height: min(sourceSize.height, max(1, label.bounds.height))
+            )
+            crop.origin.x = min(max(0, crop.origin.x), max(0, label.bounds.width - crop.width))
+            crop.origin.y = min(max(0, crop.origin.y), max(0, label.bounds.height - crop.height))
+            guard crop.width > 1, crop.height > 1 else { return nil }
+
+            let format = UIGraphicsImageRendererFormat.default()
+            format.scale = UIScreen.main.scale
+            return UIGraphicsImageRenderer(size: crop.size, format: format).image { context in
+                context.cgContext.translateBy(x: -crop.origin.x, y: -crop.origin.y)
+                label.layer.render(in: context.cgContext)
+            }
+        }
+    }
+
+    private final class MarkdownSelectionLoupeView: UIView {
+        private let imageView = UIImageView()
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            isUserInteractionEnabled = false
+            clipsToBounds = false
+
+            backgroundColor = UIColor.systemBackground.withAlphaComponent(0.94)
+            layer.cornerRadius = 16
+            layer.cornerCurve = .continuous
+            layer.borderColor = UIColor.systemBlue.withAlphaComponent(0.85).cgColor
+            layer.borderWidth = 1
+            layer.shadowColor = UIColor.black.cgColor
+            layer.shadowOffset = CGSize(width: 0, height: 4)
+            layer.shadowOpacity = 0.18
+            layer.shadowRadius = 12
+
+            imageView.clipsToBounds = true
+            imageView.contentMode = .scaleAspectFill
+            imageView.layer.cornerRadius = 13
+            imageView.layer.cornerCurve = .continuous
+            addSubview(imageView)
+        }
+
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            imageView.frame = bounds.insetBy(dx: 5, dy: 5)
+        }
+
+        func update(image: UIImage) {
+            imageView.image = image
         }
     }
 
