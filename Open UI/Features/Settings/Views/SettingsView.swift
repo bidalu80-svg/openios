@@ -180,6 +180,17 @@ struct SettingsView: View {
                     // Personalization
                     SettingsSection(header: "个性化") {
                         SettingsCell(
+                            icon: "point.3.connected.trianglepath.dotted",
+                            title: "MCP 智能体",
+                            subtitle: "本地角色、记忆和工具入口",
+                            iconColor: .cyan,
+                            showDivider: true,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.mcpAgents)
+                        }
+
+                        SettingsCell(
                             icon: "cube.box",
                             title: "技能",
                             subtitle: "本地技能、开关和创建",
@@ -303,6 +314,8 @@ struct SettingsView: View {
                     NotificationSettingsView()
                 case .adminConsole:
                     AdminConsoleView()
+                case .mcpAgents:
+                    LocalMCPAgentSettingsView()
                 case .skills:
                     LocalSkillsSettingsView()
                 case .memories:
@@ -465,6 +478,7 @@ enum SettingsDestination: Hashable {
     case sttSettings
     case notifications
     case adminConsole
+    case mcpAgents
     case skills
     case memories
     case storage

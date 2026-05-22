@@ -40,6 +40,11 @@ struct AboutView: View {
                             description: "集成本地聊天记录、工作区文件和终端能力，适合移动端轻量开发、资料整理和自动化任务。"
                         )
                         capabilityRow(
+                            icon: "point.3.connected.trianglepath.dotted",
+                            title: "本地 MCP 智能体接入",
+                            description: "支持配置本机或局域网 MCP 服务，把角色库、长期记忆、文件系统和外部工具以可控方式连接进 AI 工作流。"
+                        )
+                        capabilityRow(
                             icon: "server.rack",
                             title: "灵活站点与 API 接入",
                             description: "可连接自托管服务或第三方兼容接口，方便在不同模型、不同服务和不同工作环境间切换。",
@@ -124,6 +129,7 @@ struct AboutView: View {
                 heroTag("图像创作")
                 heroTag("文件理解")
                 heroTag("本地工作区")
+                heroTag("MCP 智能体")
             }
         }
         .padding(Spacing.md)

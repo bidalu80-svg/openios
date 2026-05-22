@@ -712,7 +712,12 @@ private struct LocalWorkspaceFilePreviewSheet: View {
             if let temporaryFileURL {
                 fileURL = temporaryFileURL
             } else {
-                let fileData = data ?? try await LocalAlpineTerminalService.shared.readFile(path: item.path)
+                let fileData: Data
+                if let data {
+                    fileData = data
+                } else {
+                    fileData = try await LocalAlpineTerminalService.shared.readFile(path: item.path)
+                }
                 let writtenURL = try Self.writeTemporaryFile(data: fileData, fileName: item.name)
                 temporaryFileURL = writtenURL
                 fileURL = writtenURL
@@ -789,39 +794,56 @@ private struct LocalWorkspaceCSVPreview: View {
 
     var body: some View {
         if rows.isEmpty {
-            VStack(spacing: 10) {
-                Spacer()
-                Image(systemName: "tablecells")
-                    .scaledFont(size: 32, weight: .semibold)
-                    .foregroundStyle(theme.textTertiary)
-                Text("表格为空")
-                    .scaledFont(size: 15, weight: .bold)
-                    .foregroundStyle(theme.textPrimary)
-                Spacer()
-            }
+            emptyView
         } else {
-            ScrollView([.horizontal, .vertical]) {
-                Grid(horizontalSpacing: 0, verticalSpacing: 0) {
-                    ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
-                        GridRow {
-                            ForEach(0..<columnCount, id: \.self) { columnIndex in
-                                Text(columnIndex < row.count ? row[columnIndex] : "")
-                                    .font(.system(size: 12, weight: rowIndex == 0 ? .semibold : .regular))
-                                    .foregroundStyle(theme.textPrimary)
-                                    .lineLimit(3)
-                                    .frame(width: 132, minHeight: 38, alignment: .leading)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 8)
-                                    .background(rowIndex == 0 ? theme.surfaceContainerHighest.opacity(0.8) : theme.cardBackground.opacity(0.55))
-                                    .border(theme.cardBorder.opacity(0.45), width: 0.5)
-                            }
-                        }
-                    }
-                }
-                .padding(16)
-            }
-            .background(theme.surfaceContainer.opacity(0.28))
+            tableView
         }
+    }
+
+    private var emptyView: some View {
+        VStack(spacing: 10) {
+            Spacer()
+            Image(systemName: "tablecells")
+                .scaledFont(size: 32, weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
+            Text("表格为空")
+                .scaledFont(size: 15, weight: .bold)
+                .foregroundStyle(theme.textPrimary)
+            Spacer()
+        }
+    }
+
+    private var tableView: some View {
+        ScrollView([.horizontal, .vertical]) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(rows.indices, id: \.self) { rowIndex in
+                    csvRow(rowIndex: rowIndex)
+                }
+            }
+            .padding(16)
+        }
+        .background(theme.surfaceContainer.opacity(0.28))
+    }
+
+    private func csvRow(rowIndex: Int) -> some View {
+        let row = rows[rowIndex]
+        return HStack(spacing: 0) {
+            ForEach(0..<columnCount, id: \.self) { columnIndex in
+                csvCell(text: columnIndex < row.count ? row[columnIndex] : "", isHeader: rowIndex == 0)
+            }
+        }
+    }
+
+    private func csvCell(text: String, isHeader: Bool) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: isHeader ? .semibold : .regular))
+            .foregroundStyle(theme.textPrimary)
+            .lineLimit(3)
+            .frame(width: 132, minHeight: 38, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(isHeader ? theme.surfaceContainerHighest.opacity(0.8) : theme.cardBackground.opacity(0.55))
+            .border(theme.cardBorder.opacity(0.45), width: 0.5)
     }
 }
 
