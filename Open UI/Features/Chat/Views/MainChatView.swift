@@ -488,57 +488,115 @@ struct MainChatView: View {
         }
     }
 
-    // MARK: - Sheets (Settings, Notes, Voice Call, Folders, Rename, Export)
+    // MARK: - Presentation Routing
+
+    private enum MainChatSheetRoute: Identifiable {
+        case settings
+        case notes
+        case createChannel
+        case createFolder
+        case editFolder(ChatFolder)
+        case renameConversation(Conversation)
+        case exportShare(URL)
+        case shareConversation(Conversation)
+        case archivedChats
+        case sharedChats
+        case workspace
+        case calendar
+        case localWorkspaceBrowser
+        case automations
+        case memories
+        case adminConsole
+        case accountPicker
+
+        var id: String {
+            switch self {
+            case .settings: return "settings"
+            case .notes: return "notes"
+            case .createChannel: return "createChannel"
+            case .createFolder: return "createFolder"
+            case .editFolder(let folder): return "editFolder-\(folder.id)"
+            case .renameConversation(let conversation): return "renameConversation-\(conversation.id)"
+            case .exportShare(let url): return "exportShare-\(url.path)"
+            case .shareConversation(let conversation): return "shareConversation-\(conversation.id)"
+            case .archivedChats: return "archivedChats"
+            case .sharedChats: return "sharedChats"
+            case .workspace: return "workspace"
+            case .calendar: return "calendar"
+            case .localWorkspaceBrowser: return "localWorkspaceBrowser"
+            case .automations: return "automations"
+            case .memories: return "memories"
+            case .adminConsole: return "adminConsole"
+            case .accountPicker: return "accountPicker"
+            }
+        }
+    }
+
+    private enum MainChatCoverRoute: Identifiable {
+        case channels
+        case localAlpineTerminal
+
+        var id: String {
+            switch self {
+            case .channels: return "channels"
+            case .localAlpineTerminal: return "localAlpineTerminal"
+            }
+        }
+    }
+
+    private var activeSheetRoute: MainChatSheetRoute? {
+        if showSettings { return .settings }
+        if showNotes { return .notes }
+        if showCreateChannel { return .createChannel }
+        if showCreateFolderSheet { return .createFolder }
+        if let folder = listViewModel.folderViewModel.editingFolder { return .editFolder(folder) }
+        if let conversation = renamingConversation { return .renameConversation(conversation) }
+        if showExportShareSheet, let url = exportFileURL { return .exportShare(url) }
+        if let conversation = sharingConversation { return .shareConversation(conversation) }
+        if showArchivedChats { return .archivedChats }
+        if showSharedChats { return .sharedChats }
+        if showWorkspace { return .workspace }
+        if showCalendar { return .calendar }
+        if showLocalWorkspaceBrowser { return .localWorkspaceBrowser }
+        if showAutomations { return .automations }
+        if showMemories { return .memories }
+        if showAdminConsole { return .adminConsole }
+        if dependencies.authViewModel.showAccountPicker { return .accountPicker }
+        return nil
+    }
+
+    private var activeCoverRoute: MainChatCoverRoute? {
+        if showChannels { return .channels }
+        if showLocalAlpineTerminal { return .localAlpineTerminal }
+        return nil
+    }
+
+    private var activeSheetBinding: Binding<MainChatSheetRoute?> {
+        Binding(
+            get: { activeSheetRoute },
+            set: { route in
+                if route == nil {
+                    dismissSheetRoute(activeSheetRoute)
+                }
+            }
+        )
+    }
+
+    private var activeCoverBinding: Binding<MainChatCoverRoute?> {
+        Binding(
+            get: { activeCoverRoute },
+            set: { route in
+                if route == nil {
+                    dismissCoverRoute(activeCoverRoute)
+                }
+            }
+        )
+    }
 
     private func applySheets<Content: View>(content: Content, voiceCallBinding: Binding<Bool>) -> some View {
         content
-            .sheet(isPresented: $showSettings) {
-                SettingsView(
-                    viewModel: dependencies.authViewModel,
-                    appearanceManager: dependencies.appearanceManager
-                )
-                .preferredColorScheme(dependencies.appearanceManager.resolvedColorScheme ?? systemColorScheme)
-                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
-            }
-            .sheet(isPresented: $showNotes) {
-                NavigationStack {
-                    NotesListView()
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarLeading) {
-                                Button {
-                                    showNotes = false
-                                } label: {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundStyle(Color.secondary)
-                                        .frame(width: 32, height: 32)
-                                        .background(Color(uiColor: .systemGray5).opacity(0.6))
-                                        .clipShape(Circle())
-                                }
-                            }
-                        }
-                }
-            }
-            .fullScreenCover(isPresented: $showChannels) {
-                NavigationStack {
-                    ChannelsListView()
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarLeading) {
-                                Button {
-                                    showChannels = false
-                                } label: {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundStyle(Color.secondary)
-                                        .frame(width: 32, height: 32)
-                                        .background(Color(uiColor: .systemGray5).opacity(0.6))
-                                        .clipShape(Circle())
-                                }
-                            }
-                        }
-                }
-                .environment(dependencies)
-                .environment(router)
+            .sheet(item: activeSheetBinding) { route in
+                sheetContent(for: route)
             }
             .sheet(isPresented: voiceCallBinding, onDismiss: {
                 // Dragging the sheet down counts as minimizing if the call is still active.
@@ -556,223 +614,277 @@ struct MainChatView: View {
                         .interactiveDismissDisabled(false)
                 }
             }
+            .fullScreenCover(item: activeCoverBinding) { route in
+                coverContent(for: route)
+            }
             .onChange(of: router.isVoiceCallPresented) { _, isPresented in
                 if !isPresented && !router.isVoiceCallMinimized {
                     router.voiceCallViewModel = nil
                 }
             }
-            .sheet(isPresented: $showCreateChannel) {
-                CreateChannelSheet(
-                    onCreate: { name, description, type, isPrivate, memberIds in
-                        Task {
-                            let channelName = name.isEmpty ? "new-channel" : name
-                            if let channel = await channelListVM.createChannel(
-                                name: channelName, description: description, type: type,
-                                isPrivate: type == .dm ? true : isPrivate
-                            ) {
-                                if !memberIds.isEmpty {
-                                    try? await dependencies.apiClient?.addChannelMembers(
-                                        id: channel.id, userIds: memberIds
-                                    )
-                                }
-                                activeChannelId = channel.id
-                                activeConversationId = nil
-                            }
-                        }
-                    },
-                    apiClient: dependencies.apiClient,
-                    allUsers: channelListVM.allServerUsers
-                )
-            }
-            // Create folder — shows full settings sheet (name + system prompt + knowledge)
-            .sheet(isPresented: $showCreateFolderSheet) {
-                CreateFolderSheet(apiClient: dependencies.apiClient) { name, data, meta in
-                    let parentId = listViewModel.folderViewModel.createSubfolderParentId
-                    listViewModel.folderViewModel.createSubfolderParentId = nil
-                    Task {
-                        await listViewModel.folderViewModel.createFolder(
-                            name: name,
-                            parentId: parentId,
-                            data: data,
-                            meta: meta
-                        )
-                    }
-                }
-            }
-            // Create folder from folderVM.showCreateSheet (triggered by context menu "Create Folder")
             .onChange(of: listViewModel.folderViewModel.showCreateSheet) { _, show in
                 if show {
                     listViewModel.folderViewModel.showCreateSheet = false
                     showCreateFolderSheet = true
                 }
             }
-            // Edit folder sheet — passes apiClient so it can load knowledge independently
-            .sheet(item: Binding(
-                get: { listViewModel.folderViewModel.editingFolder },
-                set: { listViewModel.folderViewModel.editingFolder = $0 }
-            )) { folder in
-                EditFolderSheet(
-                    folder: folder,
-                    apiClient: dependencies.apiClient
-                ) { name, data, meta in
-                    Task {
-                        await listViewModel.folderViewModel.updateFolderSettings(
-                            id: folder.id,
-                            name: name,
-                            data: data,
-                            meta: meta
-                        )
+    }
+
+    @ViewBuilder
+    private func sheetContent(for route: MainChatSheetRoute) -> some View {
+        switch route {
+        case .settings:
+            SettingsView(
+                viewModel: dependencies.authViewModel,
+                appearanceManager: dependencies.appearanceManager
+            )
+            .preferredColorScheme(dependencies.appearanceManager.resolvedColorScheme ?? systemColorScheme)
+            .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+
+        case .notes:
+            NavigationStack {
+                NotesListView()
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            sheetCloseButton { showNotes = false }
+                        }
                     }
-                }
             }
-            .alert(
-                "Rename Folder",
-                isPresented: .init(
-                    get: { listViewModel.folderViewModel.renamingFolder != nil },
-                    set: { if !$0 { listViewModel.folderViewModel.renamingFolder = nil } }
-                )
-            ) {
-                TextField(
-                    "Folder Name",
-                    text: Bindable(listViewModel.folderViewModel).renameText
-                )
-                Button("Cancel", role: .cancel) {
-                    listViewModel.folderViewModel.renamingFolder = nil
-                }
-                Button("Rename") {
-                    Task { await listViewModel.folderViewModel.commitRename() }
-                }
-            }
-            .sheet(item: $renamingConversation) { conv in
-                renameConversationSheet(conv)
-            }
-            .sheet(isPresented: $showExportShareSheet, onDismiss: {
-                if let url = exportFileURL {
-                    try? FileManager.default.removeItem(at: url)
-                    exportFileURL = nil
-                }
-            }) {
-                if let url = exportFileURL {
-                    ShareSheet(items: [url])
-                }
-            }
-            // Share chat sheet
-            .sheet(item: $sharingConversation) { conversation in
-                if let apiClient = dependencies.apiClient {
-                    ShareChatSheet(
-                        conversation: conversation,
-                        apiClient: apiClient,
-                        serverBaseURL: apiClient.baseURL,
-                        onShareIdUpdated: { shareId in
-                            listViewModel.updateShareId(for: conversation.id, shareId: shareId)
-                        },
-                        onClone: { cloned in
-                            activeConversationId = cloned.id
-                            SharedDataService.shared.saveLastActiveConversationId(cloned.id)
-                            closeDrawer()
+
+        case .createChannel:
+            CreateChannelSheet(
+                onCreate: { name, description, type, isPrivate, memberIds in
+                    Task {
+                        let channelName = name.isEmpty ? "new-channel" : name
+                        if let channel = await channelListVM.createChannel(
+                            name: channelName,
+                            description: description,
+                            type: type,
+                            isPrivate: type == .dm ? true : isPrivate
+                        ) {
+                            if !memberIds.isEmpty {
+                                try? await dependencies.apiClient?.addChannelMembers(
+                                    id: channel.id,
+                                    userIds: memberIds
+                                )
+                            }
+                            activeChannelId = channel.id
+                            activeConversationId = nil
                         }
+                    }
+                },
+                apiClient: dependencies.apiClient,
+                allUsers: channelListVM.allServerUsers
+            )
+
+        case .createFolder:
+            CreateFolderSheet(apiClient: dependencies.apiClient) { name, data, meta in
+                let parentId = listViewModel.folderViewModel.createSubfolderParentId
+                listViewModel.folderViewModel.createSubfolderParentId = nil
+                Task {
+                    await listViewModel.folderViewModel.createFolder(
+                        name: name,
+                        parentId: parentId,
+                        data: data,
+                        meta: meta
                     )
-                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
                 }
             }
-            // Archived chats sheet
-            .sheet(isPresented: $showArchivedChats) {
-                ArchivedChatsView()
-                    .environment(dependencies)
-                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
-            }
-            // Shared chats sheet
-            .sheet(isPresented: $showSharedChats) {
-                SharedChatsView()
-                    .environment(dependencies)
-                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
-            }
-            // Workspace sheet
-            .sheet(isPresented: $showWorkspace) {
-                WorkspaceView()
-                    .environment(dependencies)
-                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
-            }
-            // Calendar sheet
-            .sheet(isPresented: $showCalendar) {
-                CalendarView()
-                    .environment(dependencies)
-                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
-            }
-            // Local Alpine terminal
-            .fullScreenCover(isPresented: $showLocalAlpineTerminal) {
-                LocalAlpineTerminalConsoleView {
-                    showLocalAlpineTerminal = false
+
+        case .editFolder(let folder):
+            EditFolderSheet(
+                folder: folder,
+                apiClient: dependencies.apiClient
+            ) { name, data, meta in
+                Task {
+                    await listViewModel.folderViewModel.updateFolderSettings(
+                        id: folder.id,
+                        name: name,
+                        data: data,
+                        meta: meta
+                    )
                 }
-                .preferredColorScheme(.dark)
             }
-            // Local Alpine workspace browser
-            .sheet(isPresented: $showLocalWorkspaceBrowser) {
-                LocalWorkspaceFileBrowserView()
-                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
-                    .presentationDetents([.large])
-                    .presentationDragIndicator(.visible)
-                    .presentationCornerRadius(24)
-            }
-            // Automations sheet
-            .sheet(isPresented: $showAutomations) {
-                AutomationsListView()
-                    .environment(dependencies)
-                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
-            }
-            // Memories sheet
-            .sheet(isPresented: $showMemories) {
-                NavigationStack {
-                    MemoriesView()
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarLeading) {
-                                Button {
-                                    showMemories = false
-                                } label: {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundStyle(Color.secondary)
-                                        .frame(width: 32, height: 32)
-                                        .background(Color(uiColor: .systemGray5).opacity(0.6))
-                                        .clipShape(Circle())
-                                }
-                            }
-                        }
-                }
-                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
-            }
-            // Admin Console sheet (admin-only)
-            .sheet(isPresented: $showAdminConsole) {
-                NavigationStack {
-                    AdminConsoleView()
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarLeading) {
-                                Button {
-                                    showAdminConsole = false
-                                } label: {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundStyle(Color.secondary)
-                                        .frame(width: 32, height: 32)
-                                        .background(Color(uiColor: .systemGray5).opacity(0.6))
-                                        .clipShape(Circle())
-                                }
-                            }
-                        }
-                }
-                .environment(dependencies)
-                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
-                .presentationCornerRadius(20)
-            }
-            // Account picker sheet (multi-account per server)
-            .sheet(isPresented: Bindable(dependencies.authViewModel).showAccountPicker) {
-                AccountPickerSheet(
-                    viewModel: dependencies.authViewModel,
-                    onDismiss: { dependencies.authViewModel.showAccountPicker = false }
+
+        case .renameConversation(let conversation):
+            renameConversationSheet(conversation)
+
+        case .exportShare(let url):
+            ShareSheet(items: [url])
+
+        case .shareConversation(let conversation):
+            if let apiClient = dependencies.apiClient {
+                ShareChatSheet(
+                    conversation: conversation,
+                    apiClient: apiClient,
+                    serverBaseURL: apiClient.baseURL,
+                    onShareIdUpdated: { shareId in
+                        listViewModel.updateShareId(for: conversation.id, shareId: shareId)
+                    },
+                    onClone: { cloned in
+                        activeConversationId = cloned.id
+                        SharedDataService.shared.saveLastActiveConversationId(cloned.id)
+                        closeDrawer()
+                    }
                 )
-                .environment(dependencies)
                 .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
             }
+
+        case .archivedChats:
+            ArchivedChatsView()
+                .environment(dependencies)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+
+        case .sharedChats:
+            SharedChatsView()
+                .environment(dependencies)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+
+        case .workspace:
+            WorkspaceView()
+                .environment(dependencies)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+
+        case .calendar:
+            CalendarView()
+                .environment(dependencies)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+
+        case .localWorkspaceBrowser:
+            LocalWorkspaceFileBrowserView()
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(24)
+
+        case .automations:
+            AutomationsListView()
+                .environment(dependencies)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+
+        case .memories:
+            NavigationStack {
+                MemoriesView()
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            sheetCloseButton { showMemories = false }
+                        }
+                    }
+            }
+            .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+
+        case .adminConsole:
+            NavigationStack {
+                AdminConsoleView()
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            sheetCloseButton { showAdminConsole = false }
+                        }
+                    }
+            }
+            .environment(dependencies)
+            .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+            .presentationCornerRadius(20)
+
+        case .accountPicker:
+            AccountPickerSheet(
+                viewModel: dependencies.authViewModel,
+                onDismiss: { dependencies.authViewModel.showAccountPicker = false }
+            )
+            .environment(dependencies)
+            .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+        }
+    }
+
+    @ViewBuilder
+    private func coverContent(for route: MainChatCoverRoute) -> some View {
+        switch route {
+        case .channels:
+            NavigationStack {
+                ChannelsListView()
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            sheetCloseButton { showChannels = false }
+                        }
+                    }
+            }
+            .environment(dependencies)
+            .environment(router)
+
+        case .localAlpineTerminal:
+            LocalAlpineTerminalConsoleView {
+                showLocalAlpineTerminal = false
+            }
+            .preferredColorScheme(.dark)
+        }
+    }
+
+    @ViewBuilder
+    private func sheetCloseButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(Color.secondary)
+                .frame(width: 32, height: 32)
+                .background(Color(uiColor: .systemGray5).opacity(0.6))
+                .clipShape(Circle())
+        }
+    }
+
+    private func dismissSheetRoute(_ route: MainChatSheetRoute?) {
+        switch route {
+        case .settings:
+            showSettings = false
+        case .notes:
+            showNotes = false
+        case .createChannel:
+            showCreateChannel = false
+        case .createFolder:
+            showCreateFolderSheet = false
+        case .editFolder:
+            listViewModel.folderViewModel.editingFolder = nil
+        case .renameConversation:
+            renamingConversation = nil
+        case .exportShare:
+            showExportShareSheet = false
+            if let url = exportFileURL {
+                try? FileManager.default.removeItem(at: url)
+                exportFileURL = nil
+            }
+        case .shareConversation:
+            sharingConversation = nil
+        case .archivedChats:
+            showArchivedChats = false
+        case .sharedChats:
+            showSharedChats = false
+        case .workspace:
+            showWorkspace = false
+        case .calendar:
+            showCalendar = false
+        case .localWorkspaceBrowser:
+            showLocalWorkspaceBrowser = false
+        case .automations:
+            showAutomations = false
+        case .memories:
+            showMemories = false
+        case .adminConsole:
+            showAdminConsole = false
+        case .accountPicker:
+            dependencies.authViewModel.showAccountPicker = false
+        case .none:
+            break
+        }
+    }
+
+    private func dismissCoverRoute(_ route: MainChatCoverRoute?) {
+        switch route {
+        case .channels:
+            showChannels = false
+        case .localAlpineTerminal:
+            showLocalAlpineTerminal = false
+        case .none:
+            break
+        }
     }
 
     // MARK: - Rename Conversation Sheet (extracted for readability)
@@ -884,6 +996,25 @@ struct MainChatView: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("This will permanently delete \(listViewModel.selectedCount) selected conversation\(listViewModel.selectedCount == 1 ? "" : "s"). This action cannot be undone.")
+            }
+            // Folder rename prompt
+            .alert(
+                "Rename Folder",
+                isPresented: .init(
+                    get: { listViewModel.folderViewModel.renamingFolder != nil },
+                    set: { if !$0 { listViewModel.folderViewModel.renamingFolder = nil } }
+                )
+            ) {
+                TextField(
+                    "Folder Name",
+                    text: Bindable(listViewModel.folderViewModel).renameText
+                )
+                Button("Cancel", role: .cancel) {
+                    listViewModel.folderViewModel.renamingFolder = nil
+                }
+                Button("Rename") {
+                    Task { await listViewModel.folderViewModel.commitRename() }
+                }
             }
             // Single-conversation delete confirmation
             .confirmationDialog(
