@@ -47,13 +47,16 @@ required = {
     "usr/bin/pip3",
     "usr/bin/python3",
     "usr/include/stdio.h",
-    "usr/include/c++",
     "usr/lib/libstdc++.so.6",
     "usr/lib/crt1.o",
 }
+required_prefixes = (
+    "usr/include/c++/",
+)
 with tarfile.open(sys.argv[1], "r:*") as archive:
     names = set(archive.getnames())
 missing = sorted(required - names)
+missing.extend(prefix + "*" for prefix in required_prefixes if not any(name.startswith(prefix) for name in names))
 if missing:
     raise SystemExit("Preinstalled rootfs is missing " + ", ".join(missing))
 '@

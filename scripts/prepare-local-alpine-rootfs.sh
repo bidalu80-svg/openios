@@ -42,7 +42,7 @@ if [ -n "$preinstall_packages" ]; then
 
   rootfs_contents="$(mktemp)"
   tar -tzf "$output_path" > "$rootfs_contents"
-  required_paths=(
+  required_exact_paths=(
     usr/bin/as
     usr/bin/gcc
     usr/bin/g++
@@ -51,13 +51,22 @@ if [ -n "$preinstall_packages" ]; then
     usr/bin/pip3
     usr/bin/python3
     usr/include/stdio.h
-    usr/include/c++
     usr/lib/libstdc++.so.6
     usr/lib/crt1.o
   )
-  for required_path in "${required_paths[@]}"; do
+  required_prefix_paths=(
+    usr/include/c++/
+  )
+  for required_path in "${required_exact_paths[@]}"; do
     if ! grep -Fxq "$required_path" "$rootfs_contents"; then
       echo "Preinstalled rootfs is missing $required_path" >&2
+      rm -f "$rootfs_contents"
+      exit 1
+    fi
+  done
+  for required_prefix in "${required_prefix_paths[@]}"; do
+    if ! grep -Fq "$required_prefix" "$rootfs_contents"; then
+      echo "Preinstalled rootfs is missing $required_prefix*" >&2
       rm -f "$rootfs_contents"
       exit 1
     fi

@@ -4930,6 +4930,9 @@ final class ChatViewModel {
         if Self.isLocalAlpineEnvironmentInspectionRequest(text) {
             return true
         }
+        if Self.isLocalAlpineDependencyActionRequest(text) {
+            return true
+        }
         return Self.isLocalAlpineFollowUpFileOperation(text, messages: conversation?.messages ?? [])
     }
 
@@ -5147,6 +5150,21 @@ final class ChatViewModel {
             return true
         }
         return containsAny(normalized, ["当前环境", "沙盒环境", "alpine环境", "alpine 环境", "环境依赖", "依赖环境"])
+    }
+
+    private static func isLocalAlpineDependencyActionRequest(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        let actionTerms = [
+            "安装", "装", "配置", "修复", "升级", "检查", "检测",
+            "install", "setup", "configure", "fix", "upgrade", "check"
+        ]
+        let dependencyTerms = [
+            "依赖", "包", "模块", "库", "python", "pip", "requirements", "pyproject",
+            "node", "npm", "package.json", "apk", "gcc", "g++", "make",
+            "dependency", "dependencies", "package", "module", "library"
+        ]
+        return containsAny(normalized, actionTerms) && containsAny(normalized, dependencyTerms)
     }
 
     private static func terminalEnvironmentHintIsEnough(_ normalized: String) -> Bool {
@@ -5468,7 +5486,23 @@ final class ChatViewModel {
             "unable to execute", "unable to run", "cannot run commands",
             "run manually", "manually run", "copy and paste", "paste into terminal"
         ]
-        return refusalTerms.contains { normalized.contains($0) }
+        if refusalTerms.contains(where: { normalized.contains($0) }) {
+            return true
+        }
+        let askUserToProvideTerms = [
+            "请告诉我", "告诉我项目目录", "告诉我目录", "告诉我路径",
+            "请提供项目目录", "请提供目录", "请提供路径", "需要你提供",
+            "把路径发给我", "发给我路径", "requirements.txt 的位置", "pyproject.toml 的位置",
+            "please tell me", "please provide", "tell me the project directory",
+            "tell me the path", "provide the path", "provide the project directory"
+        ]
+        let localActionTerms = [
+            "安装", "依赖", "运行", "执行", "修复", "检查", "项目", "目录",
+            "install", "dependency", "dependencies", "run", "execute", "fix", "check",
+            "project", "directory", "requirements", "pyproject"
+        ]
+        return askUserToProvideTerms.contains { normalized.contains($0) }
+            && localActionTerms.contains { normalized.contains($0) }
     }
 
     private static func normalizedLocalAlpineExecutableContent(from content: String) -> String? {
@@ -10075,11 +10109,13 @@ final class ChatViewModel {
         - For multi-step tasks, include one short visible step note before the `iexa_alpine` block, such as "先检查文件" or "现在修复并验证". Keep detailed reasoning internal.
         - Local Alpine terminal mode owns local project operations. If the user asks to list/read/search/create/modify/delete project files, inspect a directory, run a script, or "read the mnt directory", use `/mnt/iexa` via `iexa_alpine`; do not use the Documents/Iexa Workspace tool.
         - If the user asks you to run, execute, test, verify, inspect the environment, install packages, write or modify code, fix an error, rerun after a fix, write a runnable script/project, crawl/fetch/scrape a website, or diagnose command output, use `iexa_alpine`.
+        - Dependency installs are an action, not a consultation. For "安装 Python 依赖" or similar, search `/mnt/iexa` for `requirements.txt`, `pyproject.toml`, `setup.py`, or obvious project folders; if one exists, install from it. If none exists, report the concrete search result and stop. Do not ask the user for a path before searching the workspace yourself.
         - If the user asks for a crawler/scraper for a URL, do not stop at a code sample. Write the script into `/mnt/iexa`, install/check dependencies if needed, run it against the URL, and summarize the real output.
         - If the user says "修好", "修改代码", "重新运行", "怎么不是直接执行", or similar after a Local Alpine result, treat it as a request to continue operating. Inspect the target file/output, fix with `write_files` when needed, then verify.
         - Do not merely explain commands when the user wants action. Emit the block so the app executes it.
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
+        - A preflight command is not the final answer for install/run/fix requests. If it succeeds, continue with the install/run/fix step. If it shows missing dependencies, install them. If it shows missing project files, search `/mnt/iexa` before asking the user.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
         - For scripts/projects, use JSON `write_files` inside `iexa_alpine`, then run a bounded verification command. For code files, use `code_lines`, `content_lines`, or `content_base64`; never use plain `content`/`text`/`code` for source files because display text can corrupt indentation.
         - Python write protocol is mandatory: send the complete intended `.py` file through `iexa_alpine` JSON `write_files` using `code_lines` for normal files or `content_base64` for very long/complex content. Do not write Python through visible Markdown, partial snippets, shell heredocs, `echo`, or `cat > file.py` unless explicitly debugging the writer itself.
@@ -12489,7 +12525,6 @@ final class ChatViewModel {
             localAlpineAgentStopRequested = true
         } else if result.interactiveRequest == nil,
                   !localAlpineAgentStopRequested,
-                  result.hadFailure,
                   localAlpineResultNeedsFollowUp(after: resultMessageId) {
             scheduleLocalAlpineContinuationIfNeeded(after: resultMessageId, forceContinue: true)
         } else if result.interactiveRequest == nil,
@@ -12969,19 +13004,92 @@ final class ChatViewModel {
     private func localAlpineResultNeedsFollowUp(after resultMessageId: String) -> Bool {
         guard let message = conversation?.messages.first(where: { $0.id == resultMessageId }) else { return false }
         let rawResult = message.metadata?["iexa_local_alpine_raw_result"] ?? message.content
-        return Self.localAlpineResultNeedsFollowUp(rawResult)
+        let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(message.metadata?["iexa_local_alpine_command_results"])
+        let latestUserText = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })?.content
+        return Self.localAlpineResultNeedsFollowUp(
+            rawResult,
+            commandResults: commandResults,
+            latestUserText: latestUserText
+        )
     }
 
-    private static func localAlpineResultNeedsFollowUp(_ text: String) -> Bool {
+    private static func localAlpineResultNeedsFollowUp(
+        _ text: String,
+        commandResults: [LocalAlpineAgentCommandResult] = [],
+        latestUserText: String? = nil
+    ) -> Bool {
         let normalized = normalizedLocalAlpineResultTextForFollowUpCheck(text)
         if normalized.contains("iexa_auto_repair_verified_success") {
             return false
+        }
+        if let latestUserText,
+           isLocalAlpineGoalActionRequest(latestUserText),
+           localAlpineResultIsOnlyPreflightOrQuestion(normalized, commandResults: commandResults) {
+            return true
         }
         if containsSuccessfulLocalAlpineExit(normalized)
             && !containsCriticalLocalAlpineFailureMarker(normalized) {
             return false
         }
         return containsLocalAlpineFailureMarker(normalized)
+    }
+
+    private static func isLocalAlpineGoalActionRequest(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        let actionTerms = [
+            "安装", "装", "运行", "执行", "跑", "测试", "验证", "修复", "修改",
+            "写", "创建", "生成", "编译", "构建", "依赖",
+            "install", "run", "execute", "test", "verify", "fix", "modify",
+            "write", "create", "generate", "compile", "build", "dependency", "dependencies"
+        ]
+        return actionTerms.contains { normalized.contains($0) }
+    }
+
+    private static func localAlpineResultIsOnlyPreflightOrQuestion(
+        _ normalized: String,
+        commandResults: [LocalAlpineAgentCommandResult]
+    ) -> Bool {
+        if normalized.contains("iexa_agent_task_complete")
+            || normalized.contains("iexa_auto_repair_verified_success") {
+            return false
+        }
+        if normalized.contains("请告诉我")
+            || normalized.contains("需要你提供")
+            || normalized.contains("please provide")
+            || normalized.contains("please tell me")
+            || normalized.contains("tell me the path")
+            || normalized.contains("provide the path") {
+            return true
+        }
+        let combinedCommands = commandResults
+            .map { $0.command.lowercased() }
+            .joined(separator: "\n")
+        guard !combinedCommands.isEmpty else { return false }
+        let preflightTerms = [
+            "command -v", "which ", " apk info", "apk info", " ls ", "ls -",
+            " find ", "grep ", "cat /etc/alpine-release", "uname", "python3 --version",
+            "pip3 --version", "pwd"
+        ]
+        let onlyPreflightCommands = commandResults.allSatisfy { result in
+            let command = result.command.lowercased()
+            return preflightTerms.contains { command.contains($0) }
+        }
+        if onlyPreflightCommands {
+            return true
+        }
+        let didRealAction = [
+            " apk add ", "apk add ", " pip install", "pip3 install",
+            " npm install", "python3 ./", "python3 /", "python3 -m", "node ./",
+            "node /", "gcc ", "g++ ", "make",
+            " write_files"
+        ].contains { combinedCommands.contains($0) }
+        if didRealAction {
+            return false
+        }
+        return preflightTerms.contains { combinedCommands.contains($0) }
     }
 
     private static func normalizedLocalAlpineResultTextForFollowUpCheck(_ text: String) -> String {

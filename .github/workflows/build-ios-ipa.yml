@@ -285,20 +285,26 @@ jobs:
           bash scripts/prepare-local-alpine-rootfs.sh
           test -s "Open UI/Resources/iexa-alpine-rootfs.tar.gz"
           tar -tzf "Open UI/Resources/iexa-alpine-rootfs.tar.gz" > "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"
-          for required_path in \
-            usr/bin/as \
-            usr/bin/gcc \
-            usr/bin/g++ \
-            usr/bin/ld \
-            usr/bin/make \
-            usr/bin/pip3 \
-            usr/bin/python3 \
-            usr/include/stdio.h \
-            usr/include/c++ \
-            usr/lib/libstdc++.so.6 \
+          required_exact_paths=(
+            usr/bin/as
+            usr/bin/gcc
+            usr/bin/g++
+            usr/bin/ld
+            usr/bin/make
+            usr/bin/pip3
+            usr/bin/python3
+            usr/include/stdio.h
+            usr/lib/libstdc++.so.6
             usr/lib/crt1.o
-          do
+          )
+          required_prefix_paths=(
+            usr/include/c++/
+          )
+          for required_path in "${required_exact_paths[@]}"; do
             grep -Fxq "$required_path" "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"
+          done
+          for required_prefix in "${required_prefix_paths[@]}"; do
+            grep -Fq "$required_prefix" "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"
           done
 
       - name: Prepare Local Alpine iSH runtime
@@ -324,10 +330,32 @@ jobs:
             ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs"
           test -d ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/data"
           test -s ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db"
-          for tool_path in usr/bin/as usr/bin/gcc usr/bin/g++ usr/bin/ld usr/bin/make usr/bin/pip3 usr/bin/python3 usr/include/stdio.h usr/include/c++ usr/lib/libstdc++.so.6 usr/lib/crt1.o; do
+          required_exact_tool_paths=(
+            usr/bin/as
+            usr/bin/gcc
+            usr/bin/g++
+            usr/bin/ld
+            usr/bin/make
+            usr/bin/pip3
+            usr/bin/python3
+            usr/include/stdio.h
+            usr/lib/libstdc++.so.6
+            usr/lib/crt1.o
+          )
+          required_prefix_tool_paths=(
+            usr/include/c++
+          )
+          for tool_path in "${required_exact_tool_paths[@]}"; do
             count="$(sqlite3 ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db" "select count(*) from paths where path = '$tool_path';")"
             if [ "$count" != "1" ]; then
               echo "::error::Local Alpine fakefs is missing $tool_path"
+              exit 1
+            fi
+          done
+          for tool_prefix in "${required_prefix_tool_paths[@]}"; do
+            count="$(sqlite3 ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db" "select count(*) from paths where path = '$tool_prefix' or path like '$tool_prefix/%';")"
+            if [ "$count" = "0" ]; then
+              echo "::error::Local Alpine fakefs is missing $tool_prefix/*"
               exit 1
             fi
           done
