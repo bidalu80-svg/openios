@@ -476,7 +476,7 @@ struct iPadMainChatView: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button { startNewChat() } label: {
-                            NewConversationIcon(size: 14)
+                            NewConversationIcon(size: 18)
                                 .foregroundStyle(theme.textSecondary)
                         }
                         .buttonStyle(.plain)
@@ -493,7 +493,7 @@ struct iPadMainChatView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { startNewChat() } label: {
-                        NewConversationIcon(size: 14)
+                        NewConversationIcon(size: 18)
                             .foregroundStyle(theme.textSecondary)
                     }
                     .buttonStyle(.plain)
@@ -518,7 +518,7 @@ struct iPadMainChatView: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button { startNewChat() } label: {
-                            NewConversationIcon(size: 14)
+                            NewConversationIcon(size: 18)
                                 .foregroundStyle(theme.textSecondary)
                         }
                         .buttonStyle(.plain)
@@ -532,7 +532,7 @@ struct iPadMainChatView: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button { startNewChat() } label: {
-                            NewConversationIcon(size: 14)
+                            NewConversationIcon(size: 18)
                                 .foregroundStyle(theme.textSecondary)
                         }
                         .buttonStyle(.plain)
@@ -918,7 +918,7 @@ struct iPadSidebarContent: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button(action: onNewChat) {
-                    NewConversationIcon(size: 15)
+                    NewConversationIcon(size: 19)
                         .foregroundStyle(theme.textSecondary)
                 }
                 .buttonStyle(.plain)
@@ -1629,7 +1629,7 @@ struct iPadSidebarContent: View {
 
                 // New Chat — primary action, always visible
                 Button(action: onNewChat) {
-                    NewConversationIcon(size: 15)
+                    NewConversationIcon(size: 19)
                         .foregroundStyle(theme.textSecondary)
                         .frame(width: 36, height: 36)
                         .contentShape(Rectangle())

@@ -594,7 +594,7 @@ struct ChatDetailView: View {
                     }
                     Haptics.play(.light)
                 } label: {
-                    TemporaryChatIcon(isEnabled: viewModel.isTemporaryChat, size: 13)
+                    TemporaryChatIcon(isEnabled: viewModel.isTemporaryChat, size: 20)
                         .frame(width: 34, height: 34)
                         .contentShape(Rectangle())
                 }

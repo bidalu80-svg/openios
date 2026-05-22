@@ -286,7 +286,7 @@ struct MainChatView: View {
                                 Button {
                                     startNewChat()
                                 } label: {
-                                    NewConversationIcon(size: 14)
+                                    NewConversationIcon(size: 18)
                                         .foregroundStyle(theme.textSecondary)
                                         .frame(width: 34, height: 34)
                                         .contentShape(Rectangle())
@@ -2618,7 +2618,7 @@ struct MainChatView: View {
                     closeDrawer()
                     startNewChat()
                 } label: {
-                    NewConversationIcon(size: 16)
+                    NewConversationIcon(size: 21)
                         .foregroundStyle(theme.textSecondary)
                         .frame(width: 40, height: 40)
                         .contentShape(Rectangle())
