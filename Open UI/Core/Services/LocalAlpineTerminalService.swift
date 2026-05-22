@@ -37,7 +37,7 @@ actor LocalAlpineTerminalService {
     private let logger = Logger(subsystem: "com.openui", category: "LocalAlpine")
     private let fileManager = FileManager.default
     private let rootArchiveName = "iexa-alpine-rootfs.fakefs"
-    private let bundledRootFSVersion = "3.23.4"
+    private let bundledRootFSVersion = "3.23.4-dev-tools.1"
     private let rootVersionFileName = ".iexa-rootfs-version"
     private let workspaceFolderName = "Iexa Alpine"
     private let sharedFolderName = "shared"
@@ -390,9 +390,40 @@ actor LocalAlpineTerminalService {
           . /etc/profile >/dev/null 2>&1 || true
         fi
         export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+        iexa_refresh_dns() {
+          cat > /etc/resolv.conf <<'EOF'
+        nameserver 1.1.1.1
+        nameserver 8.8.8.8
+        nameserver 223.5.5.5
+        options timeout:2 attempts:3
+        EOF
+        }
         apk() {
-          command apk "$@"
-          status=$?
+          case "${1:-}" in
+            add|fix|upgrade|update)
+              attempts=0
+              while :; do
+                iexa_refresh_dns
+                if command apk "$@"; then
+                  status=0
+                else
+                  status=$?
+                fi
+                if [ "$status" -eq 0 ] || [ "$attempts" -ge 2 ]; then
+                  break
+                fi
+                attempts=$((attempts + 1))
+                sleep "$attempts"
+              done
+              ;;
+            *)
+              if command apk "$@"; then
+                status=0
+              else
+                status=$?
+              fi
+              ;;
+          esac
           case "${1:-}" in
             add|fix|upgrade)
               hash -r 2>/dev/null || true
@@ -403,6 +434,23 @@ actor LocalAlpineTerminalService {
         }
         hash -r 2>/dev/null || true
         \(script)
+        iexa_command_status=$?
+        iexa_verify_toolchain_after_apk() {
+          case "$*" in
+            *"apk add"*build-base*|*"apk add"*g++*|*"apk add"*gcc*)
+              missing=""
+              for x in gcc g++ make; do
+                command -v "$x" >/dev/null 2>&1 || missing="$missing $x"
+              done
+              if [ -n "$missing" ]; then
+                printf '\\nIEXA_ALPINE_TOOLCHAIN_MISSING:%s\\n' "$missing" >&2
+                printf 'The Alpine package database may be out of sync with the rootfs. Install a build with the bundled build tools rootfs, or reset Local Alpine rootfs.\\n' >&2
+              fi
+              ;;
+          esac
+        }
+        iexa_verify_toolchain_after_apk \(shellSingleQuoted(script))
+        exit "$iexa_command_status"
         """
     }
 

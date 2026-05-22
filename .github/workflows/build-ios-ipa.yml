@@ -282,10 +282,24 @@ jobs:
 
       - name: Prepare bundled Local Alpine rootfs
         run: |
-          if [ ! -f "Open UI/Resources/iexa-alpine-rootfs.tar.gz" ]; then
-            bash scripts/prepare-local-alpine-rootfs.sh
-          fi
+          bash scripts/prepare-local-alpine-rootfs.sh
           test -s "Open UI/Resources/iexa-alpine-rootfs.tar.gz"
+          tar -tzf "Open UI/Resources/iexa-alpine-rootfs.tar.gz" > "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"
+          for required_path in \
+            usr/bin/as \
+            usr/bin/gcc \
+            usr/bin/g++ \
+            usr/bin/ld \
+            usr/bin/make \
+            usr/bin/pip3 \
+            usr/bin/python3 \
+            usr/include/stdio.h \
+            usr/include/c++ \
+            usr/lib/libstdc++.so.6 \
+            usr/lib/crt1.o
+          do
+            grep -Fxq "$required_path" "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"
+          done
 
       - name: Prepare Local Alpine iSH runtime
         run: |
@@ -310,6 +324,13 @@ jobs:
             ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs"
           test -d ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/data"
           test -s ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db"
+          for tool_path in usr/bin/as usr/bin/gcc usr/bin/g++ usr/bin/ld usr/bin/make usr/bin/pip3 usr/bin/python3 usr/include/stdio.h usr/include/c++ usr/lib/libstdc++.so.6 usr/lib/crt1.o; do
+            count="$(sqlite3 ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db" "select count(*) from paths where path = '$tool_path';")"
+            if [ "$count" != "1" ]; then
+              echo "::error::Local Alpine fakefs is missing $tool_path"
+              exit 1
+            fi
+          done
           bash scripts/build-local-alpine-ish-ci.sh External/ish "$RUNNER_TEMP/ish-products"
           bash scripts/enable-local-alpine-ish-ci.sh \
             "Open UI.xcodeproj/project.pbxproj" \
