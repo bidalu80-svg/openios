@@ -346,16 +346,18 @@ jobs:
             usr/include/c++
           )
           for tool_path in "${required_exact_tool_paths[@]}"; do
-            count="$(sqlite3 ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db" "select count(*) from paths where path = '$tool_path';")"
+            fakefs_path="/$tool_path"
+            count="$(sqlite3 ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db" "select count(*) from paths where cast(path as text) = '$fakefs_path';")"
             if [ "$count" != "1" ]; then
-              echo "::error::Local Alpine fakefs is missing $tool_path"
+              echo "::error::Local Alpine fakefs is missing $fakefs_path"
               exit 1
             fi
           done
           for tool_prefix in "${required_prefix_tool_paths[@]}"; do
-            count="$(sqlite3 ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db" "select count(*) from paths where path = '$tool_prefix' or path like '$tool_prefix/%';")"
+            fakefs_prefix="/$tool_prefix"
+            count="$(sqlite3 ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db" "select count(*) from paths where cast(path as text) = '$fakefs_prefix' or cast(path as text) like '$fakefs_prefix/%';")"
             if [ "$count" = "0" ]; then
-              echo "::error::Local Alpine fakefs is missing $tool_prefix/*"
+              echo "::error::Local Alpine fakefs is missing $fakefs_prefix/*"
               exit 1
             fi
           done
