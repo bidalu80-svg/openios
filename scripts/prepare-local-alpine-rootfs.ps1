@@ -2,7 +2,7 @@ param(
     [string]$OutputPath = "Open UI\Resources\iexa-alpine-rootfs.tar.gz",
     [string]$RootFSUrl = "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86/alpine-minirootfs-3.23.4-x86.tar.gz",
     [string]$ExpectedSHA256 = "dba449a2c286f73cb1cf9b248631f3182c291f22619e1500922bd97b542263fa",
-    [string[]]$PreinstallPackages = @("build-base", "g++", "make", "python3", "py3-pip")
+    [string[]]$PreinstallPackages = @()
 )
 
 $ErrorActionPreference = "Stop"

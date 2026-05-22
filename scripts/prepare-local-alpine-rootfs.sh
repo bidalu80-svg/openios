@@ -4,7 +4,7 @@ set -euo pipefail
 output_path="${1:-Open UI/Resources/iexa-alpine-rootfs.tar.gz}"
 rootfs_url="${IEXA_ALPINE_ROOTFS_URL:-https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86/alpine-minirootfs-3.23.4-x86.tar.gz}"
 expected_sha256="${IEXA_ALPINE_ROOTFS_SHA256:-dba449a2c286f73cb1cf9b248631f3182c291f22619e1500922bd97b542263fa}"
-preinstall_packages="${IEXA_ALPINE_PREINSTALL_PACKAGES:-build-base g++ make python3 py3-pip}"
+preinstall_packages="${IEXA_ALPINE_PREINSTALL_PACKAGES:-}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p "$(dirname "$output_path")"

@@ -10095,8 +10095,8 @@ final class ChatViewModel {
         - `/mnt/iexa` is the shared writable project directory. Create project files there.
         - Tool protocol: the only correct execution trigger is a fenced `iexa_alpine` block. Do not use OpenAI/ChatGPT tool-call syntax such as `to=local_alpine_exec code` or native tool calls; those are legacy/provider artifacts and should never be shown to the user.
         - Package manager: `apk`. Do not install packages on every run. First check with `command -v ...` or version commands; only use `apk update && apk add --no-cache ...` when the output proves a dependency is missing.
-        - Current bundled tool profile normally includes: `sh`/`ash`, `busybox`, `apk`, `wget`, `curl`, `python3`, `node`, `npm`, `gcc`, `g++`, `git`, and `vim`.
-        - Common packages that may still be missing for generated projects: `py3-pip`, `make`, `build-base`, `linux-headers`, `cmake`, `pkgconf`, `zip`, `unzip`, and `openssl-dev`.
+        - Current bundled tool profile is intentionally lightweight: `sh`/`ash`, `busybox`, `apk`, `wget`, and core Alpine utilities. Do not assume `python3`, `pip`, `node`, `npm`, `gcc`, `g++`, `make`, or `git` are preinstalled.
+        - Common packages to install on demand for generated projects: `python3`, `py3-pip`, `nodejs`, `npm`, `git`, `make`, `g++`, `build-base`, `linux-headers`, `cmake`, `pkgconf`, `zip`, `unzip`, and `openssl-dev`.
         - The execution is non-interactive. Do not rely on prompts, REPLs, `input()`, `read`, `scanf`, `cin`, `npm init` prompts, editors waiting for input, or long-running servers that never exit.
 
         Operational rules:
