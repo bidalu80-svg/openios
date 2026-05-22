@@ -378,7 +378,7 @@ struct ModelSelectorSheet: View {
         } label: {
             HStack(spacing: 12) {
                 ModelAvatar(
-                    size: 36,
+                    size: isSelected ? 35 : 36,
                     imageURL: model.resolveAvatarURL(baseURL: serverBaseURL),
                     label: model.shortName,
                     authToken: authToken

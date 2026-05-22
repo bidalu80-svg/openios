@@ -286,8 +286,7 @@ struct MainChatView: View {
                                 Button {
                                     startNewChat()
                                 } label: {
-                                    Image(systemName: "square.and.pencil")
-                                        .scaledFont(size: 14, weight: .medium)
+                                    NewConversationIcon(size: 14)
                                         .foregroundStyle(theme.textSecondary)
                                         .frame(width: 34, height: 34)
                                         .contentShape(Rectangle())
@@ -2619,8 +2618,7 @@ struct MainChatView: View {
                     closeDrawer()
                     startNewChat()
                 } label: {
-                    Image(systemName: "square.and.pencil")
-                        .scaledFont(size: 16, weight: .medium)
+                    NewConversationIcon(size: 16)
                         .foregroundStyle(theme.textSecondary)
                         .frame(width: 40, height: 40)
                         .contentShape(Rectangle())
@@ -2697,7 +2695,7 @@ struct MainChatView: View {
                         }
                     }
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    SettingsGearIcon()
                         .scaledFont(size: 18, weight: .medium)
                         .foregroundStyle(theme.textSecondary)
                         .frame(width: 40, height: 40)

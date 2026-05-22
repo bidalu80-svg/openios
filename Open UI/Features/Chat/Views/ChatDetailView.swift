@@ -567,11 +567,6 @@ struct ChatDetailView: View {
         ToolbarItem(placement: .principal) {
             HStack(spacing: Spacing.sm) {
                 modelSelectorButton
-                if viewModel.isTemporaryChat {
-                    Image(systemName: "bolt.fill")
-                        .scaledFont(size: 12, weight: .semibold)
-                        .foregroundStyle(theme.warning)
-                }
             }
             // Force SwiftUI to fully re-layout the toolbar principal slot when
             // the selected model changes. Without this, the toolbar caches the
@@ -584,7 +579,7 @@ struct ChatDetailView: View {
                 Haptics.play(.light)
                 isShowingChatParams = true
             } label: {
-                Image(systemName: "slider.horizontal.3")
+                SettingsGearIcon()
                     .scaledFont(size: 13, weight: .medium)
                     .foregroundStyle((viewModel.conversation?.chatParams != nil || viewModel.pendingChatParams != nil) ? theme.brandPrimary : theme.textTertiary)
                     .frame(width: 34, height: 34)
@@ -599,9 +594,7 @@ struct ChatDetailView: View {
                     }
                     Haptics.play(.light)
                 } label: {
-                    Image(systemName: viewModel.isTemporaryChat ? "bolt.fill" : "bolt")
-                        .scaledFont(size: 13, weight: .medium)
-                        .foregroundStyle(viewModel.isTemporaryChat ? theme.warning : theme.textTertiary)
+                    TemporaryChatIcon(isEnabled: viewModel.isTemporaryChat, size: 13)
                         .frame(width: 34, height: 34)
                         .contentShape(Rectangle())
                 }
@@ -628,7 +621,7 @@ struct ChatDetailView: View {
                     HStack(spacing: Spacing.xs) {
                         if let model = viewModel.selectedModel {
                             ModelAvatar(
-                                size: 25,
+                                size: 24,
                                 imageURL: viewModel.resolvedImageURL(for: model),
                                 label: model.shortName,
                                 authToken: viewModel.serverAuthToken
@@ -699,6 +692,10 @@ struct ChatDetailView: View {
     }
 
     // MARK: - Input Field Area
+
+    private var temporaryChatPillForeground: Color {
+        theme.isDark ? theme.brandPrimary : theme.brandPrimary.blend(with: .black, amount: 0.25)
+    }
 
     @ViewBuilder
     private func inputFieldArea(vm: ChatViewModel) -> some View {
@@ -1566,10 +1563,10 @@ struct ChatDetailView: View {
         let model = resolveModel(for: message)
         return HStack(spacing: Spacing.sm) {
             if let m = model {
-                ModelAvatar(size: 26, imageURL: viewModel.resolvedImageURL(for: m),
+                ModelAvatar(size: 25, imageURL: viewModel.resolvedImageURL(for: m),
                             label: m.shortName, authToken: viewModel.serverAuthToken)
             } else {
-                ModelAvatar(size: 26, label: message.model)
+                ModelAvatar(size: 25, label: message.model)
             }
             Text(model?.shortName ?? message.model ?? String(localized: "Assistant"))
                 .scaledFont(size: 12, weight: .medium)
@@ -1912,16 +1909,14 @@ struct ChatDetailView: View {
                 }
 
                 if viewModel.isTemporaryChat {
-                    HStack(spacing: 5) {
-                        Image(systemName: "bolt.fill")
-                            .scaledFont(size: 10, weight: .semibold)
+                    HStack(spacing: 0) {
                         Text("Temporary Chat")
                             .scaledFont(size: 11, weight: .semibold)
                     }
-                    .foregroundStyle(theme.warning)
+                    .foregroundStyle(temporaryChatPillForeground)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
-                    .background(theme.warning.opacity(0.1))
+                    .background(theme.brandPrimary.opacity(0.1))
                     .clipShape(Capsule())
                 }
             }

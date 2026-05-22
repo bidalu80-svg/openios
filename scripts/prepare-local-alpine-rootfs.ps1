@@ -1,6 +1,7 @@
 param(
     [string]$OutputPath = "Open UI\Resources\iexa-alpine-rootfs.tar.gz",
-    [string]$RootFSUrl = "https://github.com/ish-app/roots/releases/download/g00712ff0a54b2839c5aa1a8ed758003ca65357dc/appstore-apk.tar.gz"
+    [string]$RootFSUrl = "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86/alpine-minirootfs-3.23.4-x86.tar.gz",
+    [string]$ExpectedSHA256 = "dba449a2c286f73cb1cf9b248631f3182c291f22619e1500922bd97b542263fa"
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,5 +16,11 @@ Write-Host "Target: $resolvedOutput"
 
 Invoke-WebRequest -Uri $RootFSUrl -OutFile $resolvedOutput -UseBasicParsing
 
+$actualSHA256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedOutput).Hash.ToLowerInvariant()
+if ($ExpectedSHA256 -and $actualSHA256 -ne $ExpectedSHA256.ToLowerInvariant()) {
+    throw "SHA256 mismatch: expected $ExpectedSHA256, got $actualSHA256"
+}
+
 $item = Get-Item -LiteralPath $resolvedOutput
 Write-Host ("Done: {0:N0} bytes" -f $item.Length)
+Write-Host "SHA256: $actualSHA256"

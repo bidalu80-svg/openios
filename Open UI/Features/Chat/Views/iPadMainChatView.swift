@@ -476,8 +476,7 @@ struct iPadMainChatView: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button { startNewChat() } label: {
-                            Image(systemName: "square.and.pencil")
-                                .scaledFont(size: 14, weight: .medium)
+                            NewConversationIcon(size: 14)
                                 .foregroundStyle(theme.textSecondary)
                         }
                         .buttonStyle(.plain)
@@ -494,8 +493,7 @@ struct iPadMainChatView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { startNewChat() } label: {
-                        Image(systemName: "square.and.pencil")
-                            .scaledFont(size: 14, weight: .medium)
+                        NewConversationIcon(size: 14)
                             .foregroundStyle(theme.textSecondary)
                     }
                     .buttonStyle(.plain)
@@ -520,8 +518,7 @@ struct iPadMainChatView: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button { startNewChat() } label: {
-                            Image(systemName: "square.and.pencil")
-                                .scaledFont(size: 14, weight: .medium)
+                            NewConversationIcon(size: 14)
                                 .foregroundStyle(theme.textSecondary)
                         }
                         .buttonStyle(.plain)
@@ -535,8 +532,7 @@ struct iPadMainChatView: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button { startNewChat() } label: {
-                            Image(systemName: "square.and.pencil")
-                                .scaledFont(size: 14, weight: .medium)
+                            NewConversationIcon(size: 14)
                                 .foregroundStyle(theme.textSecondary)
                         }
                         .buttonStyle(.plain)
@@ -922,8 +918,7 @@ struct iPadSidebarContent: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button(action: onNewChat) {
-                    Image(systemName: "square.and.pencil")
-                        .scaledFont(size: 15, weight: .medium, context: .list)
+                    NewConversationIcon(size: 15)
                         .foregroundStyle(theme.textSecondary)
                 }
                 .buttonStyle(.plain)
@@ -1634,8 +1629,7 @@ struct iPadSidebarContent: View {
 
                 // New Chat — primary action, always visible
                 Button(action: onNewChat) {
-                    Image(systemName: "square.and.pencil")
-                        .scaledFont(size: 15, weight: .medium)
+                    NewConversationIcon(size: 15)
                         .foregroundStyle(theme.textSecondary)
                         .frame(width: 36, height: 36)
                         .contentShape(Rectangle())
@@ -1689,7 +1683,7 @@ struct iPadSidebarContent: View {
                         }
                     }
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    SettingsGearIcon()
                         .scaledFont(size: 17, weight: .medium)
                         .foregroundStyle(theme.textSecondary)
                         .frame(width: 36, height: 36)

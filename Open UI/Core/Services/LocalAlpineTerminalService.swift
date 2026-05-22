@@ -37,6 +37,8 @@ actor LocalAlpineTerminalService {
     private let logger = Logger(subsystem: "com.openui", category: "LocalAlpine")
     private let fileManager = FileManager.default
     private let rootArchiveName = "iexa-alpine-rootfs.fakefs"
+    private let bundledRootFSVersion = "3.23.4"
+    private let rootVersionFileName = ".iexa-rootfs-version"
     private let workspaceFolderName = "Iexa Alpine"
     private let sharedFolderName = "shared"
 
@@ -227,8 +229,10 @@ actor LocalAlpineTerminalService {
         let writableURL = workspaceURL.appendingPathComponent("rootfs.fakefs", isDirectory: true)
         let dataURL = writableURL.appendingPathComponent("data", isDirectory: true)
         let metadataURL = writableURL.appendingPathComponent("meta.db")
+        let versionURL = workspaceURL.appendingPathComponent(rootVersionFileName)
         if fileManager.fileExists(atPath: dataURL.path),
-           fileManager.fileExists(atPath: metadataURL.path) {
+           fileManager.fileExists(atPath: metadataURL.path),
+           storedRootFSVersion(at: versionURL) == bundledRootFSVersion {
             return writableURL.standardizedFileURL
         }
 
@@ -239,7 +243,13 @@ actor LocalAlpineTerminalService {
             try fileManager.removeItem(at: writableURL)
         }
         try fileManager.moveItem(at: temporaryURL, to: writableURL)
+        try? bundledRootFSVersion.write(to: versionURL, atomically: true, encoding: .utf8)
         return writableURL.standardizedFileURL
+    }
+
+    private func storedRootFSVersion(at url: URL) -> String? {
+        try? String(contentsOf: url, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func ensureResolverConfiguration(in runtimeRootFSURL: URL) throws {
