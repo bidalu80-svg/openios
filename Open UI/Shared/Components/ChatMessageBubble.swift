@@ -183,9 +183,9 @@ struct TypingIndicator: View {
     var body: some View {
         Group {
             if reduceMotion {
-                indicator(progress: 0.12)
+                indicator(progress: 0.08)
             } else {
-                TimelineView(.periodic(from: Date(), by: 1.0 / 20.0)) { timeline in
+                TimelineView(.animation) { timeline in
                     indicator(progress: progress(for: timeline.date))
                 }
             }
@@ -196,72 +196,120 @@ struct TypingIndicator: View {
     }
 
     private func indicator(progress: Double) -> some View {
-        ZStack(alignment: .leading) {
-            ForEach(0..<3, id: \.self) { index in
-                Circle()
-                    .fill(theme.textPrimary)
-                    .frame(width: 5.5, height: 5.5)
-                    .opacity(dotOpacity(index: index, progress: progress))
-                    .scaleEffect(dotScale(index: index, progress: progress))
-                    .offset(dotOffset(index: index, progress: progress))
+        Canvas { context, size in
+            for index in 0..<3 {
+                let point = dotPoint(index: index, progress: progress)
+                let diameter = CGFloat(5.2) * dotScale(index: index, progress: progress)
+                let center = CGPoint(
+                    x: size.width / 2 + point.x,
+                    y: size.height / 2 + point.y
+                )
+                let rect = CGRect(
+                    x: center.x - diameter / 2,
+                    y: center.y - diameter / 2,
+                    width: diameter,
+                    height: diameter
+                )
+
+                context.fill(
+                    Path(ellipseIn: rect),
+                    with: .color(theme.textPrimary.opacity(dotOpacity(index: index, progress: progress)))
+                )
             }
         }
-        .frame(width: 30, height: 20, alignment: .leading)
+        .frame(width: 32, height: 22)
     }
 
     private func progress(for date: Date) -> Double {
-        let period = 2.8
+        let period = 2.55
         let value = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
         return value < 0 ? value + 1 : value
     }
 
-    private func dotOffset(index: Int, progress: Double) -> CGSize {
-        let blend = triangleBlend(progress)
-        let line = CGPoint(x: CGFloat(index) * 9.5, y: 0)
-        let triangle: [CGPoint] = [
-            CGPoint(x: 0, y: -4.6),
-            CGPoint(x: 8.8, y: 4.8),
-            CGPoint(x: 17.6, y: -4.6)
-        ]
-        let target = triangle[index]
-        let wavePhase = progress * .pi * 4 - Double(index) * 0.62
-        let waveY = -sin(wavePhase) * 3.8
-        let triangleBreath = sin(progress * .pi * 2 + Double(index) * 0.74) * 0.7
+    private func dotPoint(index: Int, progress: Double) -> CGPoint {
+        switch progress {
+        case ..<0.30:
+            return linePoint(index: index, progress: progress, waveAmount: 1)
+        case ..<0.44:
+            let t = smoothstep((progress - 0.30) / 0.14)
+            return interpolate(
+                linePoint(index: index, progress: progress, waveAmount: 1 - t),
+                trianglePoint(index),
+                t
+            )
+        case ..<0.58:
+            return triangleStepPoint(index: index, progress: progress, start: 0.44, end: 0.58, step: 0)
+        case ..<0.72:
+            return triangleStepPoint(index: index, progress: progress, start: 0.58, end: 0.72, step: 1)
+        case ..<0.86:
+            return triangleStepPoint(index: index, progress: progress, start: 0.72, end: 0.86, step: 2)
+        case ..<0.96:
+            let t = smoothstep((progress - 0.86) / 0.10)
+            return interpolate(
+                trianglePoint(index),
+                linePoint(index: index, progress: progress, waveAmount: t),
+                t
+            )
+        default:
+            return linePoint(index: index, progress: progress, waveAmount: 1)
+        }
+    }
 
-        return CGSize(
-            width: line.x + (target.x - line.x) * blend,
-            height: waveY * (1 - blend) + target.y * blend + triangleBreath * blend
+    private func triangleStepPoint(index: Int, progress: Double, start: Double, end: Double, step: Int) -> CGPoint {
+        let from = trianglePoint((index + step) % 3)
+        let to = trianglePoint((index + step + 1) % 3)
+        let t = smoothstep((progress - start) / (end - start))
+        let control = CGPoint(
+            x: CGFloat(index - 1) * 1.4,
+            y: CGFloat(step - 1) * 0.8
+        )
+
+        return quadraticBezier(from: from, control: control, to: to, progress: t)
+    }
+
+    private func linePoint(index: Int, progress: Double, waveAmount: Double) -> CGPoint {
+        let x = CGFloat(index - 1) * 9.2
+        let phase = progress * .pi * 2 - Double(index) * 0.74
+        let y = -sin(phase) * 3.2 * waveAmount
+        return CGPoint(x: x, y: CGFloat(y))
+    }
+
+    private func trianglePoint(_ index: Int) -> CGPoint {
+        let points = [
+            CGPoint(x: 0, y: -6.4),
+            CGPoint(x: 8.5, y: 5.2),
+            CGPoint(x: -8.5, y: 5.2)
+        ]
+        return points[index % points.count]
+    }
+
+    private func interpolate(_ from: CGPoint, _ to: CGPoint, _ progress: Double) -> CGPoint {
+        CGPoint(
+            x: from.x + (to.x - from.x) * CGFloat(progress),
+            y: from.y + (to.y - from.y) * CGFloat(progress)
+        )
+    }
+
+    private func quadraticBezier(from: CGPoint, control: CGPoint, to: CGPoint, progress: Double) -> CGPoint {
+        let inverse = 1 - progress
+        let a = inverse * inverse
+        let b = 2 * inverse * progress
+        let c = progress * progress
+
+        return CGPoint(
+            x: from.x * CGFloat(a) + control.x * CGFloat(b) + to.x * CGFloat(c),
+            y: from.y * CGFloat(a) + control.y * CGFloat(b) + to.y * CGFloat(c)
         )
     }
 
     private func dotScale(index: Int, progress: Double) -> CGFloat {
-        let blend = triangleBlend(progress)
-        let wavePhase = progress * .pi * 4 - Double(index) * 0.62
-        let waveScale = 0.86 + 0.16 * (0.5 + 0.5 * sin(wavePhase))
-        let triangleScale = 0.92 + 0.08 * (0.5 + 0.5 * sin(progress * .pi * 2 + Double(index) * 0.42))
-        return CGFloat(waveScale * (1 - blend) + triangleScale * blend)
+        let phase = progress * .pi * 2 - Double(index) * 0.72
+        return CGFloat(0.92 + 0.12 * (0.5 + 0.5 * sin(phase)))
     }
 
     private func dotOpacity(index: Int, progress: Double) -> Double {
-        let blend = triangleBlend(progress)
-        let wavePhase = progress * .pi * 4 - Double(index) * 0.62
-        let waveOpacity = 0.68 + 0.32 * (0.5 + 0.5 * sin(wavePhase))
-        return waveOpacity * (1 - blend) + 0.92 * blend
-    }
-
-    private func triangleBlend(_ progress: Double) -> Double {
-        switch progress {
-        case ..<0.34:
-            return 0
-        case ..<0.54:
-            return smoothstep((progress - 0.34) / 0.20)
-        case ..<0.74:
-            return 1
-        case ..<0.94:
-            return 1 - smoothstep((progress - 0.74) / 0.20)
-        default:
-            return 0
-        }
+        let phase = progress * .pi * 2 - Double(index) * 0.72
+        return 0.74 + 0.26 * (0.5 + 0.5 * sin(phase))
     }
 
     private func smoothstep(_ value: Double) -> Double {
