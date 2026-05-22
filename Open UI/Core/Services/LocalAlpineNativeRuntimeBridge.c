@@ -398,6 +398,8 @@ static int boot_runtime(const char *root_archive_path, const char *workspace_pat
     char shared_path[4096];
     snprintf(shared_path, sizeof(shared_path), "%s/shared", workspace_path);
     ensure_directory(shared_path);
+    // Many shell snippets and tools assume /tmp exists.
+    generic_mkdirat(AT_PWD, "/tmp", 01777);
     generic_mkdirat(AT_PWD, "/mnt", 0755);
     generic_mkdirat(AT_PWD, "/mnt/iexa", 0755);
     do_mount(&realfs, shared_path, "/mnt/iexa", "", 0);
