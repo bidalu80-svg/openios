@@ -378,7 +378,7 @@ struct ModelSelectorSheet: View {
         } label: {
             HStack(spacing: 12) {
                 ModelAvatar(
-                    size: isSelected ? 35 : 36,
+                    size: isSelected ? 32 : 33,
                     imageURL: model.resolveAvatarURL(baseURL: serverBaseURL),
                     label: model.shortName,
                     authToken: authToken
@@ -442,7 +442,7 @@ struct ModelSelectorSheet: View {
         .listRowInsets(EdgeInsets())
         .listRowBackground(Color.clear)
         .listRowSeparatorTint(theme.divider.opacity(0.5))
-        .alignmentGuide(.listRowSeparatorLeading) { _ in 16 + 36 + 12 }
+        .alignmentGuide(.listRowSeparatorLeading) { _ in 16 + 33 + 12 }
     }
 
     @ViewBuilder
@@ -540,15 +540,15 @@ private struct EquatableModelRow: View, Equatable {
         if !isLast {
             Divider()
                 .background(theme.divider.opacity(0.5))
-                .padding(.leading, 16 + 36 + 12) // inset past avatar
+                .padding(.leading, 16 + 33 + 12) // inset past avatar
         }
     }
 
     private var rowContent: some View {
         HStack(spacing: 12) {
-            // Avatar — 36pt, no glow ring
+            // Avatar — compact, no glow ring
             ModelAvatar(
-                size: 36,
+                size: 33,
                 imageURL: model.resolveAvatarURL(baseURL: serverBaseURL),
                 label: model.shortName,
                 authToken: authToken

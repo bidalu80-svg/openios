@@ -40,7 +40,7 @@ struct ModelAvatar: View {
     }
 
     private var iexaAvatar: some View {
-        IexaLogoMark(size: size)
+        IexaGradientLogoMark(size: size)
     }
 
     private var shimmerPlaceholder: some View {
@@ -48,6 +48,37 @@ struct ModelAvatar: View {
             .fill(theme.shimmerBase)
             .frame(width: size, height: size)
             .shimmer()
+    }
+}
+
+// MARK: - Gradient Model Mark
+
+private struct IexaGradientLogoMark: View {
+    let size: CGFloat
+
+    private var gradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color(red: 0.10, green: 0.42, blue: 1.00),
+                Color(red: 0.36, green: 0.35, blue: 1.00),
+                Color(red: 0.04, green: 0.72, blue: 0.95)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    var body: some View {
+        Rectangle()
+            .fill(gradient)
+            .frame(width: size, height: size)
+            .mask {
+                Image("IexaLogoBlue")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size, height: size)
+            }
+            .accessibilityHidden(true)
     }
 }
 

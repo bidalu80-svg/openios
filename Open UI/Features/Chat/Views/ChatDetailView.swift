@@ -210,7 +210,13 @@ struct ChatDetailView: View {
     private var ambientBackgroundMode: ChatAmbientBackgroundMode {
         let isFirstTurn = viewModel.messages.count <= 2
         guard isFirstTurn else { return .normal }
-        return viewModel.isStreaming ? .activeFirstTurn : .idleFirstTurn
+        return hasActiveFirstTurnStream ? .activeFirstTurn : .idleFirstTurn
+    }
+
+    private var hasActiveFirstTurnStream: Bool {
+        viewModel.isStreaming
+            || viewModel.streamingStore.isActive
+            || viewModel.messages.last(where: { $0.role == .assistant })?.isStreaming == true
     }
 
     // MARK: - Body
@@ -627,7 +633,7 @@ struct ChatDetailView: View {
                     HStack(spacing: Spacing.xs) {
                         if let model = viewModel.selectedModel {
                             ModelAvatar(
-                                size: 24,
+                                size: 21,
                                 imageURL: viewModel.resolvedImageURL(for: model),
                                 label: model.shortName,
                                 authToken: viewModel.serverAuthToken
@@ -1006,7 +1012,7 @@ struct ChatDetailView: View {
 
     private var placeholderText: String {
         if let model = viewModel.selectedModel {
-            return "给 \(model.shortName) 发消息"
+            return "询问 \(model.shortName)"
         }
         return "发送消息"
     }
@@ -1568,10 +1574,10 @@ struct ChatDetailView: View {
         let model = resolveModel(for: message)
         return HStack(spacing: Spacing.sm) {
             if let m = model {
-                ModelAvatar(size: 25, imageURL: viewModel.resolvedImageURL(for: m),
+                ModelAvatar(size: 22, imageURL: viewModel.resolvedImageURL(for: m),
                             label: m.shortName, authToken: viewModel.serverAuthToken)
             } else {
-                ModelAvatar(size: 25, label: message.model)
+                ModelAvatar(size: 22, label: message.model)
             }
             Text(model?.shortName ?? message.model ?? String(localized: "Assistant"))
                 .scaledFont(size: 12, weight: .medium)
@@ -1888,14 +1894,14 @@ struct ChatDetailView: View {
                 ZStack {
                     if let model = viewModel.selectedModel {
                         ModelAvatar(
-                            size: 58,
+                            size: 55,
                             imageURL: viewModel.resolvedImageURL(for: model),
                             label: model.shortName,
                             authToken: viewModel.serverAuthToken
                         )
                         .transition(.scale.combined(with: .opacity))
                     } else {
-                        ModelAvatar(size: 58, label: nil)
+                        ModelAvatar(size: 55, label: nil)
                             .transition(.scale.combined(with: .opacity))
                     }
                 }
@@ -3838,7 +3844,7 @@ private struct ChatAmbientBackgroundView: View {
                 if reduceMotion {
                     activeGradient(phase: 0.22)
                 } else {
-                    TimelineView(.periodic(from: Date(), by: 1.0 / 12.0)) { timeline in
+                    TimelineView(.periodic(from: Date(), by: 1.0 / 18.0)) { timeline in
                         activeGradient(phase: phase(for: timeline.date))
                     }
                     .transition(.opacity)
@@ -3874,11 +3880,43 @@ private struct ChatAmbientBackgroundView: View {
 
     private func activeGradient(phase: CGFloat) -> some View {
         let angle = Double(phase) * .pi * 2
+        let colorAngle = Double(phase) * .pi * 2
+        let topColor = animatedColor(
+            red: 0.38, green: 0.88, blue: 0.76,
+            amplitude: (0.08, 0.06, 0.10),
+            angle: colorAngle,
+            offset: 0.0
+        )
+        let midColor = animatedColor(
+            red: 0.58, green: 0.83, blue: 1.00,
+            amplitude: (0.08, 0.07, 0.00),
+            angle: colorAngle,
+            offset: 1.8
+        )
+        let glowColor = animatedColor(
+            red: 0.88, green: 1.00, blue: 0.82,
+            amplitude: (0.08, 0.00, 0.08),
+            angle: colorAngle,
+            offset: 3.2
+        )
+        let mintGlow = animatedColor(
+            red: 0.46, green: 0.95, blue: 0.74,
+            amplitude: (0.09, 0.03, 0.09),
+            angle: colorAngle,
+            offset: 1.1
+        )
+        let blueGlow = animatedColor(
+            red: 0.46, green: 0.75, blue: 1.00,
+            amplitude: (0.06, 0.08, 0.00),
+            angle: colorAngle,
+            offset: 4.0
+        )
+
         return LinearGradient(
             colors: [
-                Color(red: 0.43, green: 0.88, blue: 0.78).opacity(theme.isDark ? 0.22 : 0.74),
-                Color(red: 0.61, green: 0.86, blue: 1.00).opacity(theme.isDark ? 0.20 : 0.70),
-                Color(red: 0.94, green: 1.00, blue: 0.86).opacity(theme.isDark ? 0.12 : 0.50),
+                topColor.opacity(theme.isDark ? 0.22 : 0.76),
+                midColor.opacity(theme.isDark ? 0.20 : 0.70),
+                glowColor.opacity(theme.isDark ? 0.12 : 0.50),
                 Color.white.opacity(theme.isDark ? 0.00 : 0.72)
             ],
             startPoint: UnitPoint(
@@ -3893,7 +3931,7 @@ private struct ChatAmbientBackgroundView: View {
         .overlay {
             RadialGradient(
                 colors: [
-                    Color(red: 0.50, green: 0.96, blue: 0.76).opacity(theme.isDark ? 0.18 : 0.34),
+                    mintGlow.opacity(theme.isDark ? 0.18 : 0.35),
                     Color.clear
                 ],
                 center: UnitPoint(
@@ -3907,7 +3945,7 @@ private struct ChatAmbientBackgroundView: View {
         .overlay {
             RadialGradient(
                 colors: [
-                    Color(red: 0.48, green: 0.77, blue: 1.00).opacity(theme.isDark ? 0.14 : 0.28),
+                    blueGlow.opacity(theme.isDark ? 0.14 : 0.30),
                     Color.clear
                 ],
                 center: UnitPoint(
@@ -3920,8 +3958,27 @@ private struct ChatAmbientBackgroundView: View {
         }
     }
 
+    private func animatedColor(
+        red: Double,
+        green: Double,
+        blue: Double,
+        amplitude: (Double, Double, Double),
+        angle: Double,
+        offset: Double
+    ) -> Color {
+        Color(
+            red: clampColor(red + amplitude.0 * sin(angle + offset)),
+            green: clampColor(green + amplitude.1 * sin(angle + offset + 1.7)),
+            blue: clampColor(blue + amplitude.2 * sin(angle + offset + 3.1))
+        )
+    }
+
+    private func clampColor(_ value: Double) -> Double {
+        min(1, max(0, value))
+    }
+
     private func phase(for date: Date) -> CGFloat {
-        let progress = date.timeIntervalSinceReferenceDate / 12
+        let progress = date.timeIntervalSinceReferenceDate / 15
         return CGFloat(progress - floor(progress))
     }
 }

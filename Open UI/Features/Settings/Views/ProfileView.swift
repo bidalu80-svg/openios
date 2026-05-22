@@ -77,12 +77,6 @@ struct ProfileView: View {
                 // Profile fields
                 profileSection
 
-                // Notifications
-                notificationsSection
-
-                // Security
-                securitySection
-
                 // Save button
                 saveButton
             }

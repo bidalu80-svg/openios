@@ -217,41 +217,39 @@ struct TypingIndicator: View {
                 )
             }
         }
-        .frame(width: 32, height: 22)
+        .frame(width: 34, height: 24)
     }
 
     private func progress(for date: Date) -> Double {
-        let period = 2.55
+        let period = 3.15
         let value = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
         return value < 0 ? value + 1 : value
     }
 
     private func dotPoint(index: Int, progress: Double) -> CGPoint {
         switch progress {
-        case ..<0.30:
+        case ..<0.34:
             return linePoint(index: index, progress: progress, waveAmount: 1)
-        case ..<0.44:
-            let t = smoothstep((progress - 0.30) / 0.14)
+        case ..<0.48:
+            let t = smoothstep((progress - 0.34) / 0.14)
             return interpolate(
                 linePoint(index: index, progress: progress, waveAmount: 1 - t),
                 trianglePoint(index),
                 t
             )
-        case ..<0.58:
-            return triangleStepPoint(index: index, progress: progress, start: 0.44, end: 0.58, step: 0)
-        case ..<0.72:
-            return triangleStepPoint(index: index, progress: progress, start: 0.58, end: 0.72, step: 1)
-        case ..<0.86:
-            return triangleStepPoint(index: index, progress: progress, start: 0.72, end: 0.86, step: 2)
-        case ..<0.96:
-            let t = smoothstep((progress - 0.86) / 0.10)
+        case ..<0.64:
+            return triangleStepPoint(index: index, progress: progress, start: 0.48, end: 0.64, step: 0)
+        case ..<0.80:
+            return triangleStepPoint(index: index, progress: progress, start: 0.64, end: 0.80, step: 1)
+        case ..<0.94:
+            return triangleStepPoint(index: index, progress: progress, start: 0.80, end: 0.94, step: 2)
+        default:
+            let t = smoothstep((progress - 0.94) / 0.06)
             return interpolate(
                 trianglePoint(index),
                 linePoint(index: index, progress: progress, waveAmount: t),
                 t
             )
-        default:
-            return linePoint(index: index, progress: progress, waveAmount: 1)
         }
     }
 
@@ -260,8 +258,8 @@ struct TypingIndicator: View {
         let to = trianglePoint((index + step + 1) % 3)
         let t = smoothstep((progress - start) / (end - start))
         let control = CGPoint(
-            x: CGFloat(index - 1) * 1.4,
-            y: CGFloat(step - 1) * 0.8
+            x: CGFloat(index - 1) * 0.8,
+            y: CGFloat(step - 1) * 0.45
         )
 
         return quadraticBezier(from: from, control: control, to: to, progress: t)
@@ -269,8 +267,8 @@ struct TypingIndicator: View {
 
     private func linePoint(index: Int, progress: Double, waveAmount: Double) -> CGPoint {
         let x = CGFloat(index - 1) * 9.2
-        let phase = progress * .pi * 2 - Double(index) * 0.74
-        let y = -sin(phase) * 3.2 * waveAmount
+        let phase = progress * .pi * 4 - Double(index) * 0.62
+        let y = -sin(phase) * 3.8 * waveAmount
         return CGPoint(x: x, y: CGFloat(y))
     }
 
