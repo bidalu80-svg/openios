@@ -207,6 +207,12 @@ struct ChatDetailView: View {
 
     private var _folderWorkspace: ChatFolder?
 
+    private var ambientBackgroundMode: ChatAmbientBackgroundMode {
+        let isFirstTurn = viewModel.messages.count <= 2
+        guard isFirstTurn else { return .normal }
+        return viewModel.isStreaming ? .activeFirstTurn : .idleFirstTurn
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -228,7 +234,7 @@ struct ChatDetailView: View {
         }
 
         let baseView = ZStack {
-            theme.background.ignoresSafeArea()
+            ChatAmbientBackgroundView(mode: ambientBackgroundMode)
             messageListArea
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -952,7 +958,6 @@ struct ChatDetailView: View {
                 }
             )
         }
-        .background(theme.background)
         .animation(.easeOut(duration: 0.2), value: vm.isShowingKnowledgePicker)
         .animation(.easeOut(duration: 0.15), value: vm.selectedKnowledgeItems.count)
         .animation(.easeOut(duration: 0.15), value: vm.selectedReferenceChats.count)
@@ -3804,6 +3809,120 @@ private struct IsolatedStreamingStatus: View {
                 .transition(.opacity)
             }
         }
+    }
+}
+
+private enum ChatAmbientBackgroundMode: Equatable {
+    case normal
+    case idleFirstTurn
+    case activeFirstTurn
+}
+
+private struct ChatAmbientBackgroundView: View {
+    let mode: ChatAmbientBackgroundMode
+
+    @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            theme.background
+
+            switch mode {
+            case .normal:
+                Color.clear
+            case .idleFirstTurn:
+                idleGradient
+                    .transition(.opacity)
+            case .activeFirstTurn:
+                if reduceMotion {
+                    activeGradient(phase: 0.22)
+                } else {
+                    TimelineView(.periodic(from: Date(), by: 1.0 / 12.0)) { timeline in
+                        activeGradient(phase: phase(for: timeline.date))
+                    }
+                    .transition(.opacity)
+                }
+            }
+        }
+        .ignoresSafeArea()
+        .animation(.easeInOut(duration: 0.35), value: mode)
+    }
+
+    private var idleGradient: some View {
+        LinearGradient(
+            colors: [
+                Color.clear,
+                Color(red: 0.94, green: 0.98, blue: 1.00).opacity(theme.isDark ? 0.08 : 0.32),
+                Color(red: 0.60, green: 0.82, blue: 1.00).opacity(theme.isDark ? 0.18 : 0.78)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .overlay(alignment: .bottomLeading) {
+            RadialGradient(
+                colors: [
+                    Color(red: 0.52, green: 0.77, blue: 1.00).opacity(theme.isDark ? 0.12 : 0.28),
+                    Color.clear
+                ],
+                center: .bottomLeading,
+                startRadius: 0,
+                endRadius: 420
+            )
+        }
+    }
+
+    private func activeGradient(phase: CGFloat) -> some View {
+        let angle = Double(phase) * .pi * 2
+        return LinearGradient(
+            colors: [
+                Color(red: 0.43, green: 0.88, blue: 0.78).opacity(theme.isDark ? 0.22 : 0.74),
+                Color(red: 0.61, green: 0.86, blue: 1.00).opacity(theme.isDark ? 0.20 : 0.70),
+                Color(red: 0.94, green: 1.00, blue: 0.86).opacity(theme.isDark ? 0.12 : 0.50),
+                Color.white.opacity(theme.isDark ? 0.00 : 0.72)
+            ],
+            startPoint: UnitPoint(
+                x: CGFloat(0.12 + 0.08 * cos(angle)),
+                y: CGFloat(0.02 + 0.06 * sin(angle * 0.75))
+            ),
+            endPoint: UnitPoint(
+                x: CGFloat(0.82 + 0.07 * sin(angle * 0.68)),
+                y: CGFloat(0.92 - 0.05 * cos(angle))
+            )
+        )
+        .overlay {
+            RadialGradient(
+                colors: [
+                    Color(red: 0.50, green: 0.96, blue: 0.76).opacity(theme.isDark ? 0.18 : 0.34),
+                    Color.clear
+                ],
+                center: UnitPoint(
+                    x: CGFloat(0.12 + 0.07 * sin(angle * 0.7)),
+                    y: CGFloat(0.05 + 0.05 * cos(angle * 0.9))
+                ),
+                startRadius: 8,
+                endRadius: 360
+            )
+        }
+        .overlay {
+            RadialGradient(
+                colors: [
+                    Color(red: 0.48, green: 0.77, blue: 1.00).opacity(theme.isDark ? 0.14 : 0.28),
+                    Color.clear
+                ],
+                center: UnitPoint(
+                    x: CGFloat(0.82 + 0.05 * cos(angle * 0.8)),
+                    y: CGFloat(0.10 + 0.05 * sin(angle))
+                ),
+                startRadius: 10,
+                endRadius: 420
+            )
+        }
+    }
+
+    private func phase(for date: Date) -> CGFloat {
+        let progress = date.timeIntervalSinceReferenceDate / 12
+        return CGFloat(progress - floor(progress))
     }
 }
 

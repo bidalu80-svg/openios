@@ -177,28 +177,96 @@ private struct UserBubbleShape: Shape {
 
 /// An animated typing indicator shown while the assistant is composing.
 struct TypingIndicator: View {
-    @State private var animate = false
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(spacing: 5) {
-            ForEach(0..<3, id: \.self) { i in
-                Circle()
-                    .fill(theme.textTertiary)
-                    .frame(width: 7, height: 7)
-                    .scaleEffect(animate ? 1.0 : 0.5)
-                    .opacity(animate ? 1.0 : 0.3)
-                    .animation(
-                        .easeInOut(duration: 0.6)
-                            .repeatForever()
-                            .delay(Double(i) * 0.2),
-                        value: animate
-                    )
+        Group {
+            if reduceMotion {
+                indicator(progress: 0.12)
+            } else {
+                TimelineView(.periodic(from: Date(), by: 1.0 / 20.0)) { timeline in
+                    indicator(progress: progress(for: timeline.date))
+                }
             }
         }
         .padding(.horizontal, Spacing.sm)
         .padding(.vertical, Spacing.sm)
-        .onAppear { animate = true }
+        .frame(width: 48, height: 30, alignment: .leading)
+    }
+
+    private func indicator(progress: Double) -> some View {
+        ZStack(alignment: .leading) {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .fill(theme.textPrimary)
+                    .frame(width: 5.5, height: 5.5)
+                    .opacity(dotOpacity(index: index, progress: progress))
+                    .scaleEffect(dotScale(index: index, progress: progress))
+                    .offset(dotOffset(index: index, progress: progress))
+            }
+        }
+        .frame(width: 30, height: 20, alignment: .leading)
+    }
+
+    private func progress(for date: Date) -> Double {
+        let period = 2.8
+        let value = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
+        return value < 0 ? value + 1 : value
+    }
+
+    private func dotOffset(index: Int, progress: Double) -> CGSize {
+        let blend = triangleBlend(progress)
+        let line = CGPoint(x: CGFloat(index) * 9.5, y: 0)
+        let triangle: [CGPoint] = [
+            CGPoint(x: 0, y: -4.6),
+            CGPoint(x: 8.8, y: 4.8),
+            CGPoint(x: 17.6, y: -4.6)
+        ]
+        let target = triangle[index]
+        let wavePhase = progress * .pi * 4 - Double(index) * 0.62
+        let waveY = -sin(wavePhase) * 3.8
+        let triangleBreath = sin(progress * .pi * 2 + Double(index) * 0.74) * 0.7
+
+        return CGSize(
+            width: line.x + (target.x - line.x) * blend,
+            height: waveY * (1 - blend) + target.y * blend + triangleBreath * blend
+        )
+    }
+
+    private func dotScale(index: Int, progress: Double) -> CGFloat {
+        let blend = triangleBlend(progress)
+        let wavePhase = progress * .pi * 4 - Double(index) * 0.62
+        let waveScale = 0.86 + 0.16 * (0.5 + 0.5 * sin(wavePhase))
+        let triangleScale = 0.92 + 0.08 * (0.5 + 0.5 * sin(progress * .pi * 2 + Double(index) * 0.42))
+        return CGFloat(waveScale * (1 - blend) + triangleScale * blend)
+    }
+
+    private func dotOpacity(index: Int, progress: Double) -> Double {
+        let blend = triangleBlend(progress)
+        let wavePhase = progress * .pi * 4 - Double(index) * 0.62
+        let waveOpacity = 0.68 + 0.32 * (0.5 + 0.5 * sin(wavePhase))
+        return waveOpacity * (1 - blend) + 0.92 * blend
+    }
+
+    private func triangleBlend(_ progress: Double) -> Double {
+        switch progress {
+        case ..<0.34:
+            return 0
+        case ..<0.54:
+            return smoothstep((progress - 0.34) / 0.20)
+        case ..<0.74:
+            return 1
+        case ..<0.94:
+            return 1 - smoothstep((progress - 0.74) / 0.20)
+        default:
+            return 0
+        }
+    }
+
+    private func smoothstep(_ value: Double) -> Double {
+        let t = min(1, max(0, value))
+        return t * t * (3 - 2 * t)
     }
 }
 
