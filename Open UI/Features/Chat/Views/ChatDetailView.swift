@@ -1583,7 +1583,6 @@ struct ChatDetailView: View {
     private func messageBubble(for message: ChatMessage, isLastAssistant: Bool) -> some View {
         if isLocalAlpineResultMessage(message) {
             LocalAlpineResultCard(
-                messageId: message.id,
                 content: message.content,
                 metadata: message.metadata,
                 isStreaming: message.isStreaming,
@@ -3834,7 +3833,7 @@ private struct ImageGenerationPlaceholderView: View {
             }
             .overlay {
                 shape
-                    .strokeBorder(Color.white.opacity(theme.isDark ? 0.10 : 0.46), lineWidth: 0.8)
+                    .strokeBorder(Color.white.opacity(theme.isDark ? 0.08 : 0.18), lineWidth: 0.75)
             }
             .aspectRatio(1, contentMode: .fit)
             .frame(maxWidth: 340)
@@ -3844,66 +3843,106 @@ private struct ImageGenerationPlaceholderView: View {
     }
 
     private func basePalette(phase: CGFloat) -> [Color] {
-        let hue = Double(phase)
         return [
-            Color(hue: hueOffset(hue, 0.54), saturation: 0.34, brightness: theme.isDark ? 0.72 : 1.00),
-            Color(hue: hueOffset(hue, 0.88), saturation: 0.30, brightness: theme.isDark ? 0.78 : 1.00),
-            Color(hue: hueOffset(hue, 0.12), saturation: 0.36, brightness: theme.isDark ? 0.76 : 1.00),
-            Color(hue: hueOffset(hue, 0.27), saturation: 0.28, brightness: theme.isDark ? 0.70 : 0.98),
-            Color(hue: hueOffset(hue, 0.67), saturation: 0.26, brightness: theme.isDark ? 0.74 : 1.00)
+            Color(red: 0.98, green: 0.92, blue: 0.68).opacity(theme.isDark ? 0.92 : 0.98),
+            Color(red: 0.79, green: 0.93, blue: 0.84).opacity(theme.isDark ? 0.88 : 0.96),
+            Color(red: 0.74, green: 0.88, blue: 1.00).opacity(theme.isDark ? 0.86 : 0.95),
+            Color(red: 0.92, green: 0.80, blue: 1.00).opacity(theme.isDark ? 0.90 : 0.97),
+            Color(red: 0.99, green: 0.83, blue: 0.91).opacity(theme.isDark ? 0.88 : 0.95)
         ]
     }
 
     private func backgroundFill(phase: CGFloat) -> LinearGradient {
         let angle = Double(phase) * .pi * 2
         return LinearGradient(
-            colors: basePalette(phase: phase).map { $0.opacity(theme.isDark ? 0.84 : 0.76) },
+            colors: basePalette(phase: phase).map { $0.opacity(theme.isDark ? 0.78 : 0.90) },
             startPoint: UnitPoint(
-                x: CGFloat(0.50 + 0.36 * cos(angle - 0.35)),
-                y: CGFloat(0.50 + 0.36 * sin(angle - 0.35))
+                x: CGFloat(0.10 + 0.12 * cos(angle - 0.45)),
+                y: CGFloat(0.12 + 0.10 * sin(angle - 0.25))
             ),
             endPoint: UnitPoint(
-                x: CGFloat(0.50 + 0.36 * cos(angle + .pi)),
-                y: CGFloat(0.50 + 0.36 * sin(angle + .pi))
+                x: CGFloat(0.92 - 0.10 * cos(angle + .pi * 0.65)),
+                y: CGFloat(0.90 - 0.12 * sin(angle + .pi * 0.50))
             )
         )
     }
 
     private func colorOverlay(phase: CGFloat) -> some View {
-        let cycle = Double(phase) * .pi * 2
-        let palette = basePalette(phase: phase).map {
-            $0.opacity(theme.isDark ? 0.48 : 0.46)
-        }
-        let angularCenter = UnitPoint(
-            x: CGFloat(0.50 + 0.14 * sin(cycle)),
-            y: CGFloat(0.48 + 0.12 * cos(cycle))
-        )
-        let highlightCenter = UnitPoint(
-            x: CGFloat(0.50 + 0.22 * cos(cycle + 0.65)),
-            y: CGFloat(0.46 + 0.18 * sin(cycle + 1.20))
-        )
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            let height = geometry.size.height
+            let shortEdge = min(width, height)
 
-        return ZStack {
-            AngularGradient(
-                gradient: Gradient(colors: palette),
-                center: angularCenter,
-                startAngle: .degrees(Double(phase) * 360),
-                endAngle: .degrees(Double(phase) * 360 + 360)
-            )
-            .blur(radius: 22)
-            .opacity(theme.isDark ? 0.70 : 0.82)
+            ZStack {
+                cloudBlob(
+                    color: Color(red: 0.98, green: 0.89, blue: 0.62),
+                    phase: phase,
+                    size: shortEdge * 1.05,
+                    baseX: 0.15,
+                    baseY: 0.18,
+                    xAmplitude: 0.10,
+                    yAmplitude: 0.07,
+                    speed: 0.82,
+                    offset: 0.10,
+                    in: geometry.size
+                )
 
-            RadialGradient(
-                colors: [
-                    Color.white.opacity(theme.isDark ? 0.12 : 0.22),
-                    Color.white.opacity(0.02)
-                ],
-                center: highlightCenter,
-                startRadius: 20,
-                endRadius: 260
-            )
+                cloudBlob(
+                    color: Color(red: 0.72, green: 0.87, blue: 1.00),
+                    phase: phase,
+                    size: shortEdge * 0.98,
+                    baseX: 0.73,
+                    baseY: 0.20,
+                    xAmplitude: 0.11,
+                    yAmplitude: 0.08,
+                    speed: 0.96,
+                    offset: 0.55,
+                    in: geometry.size
+                )
+
+                cloudBlob(
+                    color: Color(red: 0.90, green: 0.76, blue: 1.00),
+                    phase: phase,
+                    size: shortEdge * 1.08,
+                    baseX: 0.32,
+                    baseY: 0.72,
+                    xAmplitude: 0.13,
+                    yAmplitude: 0.11,
+                    speed: 0.88,
+                    offset: 0.82,
+                    in: geometry.size
+                )
+
+                cloudBlob(
+                    color: Color(red: 0.78, green: 0.97, blue: 0.86),
+                    phase: phase,
+                    size: shortEdge * 0.82,
+                    baseX: 0.82,
+                    baseY: 0.76,
+                    xAmplitude: 0.09,
+                    yAmplitude: 0.08,
+                    speed: 0.72,
+                    offset: 1.20,
+                    in: geometry.size
+                )
+
+                cloudBlob(
+                    color: Color(red: 0.99, green: 0.80, blue: 0.89),
+                    phase: phase,
+                    size: shortEdge * 0.72,
+                    baseX: 0.50,
+                    baseY: 0.48,
+                    xAmplitude: 0.06,
+                    yAmplitude: 0.05,
+                    speed: 0.66,
+                    offset: 0.42,
+                    in: geometry.size
+                )
+            }
+            .blur(radius: shortEdge * 0.065)
+            .saturation(theme.isDark ? 1.10 : 1.02)
+            .opacity(theme.isDark ? 0.92 : 0.98)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private func phase(for date: Date) -> CGFloat {
@@ -3911,9 +3950,61 @@ private struct ImageGenerationPlaceholderView: View {
         return CGFloat(progress - floor(progress))
     }
 
-    private func hueOffset(_ hue: Double, _ offset: Double) -> Double {
-        let value = hue + offset
-        return value - floor(value)
+    private func cloudBlob(
+        color: Color,
+        phase: CGFloat,
+        size: CGFloat,
+        baseX: CGFloat,
+        baseY: CGFloat,
+        xAmplitude: CGFloat,
+        yAmplitude: CGFloat,
+        speed: CGFloat,
+        offset: CGFloat,
+        in containerSize: CGSize
+    ) -> some View {
+        let center = cloudCenter(
+            phase: phase,
+            baseX: baseX,
+            baseY: baseY,
+            xAmplitude: xAmplitude,
+            yAmplitude: yAmplitude,
+            speed: speed,
+            offset: offset
+        )
+
+        return Circle()
+            .fill(
+                RadialGradient(
+                    colors: [
+                        color.opacity(theme.isDark ? 0.86 : 0.76),
+                        color.opacity(theme.isDark ? 0.30 : 0.20),
+                        color.opacity(0.0)
+                    ],
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: size * 0.52
+                )
+            )
+            .frame(width: size, height: size)
+            .position(x: containerSize.width * center.x, y: containerSize.height * center.y)
+    }
+
+    private func cloudCenter(
+        phase: CGFloat,
+        baseX: CGFloat,
+        baseY: CGFloat,
+        xAmplitude: CGFloat,
+        yAmplitude: CGFloat,
+        speed: CGFloat,
+        offset: CGFloat
+    ) -> CGPoint {
+        let angle = Double(phase * speed + offset) * .pi * 2
+        let x = baseX + xAmplitude * CGFloat(sin(angle))
+        let y = baseY + yAmplitude * CGFloat(cos(angle * 0.82 + 0.35))
+        return CGPoint(
+            x: min(0.94, max(0.06, x)),
+            y: min(0.94, max(0.06, y))
+        )
     }
 }
 
@@ -4320,26 +4411,22 @@ private struct IsolatedAssistantMessage: View {
 }
 
 private struct LocalAlpineResultCard: View {
-    let messageId: String
     let content: String
     let metadata: [String: String]?
     let isStreaming: Bool
     let statusHistory: [ChatStatusUpdate]
 
     @Environment(\.theme) private var theme
-    @AppStorage("localAlpineClosedWrittenFileCardKeys") private var closedWrittenFileCardKeysStorage = ""
     @State private var isExpanded = false
     private let writtenFiles: [LocalAlpineWrittenFile]
     private let commandResults: [LocalAlpineAgentCommandResult]
 
     init(
-        messageId: String,
         content: String,
         metadata: [String: String]?,
         isStreaming: Bool,
         statusHistory: [ChatStatusUpdate]
     ) {
-        self.messageId = messageId
         self.content = content
         self.metadata = metadata
         self.isStreaming = isStreaming
@@ -4381,10 +4468,6 @@ private struct LocalAlpineResultCard: View {
         max(0, writtenFiles.count - 4) + max(0, executableCommandResults.count - 5)
     }
 
-    private var isWrittenFilesCardClosed: Bool {
-        Set(closedWrittenFileCardKeysStorage.split(separator: "\n").map(String.init)).contains(messageId)
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Button {
@@ -4417,12 +4500,8 @@ private struct LocalAlpineResultCard: View {
                 activityLedger
             }
 
-            if !writtenFiles.isEmpty && !isWrittenFilesCardClosed {
-                LocalAlpineWrittenFilesCard(files: writtenFiles) {
-                    withAnimation(MicroAnimation.snappy) {
-                        closeWrittenFilesCard()
-                    }
-                }
+            if !writtenFiles.isEmpty {
+                LocalAlpineWrittenFilesCard(files: writtenFiles)
             }
 
             if isExpanded {
@@ -4513,200 +4592,96 @@ private struct LocalAlpineResultCard: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func closeWrittenFilesCard() {
-        var keys = closedWrittenFileCardKeysStorage
-            .split(separator: "\n")
-            .map(String.init)
-        if !keys.contains(messageId) {
-            keys.append(messageId)
-        }
-        if keys.count > 400 {
-            keys = Array(keys.suffix(400))
-        }
-        closedWrittenFileCardKeysStorage = keys.joined(separator: "\n")
-    }
 }
 
 private struct LocalAlpineWrittenFilesCard: View {
     let files: [LocalAlpineWrittenFile]
-    let onClose: () -> Void
 
     @Environment(\.theme) private var theme
-    @State private var selectedIndex = 0
     @State private var codeCache: [String: String] = [:]
     @State private var loadingPaths: Set<String> = []
-
-    init(files: [LocalAlpineWrittenFile], onClose: @escaping () -> Void) {
-        self.files = files
-        self.onClose = onClose
-        _selectedIndex = State(initialValue: max(0, files.count - 1))
-    }
-
-    private var selectedFile: LocalAlpineWrittenFile? {
-        guard !files.isEmpty else { return nil }
-        return files[min(selectedIndex, files.count - 1)]
-    }
-
-    private var title: String {
-        if files.count == 1 {
-            return selectedFile?.fileName ?? "已写入文件"
-        }
-        return "已写入 \(files.count) 个文件"
-    }
-
-    private var subtitle: String {
-        guard let selectedFile else { return "已写入文件" }
-        let lines = selectedFile.lineCount
-        if files.count == 1 {
-            return "\(selectedFile.path) · \(lines) 行 · \(selectedFile.byteCount) B"
-        }
-        return "\(selectedIndex + 1) / \(files.count) · \(selectedFile.path)"
-    }
-
-    private var displayCode: String {
-        guard let selectedFile else { return "" }
-        if let cached = codeCache[selectedFile.path], !cached.isEmpty {
-            return cached
-        }
-        return selectedFile.previewTailLines.joined(separator: "\n")
-    }
-
-    private var fencedCodeMarkdown: String {
-        guard let selectedFile else { return "" }
-        let code = displayCode
-        let fence = code.contains("```") ? "````" : "```"
-        let body = code.isEmpty ? " " : code
-        return "\(fence)\(selectedFile.language)\n\(body)\n\(fence)"
-    }
-
-    private var isLoadingCurrentFile: Bool {
-        guard let selectedFile else { return false }
-        return loadingPaths.contains(selectedFile.path)
-    }
+    @State private var previewItem: LocalAlpineWrittenFilePreviewItem?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            header
-            codePreview
-            if files.count > 1 {
-                filePager
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(files, id: \.path) { file in
+                fileCard(for: file)
             }
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.94))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.55 : 0.75), lineWidth: 0.8)
-        )
-        .task(id: selectedFile?.path) {
-            await ensureSelectedFileCodeLoaded()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .sheet(item: $previewItem) { item in
+            LocalAlpineWrittenFilePreviewSheet(item: item)
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "doc.text")
-                .scaledFont(size: 14, weight: .semibold)
-                .foregroundStyle(theme.brandPrimary)
+    private func fileCard(for file: LocalAlpineWrittenFile) -> some View {
+        Button {
+            openPreview(for: file)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "doc")
+                    .scaledFont(size: 24, weight: .semibold)
+                    .foregroundStyle(theme.brandPrimary)
+                    .frame(width: 46, height: 46)
+                    .background(theme.brandPrimary.opacity(theme.isDark ? 0.18 : 0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .scaledFont(size: 13, weight: .semibold)
-                    .foregroundStyle(theme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(subtitle)
-                    .scaledFont(size: 11, weight: .medium)
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(file.fileName)
+                        .scaledFont(size: 17, weight: .semibold)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(contentType(for: file))
+                        .scaledFont(size: 14, weight: .semibold)
+                        .foregroundStyle(theme.textSecondary.opacity(0.88))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 8)
+
+                if loadingPaths.contains(file.path) {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: "chevron.right")
+                        .scaledFont(size: 23, weight: .semibold)
+                        .foregroundStyle(theme.textSecondary.opacity(0.70))
+                }
             }
-
-            Spacer(minLength: 0)
-
-            if isLoadingCurrentFile {
-                ProgressView()
-                    .controlSize(.mini)
-            }
-
-            Button {
-                onClose()
-                Haptics.play(.light)
-            } label: {
-                Image(systemName: "xmark")
-                    .scaledFont(size: 11, weight: .semibold)
-                    .foregroundStyle(theme.textTertiary)
-                    .frame(width: 28, height: 30)
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private var codePreview: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            StreamingMarkdownView(
-                content: fencedCodeMarkdown,
-                isStreaming: false
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(theme.surfaceContainer.opacity(theme.isDark ? 0.74 : 0.96))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.48 : 0.62), lineWidth: 0.8)
             )
-
-            if isLoadingCurrentFile {
-                Text("正在加载完整代码，卡片会自动切回之前那套输出样式…")
-                    .scaledFont(size: 11, weight: .medium)
-                    .foregroundStyle(theme.textTertiary)
-                    .padding(.top, 2)
-            }
         }
-    }
-
-    private var filePager: some View {
-        HStack(spacing: 8) {
-            Button {
-                withAnimation(MicroAnimation.snappy) {
-                    selectedIndex = max(0, selectedIndex - 1)
-                }
-            } label: {
-                Image(systemName: "chevron.left")
-                    .scaledFont(size: 12, weight: .semibold)
-                    .frame(width: 30, height: 30)
-            }
-            .buttonStyle(.plain)
-            .disabled(selectedIndex == 0)
-
-            Text(selectedFile?.path ?? "")
-                .scaledFont(size: 11, weight: .medium, design: .monospaced)
-                .foregroundStyle(theme.textSecondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            Spacer(minLength: 0)
-
-            Button {
-                withAnimation(MicroAnimation.snappy) {
-                    selectedIndex = min(files.count - 1, selectedIndex + 1)
-                }
-            } label: {
-                Image(systemName: "chevron.right")
-                    .scaledFont(size: 12, weight: .semibold)
-                    .frame(width: 30, height: 30)
-            }
-            .buttonStyle(.plain)
-            .disabled(selectedIndex >= files.count - 1)
-        }
+        .buttonStyle(.plain)
+        .disabled(loadingPaths.contains(file.path))
     }
 
     @MainActor
-    private func ensureSelectedFileCodeLoaded() async {
-        guard let selectedFile else { return }
-        if codeCache[selectedFile.path] != nil || loadingPaths.contains(selectedFile.path) {
+    private func openPreview(for file: LocalAlpineWrittenFile) {
+        Haptics.play(.light)
+        if let cached = codeCache[file.path] {
+            previewItem = LocalAlpineWrittenFilePreviewItem(file: file, code: cached)
             return
         }
-        loadingPaths.insert(selectedFile.path)
-        let code = await loadFullCode(for: selectedFile)
-        codeCache[selectedFile.path] = code
-        loadingPaths.remove(selectedFile.path)
+        if loadingPaths.contains(file.path) {
+            return
+        }
+        loadingPaths.insert(file.path)
+        Task {
+            let code = await loadFullCode(for: file)
+            await MainActor.run {
+                codeCache[file.path] = code
+                loadingPaths.remove(file.path)
+                previewItem = LocalAlpineWrittenFilePreviewItem(file: file, code: code)
+            }
+        }
     }
 
     private func loadFullCode(for file: LocalAlpineWrittenFile) async -> String {
@@ -4716,6 +4691,116 @@ private struct LocalAlpineWrittenFilesCard: View {
         } catch {
             return file.previewTailLines.joined(separator: "\n")
         }
+    }
+
+    private func contentType(for file: LocalAlpineWrittenFile) -> String {
+        switch (file.fileName as NSString).pathExtension.lowercased() {
+        case "py":
+            return "text/x-python"
+        case "swift":
+            return "text/x-swift"
+        case "js":
+            return "text/javascript"
+        case "ts":
+            return "text/typescript"
+        case "json":
+            return "application/json"
+        case "yaml", "yml":
+            return "application/yaml"
+        case "xml":
+            return "application/xml"
+        case "html", "htm":
+            return "text/html"
+        case "css", "scss", "sh", "md", "txt", "toml", "ini", "cfg", "conf":
+            return "text/plain"
+        default:
+            return "application/octet-stream"
+        }
+    }
+}
+
+private struct LocalAlpineWrittenFilePreviewItem: Identifiable {
+    let file: LocalAlpineWrittenFile
+    let code: String
+
+    var id: String { file.path }
+}
+
+private struct LocalAlpineWrittenFilePreviewSheet: View {
+    let item: LocalAlpineWrittenFilePreviewItem
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+    @State private var copied = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                previewHeader
+                Divider()
+                GeometryReader { proxy in
+                    SourceCodeTextView(
+                        code: item.code,
+                        language: item.file.language,
+                        maxHeight: max(240, proxy.size.height),
+                        wrapLines: true
+                    )
+                }
+            }
+            .background(theme.background)
+            .navigationTitle(item.file.fileName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("完成") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        UIPasteboard.general.string = item.code
+                        Haptics.notify(.success)
+                        withAnimation(MicroAnimation.snappy) { copied = true }
+                        Task {
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                            await MainActor.run {
+                                withAnimation(MicroAnimation.snappy) { copied = false }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .scaledFont(size: 14, weight: .medium)
+                    }
+                }
+            }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private var previewHeader: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .scaledFont(size: 15, weight: .semibold)
+                .foregroundStyle(theme.brandPrimary)
+                .frame(width: 32, height: 32)
+                .background(theme.brandPrimary.opacity(theme.isDark ? 0.16 : 0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.file.path)
+                    .scaledFont(size: 12, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("\(item.file.lineCount) 行 · \(item.file.byteCount) B")
+                    .scaledFont(size: 11, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 }
 
