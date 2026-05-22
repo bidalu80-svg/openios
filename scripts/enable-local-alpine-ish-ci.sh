@@ -36,7 +36,7 @@ def insert_setting(block: str, setting: str) -> str:
         f'{setting_indent}INFOPLIST_KEY_CFBundleDisplayName = Iexa;\n',
         f'{setting_indent}IPHONEOS_DEPLOYMENT_TARGET = 18.1;\n',
         f'{setting_indent}LD_RUNPATH_SEARCH_PATHS = (\n',
-        f'{setting_indent}MARKETING_VERSION = 3.6;\n',
+        f'{setting_indent}MARKETING_VERSION = 3.7;\n',
     ):
         if anchor in block:
             return block.replace(anchor, setting + anchor, 1)
