@@ -381,14 +381,8 @@ struct LocalAlpineTerminalConsoleView: View {
 
     private func sanitizedInlineCommandText(_ text: String) -> String {
         text
-            .replacingOccurrences(
-                of: #"\\[ \t]*\r?\n[ \t]*"#,
-                with: " ",
-                options: .regularExpression
-            )
-            .replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
     }
 
     private func cancelCurrentInput() {
