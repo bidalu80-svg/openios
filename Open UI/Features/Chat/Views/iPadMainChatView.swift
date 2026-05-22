@@ -50,6 +50,9 @@ struct iPadMainChatView: View {
     /// Whether the local Alpine terminal is visible.
     @State private var showLocalAlpineTerminal = false
 
+    /// Whether the local Alpine workspace file browser is visible.
+    @State private var showLocalWorkspaceBrowser = false
+
     /// Whether the automations sheet is visible.
     @State private var showAutomations = false
 
@@ -346,6 +349,14 @@ struct iPadMainChatView: View {
             }
             .preferredColorScheme(.dark)
         }
+        // Local Alpine workspace browser
+        .sheet(isPresented: $showLocalWorkspaceBrowser) {
+            LocalWorkspaceFileBrowserView()
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(24)
+        }
         // Automations sheet
         .sheet(isPresented: $showAutomations) {
             AutomationsListView()
@@ -379,6 +390,7 @@ struct iPadMainChatView: View {
             showMemories: $showMemories,
             showCalendar: $showCalendar,
             showLocalAlpineTerminal: $showLocalAlpineTerminal,
+            showLocalWorkspaceBrowser: $showLocalWorkspaceBrowser,
             showAutomations: $showAutomations,
             showAdminConsole: $showAdminConsole,
             showDeleteAllConfirmation: $showDeleteAllConfirmation,
@@ -728,6 +740,7 @@ struct iPadSidebarContent: View {
     @Binding var showMemories: Bool
     @Binding var showCalendar: Bool
     @Binding var showLocalAlpineTerminal: Bool
+    @Binding var showLocalWorkspaceBrowser: Bool
     @Binding var showAutomations: Bool
     @Binding var showAdminConsole: Bool
     @Binding var showDeleteAllConfirmation: Bool
@@ -1659,6 +1672,10 @@ struct iPadSidebarContent: View {
                         Button { showCalendar = true } label: {
                             Label("日历", systemImage: "calendar")
                         }
+                    }
+
+                    Button { showLocalWorkspaceBrowser = true } label: {
+                        Label("浏览文件", systemImage: "folder")
                     }
 
                     Button { showLocalAlpineTerminal = true } label: {

@@ -35,6 +35,9 @@ struct MainChatView: View {
     /// Controls the local Alpine terminal presentation.
     @State private var showLocalAlpineTerminal = false
 
+    /// Controls the local Alpine workspace file browser presentation.
+    @State private var showLocalWorkspaceBrowser = false
+
     /// Controls the automations sheet presentation.
     @State private var showAutomations = false
 
@@ -702,6 +705,14 @@ struct MainChatView: View {
                     showLocalAlpineTerminal = false
                 }
                 .preferredColorScheme(.dark)
+            }
+            // Local Alpine workspace browser
+            .sheet(isPresented: $showLocalWorkspaceBrowser) {
+                LocalWorkspaceFileBrowserView()
+                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+                    .presentationCornerRadius(24)
             }
             // Automations sheet
             .sheet(isPresented: $showAutomations) {
@@ -2659,6 +2670,13 @@ struct MainChatView: View {
                         } label: {
                             Label("日历", systemImage: "calendar")
                         }
+                    }
+
+                    Button {
+                        closeDrawer()
+                        showLocalWorkspaceBrowser = true
+                    } label: {
+                        Label("浏览文件", systemImage: "folder")
                     }
 
                     Button {

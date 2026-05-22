@@ -58,13 +58,14 @@ actor LocalAlpineTerminalService {
         LocalAlpineNativeRuntime.shared.interrupt()
     }
 
-    func listFiles(path: String) async throws -> [TerminalFileItem] {
+    func listFiles(path: String, includeHidden: Bool = false) async throws -> [TerminalFileItem] {
         let root = try ensureSharedWorkspaceDirectory()
         let directory = try resolve(path: path, root: root, allowRoot: true)
+        let options: FileManager.DirectoryEnumerationOptions = includeHidden ? [] : [.skipsHiddenFiles]
         let urls = try fileManager.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey],
-            options: [.skipsHiddenFiles]
+            options: options
         )
 
         let basePath = normalizedTerminalPath(path)
