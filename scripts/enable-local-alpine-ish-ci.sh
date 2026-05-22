@@ -34,6 +34,7 @@ def format_array_setting(key: str, values: list[str]) -> str:
 def insert_setting(block: str, setting: str) -> str:
     for anchor in (
         f'{setting_indent}INFOPLIST_KEY_CFBundleDisplayName = Iexa;\n',
+        f'{setting_indent}CURRENT_PROJECT_VERSION = 4;\n',
         f'{setting_indent}IPHONEOS_DEPLOYMENT_TARGET = 18.1;\n',
         f'{setting_indent}LD_RUNPATH_SEARCH_PATHS = (\n',
         f'{setting_indent}MARKETING_VERSION = 3.7;\n',

@@ -41,6 +41,7 @@ actor LocalAlpineTerminalService {
     private let rootVersionFileName = ".iexa-rootfs-version"
     private let workspaceFolderName = "Iexa Alpine"
     private let sharedFolderName = "shared"
+    private let maximumInlineRuntimeCommandBytes = 3_072
 
     private init() {}
 
@@ -187,14 +188,18 @@ actor LocalAlpineTerminalService {
         let runtimeCommand = stdinInput.map {
             wrappedCommandForInteractiveInput(command: bootstrappedCommand, stdinInput: $0)
         } ?? bootstrappedCommand
+        let materialized = await materializedRuntimeCommandIfNeeded(runtimeCommand)
         let result = await LocalAlpineNativeRuntime.shared.execute(
             LocalAlpineNativeCommand(
-                command: runtimeCommand,
+                command: materialized.command,
                 cwd: runtimeCWD,
                 rootArchiveURL: runtimeRootFSURL,
                 workspaceURL: workspaceURL
             )
         )
+        if let cleanupPath = materialized.cleanupPath {
+            try? await deleteItem(path: cleanupPath)
+        }
         return LocalAlpineCommandResult(command: trimmed, output: result.output, exitCode: result.exitCode, interactiveRequest: nil)
     }
 
@@ -316,6 +321,34 @@ actor LocalAlpineTerminalService {
     private func normalizedRuntimePath(_ rawPath: String) -> String {
         let hostPath = normalizedTerminalPath(rawPath)
         return hostPath == "/" ? "/mnt/iexa" : "/mnt/iexa\(hostPath)"
+    }
+
+    private func runtimePath(forSharedPath rawPath: String) -> String {
+        let hostPath = normalizedTerminalPath(rawPath)
+        return hostPath == "/" ? "/mnt/iexa" : "/mnt/iexa\(hostPath)"
+    }
+
+    private func materializedRuntimeCommandIfNeeded(_ command: String) async -> (command: String, cleanupPath: String?) {
+        guard command.utf8.count > maximumInlineRuntimeCommandBytes else {
+            return (command, nil)
+        }
+
+        guard let data = (command + "\n").data(using: .utf8) else {
+            let message = "Local Alpine command is too long and could not be encoded as UTF-8."
+            return ("printf '%s\\n' \(shellSingleQuoted(message)) >&2\nexit 125", nil)
+        }
+
+        let scriptPath = "/.iexa-terminal-scripts/command-\(UUID().uuidString).sh"
+        let split = splitFilePath(scriptPath)
+        do {
+            try await writeFile(data: data, fileName: split.fileName, destinationPath: split.directory)
+            logger.info("Materialized long Local Alpine command into temporary script: \(scriptPath, privacy: .public)")
+            return ("/bin/sh \(shellSingleQuoted(runtimePath(forSharedPath: scriptPath)))", scriptPath)
+        } catch {
+            logger.error("Failed to materialize long Local Alpine command: \(error.localizedDescription, privacy: .public)")
+            let message = "Local Alpine command is too long and could not be written to a temporary script: \(error.localizedDescription)"
+            return ("printf '%s\\n' \(shellSingleQuoted(message)) >&2\nexit 125", nil)
+        }
     }
 
     private func compatibilityCommand(for command: String) -> String {
@@ -496,6 +529,14 @@ actor LocalAlpineTerminalService {
 
     private func shellSingleQuoted(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    private func splitFilePath(_ rawPath: String) -> (directory: String, fileName: String) {
+        let normalized = normalizedTerminalPath(rawPath)
+        let nsPath = normalized as NSString
+        let directory = nsPath.deletingLastPathComponent
+        let fileName = nsPath.lastPathComponent
+        return (directory.isEmpty ? "/" : directory, fileName)
     }
 
     private func sanitizedFileName(_ rawName: String) throws -> String {

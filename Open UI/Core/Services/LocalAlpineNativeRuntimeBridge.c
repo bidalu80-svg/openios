@@ -503,8 +503,18 @@ char *iexa_local_alpine_execute(
     }
 
     const char *shell = "/bin/sh";
+    const char *safe_command = command != NULL ? command : "";
     char argv[8192];
-    snprintf(argv, sizeof(argv), "%s%c-c%c%s%c%c", shell, '\0', '\0', command != NULL ? command : "", '\0', '\0');
+    size_t argv_required = strlen(shell) + strlen("-c") + strlen(safe_command) + 4;
+    if (argv_required >= sizeof(argv)) {
+        if (exit_code != NULL) {
+            *exit_code = 125;
+        }
+        exit_hook = NULL;
+        pthread_mutex_unlock(&runtime_lock);
+        return iexa_dup_output("Local Alpine inline command is too long; write it to a script file and execute the file instead.\n");
+    }
+    snprintf(argv, sizeof(argv), "%s%c-c%c%s%c%c", shell, '\0', '\0', safe_command, '\0', '\0');
     char envp[1024];
     envp[0] = '\0';
     size_t envp_offset = 0;
