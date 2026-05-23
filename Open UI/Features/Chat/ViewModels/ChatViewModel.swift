@@ -356,7 +356,7 @@ final class ChatViewModel {
     private var localAlpineContinuationParentIds: Set<String> = []
     private var localAlpineFinishedContinuationMessageIds: Set<String> = []
     private let localAlpineAgentMaxSteps = 10
-    private let localAlpineContinuationMaxNoCommandRetries = 3
+    private let localAlpineContinuationMaxNoCommandRetries = 2
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     @ObservationIgnored private var localAlpineInputContinuation: CheckedContinuation<String?, Never>?
@@ -1304,6 +1304,16 @@ final class ChatViewModel {
             || message.model == "Local Native"
     }
 
+    private static let localAlpineEnvironmentProfile = """
+        Local Alpine environment profile:
+        - Runtime is the app-bundled Alpine Linux rootfs under iSH/x86 usermode, not the iOS host shell.
+        - Default workspace is `/mnt/iexa`; relative paths should be created and run there.
+        - Shell is POSIX `sh`/BusyBox `ash`; package manager is `apk`.
+        - The rootfs may already contain developer tools such as `gcc`, `g++`, `make`, `cmake`, `pkgconf`, Python, and common archive/network tools. Trust prior Local Alpine observations in this chat instead of re-running the same generic probe.
+        - For C/C++ tasks, prefer writing the requested source/project and compiling/running it directly. Only install or diagnose packages after a real `command not found`, missing header, linker, or package error.
+        - Never execute a bare domain or prose as a shell command. Use `curl`/`wget` for URLs and `command -v`/`apk info` only as focused diagnostics.
+        """
+
     private static func localAlpineExecutionStateSystemContext(from messages: [ChatMessage]) -> String? {
         let alpineMessages = messages.filter { isLocalAlpineAgentResult($0) }
         let latestUserGoal = messages.last(where: {
@@ -1317,15 +1327,19 @@ final class ChatViewModel {
             Current user goal:
             \(indentForSystemContext(clippedForSystemContext(latestUserGoal ?? "（未提供）", maxCharacters: 1_500)))
 
+            \(localAlpineEnvironmentProfile)
+
             First-turn bootstrap policy:
-            - You already know the static environment: Alpine 3.19.x x86/iSH, POSIX sh/ash, working directory `/mnt/iexa`, package manager `apk`, lightweight rootfs.
-            - If the task depends on runtimes, packages, compilers, current files, or previous generated files, first get a small real environment snapshot and workspace listing, then continue from that observation.
-            - If the user gave an explicit simple file operation target, you may combine the operation with a minimal `pwd`/`ls` verification instead of running a separate bootstrap.
+            - Do not spend a turn only restating that you will inspect the environment. If inspection is needed, emit the actual `iexa_alpine` block immediately.
+            - If the task depends on unknown current files, first get a small workspace listing, then continue from that observation.
+            - If the task depends on compilers or packages, use a focused probe once. For C++ this means `command -v g++ make cmake pkgconf` and optionally `apk info build-base gcc g++ musl-dev cmake make pkgconf`.
+            - If the user asked to write/create/build/run code, combine file creation plus compile/run verification in the first useful tool call when practical. Do not stop after a dependency probe if the required tools are present.
+            - If the user gave an explicit simple file operation target, combine the operation with a minimal `pwd`/`ls` verification instead of running a separate bootstrap.
             - If the user asks to run/test/build/fix/install/read/write/delete/search, this is an operation request, not a request for advice. Emit one executable `iexa_alpine` block; do not ask the user to run commands manually.
             - For "run this code" follow-ups, use the latest runnable code block, write it under `/mnt/iexa`, run the matching interpreter/compiler, and summarize the real output.
             - Do not ask the user how to operate the environment. Use one fenced `iexa_alpine` block as the first tool_use.
 
-            Preferred first tool_use shape when environment knowledge is needed:
+            Preferred first tool_use shape only when broad environment knowledge is truly needed and has not already been observed:
             ```iexa_alpine
             set -u
             printf '== alpine ==\\n'
@@ -1436,12 +1450,15 @@ final class ChatViewModel {
         [Local Alpine execution state]
         The iOS host app simulates a Codex CLI tool loop. A fenced `iexa_alpine` block is the local tool_use, and each Local Alpine result below is the tool_result/observation. This state is real host-side execution state, even if the command block itself is no longer visible in chat.
 
+        \(localAlpineEnvironmentProfile)
+
         \(blocks.joined(separator: "\n\n"))
 
         Rules for this state:
         - If state is running, tell the user the Local Alpine command is still running or ask whether to stop it; do not apologize that no executable block was emitted.
         - If result output is present, answer from that output as the source of truth.
         - Follow controller_verdict: `needs_next_tool_*` means continue with exactly one new `iexa_alpine` block; `ready_for_final_summary` means stop tool use and summarize; `tool_running` means wait or report running status.
+        - If prior observations already prove a tool/package exists, do not repeat a generic environment probe. Move to the user's concrete task.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
         - If the latest result contains Python IndentationError or SyntaxError, emit one complete corrected Python file through byte-preserving `iexa_alpine` JSON `write_files`, then run a bounded verification command. Keep the file body complete and exact; do not repeat only the same failed command.
@@ -12524,7 +12541,7 @@ final class ChatViewModel {
         ```text
         IEXA_AGENT_KICKOFF
         \(reason)
-        NEXT_ACTION_REQUIRED: You must emit exactly one fenced iexa_alpine block now. Do not explain commands for the user to run manually. For environment/dependency inspection, execute commands such as uname, cat /etc/alpine-release, apk --version, apk info, command -v python3 node npm gcc g++ git curl wget, and ls -la /mnt/iexa. For action requests, follow the user's verb: read/list/search/create/write/delete/fix/run/test/build/install, then verify from real output.
+        NEXT_ACTION_REQUIRED: You must emit exactly one fenced iexa_alpine block now. Do not answer with only a plan such as "I will inspect" or "I will start". Do not explain commands for the user to run manually. Use prior Local Alpine observations as cached environment facts; do not repeat the same generic environment probe if tools were already found. For focused environment/dependency inspection, execute one bounded command such as command -v python3 node npm gcc g++ make cmake pkgconf git curl wget; apk info build-base gcc g++ musl-dev cmake make pkgconf; ls -la /mnt/iexa. For action requests, follow the user's verb: read/list/search/create/write/delete/fix/run/test/build/install, then verify from real output.
         If the user asked to run this/above/recent code, extract the most recent runnable fenced code block from the conversation, write it into /mnt/iexa with JSON write_files, then execute it. Never simulate code output.
         ```
         """
@@ -13389,9 +13406,9 @@ final class ChatViewModel {
 
         let rawContent = content
         if !isFinalSummary,
-           Self.isLocalAlpineManualRunOrRefusalResponse(rawContent),
            parentNeedsFollowUp,
            let parentResultId,
+           !Self.contentContainsLocalAlpineInstruction(rawContent),
            localAlpineNoCommandContinuationRetries < localAlpineContinuationMaxNoCommandRetries {
             localAlpineNoCommandContinuationRetries += 1
             localAlpineAgentStopRequested = false
@@ -13399,7 +13416,9 @@ final class ChatViewModel {
             localAlpineContinuationParentIds.remove(parentResultId)
             let correctionId = appendLocalAlpineProtocolCorrectionResult(
                 parentId: assistantMessageId,
-                reason: "The assistant told the user to run commands manually instead of using the Local Alpine executor."
+                reason: Self.isLocalAlpineManualRunOrRefusalResponse(rawContent)
+                    ? "The assistant told the user to run commands manually instead of using the Local Alpine executor."
+                    : "The assistant described a plan for Local Alpine work but did not emit an executable iexa_alpine block."
             )
             updateAssistantMessage(
                 id: assistantMessageId,
@@ -13773,6 +13792,9 @@ final class ChatViewModel {
         let instruction = """
         [Local Alpine continuation]
         You are in a continuous Local Alpine agent loop. Read the latest real Local Alpine result above.
+
+        \(localAlpineEnvironmentProfile)
+
         Loop Runtime:
         - Operate like Codex CLI: plan internally, execute exactly one bounded next step, observe the real result, repair if needed, verify, then summarize only when the user goal is actually done.
         - The previous `iexa_alpine` block is the tool_use and the latest Local Alpine result is the tool_result. Continue exactly like a tool-driven coding agent: observe, choose the next smallest useful tool call, execute, observe again.
@@ -13788,6 +13810,8 @@ final class ChatViewModel {
         - Before the block, write at most one short visible sentence naming the current step. Do not reveal detailed hidden reasoning.
         Iexa Environment:
         - `/mnt/iexa` is the user workspace. Relative files live there. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, and `/var` are system paths and should normally be inspected, not edited directly.
+        - Cache what the latest Local Alpine observations already proved. If `gcc`, `g++`, `make`, `cmake`, or `pkgconf` were just found or listed as installed, do not probe them again in the same task.
+        - For C++ create/build/run requests, move from confirmed toolchain state to creating source files and compiling/running them. Do not answer only with dependency commentary unless the user asked only for dependency commentary.
         - If the latest output shows missing runtime/compiler/package, install the smallest needed Alpine package and then continue to the user's requested operation.
         - If the latest output only proves environment state, package status, or file listing, decide the next actual operation from the original user goal instead of treating the observation as done.
         - If the user asks "为什么", "这是什么问题", or similar after an error, explain the latest observation and wait. If the user says "修", "继续", "跑", "执行", or "重新", resume with the next `iexa_alpine` step.
@@ -13805,6 +13829,7 @@ final class ChatViewModel {
         Retry:
         - If the last command failed, inspect the exit code/output first, then emit a different bounded diagnostic or fix command before rerunning verification.
         - Retry only after changing something meaningful: edited file, installed a dependency that was proven missing, changed cwd, changed command arguments, or gathered new diagnostics.
+        - Do not emit the same command twice in one `iexa_alpine` response.
         - If the last output contains `IEXA_AGENT_KICKOFF` or `NEXT_ACTION_REQUIRED`, it means the app routed an explicit local task to you but your previous answer did not include an executable block. Your next response must emit one concrete `iexa_alpine` block with `write_files` and/or `command` for the user's request.
         - For "运行这段代码" / "run this code" follow-ups, do not answer with simulated output. Find the latest runnable fenced code block in conversation context, save it under `/mnt/iexa`, run it with the right interpreter/compiler, then continue from the real output.
         Stuck Detection:

@@ -348,8 +348,10 @@ actor LocalAlpineAgentService {
             return LocalAlpineAgentResult(didExecute: false, summary: lines.joined(separator: "\n"), interactiveRequest: nil)
         }
 
-        let trimmedCommands = Array(commands.prefix(maxCommandsPerResponse))
-        let skippedCount = max(0, commands.count - trimmedCommands.count)
+        let uniqueCommands = Self.deduplicatedCommands(commands, defaultCWD: defaultCWD)
+        let duplicateCount = max(0, commands.count - uniqueCommands.count)
+        let trimmedCommands = Array(uniqueCommands.prefix(maxCommandsPerResponse))
+        let skippedCount = max(0, uniqueCommands.count - trimmedCommands.count)
         var commandResults: [LocalAlpineAgentCommandResult] = []
         var writtenFiles: [LocalAlpineWrittenFile] = []
         var editedFilePaths = Set<String>()
@@ -476,6 +478,9 @@ actor LocalAlpineAgentService {
         if skippedCount > 0 {
             lines.append("- 已跳过 \(skippedCount) 条多余命令，避免一次执行过多。")
         }
+        if duplicateCount > 0 {
+            lines.append("- 已跳过 \(duplicateCount) 条重复命令，避免同一批工具调用重复执行。")
+        }
 
         return LocalAlpineAgentResult(
             didExecute: true,
@@ -494,6 +499,41 @@ actor LocalAlpineAgentService {
             let command = result.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return command != "write_files"
         }.count
+    }
+
+    private nonisolated static func deduplicatedCommands(
+        _ commands: [LocalAlpineAgentCommand],
+        defaultCWD: String
+    ) -> [LocalAlpineAgentCommand] {
+        var seen = Set<String>()
+        var deduplicated: [LocalAlpineAgentCommand] = []
+        for command in commands {
+            let key = commandDedupeKey(command, defaultCWD: defaultCWD)
+            guard seen.insert(key).inserted else { continue }
+            deduplicated.append(command)
+        }
+        return deduplicated
+    }
+
+    private nonisolated static func commandDedupeKey(
+        _ command: LocalAlpineAgentCommand,
+        defaultCWD: String
+    ) -> String {
+        let cwd = (command.cwd ?? defaultCWD)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let shell = (command.command ?? "")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let files = command.writeFiles
+            .map { file in
+                let path = file.path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                return "\(path):\(file.content.hashValue):\(file.source.displayName)"
+            }
+            .joined(separator: "|")
+        return "\(cwd)\n\(shell)\n\(files)"
     }
 
     private nonisolated static func commandResult(
@@ -1473,19 +1513,19 @@ actor LocalAlpineAgentService {
     }
 }
 
-private struct LocalAlpineAgentCommand {
+private struct LocalAlpineAgentCommand: Sendable {
     let command: String?
     let cwd: String?
     let writeFiles: [LocalAlpineAgentFile]
 }
 
-private struct LocalAlpineAgentFile {
+private struct LocalAlpineAgentFile: Sendable {
     let path: String
     let content: String
     let source: LocalAlpineAgentFileSource
 }
 
-private enum LocalAlpineAgentFileSource: Equatable {
+private enum LocalAlpineAgentFileSource: Equatable, Sendable {
     case content
     case codeLines
     case contentLines
