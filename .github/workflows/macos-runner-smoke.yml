@@ -2,6 +2,9 @@ name: macOS Runner Smoke
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/unsigned-local-alpine-f9d8bcf
 
 permissions:
   contents: read
