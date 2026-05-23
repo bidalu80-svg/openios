@@ -1,5 +1,39 @@
 import SwiftUI
 
+private struct IexaToolbarGlassBackground: ViewModifier {
+    @Environment(\.theme) private var theme
+
+    let cornerRadius: CGFloat
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content
+        } else {
+            content
+                .background {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                .fill(theme.cardBackground.opacity(theme.isDark ? 0.16 : 0.34))
+                        }
+                        .overlay {
+                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                .strokeBorder(Color.white.opacity(theme.isDark ? 0.18 : 0.58), lineWidth: 0.6)
+                        }
+                        .shadow(color: Color.black.opacity(theme.isDark ? 0.24 : 0.08), radius: 12, x: 0, y: 6)
+                }
+        }
+    }
+}
+
+extension View {
+    func iexaToolbarGlass(cornerRadius: CGFloat = 18) -> some View {
+        modifier(IexaToolbarGlassBackground(cornerRadius: cornerRadius))
+    }
+}
+
 struct NewConversationIcon: View {
     let size: CGFloat
 

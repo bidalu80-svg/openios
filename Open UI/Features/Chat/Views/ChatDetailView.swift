@@ -595,6 +595,7 @@ struct ChatDetailView: View {
                     .scaledFont(size: 13, weight: .medium)
                     .foregroundStyle((viewModel.conversation?.chatParams != nil || viewModel.pendingChatParams != nil) ? theme.brandPrimary : theme.textTertiary)
                     .frame(width: 34, height: 34)
+                    .iexaToolbarGlass(cornerRadius: 17)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -608,6 +609,7 @@ struct ChatDetailView: View {
                 } label: {
                     TemporaryChatIcon(isEnabled: viewModel.isTemporaryChat, size: 20)
                         .frame(width: 34, height: 34)
+                        .iexaToolbarGlass(cornerRadius: 17)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -655,14 +657,7 @@ struct ChatDetailView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                     .frame(minHeight: 40)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(theme.cardBackground.opacity(0.9))
-                    )
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.5)
-                    )
+                    .iexaToolbarGlass(cornerRadius: 22)
                     .clipShape(Capsule(style: .continuous))
                 }
                 .buttonStyle(.plain)
