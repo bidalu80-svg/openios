@@ -1304,6 +1304,21 @@ final class ChatViewModel {
             || message.model == "Local Native"
     }
 
+    private static let localAlpineLanguageDependencyPlaybook = """
+        Local Alpine language/dependency playbook:
+        - General rule: do not reinstall or re-probe tools already proven present by earlier Local Alpine output in this chat. Use focused checks only for unknown or failed dependencies.
+        - Python: `python3`; package `python3`; pip package `py3-pip`. For projects use `requirements.txt`, then `pyproject.toml`/`setup.py`. Verify with `python3 -m py_compile <file>` and then `python3 <file>`.
+        - Node/JavaScript/TypeScript: `node`; packages `nodejs npm`. If `package.json` exists, run `npm install` before `npm test`/`npm run ...`. Simple `.js` runs with `node file.js`; TypeScript can use `npx --yes tsx file.ts` after npm is available.
+        - C: package `build-base`; compile single files with `gcc -O2 -Wall file.c -o app && ./app`.
+        - C++: package `build-base`; add `cmake`/`pkgconf` only for CMake/pkg-config projects. Compile single files with `g++ -std=c++17 -O2 -Wall file.cpp -o app && ./app`.
+        - CMake/Make: packages `build-base cmake make pkgconf`; configure under `build/`, then `cmake --build build` or `make`.
+        - Go: package `go`; if `go.mod` exists run `go mod download` then `go run .` or `go test ./...`; single file uses `go run file.go`.
+        - Rust: packages `rust cargo`; Cargo projects use `cargo fetch`, `cargo run`, or `cargo test`; single `.rs` can use `rustc file.rs -o app && ./app`.
+        - Java: package `openjdk17`; single file uses `javac File.java && java File`; Maven/Gradle projects need `maven`/`gradle` only when `pom.xml` or Gradle files exist.
+        - Lua/Ruby/PHP/Perl: packages `lua5.4`, `ruby`, `php`, `perl`; install only if the interpreter is missing.
+        - Native library headers: install `linux-headers`, `openssl-dev`, `zlib-dev`, `libffi-dev`, or similar only after the compiler output names a missing header/library.
+        """
+
     private static let localAlpineEnvironmentProfile = """
         Local Alpine environment profile:
         - Runtime is the app-bundled Alpine Linux rootfs under iSH/x86 usermode, not the iOS host shell.
@@ -1328,6 +1343,8 @@ final class ChatViewModel {
             \(indentForSystemContext(clippedForSystemContext(latestUserGoal ?? "（未提供）", maxCharacters: 1_500)))
 
             \(localAlpineEnvironmentProfile)
+
+            \(localAlpineLanguageDependencyPlaybook)
 
             First-turn bootstrap policy:
             - Do not spend a turn only restating that you will inspect the environment. If inspection is needed, emit the actual `iexa_alpine` block immediately.
@@ -1451,6 +1468,8 @@ final class ChatViewModel {
         The iOS host app simulates a Codex CLI tool loop. A fenced `iexa_alpine` block is the local tool_use, and each Local Alpine result below is the tool_result/observation. This state is real host-side execution state, even if the command block itself is no longer visible in chat.
 
         \(localAlpineEnvironmentProfile)
+
+        \(localAlpineLanguageDependencyPlaybook)
 
         \(blocks.joined(separator: "\n\n"))
 
@@ -5615,7 +5634,7 @@ final class ChatViewModel {
             """
         case "rs":
             return """
-            command -v rustc >/dev/null 2>&1 || { apk update && apk add --no-cache rust; }
+            command -v rustc >/dev/null 2>&1 || { apk update && apk add --no-cache rust cargo; }
             out="/tmp/iexa-rust-$(date +%s)"
             rustc "$target" -o "$out" && "$out"
             """
@@ -5623,13 +5642,13 @@ final class ChatViewModel {
             return """
             command -v gcc >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
             out="/tmp/iexa-c-$(date +%s)"
-            gcc "$target" -o "$out" && "$out"
+            gcc -O2 -Wall "$target" -o "$out" && "$out"
             """
         case "cc", "cpp", "cxx":
             return """
             command -v g++ >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
             out="/tmp/iexa-cpp-$(date +%s)"
-            g++ "$target" -o "$out" && "$out"
+            g++ -std=c++17 -O2 -Wall "$target" -o "$out" && "$out"
             """
         case "java":
             return """
@@ -6414,20 +6433,38 @@ final class ChatViewModel {
                 LocalAlpinePackageSpec(command: "g++", package: "build-base"),
                 LocalAlpinePackageSpec(command: "make", package: "build-base")
             ]),
-            (["g++", "c++"], [LocalAlpinePackageSpec(command: "g++", package: "g++")]),
-            (["gcc"], [LocalAlpinePackageSpec(command: "gcc", package: "gcc")]),
-            (["make"], [LocalAlpinePackageSpec(command: "make", package: "make")]),
+            (["g++", "c++", "cpp", "c++依赖", "c++ 依赖", "c++项目", "c++ 项目"], [
+                LocalAlpinePackageSpec(command: "g++", package: "build-base"),
+                LocalAlpinePackageSpec(command: "make", package: "build-base")
+            ]),
+            (["gcc", "c语言", "c 语言"], [
+                LocalAlpinePackageSpec(command: "gcc", package: "build-base"),
+                LocalAlpinePackageSpec(command: "make", package: "build-base")
+            ]),
+            (["make"], [LocalAlpinePackageSpec(command: "make", package: "build-base")]),
             (["cmake"], [LocalAlpinePackageSpec(command: "cmake", package: "cmake")]),
+            (["pkgconf", "pkg-config"], [LocalAlpinePackageSpec(command: "pkgconf", package: "pkgconf")]),
+            (["linux-headers"], [LocalAlpinePackageSpec(command: "linux-headers", package: "linux-headers")]),
             (["python3", "python"], [LocalAlpinePackageSpec(command: "python3", package: "python3")]),
             (["pip3", "pip"], [LocalAlpinePackageSpec(command: "pip3", package: "py3-pip")]),
             (["node", "nodejs"], [LocalAlpinePackageSpec(command: "node", package: "nodejs")]),
             (["npm"], [LocalAlpinePackageSpec(command: "npm", package: "npm")]),
             (["lua", "lua5.4"], [LocalAlpinePackageSpec(command: "lua5.4", package: "lua5.4")]),
             (["go", "golang"], [LocalAlpinePackageSpec(command: "go", package: "go")]),
-            (["rust", "rustc"], [LocalAlpinePackageSpec(command: "rustc", package: "rust")]),
+            (["rust", "rustc"], [
+                LocalAlpinePackageSpec(command: "rustc", package: "rust"),
+                LocalAlpinePackageSpec(command: "cargo", package: "cargo")
+            ]),
+            (["cargo"], [LocalAlpinePackageSpec(command: "cargo", package: "cargo")]),
             (["java", "javac"], [LocalAlpinePackageSpec(command: "javac", package: "openjdk17")]),
+            (["maven", "mvn"], [LocalAlpinePackageSpec(command: "mvn", package: "maven")]),
+            (["gradle"], [LocalAlpinePackageSpec(command: "gradle", package: "gradle")]),
             (["ruby"], [LocalAlpinePackageSpec(command: "ruby", package: "ruby")]),
+            (["bundler", "bundle"], [LocalAlpinePackageSpec(command: "bundle", package: "ruby-bundler")]),
             (["php"], [LocalAlpinePackageSpec(command: "php", package: "php")]),
+            (["composer"], [LocalAlpinePackageSpec(command: "composer", package: "composer")]),
+            (["perl"], [LocalAlpinePackageSpec(command: "perl", package: "perl")]),
+            (["bash"], [LocalAlpinePackageSpec(command: "bash", package: "bash")]),
             (["curl"], [LocalAlpinePackageSpec(command: "curl", package: "curl")]),
             (["wget"], [LocalAlpinePackageSpec(command: "wget", package: "wget")]),
             (["git"], [LocalAlpinePackageSpec(command: "git", package: "git")]),
@@ -6502,11 +6539,66 @@ final class ChatViewModel {
           printf '\\n== pip install . ==\\n'
           pip3 install .
         fi
+        if [ -f go.mod ]; then
+          did_install=1
+          command -v go >/dev/null 2>&1 || { apk update && apk add --no-cache go; }
+          printf '\\n== go mod download ==\\n'
+          go mod download
+        fi
+        if [ -f Cargo.toml ]; then
+          did_install=1
+          command -v cargo >/dev/null 2>&1 || { apk update && apk add --no-cache rust cargo; }
+          printf '\\n== cargo fetch ==\\n'
+          cargo fetch
+        fi
+        if [ -f CMakeLists.txt ]; then
+          did_install=1
+          command -v cmake >/dev/null 2>&1 || { apk update && apk add --no-cache cmake; }
+          command -v make >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
+          command -v pkgconf >/dev/null 2>&1 || { apk update && apk add --no-cache pkgconf; }
+          printf '\\n== cmake deps ready ==\\n'
+          cmake --version | head -n 1 || true
+        fi
         if [ -f Makefile ] || [ -f makefile ]; then
+          did_install=1
           command -v make >/dev/null 2>&1 || { apk update && apk add --no-cache make; }
+          command -v gcc >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
+        fi
+        if [ -f pom.xml ]; then
+          did_install=1
+          command -v javac >/dev/null 2>&1 || { apk update && apk add --no-cache openjdk17; }
+          command -v mvn >/dev/null 2>&1 || { apk update && apk add --no-cache maven; }
+          printf '\\n== maven dependency resolve ==\\n'
+          mvn -q -DskipTests dependency:resolve
+        fi
+        if [ -f build.gradle ] || [ -f build.gradle.kts ] || [ -f gradlew ]; then
+          did_install=1
+          command -v javac >/dev/null 2>&1 || { apk update && apk add --no-cache openjdk17; }
+          if [ -x ./gradlew ]; then
+            printf '\\n== gradle wrapper dependencies ==\\n'
+            ./gradlew --no-daemon dependencies
+          else
+            command -v gradle >/dev/null 2>&1 || { apk update && apk add --no-cache gradle; }
+            printf '\\n== gradle dependencies ==\\n'
+            gradle --no-daemon dependencies
+          fi
+        fi
+        if [ -f composer.json ]; then
+          did_install=1
+          command -v php >/dev/null 2>&1 || { apk update && apk add --no-cache php; }
+          command -v composer >/dev/null 2>&1 || { apk update && apk add --no-cache composer; }
+          printf '\\n== composer install ==\\n'
+          composer install --no-interaction
+        fi
+        if [ -f Gemfile ]; then
+          did_install=1
+          command -v ruby >/dev/null 2>&1 || { apk update && apk add --no-cache ruby; }
+          command -v bundle >/dev/null 2>&1 || { apk update && apk add --no-cache ruby-bundler; }
+          printf '\\n== bundle install ==\\n'
+          bundle install
         fi
         if [ "$did_install" -eq 0 ]; then
-          printf '\\n未找到 package.json、requirements.txt 或 pyproject.toml。请先告诉我要安装哪个包，或把依赖文件放到 /mnt/iexa。\\n'
+          printf '\\n未找到已支持的依赖文件：package.json、requirements.txt、pyproject.toml、go.mod、Cargo.toml、CMakeLists.txt、Makefile、pom.xml、build.gradle、composer.json 或 Gemfile。请先告诉我要安装哪个包，或把依赖文件放到 /mnt/iexa。\\n'
           exit 2
         fi
         printf '\\nIEXA_DEPENDENCIES_INSTALL_DONE\\n'
@@ -10582,9 +10674,11 @@ final class ChatViewModel {
         - `/mnt/iexa` is the shared writable project directory. Create project files there.
         - Tool protocol: the only correct execution trigger is a fenced `iexa_alpine` block. Do not use OpenAI/ChatGPT tool-call syntax such as `to=local_alpine_exec code` or native tool calls; those are legacy/provider artifacts and should never be shown to the user.
         - Package manager: `apk`. Do not install packages on every run. First check with `command -v ...` or version commands; only use `apk update && apk add --no-cache ...` when the output proves a dependency is missing.
-        - Alpine version: bundled rootfs is Alpine 3.19.x x86/iSH-style Linux. It is intentionally lightweight: `sh`/`ash`, `busybox`, `apk`, `wget`, and core Alpine utilities. Do not assume `python3`, `pip`, `node`, `npm`, `gcc`, `g++`, `make`, or `git` are preinstalled.
-        - Common packages to install on demand for generated projects: `python3`, `py3-pip`, `nodejs`, `npm`, `git`, `make`, `g++`, `build-base`, `linux-headers`, `cmake`, `pkgconf`, `zip`, `unzip`, and `openssl-dev`.
+        - Alpine version: bundled rootfs is Alpine 3.19.x x86/iSH-style Linux. It is lightweight but current app builds may bundle common developer tools. Treat prior Local Alpine command output as cached facts; do not repeat broad probes or reinstall tools already shown as present.
+        - Common apk packages to install on demand: `python3`, `py3-pip`, `nodejs`, `npm`, `git`, `build-base`, `linux-headers`, `cmake`, `pkgconf`, `zip`, `unzip`, `openssl-dev`, `go`, `rust`, `cargo`, `openjdk17`, `maven`, `lua5.4`, `ruby`, `php`, and `perl`.
         - The execution is non-interactive. Do not rely on prompts, REPLs, `input()`, `read`, `scanf`, `cin`, `npm init` prompts, editors waiting for input, or long-running servers that never exit.
+
+        \(localAlpineLanguageDependencyPlaybook)
 
         Iexa local environment contract:
         - Treat `/mnt/iexa` as the user's current local workspace. Relative paths resolve there unless the user names an absolute rootfs path.
@@ -10613,7 +10707,7 @@ final class ChatViewModel {
         - If the user says "修好", "修改代码", "重新运行", "怎么不是直接执行", or similar after a Local Alpine result, treat it as a request to continue operating. Inspect the target file/output, fix with `write_files` when needed, then verify.
         - Do not merely explain commands when the user wants action. Emit the block so the app executes it.
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
-        - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
+        - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, follow the language/dependency playbook above. Use a focused preflight only for unknown dependencies, install only missing packages, and do not repeat install commands after a successful install.
         - A preflight command is not the final answer for install/run/fix requests. If it succeeds, continue with the install/run/fix step. If it shows missing dependencies, install them. If it shows missing project files, search `/mnt/iexa` before asking the user.
         - Interpret user intent as an operation plan, not advice. Read/list/search requests require file-system inspection; create/write/modify requests require structured writes; delete requests require scoped deletion plus verification; fix/debug requests require reproduce -> inspect -> patch -> verify; run/test/build requests require dependency check -> execute -> summarize real output.
         - If an install command succeeds and the user asked to run/test/build/fix something, continue to the run/test/build/fix step. Do not stop with "installed successfully" unless the user's only goal was installation.
@@ -13794,6 +13888,8 @@ final class ChatViewModel {
         You are in a continuous Local Alpine agent loop. Read the latest real Local Alpine result above.
 
         \(localAlpineEnvironmentProfile)
+
+        \(localAlpineLanguageDependencyPlaybook)
 
         Loop Runtime:
         - Operate like Codex CLI: plan internally, execute exactly one bounded next step, observe the real result, repair if needed, verify, then summarize only when the user goal is actually done.
