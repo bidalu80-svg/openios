@@ -690,10 +690,11 @@ int32_t iexa_local_alpine_session_start(
     char envp[1024];
     envp[0] = '\0';
     size_t envp_offset = 0;
-    append_env_entry(envp, sizeof(envp), &envp_offset, "TERM=xterm-256color");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "TERM=dumb");
     append_env_entry(envp, sizeof(envp), &envp_offset, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
     append_env_entry(envp, sizeof(envp), &envp_offset, "HOME=/root");
     append_env_entry(envp, sizeof(envp), &envp_offset, "USER=root");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "PS1=");
     if (time_zone != NULL && time_zone[0] != '\0') {
         char tz_env[128];
         snprintf(tz_env, sizeof(tz_env), "TZ=%s", time_zone);

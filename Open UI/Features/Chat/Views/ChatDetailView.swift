@@ -598,7 +598,7 @@ struct ChatDetailView: View {
                     } label: {
                         NewConversationIcon(size: 18)
                             .foregroundStyle(theme.textSecondary)
-                            .frame(width: 30, height: 30)
+                            .frame(width: 34, height: 34)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -611,7 +611,7 @@ struct ChatDetailView: View {
                     SettingsGearIcon()
                         .scaledFont(size: 12, weight: .medium)
                         .foregroundStyle((viewModel.conversation?.chatParams != nil || viewModel.pendingChatParams != nil) ? theme.brandPrimary : theme.textTertiary)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 34, height: 34)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -624,16 +624,17 @@ struct ChatDetailView: View {
                         Haptics.play(.light)
                     } label: {
                         TemporaryChatIcon(isEnabled: viewModel.isTemporaryChat, size: 18)
-                            .frame(width: 30, height: 30)
+                            .frame(width: 34, height: 34)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(viewModel.isTemporaryChat ? "Temporary chat on" : "Temporary chat off")
                 }
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 6)
             .padding(.vertical, 3)
-            .iexaToolbarGlass(cornerRadius: 19, compact: true)
+            .frame(minWidth: viewModel.messages.isEmpty ? 120 : 84, minHeight: 40)
+            .iexaToolbarGlass(cornerRadius: 20, compact: true)
             .clipShape(Capsule(style: .continuous))
         }
     }

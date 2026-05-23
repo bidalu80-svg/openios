@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 import QuickLook
 import UIKit
+import Foundation
 
 // MARK: - Local Alpine Terminal Console
 
@@ -29,8 +30,8 @@ struct LocalAlpineTerminalConsoleView: View {
     @State private var isPollingSessionOutput = false
 
     private let terminalGreen = Color(red: 0.24, green: 0.82, blue: 0.36)
-    private let terminalCommandFontSize: CGFloat = 10
-    private let terminalOutputFontSize: CGFloat = 9
+    private let terminalCommandFontSize: CGFloat = 13
+    private let terminalOutputFontSize: CGFloat = 12
     @State private var cwd = "/mnt/iexa"
     private let stateMarkerPrefix = "__IEXA_SHELL_STATE__"
 
@@ -62,21 +63,23 @@ struct LocalAlpineTerminalConsoleView: View {
                     GeometryReader { geometry in
                         ScrollView([.vertical, .horizontal], showsIndicators: true) {
                             LazyVStack(alignment: .leading, spacing: 7) {
-                                if usesInteractiveSession {
-                                    if let sessionStartupMessage {
-                                        Text(sessionStartupMessage)
-                                            .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
-                                            .foregroundStyle(.white.opacity(0.45))
-                                            .fixedSize(horizontal: true, vertical: true)
-                                            .textSelection(.enabled)
-                                    }
-                                    Text(interactiveOutput.isEmpty ? "启动 shell..." : interactiveOutput)
+                                if let sessionStartupMessage {
+                                    Text(sessionStartupMessage)
                                         .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
-                                        .foregroundStyle(terminalGreen.opacity(0.88))
-                                        .lineLimit(nil)
+                                        .foregroundStyle(.white.opacity(0.45))
                                         .fixedSize(horizontal: true, vertical: true)
                                         .textSelection(.enabled)
-                                        .id("interactiveOutput")
+                                }
+                                if usesInteractiveSession {
+                                    if !interactiveOutput.isEmpty {
+                                        Text(interactiveOutput)
+                                            .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
+                                            .foregroundStyle(terminalGreen.opacity(0.88))
+                                            .lineLimit(nil)
+                                            .fixedSize(horizontal: true, vertical: true)
+                                            .textSelection(.enabled)
+                                            .id("interactiveOutput")
+                                    }
                                 } else {
                                     ForEach(entries) { entry in
                                         VStack(alignment: .leading, spacing: 2) {
@@ -131,7 +134,8 @@ struct LocalAlpineTerminalConsoleView: View {
                             }
                         }
                         .onChange(of: interactiveOutput) { _, _ in
-                            guard usesInteractiveSession else { return }
+                            guard usesInteractiveSession,
+                                  shouldAutoScrollInteractiveOutput(availableHeight: geometry.size.height) else { return }
                             withAnimation(.easeOut(duration: 0.12)) {
                                 proxy.scrollTo("commandLine", anchor: .bottom)
                             }
@@ -206,13 +210,7 @@ struct LocalAlpineTerminalConsoleView: View {
             Spacer()
 
             Button {
-                entries.removeAll()
-                commandInput = ""
-                historyCursor = nil
-                isControlLatched = false
-                isAccessoryBarHidden = false
-                refocusCommandLine()
-                Haptics.play(.light)
+                clearConsole()
             } label: {
                 Image(systemName: "paintbrush")
                     .font(.system(size: 19, weight: .light))
@@ -223,6 +221,24 @@ struct LocalAlpineTerminalConsoleView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("清空")
         }
+    }
+
+    private func clearConsole() {
+        if usesInteractiveSession {
+            if let interactiveSessionID {
+                _ = LocalAlpineTerminalService.shared.readSessionOutput(sessionID: interactiveSessionID)
+            }
+            interactiveOutput = ""
+            sessionStartupMessage = nil
+        } else {
+            entries.removeAll()
+        }
+        commandInput = ""
+        historyCursor = nil
+        isControlLatched = false
+        isAccessoryBarHidden = false
+        refocusCommandLine()
+        Haptics.play(.light)
     }
 
     private var commandLine: some View {
@@ -869,11 +885,66 @@ struct LocalAlpineTerminalConsoleView: View {
             if let sessionID = interactiveSessionID {
                 let output = LocalAlpineTerminalService.shared.readSessionOutput(sessionID: sessionID)
                 if !output.isEmpty {
-                    interactiveOutput += output
+                    appendInteractiveOutput(output, sessionID: sessionID)
                 }
             }
             try? await Task.sleep(nanoseconds: 120_000_000)
         }
+    }
+
+    private func appendInteractiveOutput(_ output: String, sessionID: Int) {
+        var sanitized = output
+        while let range = sanitized.range(of: "\u{1B}[6n") {
+            sanitized.removeSubrange(range)
+            let cursor = interactiveCursorPosition()
+            _ = LocalAlpineTerminalService.shared.writeSessionInput(
+                sessionID: sessionID,
+                input: "\u{1B}[\(cursor.row);\(cursor.column)R"
+            )
+        }
+        sanitized = Self.sanitizedTerminalOutput(sanitized)
+
+        if sanitized.isEmpty { return }
+        interactiveOutput += sanitized
+    }
+
+    private static func sanitizedTerminalOutput(_ output: String) -> String {
+        let escape = "\u{1B}"
+        let patterns = [
+            "\(escape)\\[\\?[0-9;]*[A-Za-z]",
+            "\(escape)\\[[0-9;]*[A-Za-z]"
+        ]
+        return patterns.reduce(output) { current, pattern in
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return current }
+            let currentRange = NSRange(current.startIndex..<current.endIndex, in: current)
+            return regex.stringByReplacingMatches(in: current, range: currentRange, withTemplate: "")
+        }
+        .replacingOccurrences(of: "\u{0007}", with: "")
+        .replacingOccurrences(of: "\u{0008}", with: "")
+    }
+
+    private func terminalLineCount(in output: String) -> Int {
+        output
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .count
+    }
+
+    private func shouldAutoScrollInteractiveOutput(availableHeight: CGFloat) -> Bool {
+        let lineHeight = max(1, terminalOutputFontSize * 1.35)
+        let visibleRows = max(6, Int(availableHeight / lineHeight))
+        return terminalLineCount(in: interactiveOutput) > visibleRows
+    }
+
+    private func interactiveCursorPosition() -> (row: Int, column: Int) {
+        let normalized = interactiveOutput
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false)
+        let row = max(1, lines.count)
+        let column = max(1, (lines.last?.count ?? 0) + 1)
+        return (row, column)
     }
 
     private func sendInteractiveInput(_ input: String) {
