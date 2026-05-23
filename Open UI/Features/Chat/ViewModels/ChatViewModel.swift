@@ -10095,7 +10095,7 @@ final class ChatViewModel {
         - `/mnt/iexa` is the shared writable project directory. Create project files there.
         - Tool protocol: the only correct execution trigger is a fenced `iexa_alpine` block. Do not use OpenAI/ChatGPT tool-call syntax such as `to=local_alpine_exec code` or native tool calls; those are legacy/provider artifacts and should never be shown to the user.
         - Package manager: `apk`. Do not install packages on every run. First check with `command -v ...` or version commands; only use `apk update && apk add --no-cache ...` when the output proves a dependency is missing.
-        - Current bundled tool profile is intentionally lightweight: `sh`/`ash`, `busybox`, `apk`, `wget`, and core Alpine utilities. Do not assume `python3`, `pip`, `node`, `npm`, `gcc`, `g++`, `make`, or `git` are preinstalled.
+        - Alpine version: bundled rootfs is Alpine 3.19.x x86/iSH-style Linux. It is intentionally lightweight: `sh`/`ash`, `busybox`, `apk`, `wget`, and core Alpine utilities. Do not assume `python3`, `pip`, `node`, `npm`, `gcc`, `g++`, `make`, or `git` are preinstalled.
         - Common packages to install on demand for generated projects: `python3`, `py3-pip`, `nodejs`, `npm`, `git`, `make`, `g++`, `build-base`, `linux-headers`, `cmake`, `pkgconf`, `zip`, `unzip`, and `openssl-dev`.
         - The execution is non-interactive. Do not rely on prompts, REPLs, `input()`, `read`, `scanf`, `cin`, `npm init` prompts, editors waiting for input, or long-running servers that never exit.
 
@@ -10116,6 +10116,10 @@ final class ChatViewModel {
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, include a fast preflight such as `command -v python3 node npm gcc curl` and relevant version checks. Install only the missing packages, and do not repeat install commands after a successful install.
         - A preflight command is not the final answer for install/run/fix requests. If it succeeds, continue with the install/run/fix step. If it shows missing dependencies, install them. If it shows missing project files, search `/mnt/iexa` before asking the user.
+        - Interpret user intent as an operation plan, not advice. Read/list/search requests require file-system inspection; create/write/modify requests require structured writes; delete requests require scoped deletion plus verification; fix/debug requests require reproduce -> inspect -> patch -> verify; run/test/build requests require dependency check -> execute -> summarize real output.
+        - If an install command succeeds and the user asked to run/test/build/fix something, continue to the run/test/build/fix step. Do not stop with "installed successfully" unless the user's only goal was installation.
+        - If a command exits 0 but the output only lists versions, paths, files, package metadata, or dependency status, treat it as observation, not task completion. Continue to the next operation needed by the user's original goal.
+        - If output says a command/package/file is missing, choose the smallest safe next step: install the package, search the workspace, or create the missing file. Do not ask the user to do that work manually.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
         - For scripts/projects, use JSON `write_files` inside `iexa_alpine`, then run a bounded verification command. For code files, use `code_lines`, `content_lines`, or `content_base64`; never use plain `content`/`text`/`code` for source files because display text can corrupt indentation.
         - Python write protocol is mandatory: send the complete intended `.py` file through `iexa_alpine` JSON `write_files` using `code_lines` for normal files or `content_base64` for very long/complex content. Do not write Python through visible Markdown, partial snippets, shell heredocs, `echo`, or `cat > file.py` unless explicitly debugging the writer itself.
@@ -12036,7 +12040,7 @@ final class ChatViewModel {
         ```text
         IEXA_AGENT_KICKOFF
         \(reason)
-        NEXT_ACTION_REQUIRED: You must emit exactly one fenced iexa_alpine block now. Do not explain commands for the user to run manually. For environment/dependency inspection, execute commands such as uname, cat /etc/alpine-release, apk --version, apk info, command -v python3 node npm gcc g++ git curl wget, and ls -la /mnt/iexa.
+        NEXT_ACTION_REQUIRED: You must emit exactly one fenced iexa_alpine block now. Do not explain commands for the user to run manually. For environment/dependency inspection, execute commands such as uname, cat /etc/alpine-release, apk --version, apk info, command -v python3 node npm gcc g++ git curl wget, and ls -la /mnt/iexa. For action requests, follow the user's verb: read/list/search/create/write/delete/fix/run/test/build/install, then verify from real output.
         ```
         """
         return appendAssistantResult(parentId: parentId, model: "Local Alpine", content: content, metadata: [
@@ -13026,7 +13030,11 @@ final class ChatViewModel {
         }
         if let latestUserText,
            isLocalAlpineGoalActionRequest(latestUserText),
-           localAlpineResultIsOnlyPreflightOrQuestion(normalized, commandResults: commandResults) {
+           localAlpineResultIsOnlyPreflightOrQuestion(
+               normalized,
+               commandResults: commandResults,
+               latestUserText: latestUserText
+           ) {
             return true
         }
         if containsSuccessfulLocalAlpineExit(normalized)
@@ -13041,16 +13049,19 @@ final class ChatViewModel {
         guard !normalized.isEmpty else { return false }
         let actionTerms = [
             "安装", "装", "运行", "执行", "跑", "测试", "验证", "修复", "修改",
-            "写", "创建", "生成", "编译", "构建", "依赖",
+            "写", "创建", "生成", "编译", "构建", "依赖", "读取", "查看",
+            "列出", "搜索", "查找", "删除", "清理", "重命名", "复制", "移动",
             "install", "run", "execute", "test", "verify", "fix", "modify",
-            "write", "create", "generate", "compile", "build", "dependency", "dependencies"
+            "write", "create", "generate", "compile", "build", "dependency", "dependencies",
+            "read", "list", "search", "find", "delete", "remove", "rename", "copy", "move"
         ]
         return actionTerms.contains { normalized.contains($0) }
     }
 
     private static func localAlpineResultIsOnlyPreflightOrQuestion(
         _ normalized: String,
-        commandResults: [LocalAlpineAgentCommandResult]
+        commandResults: [LocalAlpineAgentCommandResult],
+        latestUserText: String? = nil
     ) -> Bool {
         if normalized.contains("iexa_agent_task_complete")
             || normalized.contains("iexa_auto_repair_verified_success") {
@@ -13058,10 +13069,16 @@ final class ChatViewModel {
         }
         if normalized.contains("请告诉我")
             || normalized.contains("需要你提供")
+            || normalized.contains("你可以")
+            || normalized.contains("请手动")
+            || normalized.contains("手动运行")
+            || normalized.contains("复制以下命令")
             || normalized.contains("please provide")
             || normalized.contains("please tell me")
             || normalized.contains("tell me the path")
-            || normalized.contains("provide the path") {
+            || normalized.contains("provide the path")
+            || normalized.contains("run this command")
+            || normalized.contains("copy and paste") {
             return true
         }
         let combinedCommands = commandResults
@@ -13071,7 +13088,8 @@ final class ChatViewModel {
         let preflightTerms = [
             "command -v", "which ", " apk info", "apk info", " ls ", "ls -",
             " find ", "grep ", "cat /etc/alpine-release", "uname", "python3 --version",
-            "pip3 --version", "pwd"
+            "pip3 --version", "node --version", "npm --version", "gcc --version",
+            "g++ --version", "make --version", "pwd"
         ]
         let onlyPreflightCommands = commandResults.allSatisfy { result in
             let command = result.command.lowercased()
@@ -13083,13 +13101,38 @@ final class ChatViewModel {
         let didRealAction = [
             " apk add ", "apk add ", " pip install", "pip3 install",
             " npm install", "python3 ./", "python3 /", "python3 -m", "node ./",
-            "node /", "gcc ", "g++ ", "make",
+            "node /", "gcc ", "g++ ", "make", " rm ", "rm -", "rm ./", "rm /mnt/iexa",
+            " mv ", "mv ./", "mv /mnt/iexa", " cp ", "cp ./", "cp /mnt/iexa",
             " write_files"
         ].contains { combinedCommands.contains($0) }
         if didRealAction {
+            if let latestUserText,
+               isLocalAlpineGoalActionRequest(latestUserText),
+               localAlpineActionWasOnlyInstallOrWrite(combinedCommands) {
+                return true
+            }
             return false
         }
         return preflightTerms.contains { combinedCommands.contains($0) }
+    }
+
+    private static func localAlpineActionWasOnlyInstallOrWrite(_ combinedCommands: String) -> Bool {
+        let actionCommands = combinedCommands
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !actionCommands.isEmpty else { return false }
+        return actionCommands.allSatisfy { command in
+            command == "write_files"
+                || command.contains("apk add")
+                || command.contains("pip install")
+                || command.contains("pip3 install")
+                || command.contains("npm install")
+                || command.hasPrefix("command -v")
+                || command.hasPrefix("which ")
+                || command.hasPrefix("apk info")
+                || command.contains("--version")
+        }
     }
 
     private static func normalizedLocalAlpineResultTextForFollowUpCheck(_ text: String) -> String {

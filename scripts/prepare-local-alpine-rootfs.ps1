@@ -1,7 +1,7 @@
 param(
     [string]$OutputPath = "Open UI\Resources\iexa-alpine-rootfs.tar.gz",
-    [string]$RootFSUrl = "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86/alpine-minirootfs-3.23.4-x86.tar.gz",
-    [string]$ExpectedSHA256 = "dba449a2c286f73cb1cf9b248631f3182c291f22619e1500922bd97b542263fa",
+    [string]$RootFSUrl = "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86/alpine-minirootfs-3.19.9-x86.tar.gz",
+    [string]$ExpectedSHA256 = "8b85e1c9c743704eda40f69cd82c80ac3805732eb0906f35c870b44d91e1818d",
     [string[]]$PreinstallPackages = @()
 )
 

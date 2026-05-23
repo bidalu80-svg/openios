@@ -37,7 +37,7 @@ actor LocalAlpineTerminalService {
     private let logger = Logger(subsystem: "com.openui", category: "LocalAlpine")
     private let fileManager = FileManager.default
     private let rootArchiveName = "iexa-alpine-rootfs.fakefs"
-    private let bundledRootFSVersion = "3.23.4-lite.1"
+    private let bundledRootFSVersion = "3.19.9-lite.1"
     private let rootVersionFileName = ".iexa-rootfs-version"
     private let workspaceFolderName = "Iexa Alpine"
     private let sharedFolderName = "shared"

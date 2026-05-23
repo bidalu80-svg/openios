@@ -292,7 +292,7 @@ jobs:
             etc/alpine-release
             etc/apk/repositories
             usr/bin/wget
-            usr/lib/libapk.so.3.0.0
+            usr/lib/libapk.so.2.14.0
           )
           for required_path in "${required_exact_paths[@]}"; do
             grep -Fxq "$required_path" "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"
@@ -328,7 +328,7 @@ jobs:
             etc/alpine-release
             etc/apk/repositories
             usr/bin/wget
-            usr/lib/libapk.so.3.0.0
+            usr/lib/libapk.so.2.14.0
           )
           for tool_path in "${required_exact_tool_paths[@]}"; do
             fakefs_path="/$tool_path"
