@@ -84,6 +84,18 @@ actor LocalAlpineTerminalService {
         }
     }
 
+    func listRootFSFiles(path: String, includeHidden: Bool = true) async throws -> [TerminalFileItem] {
+        let rootPath = try normalizedRootFSPath(path)
+        let result = await execute(
+            command: rootFSListCommand(path: rootPath, includeHidden: includeHidden),
+            cwd: "/mnt/iexa"
+        )
+        guard result.exitCode == 0 else {
+            throw LocalAlpineError.commandFailed(result.output)
+        }
+        return try parseRootFSListOutput(result.output, path: rootPath)
+    }
+
     func createFolder(path: String) async throws {
         let root = try ensureSharedWorkspaceDirectory()
         let url = try resolve(path: path, root: root, allowRoot: false)
@@ -103,12 +115,56 @@ actor LocalAlpineTerminalService {
         return try Data(contentsOf: url)
     }
 
+    func readRootFSFile(path: String) async throws -> Data {
+        let rootPath = try normalizedRootFSPath(path)
+        guard rootPath != "/" else {
+            throw LocalAlpineError.invalidPath(path)
+        }
+
+        let result = await execute(
+            command: rootFSReadCommand(path: rootPath),
+            cwd: "/mnt/iexa"
+        )
+        guard result.exitCode == 0 else {
+            throw LocalAlpineError.commandFailed(result.output)
+        }
+
+        let begin = "IEXA_ROOTFS_B64_BEGIN"
+        let end = "IEXA_ROOTFS_B64_END"
+        guard let beginRange = result.output.range(of: begin),
+              let endRange = result.output.range(of: end, range: beginRange.upperBound..<result.output.endIndex) else {
+            throw LocalAlpineError.commandFailed(result.output)
+        }
+
+        let encoded = String(result.output[beginRange.upperBound..<endRange.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = Data(base64Encoded: encoded, options: [.ignoreUnknownCharacters]) else {
+            throw LocalAlpineError.commandFailed("Unable to decode rootfs file data.")
+        }
+        return data
+    }
+
     func writeFile(data: Data, fileName: String, destinationPath: String) async throws {
         let root = try ensureSharedWorkspaceDirectory()
         let directory = try resolve(path: destinationPath, root: root, allowRoot: true)
         let safeName = try sanitizedFileName(fileName)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         try data.write(to: directory.appendingPathComponent(safeName), options: .atomic)
+    }
+
+    func deleteRootFSItem(path: String) async throws {
+        let rootPath = try normalizedRootFSPath(path)
+        guard isDeletableRootFSPath(rootPath) else {
+            throw LocalAlpineError.protectedPath(rootPath)
+        }
+
+        let result = await execute(
+            command: rootFSDeleteCommand(path: rootPath),
+            cwd: "/mnt/iexa"
+        )
+        guard result.exitCode == 0 else {
+            throw LocalAlpineError.commandFailed(result.output)
+        }
     }
 
     func execute(command: String, cwd: String, stdinInput: String? = nil) async -> LocalAlpineCommandResult {
@@ -322,6 +378,148 @@ actor LocalAlpineTerminalService {
     private func normalizedRuntimePath(_ rawPath: String) -> String {
         let hostPath = normalizedTerminalPath(rawPath)
         return hostPath == "/" ? "/mnt/iexa" : "/mnt/iexa\(hostPath)"
+    }
+
+    private func normalizedRootFSPath(_ rawPath: String) throws -> String {
+        var path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        if path.isEmpty || path == "." || path == "~" {
+            return "/"
+        }
+        if !path.hasPrefix("/") {
+            path = "/" + path
+        }
+
+        var components: [String] = []
+        for component in path.split(separator: "/", omittingEmptySubsequences: true).map(String.init) {
+            if component == "." {
+                continue
+            }
+            if component == ".." {
+                if !components.isEmpty {
+                    components.removeLast()
+                }
+                continue
+            }
+            components.append(component)
+        }
+        let normalized = components.isEmpty ? "/" : "/" + components.joined(separator: "/")
+        guard !normalized.contains("\u{0}") else {
+            throw LocalAlpineError.invalidPath(rawPath)
+        }
+        return normalized
+    }
+
+    private func rootFSListCommand(path: String, includeHidden: Bool) -> String {
+        let hiddenGuard = includeHidden ? "" : """
+          case "$name" in .*) continue ;; esac
+        """
+        return """
+        target=\(shellSingleQuoted(path))
+        if [ ! -d "$target" ]; then
+          printf 'IEXA_ROOTFS_ERROR\\tNot a directory: %s\\n' "$target" >&2
+          exit 20
+        fi
+        for entry in "$target"/* "$target"/.[!.]* "$target"/..?*; do
+          [ -e "$entry" ] || [ -L "$entry" ] || continue
+          name=${entry##*/}
+          case "$name" in .|..) continue ;; esac
+        \(hiddenGuard)
+          kind=o
+          if [ -d "$entry" ]; then
+            kind=d
+          elif [ -f "$entry" ]; then
+            kind=f
+          elif [ -L "$entry" ]; then
+            kind=l
+          fi
+          size=
+          if [ "$kind" = f ]; then
+            size=$(wc -c < "$entry" 2>/dev/null | tr -d ' ' || true)
+          fi
+          mtime=$(stat -c '%Y' "$entry" 2>/dev/null || true)
+          perms=$(stat -c '%A' "$entry" 2>/dev/null || true)
+          printf 'IEXA_ROOTFS_ENTRY\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$kind" "$size" "$mtime" "$perms" "$name"
+        done
+        """
+    }
+
+    private func rootFSReadCommand(path: String) -> String {
+        """
+        target=\(shellSingleQuoted(path))
+        max_bytes=16777216
+        if [ ! -f "$target" ]; then
+          printf 'Not a regular file: %s\\n' "$target" >&2
+          exit 21
+        fi
+        size=$(wc -c < "$target" 2>/dev/null | tr -d ' ' || echo 0)
+        case "$size" in
+          ''|*[!0-9]*) size=0 ;;
+        esac
+        if [ "$size" -gt "$max_bytes" ]; then
+          printf 'File is too large to preview: %s bytes (limit %s bytes)\\n' "$size" "$max_bytes" >&2
+          exit 22
+        fi
+        if ! command -v base64 >/dev/null 2>&1; then
+          printf 'base64 is unavailable in this rootfs.\\n' >&2
+          exit 23
+        fi
+        printf 'IEXA_ROOTFS_B64_BEGIN\\n'
+        base64 "$target" | tr -d '\\n'
+        printf '\\nIEXA_ROOTFS_B64_END\\n'
+        """
+    }
+
+    private func rootFSDeleteCommand(path: String) -> String {
+        """
+        target=\(shellSingleQuoted(path))
+        if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+          printf 'missing: %s\\n' "$target"
+          exit 0
+        fi
+        rm -rf -- "$target"
+        printf 'deleted: %s\\n' "$target"
+        """
+    }
+
+    private func parseRootFSListOutput(_ output: String, path: String) throws -> [TerminalFileItem] {
+        let marker = "IEXA_ROOTFS_ENTRY\t"
+        return output
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .compactMap { rawLine -> TerminalFileItem? in
+                let line = String(rawLine)
+                guard line.hasPrefix(marker) else { return nil }
+                let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+                guard parts.count >= 6 else { return nil }
+                let kind = String(parts[1])
+                let sizeText = String(parts[2])
+                let mtimeText = String(parts[3])
+                let permissions = String(parts[4])
+                let name = parts.dropFirst(5).map(String.init).joined(separator: "\t")
+                guard !name.isEmpty else { return nil }
+                let itemPath = path == "/" ? "/\(name)" : "\(path)/\(name)"
+                let modified = Double(mtimeText).map { Date(timeIntervalSince1970: $0) }
+                return TerminalFileItem(
+                    name: name,
+                    path: itemPath,
+                    isDirectory: kind == "d",
+                    size: Int64(sizeText),
+                    modified: modified,
+                    permissions: permissions.isEmpty ? nil : permissions
+                )
+            }
+    }
+
+    private func isDeletableRootFSPath(_ path: String) -> Bool {
+        guard path.hasPrefix("/"), path != "/" else { return false }
+        guard path.hasPrefix("/tmp/") || path.hasPrefix("/root/") || path.hasPrefix("/home/") else {
+            return false
+        }
+        let protectedExact: Set<String> = [
+            "/bin", "/dev", "/etc", "/home", "/lib", "/media", "/mnt", "/mnt/iexa",
+            "/proc", "/root", "/run", "/sbin", "/sys", "/tmp", "/usr", "/var"
+        ]
+        return !protectedExact.contains(path)
     }
 
     private func runtimePath(forSharedPath rawPath: String) -> String {
@@ -601,6 +799,8 @@ actor LocalAlpineTerminalService {
 enum LocalAlpineError: LocalizedError {
     case documentsUnavailable
     case invalidPath(String)
+    case protectedPath(String)
+    case commandFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -608,6 +808,11 @@ enum LocalAlpineError: LocalizedError {
             return "Documents directory is unavailable."
         case .invalidPath(let path):
             return "Invalid local path: \(path)"
+        case .protectedPath(let path):
+            return "Protected rootfs path cannot be deleted: \(path)"
+        case .commandFailed(let output):
+            let message = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            return message.isEmpty ? "Local Alpine command failed." : message
         }
     }
 }

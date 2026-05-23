@@ -1301,7 +1301,44 @@ final class ChatViewModel {
 
     private static func localAlpineExecutionStateSystemContext(from messages: [ChatMessage]) -> String? {
         let alpineMessages = messages.filter { isLocalAlpineAgentResult($0) }
-        guard !alpineMessages.isEmpty else { return nil }
+        let latestUserGoal = messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })?.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !alpineMessages.isEmpty else {
+            return """
+            [Local Alpine execution state]
+            No Local Alpine tool_result has been observed yet for this turn. Treat this as the start of a Codex CLI style local agent session.
+
+            Current user goal:
+            \(indentForSystemContext(clippedForSystemContext(latestUserGoal ?? "（未提供）", maxCharacters: 1_500)))
+
+            First-turn bootstrap policy:
+            - You already know the static environment: Alpine 3.19.x x86/iSH, POSIX sh/ash, working directory `/mnt/iexa`, package manager `apk`, lightweight rootfs.
+            - If the task depends on runtimes, packages, compilers, current files, or previous generated files, first get a small real environment snapshot and workspace listing, then continue from that observation.
+            - If the user gave an explicit simple file operation target, you may combine the operation with a minimal `pwd`/`ls` verification instead of running a separate bootstrap.
+            - Do not ask the user how to operate the environment. Use one fenced `iexa_alpine` block as the first tool_use.
+
+            Preferred first tool_use shape when environment knowledge is needed:
+            ```iexa_alpine
+            set -u
+            printf '== alpine ==\\n'
+            cat /etc/alpine-release 2>/dev/null || true
+            uname -a 2>/dev/null || true
+            printf '\\n== cwd ==\\n'
+            pwd
+            printf '\\n== tools ==\\n'
+            for x in sh ash apk wget curl python3 pip3 node npm gcc g++ make git tar unzip zip sqlite3; do
+              printf '%-8s ' "$x"
+              command -v "$x" 2>/dev/null || printf 'missing\\n'
+            done
+            printf '\\n== /mnt/iexa ==\\n'
+            ls -la /mnt/iexa
+            ```
+
+            After the app returns this real tool_result, observe it and choose the next smallest useful tool_use for the user's goal.
+            [/Local Alpine execution state]
+            """
+        }
 
         let blocks = alpineMessages.suffix(4).map { message -> String in
             let metadata = message.metadata ?? [:]
@@ -1315,6 +1352,10 @@ final class ChatViewModel {
             let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata["iexa_local_alpine_written_files"])
 
             var lines = ["- state: \(state)"]
+            if let latestUserGoal, !latestUserGoal.isEmpty {
+                lines.append("  user_goal:")
+                lines.append(indentForSystemContext(clippedForSystemContext(latestUserGoal, maxCharacters: 1_500)))
+            }
             if let status, !status.isEmpty {
                 lines.append("  status: \(status)")
             }
@@ -1357,18 +1398,43 @@ final class ChatViewModel {
                 lines.append("  required next action:")
                 lines.append(indentForSystemContext("Python syntax/indentation error detected. Rewrite the complete corrected Python file through byte-preserving iexa_alpine JSON write_files, then run a bounded verification command. Do not repeat only the same failed command."))
             }
+            let observationText = [content, rawResult].compactMap { $0 }.joined(separator: "\n")
+            let normalizedObservation = normalizedLocalAlpineResultTextForFollowUpCheck(observationText)
+            let needsFollowUp = localAlpineResultNeedsFollowUp(
+                observationText,
+                commandResults: commandResults,
+                latestUserText: latestUserGoal
+            )
+            let verdict: String
+            let controllerPolicy: String
+            if message.isStreaming {
+                verdict = "tool_running"
+                controllerPolicy = "Wait for the Local Alpine result before making another tool call."
+            } else if needsFollowUp {
+                verdict = containsLocalAlpineFailureMarker(normalizedObservation)
+                    ? "needs_next_tool_after_failure"
+                    : "needs_next_tool_after_incomplete_observation"
+                controllerPolicy = "Inspect the observation, choose one different bounded iexa_alpine step, and continue the agent loop."
+            } else {
+                verdict = "ready_for_final_summary"
+                controllerPolicy = "Do not emit another iexa_alpine block unless the user asks for more work. Summarize the verified result."
+            }
+            lines.append("  controller_verdict: \(verdict)")
+            lines.append("  controller_policy:")
+            lines.append(indentForSystemContext(controllerPolicy))
             return lines.joined(separator: "\n")
         }
 
         return """
         [Local Alpine execution state]
-        The iOS host app runs `iexa_alpine` blocks asynchronously. This state is real host-side execution state, even if the command block itself is no longer visible in chat.
+        The iOS host app simulates a Codex CLI tool loop. A fenced `iexa_alpine` block is the local tool_use, and each Local Alpine result below is the tool_result/observation. This state is real host-side execution state, even if the command block itself is no longer visible in chat.
 
         \(blocks.joined(separator: "\n\n"))
 
         Rules for this state:
         - If state is running, tell the user the Local Alpine command is still running or ask whether to stop it; do not apologize that no executable block was emitted.
         - If result output is present, answer from that output as the source of truth.
+        - Follow controller_verdict: `needs_next_tool_*` means continue with exactly one new `iexa_alpine` block; `ready_for_final_summary` means stop tool use and summarize; `tool_running` means wait or report running status.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
         - If the latest result contains Python IndentationError or SyntaxError, emit one complete corrected Python file through byte-preserving `iexa_alpine` JSON `write_files`, then run a bounded verification command. Keep the file body complete and exact; do not repeat only the same failed command.
@@ -5019,10 +5085,10 @@ final class ChatViewModel {
         let actionTerms = [
             "执行", "运行", "跑", "测试", "验证", "检查", "查看", "读取", "列出",
             "安装", "装", "编译", "构建", "创建", "新建", "生成", "写入", "保存",
-            "修改", "删除", "修复", "调试",
+            "修改", "删除", "修复", "调试", "搜索", "查找", "重命名", "移动", "复制", "整理", "总结", "汇报",
             "execute", "run", "test", "verify", "check", "inspect", "read", "list",
             "install", "build", "compile", "create", "write", "save", "modify",
-            "delete", "fix", "debug"
+            "delete", "fix", "debug", "search", "find", "rename", "move", "copy", "summarize", "report"
         ]
         return containsAny(normalized, actionTerms)
     }
@@ -5069,13 +5135,17 @@ final class ChatViewModel {
             "创建项目并运行", "创建脚本并运行", "测试项目", "运行项目",
             "安装依赖", "装依赖", "装一下依赖", "安装包", "装包", "安装模块", "安装库",
             "创建文件", "新建文件", "生成文件", "写入文件", "保存文件", "修改文件",
+            "删除文件", "重命名文件", "移动文件", "复制文件", "搜索文件", "查找文件",
             "创建脚本", "生成脚本", "写脚本", "创建项目", "生成项目",
             "编译项目", "构建项目", "测试代码", "检查项目", "查看目录", "列出目录",
+            "总结输出", "总结结果", "汇报结果", "根据输出", "根据结果",
             "跑一下", "跑下", "执行一下", "运行一下", "查一下命令", "用 bash", "用 shell",
             "local alpine", "alpine 执行", "alpine运行",
             "run command", "execute command", "run script", "run project",
             "install dependencies", "install deps", "install package", "build project", "compile project",
-            "create file", "write file", "save file", "generate file", "modify file"
+            "create file", "write file", "save file", "generate file", "modify file",
+            "delete file", "rename file", "move file", "copy file", "search files",
+            "summarize output", "summarize result", "report result"
         ]
         return terms.contains { normalized.contains($0) }
     }
@@ -5085,10 +5155,11 @@ final class ChatViewModel {
         guard !normalized.isEmpty else { return false }
         let actionTerms = [
             "创建", "新建", "生成", "写入", "保存", "落地", "修改", "改",
-            "删除", "删掉", "删了", "移除", "清理",
-            "读取", "查看", "打开", "列出", "搜索", "查找",
+            "删除", "删掉", "删了", "移除", "清理", "重命名", "移动", "复制",
+            "读取", "查看", "打开", "列出", "搜索", "查找", "整理", "总结", "汇报",
             "create", "new file", "generate", "write", "save", "modify", "edit",
-            "delete", "remove", "rm ", "read", "open", "list", "search", "find"
+            "delete", "remove", "rm ", "rename", "move", "copy", "read", "open", "list", "search", "find",
+            "summarize", "report"
         ]
         let targetTerms = [
             "文件", "脚本", "代码", "项目", "目录", "file", "script", "code", "project", "folder",
@@ -5243,11 +5314,83 @@ final class ChatViewModel {
             guard targetPath != nil else { return nil }
             return """
             target=\(quotedTarget)
+            case "$target" in
+              /mnt/iexa/*) ;;
+              *) printf 'refusing unsafe delete target: %s\\n' "$target"; exit 2 ;;
+            esac
             if [ -e "$target" ]; then
               rm -rf -- "$target" && printf 'deleted: %s\\n' "$target"
             else
               printf 'missing: %s\\n' "$target"
             fi
+            printf '\\n== /mnt/iexa ==\\n'
+            ls -la /mnt/iexa
+            """
+        }
+
+        if containsAny(normalized, ["重命名", "rename"]) {
+            guard let targetPath,
+                  let destination = localAlpineDestinationPath(in: text, fallbackDirectoryOf: targetPath),
+                  isSafeLocalAlpineTarget(destination) else { return nil }
+            let quotedDestination = shellQuoted(destination)
+            return """
+            src=\(quotedTarget)
+            dst=\(quotedDestination)
+            case "$src:$dst" in
+              /mnt/iexa/*:/mnt/iexa/*) ;;
+              *) printf 'refusing unsafe rename: %s -> %s\\n' "$src" "$dst"; exit 2 ;;
+            esac
+            if [ ! -e "$src" ]; then
+              printf 'missing: %s\\n' "$src"
+              exit 1
+            fi
+            mv -- "$src" "$dst"
+            printf 'renamed: %s -> %s\\n\\n' "$src" "$dst"
+            ls -la "$(dirname "$dst")"
+            """
+        }
+
+        if containsAny(normalized, ["移动", "move"]) {
+            guard let targetPath,
+                  let destination = localAlpineDestinationPath(in: text, fallbackDirectoryOf: targetPath),
+                  isSafeLocalAlpineTarget(destination) else { return nil }
+            let quotedDestination = shellQuoted(destination)
+            return """
+            src=\(quotedTarget)
+            dst=\(quotedDestination)
+            case "$src:$dst" in
+              /mnt/iexa/*:/mnt/iexa/*) ;;
+              *) printf 'refusing unsafe move: %s -> %s\\n' "$src" "$dst"; exit 2 ;;
+            esac
+            if [ ! -e "$src" ]; then
+              printf 'missing: %s\\n' "$src"
+              exit 1
+            fi
+            mv -- "$src" "$dst"
+            printf 'moved: %s -> %s\\n\\n' "$src" "$dst"
+            ls -la "$(dirname "$dst")"
+            """
+        }
+
+        if containsAny(normalized, ["复制", "copy"]) {
+            guard let targetPath,
+                  let destination = localAlpineDestinationPath(in: text, fallbackDirectoryOf: targetPath),
+                  isSafeLocalAlpineTarget(destination) else { return nil }
+            let quotedDestination = shellQuoted(destination)
+            return """
+            src=\(quotedTarget)
+            dst=\(quotedDestination)
+            case "$src:$dst" in
+              /mnt/iexa/*:/mnt/iexa/*) ;;
+              *) printf 'refusing unsafe copy: %s -> %s\\n' "$src" "$dst"; exit 2 ;;
+            esac
+            if [ ! -e "$src" ]; then
+              printf 'missing: %s\\n' "$src"
+              exit 1
+            fi
+            cp -R -- "$src" "$dst"
+            printf 'copied: %s -> %s\\n\\n' "$src" "$dst"
+            ls -la "$(dirname "$dst")"
             """
         }
 
@@ -5291,6 +5434,52 @@ final class ChatViewModel {
         }
 
         return nil
+    }
+
+    private static func localAlpineDestinationPath(in text: String, fallbackDirectoryOf source: String) -> String? {
+        let nsText = text as NSString
+        let sourceDir = (source as NSString).deletingLastPathComponent
+        let baseDir = sourceDir.hasPrefix("/mnt/iexa") ? sourceDir : "/mnt/iexa"
+
+        func normalizedDestination(from raw: String) -> String? {
+            let candidate = cleanLocalAlpinePathCandidate(raw)
+            guard !candidate.isEmpty else { return nil }
+            if candidate.hasPrefix("/mnt/iexa/") {
+                return candidate
+            }
+            if candidate.hasPrefix("/") || candidate.contains("..") {
+                return nil
+            }
+            return "\(baseDir)/\(candidate)"
+        }
+
+        let explicitDestinationPatterns = [
+            #"(?:重命名|改名|命名|移动|复制|拷贝)[^，。；;\n]{0,40}?(?:到|为|成)\s*[`\"'“”‘’]?([^`\"'“”‘’\s，。；;]+)"#,
+            #"(?:rename|move|copy)[^;\n]{0,40}?\b(?:to|as)\s*[`\"'“”‘’]?([^`\"'“”‘’\s，。；;]+)"#,
+            #"(?:->|=>)\s*[`\"'“”‘’]?([^`\"'“”‘’\s，。；;]+)"#
+        ]
+        for pattern in explicitDestinationPatterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(location: 0, length: nsText.length)
+            guard let match = regex.firstMatch(in: text, range: range),
+                  match.numberOfRanges >= 2 else { continue }
+            let raw = nsText.substring(with: match.range(at: 1))
+            if let destination = normalizedDestination(from: raw) {
+                return destination
+            }
+        }
+
+        guard let quotedRegex = try? NSRegularExpression(pattern: #"[`\"'“”‘’]([^`\"'“”‘’]+)[`\"'“”‘’]"#) else {
+            return nil
+        }
+        let quotedMatches = quotedRegex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+        guard quotedMatches.count >= 2,
+              let last = quotedMatches.last,
+              last.numberOfRanges >= 2 else {
+            return nil
+        }
+        let raw = nsText.substring(with: last.range(at: 1))
+        return normalizedDestination(from: raw)
     }
 
     private static func localAlpineRunCommand(for targetPath: String) -> String? {
@@ -10088,6 +10277,7 @@ final class ChatViewModel {
         - `iexa_alpine` is NOT an OpenAI/native/function tool registered on the server.
         - Never call a tool named `iexa_alpine` through provider tool-call syntax. Never write "Tool iexa_alpine does not exist".
         - The host app only detects and executes a literal fenced Markdown block whose language is `iexa_alpine`. If you need local execution, print that fenced block as normal assistant text.
+        - Treat this as a local Codex CLI harness: assistant text containing one fenced `iexa_alpine` block is the tool_use; the host app execution result appended afterward is the tool_result/observation; your next assistant turn must observe that result and either issue exactly one next tool_use or produce the final summary.
 
         Environment facts:
         - Shell: Alpine Linux ash/busybox style shell. Prefer POSIX sh syntax.
@@ -10102,11 +10292,13 @@ final class ChatViewModel {
         Operational rules:
         - Act like a Codex CLI style agent loop: understand the user's goal, choose one bounded next step, execute it, read the real output, then either continue with the next step or stop with a concise summary.
         - Treat a fenced `iexa_alpine` block as the app's local execution request: emit one block as text, wait for the app's real result, then decide the next action from that result.
+        - Maintain this loop invariant: Goal -> one tool_use -> real tool_result -> observation summary -> one next tool_use or final answer. Never skip the observation step and never invent command output.
         - Resolve intent before acting. File-management requests such as delete/read/list/search/rename are not code-generation requests. If the user says "删除 hello.lua", delete exactly `/mnt/iexa/hello.lua` and verify the directory; do not create or run a demo Lua script.
         - For relative paths, treat them as inside `/mnt/iexa`. For destructive operations, stay inside `/mnt/iexa`, refuse the workspace root itself, act only on the explicit target, then list or read back enough output to prove the result.
         - For project/code-generation requests in any language, create the needed files under `/mnt/iexa`, include entrypoints and config/dependency files, check the relevant runtime/compiler/package manager, install only missing dependencies with `apk`/`npm`/`pip` as appropriate, then run a bounded verification command.
         - Keep an internal step ledger: what has already been inspected, what command/file write was just attempted, what the output proved, and what the next smallest useful step is. Do not rely on memory guesses when the Local Alpine result is available.
         - For multi-step tasks, include one short visible step note before the `iexa_alpine` block, such as "先检查文件" or "现在修复并验证". Keep detailed reasoning internal.
+        - Intent to tool mapping: read/list/search -> inspect real files; create/write/modify -> structured `write_files` plus verification; delete/rename/move/copy -> scoped file operation plus `ls` verification; install -> check then install only missing packages; run/test/build -> dependency check then execute; fix/debug -> reproduce, inspect, patch, verify; summarize/report -> use the latest real observation and stop tool use unless more execution is required.
         - Local Alpine terminal mode owns local project operations. If the user asks to list/read/search/create/modify/delete project files, inspect a directory, run a script, or "read the mnt directory", use `/mnt/iexa` via `iexa_alpine`; do not use the Documents/Iexa Workspace tool.
         - If the user asks you to run, execute, test, verify, inspect the environment, install packages, write or modify code, fix an error, rerun after a fix, write a runnable script/project, crawl/fetch/scrape a website, or diagnose command output, use `iexa_alpine`.
         - Dependency installs are an action, not a consultation. For "安装 Python 依赖" or similar, search `/mnt/iexa` for `requirements.txt`, `pyproject.toml`, `setup.py`, or obvious project folders; if one exists, install from it. If none exists, report the concrete search result and stop. Do not ask the user for a path before searching the workspace yourself.
@@ -13091,20 +13283,25 @@ final class ChatViewModel {
             "pip3 --version", "node --version", "npm --version", "gcc --version",
             "g++ --version", "make --version", "pwd"
         ]
-        let onlyPreflightCommands = commandResults.allSatisfy { result in
-            let command = result.command.lowercased()
-            return preflightTerms.contains { command.contains($0) }
+        let realActionPatterns = [
+            #"(?m)(^|[;&|{]\s*)apk\s+add\b"#,
+            #"(?m)(^|[;&|{]\s*)(?:python3\s+-m\s+pip|pip3?|npm)\s+(?:install|i|add)\b"#,
+            #"(?m)(^|[;&|{]\s*)python3\s+(?:/|\./|[\w.-]+\.py\b|-m\b|-c\b|-\s)"#,
+            #"(?m)(^|[;&|{]\s*)node\s+(?:/|\./|[\w.-]+\.m?js\b)"#,
+            #"(?m)(^|[;&|{]\s*)gcc\s+(?!--version\b|--help\b)"#,
+            #"(?m)(^|[;&|{]\s*)g\+\+\s+(?!--version\b|--help\b)"#,
+            #"(?m)(^|[;&|{]\s*)make(?:\s+(?!--version\b|--help\b)|$)"#,
+            #"(?m)(^|[;&|{]\s*)rm\s+(?:-|/mnt/iexa|\./)"#,
+            #"(?m)(^|[;&|{]\s*)mv\s+"#,
+            #"(?m)(^|[;&|{]\s*)cp\s+"#,
+            #"(?m)(^|[;&|{]\s*)mkdir\s+"#,
+            #"(?m)(^|[;&|{]\s*)touch\s+"#,
+            #"(?m)(^|[;&|{]\s*)chmod\s+"#,
+            #"\bwrite_files\b"#
+        ]
+        let didRealAction = realActionPatterns.contains {
+            combinedCommands.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil
         }
-        if onlyPreflightCommands {
-            return true
-        }
-        let didRealAction = [
-            " apk add ", "apk add ", " pip install", "pip3 install",
-            " npm install", "python3 ./", "python3 /", "python3 -m", "node ./",
-            "node /", "gcc ", "g++ ", "make", " rm ", "rm -", "rm ./", "rm /mnt/iexa",
-            " mv ", "mv ./", "mv /mnt/iexa", " cp ", "cp ./", "cp /mnt/iexa",
-            " write_files"
-        ].contains { combinedCommands.contains($0) }
         if didRealAction {
             if let latestUserText,
                localAlpineUserRequestNeedsVerificationAfterSetup(latestUserText),
@@ -13112,6 +13309,13 @@ final class ChatViewModel {
                 return true
             }
             return false
+        }
+        let onlyPreflightCommands = commandResults.allSatisfy { result in
+            let command = result.command.lowercased()
+            return preflightTerms.contains { command.contains($0) }
+        }
+        if onlyPreflightCommands {
+            return true
         }
         return preflightTerms.contains { combinedCommands.contains($0) }
     }

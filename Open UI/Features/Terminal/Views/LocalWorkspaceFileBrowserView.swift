@@ -3,27 +3,94 @@ import QuickLook
 import UniformTypeIdentifiers
 import UIKit
 
+private enum LocalFileBrowserLocation: String, CaseIterable, Identifiable {
+    case workspace
+    case rootfs
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .workspace: return "工作区"
+        case .rootfs: return "rootfs"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .workspace: return "当前本地 Alpine 工作区"
+        case .rootfs: return "本地 Alpine 根文件系统"
+        }
+    }
+
+    var emptySubtitle: String {
+        switch self {
+        case .workspace: return "AI 写入的文件会出现在这里。"
+        case .rootfs: return "rootfs 目录暂时没有可显示项目。"
+        }
+    }
+}
+
+private struct LocalFileBrowserPreviewTarget: Identifiable {
+    let item: TerminalFileItem
+    let location: LocalFileBrowserLocation
+
+    var id: String { "\(location.rawValue):\(item.path)" }
+}
+
+private struct LocalFileBrowserDeleteTarget: Identifiable {
+    let item: TerminalFileItem
+    let location: LocalFileBrowserLocation
+
+    var id: String { "\(location.rawValue):\(item.path)" }
+}
+
 struct LocalWorkspaceFileBrowserView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
 
+    @State private var location: LocalFileBrowserLocation = .workspace
     @State private var currentPath = "/"
+    @State private var rootfsPath = "/"
     @State private var pathHistory: [String] = []
+    @State private var rootfsPathHistory: [String] = []
     @State private var items: [TerminalFileItem] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var searchText = ""
-    @State private var previewItem: TerminalFileItem?
+    @State private var previewTarget: LocalFileBrowserPreviewTarget?
     @State private var shareURL: URL?
-    @State private var confirmDeleteItem: TerminalFileItem?
+    @State private var confirmDeleteTarget: LocalFileBrowserDeleteTarget?
+
+    private var activePath: String {
+        switch location {
+        case .workspace: return currentPath
+        case .rootfs: return rootfsPath
+        }
+    }
+
+    private var activeHistory: [String] {
+        switch location {
+        case .workspace: return pathHistory
+        case .rootfs: return rootfsPathHistory
+        }
+    }
 
     private var runtimePath: String {
-        currentPath == "/" ? "/mnt/iexa" : "/mnt/iexa\(currentPath)"
+        switch location {
+        case .workspace:
+            return currentPath == "/" ? "/mnt/iexa" : "/mnt/iexa\(currentPath)"
+        case .rootfs:
+            return rootfsPath
+        }
     }
 
     private var pathSegments: [(name: String, path: String)] {
-        let components = currentPath.split(separator: "/").map(String.init)
-        var segments: [(name: String, path: String)] = [("mnt", "/"), ("iexa", "/")]
+        let path = activePath
+        let components = path.split(separator: "/").map(String.init)
+        var segments: [(name: String, path: String)] = location == .workspace
+            ? [("mnt", "/"), ("iexa", "/")]
+            : [("rootfs", "/")]
         var accumulated = ""
         for component in components {
             accumulated += "/\(component)"
@@ -50,6 +117,7 @@ struct LocalWorkspaceFileBrowserView: View {
             ZStack {
                 theme.background.ignoresSafeArea()
                 VStack(spacing: 0) {
+                    locationPicker
                     workspaceHeader
                     breadcrumbBar
                     Divider().foregroundStyle(theme.cardBorder.opacity(0.35))
@@ -78,11 +146,12 @@ struct LocalWorkspaceFileBrowserView: View {
         .task {
             await loadDirectory()
         }
-        .sheet(item: $previewItem) { item in
+        .sheet(item: $previewTarget) { target in
             LocalWorkspaceFilePreviewSheet(
-                item: item,
+                item: target.item,
+                location: target.location,
                 onDeleted: {
-                    previewItem = nil
+                    previewTarget = nil
                     Task { await loadDirectory() }
                 }
             )
@@ -91,30 +160,45 @@ struct LocalWorkspaceFileBrowserView: View {
             ShareSheetView(activityItems: [url])
         }
         .confirmationDialog(
-            "删除 \(confirmDeleteItem?.name ?? "")？",
+            "删除 \(confirmDeleteTarget?.item.name ?? "")？",
             isPresented: Binding(
-                get: { confirmDeleteItem != nil },
-                set: { if !$0 { confirmDeleteItem = nil } }
+                get: { confirmDeleteTarget != nil },
+                set: { if !$0 { confirmDeleteTarget = nil } }
             ),
             titleVisibility: .visible
         ) {
             Button("删除", role: .destructive) {
-                if let item = confirmDeleteItem {
-                    Task { await delete(item) }
+                if let target = confirmDeleteTarget {
+                    Task { await delete(target.item, in: target.location) }
                 }
-                confirmDeleteItem = nil
+                confirmDeleteTarget = nil
             }
             Button("取消", role: .cancel) {
-                confirmDeleteItem = nil
+                confirmDeleteTarget = nil
             }
         } message: {
-            Text("这个操作会从当前 /mnt/iexa 工作区移除该项目，无法撤销。")
+            Text(deleteWarningText)
+        }
+    }
+
+    private var locationPicker: some View {
+        Picker("浏览位置", selection: $location) {
+            ForEach(LocalFileBrowserLocation.allCases) { location in
+                Text(location.title).tag(location)
+            }
+        }
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 18)
+        .padding(.top, 8)
+        .onChange(of: location) { _, _ in
+            searchText = ""
+            Task { await loadDirectory() }
         }
     }
 
     private var workspaceHeader: some View {
         HStack(spacing: 12) {
-            Image(systemName: "folder")
+            Image(systemName: location == .workspace ? "folder" : "shippingbox")
                 .scaledFont(size: 18, weight: .semibold)
                 .foregroundStyle(theme.brandPrimary)
                 .frame(width: 42, height: 42)
@@ -122,17 +206,19 @@ struct LocalWorkspaceFileBrowserView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
             VStack(alignment: .leading, spacing: 3) {
-                Text("/mnt/iexa")
+                Text(runtimePath)
                     .scaledFont(size: 17, weight: .bold)
                     .foregroundStyle(theme.textPrimary)
-                Text("当前本地 Alpine 工作区")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(location.subtitle)
                     .scaledFont(size: 12, weight: .medium)
                     .foregroundStyle(theme.textTertiary)
             }
 
             Spacer(minLength: 0)
 
-            if currentPath != "/" {
+            if activePath != "/" || !activeHistory.isEmpty {
                 Button {
                     navigateBack()
                     Haptics.play(.light)
@@ -166,13 +252,13 @@ struct LocalWorkspaceFileBrowserView: View {
                         Haptics.play(.light)
                     } label: {
                         Text(segment.name)
-                            .scaledFont(size: 12, weight: segment.path == currentPath ? .bold : .medium)
-                            .foregroundStyle(segment.path == currentPath ? theme.brandPrimary : theme.textSecondary)
+                            .scaledFont(size: 12, weight: segment.path == activePath ? .bold : .medium)
+                            .foregroundStyle(segment.path == activePath ? theme.brandPrimary : theme.textSecondary)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 5)
                             .background(
                                 Capsule()
-                                    .fill(segment.path == currentPath ? theme.brandPrimary.opacity(0.11) : Color.clear)
+                                    .fill(segment.path == activePath ? theme.brandPrimary.opacity(0.11) : Color.clear)
                             )
                     }
                     .buttonStyle(.plain)
@@ -186,7 +272,7 @@ struct LocalWorkspaceFileBrowserView: View {
     @ViewBuilder
     private var content: some View {
         if isLoading && items.isEmpty {
-            emptyState(icon: "folder", title: "正在读取工作区", subtitle: "正在加载 \(runtimePath)")
+            emptyState(icon: location == .workspace ? "folder" : "shippingbox", title: "正在读取文件", subtitle: "正在加载 \(runtimePath)")
         } else if let errorMessage {
             VStack(spacing: 12) {
                 emptyState(icon: "exclamationmark.triangle", title: "无法读取文件", subtitle: errorMessage)
@@ -198,9 +284,9 @@ struct LocalWorkspaceFileBrowserView: View {
             }
         } else if filteredItems.isEmpty {
             emptyState(
-                icon: searchText.isEmpty ? "folder" : "magnifyingglass",
+                icon: searchText.isEmpty ? (location == .workspace ? "folder" : "shippingbox") : "magnifyingglass",
                 title: searchText.isEmpty ? "这个目录是空的" : "没有找到文件",
-                subtitle: searchText.isEmpty ? "AI 写入的文件会出现在这里。" : "换个关键词再试试。"
+                subtitle: searchText.isEmpty ? location.emptySubtitle : "换个关键词再试试。"
             )
         } else {
             List {
@@ -229,7 +315,7 @@ struct LocalWorkspaceFileBrowserView: View {
             if item.isDirectory {
                 navigateToDirectory(item.path)
             } else {
-                previewItem = item
+                previewTarget = LocalFileBrowserPreviewTarget(item: item, location: location)
             }
             Haptics.play(.light)
         } label: {
@@ -261,14 +347,15 @@ struct LocalWorkspaceFileBrowserView: View {
         .buttonStyle(.plain)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
-                confirmDeleteItem = item
+                confirmDeleteTarget = LocalFileBrowserDeleteTarget(item: item, location: location)
             } label: {
                 Label("删除", systemImage: "trash")
             }
 
             if !item.isDirectory {
                 Button {
-                    Task { shareURL = await temporaryURL(for: item) }
+                    let selectedLocation = location
+                    Task { shareURL = await temporaryURL(for: item, in: selectedLocation) }
                 } label: {
                     Label("分享", systemImage: "square.and.arrow.up")
                 }
@@ -284,20 +371,21 @@ struct LocalWorkspaceFileBrowserView: View {
                 }
             } else {
                 Button {
-                    previewItem = item
+                    previewTarget = LocalFileBrowserPreviewTarget(item: item, location: location)
                 } label: {
                     Label("预览", systemImage: "eye")
                 }
 
                 Button {
-                    Task { shareURL = await temporaryURL(for: item) }
+                    let selectedLocation = location
+                    Task { shareURL = await temporaryURL(for: item, in: selectedLocation) }
                 } label: {
                     Label("分享", systemImage: "square.and.arrow.up")
                 }
             }
 
             Button {
-                UIPasteboard.general.string = "/mnt/iexa\(item.path == "/" ? "" : item.path)"
+                UIPasteboard.general.string = displayPath(for: item, in: location)
                 Haptics.notify(.success)
             } label: {
                 Label("复制路径", systemImage: "doc.on.doc")
@@ -306,7 +394,7 @@ struct LocalWorkspaceFileBrowserView: View {
             Divider()
 
             Button(role: .destructive) {
-                confirmDeleteItem = item
+                confirmDeleteTarget = LocalFileBrowserDeleteTarget(item: item, location: location)
             } label: {
                 Label("删除", systemImage: "trash")
             }
@@ -345,7 +433,12 @@ struct LocalWorkspaceFileBrowserView: View {
         isLoading = true
         errorMessage = nil
         do {
-            items = try await LocalAlpineTerminalService.shared.listFiles(path: currentPath, includeHidden: true)
+            switch location {
+            case .workspace:
+                items = try await LocalAlpineTerminalService.shared.listFiles(path: currentPath, includeHidden: true)
+            case .rootfs:
+                items = try await LocalAlpineTerminalService.shared.listRootFSFiles(path: rootfsPath, includeHidden: true)
+            }
         } catch {
             items = []
             errorMessage = error.localizedDescription
@@ -354,34 +447,61 @@ struct LocalWorkspaceFileBrowserView: View {
     }
 
     private func navigateToDirectory(_ path: String) {
-        pathHistory.append(currentPath)
-        currentPath = path
-        searchText = ""
-        Task { await loadDirectory() }
-    }
-
-    private func navigateToPath(_ path: String) {
-        guard path != currentPath else { return }
-        pathHistory.append(currentPath)
-        currentPath = path
-        searchText = ""
-        Task { await loadDirectory() }
-    }
-
-    private func navigateBack() {
-        if let previous = pathHistory.popLast() {
-            currentPath = previous
-        } else {
-            let parent = (currentPath as NSString).deletingLastPathComponent
-            currentPath = parent.isEmpty ? "/" : parent
+        switch location {
+        case .workspace:
+            pathHistory.append(currentPath)
+            currentPath = path
+        case .rootfs:
+            rootfsPathHistory.append(rootfsPath)
+            rootfsPath = path
         }
         searchText = ""
         Task { await loadDirectory() }
     }
 
-    private func delete(_ item: TerminalFileItem) async {
+    private func navigateToPath(_ path: String) {
+        guard path != activePath else { return }
+        switch location {
+        case .workspace:
+            pathHistory.append(currentPath)
+            currentPath = path
+        case .rootfs:
+            rootfsPathHistory.append(rootfsPath)
+            rootfsPath = path
+        }
+        searchText = ""
+        Task { await loadDirectory() }
+    }
+
+    private func navigateBack() {
+        switch location {
+        case .workspace:
+            if let previous = pathHistory.popLast() {
+                currentPath = previous
+            } else {
+                let parent = (currentPath as NSString).deletingLastPathComponent
+                currentPath = parent.isEmpty ? "/" : parent
+            }
+        case .rootfs:
+            if let previous = rootfsPathHistory.popLast() {
+                rootfsPath = previous
+            } else {
+                let parent = (rootfsPath as NSString).deletingLastPathComponent
+                rootfsPath = parent.isEmpty ? "/" : parent
+            }
+        }
+        searchText = ""
+        Task { await loadDirectory() }
+    }
+
+    private func delete(_ item: TerminalFileItem, in location: LocalFileBrowserLocation) async {
         do {
-            try await LocalAlpineTerminalService.shared.deleteItem(path: item.path)
+            switch location {
+            case .workspace:
+                try await LocalAlpineTerminalService.shared.deleteItem(path: item.path)
+            case .rootfs:
+                try await LocalAlpineTerminalService.shared.deleteRootFSItem(path: item.path)
+            }
             items.removeAll { $0.path == item.path }
             Haptics.notify(.success)
         } catch {
@@ -390,10 +510,16 @@ struct LocalWorkspaceFileBrowserView: View {
         }
     }
 
-    private func temporaryURL(for item: TerminalFileItem) async -> URL? {
+    private func temporaryURL(for item: TerminalFileItem, in location: LocalFileBrowserLocation) async -> URL? {
         guard !item.isDirectory else { return nil }
         do {
-            let data = try await LocalAlpineTerminalService.shared.readFile(path: item.path)
+            let data: Data
+            switch location {
+            case .workspace:
+                data = try await LocalAlpineTerminalService.shared.readFile(path: item.path)
+            case .rootfs:
+                data = try await LocalAlpineTerminalService.shared.readRootFSFile(path: item.path)
+            }
             return try Self.writeTemporaryFile(data: data, fileName: item.name)
         } catch {
             errorMessage = error.localizedDescription
@@ -409,6 +535,24 @@ struct LocalWorkspaceFileBrowserView: View {
             return "\(kind.label) · \(size)"
         }
         return kind.label
+    }
+
+    private var deleteWarningText: String {
+        switch confirmDeleteTarget?.location ?? location {
+        case .workspace:
+            return "这个操作会从当前 /mnt/iexa 工作区移除该项目，无法撤销。"
+        case .rootfs:
+            return "这个操作会从本地 Alpine rootfs 中删除该项目，可能影响运行环境，无法撤销。"
+        }
+    }
+
+    private func displayPath(for item: TerminalFileItem, in location: LocalFileBrowserLocation) -> String {
+        switch location {
+        case .workspace:
+            return "/mnt/iexa\(item.path == "/" ? "" : item.path)"
+        case .rootfs:
+            return item.path
+        }
     }
 
     private func iconColor(for item: TerminalFileItem) -> Color {
@@ -438,6 +582,7 @@ struct LocalWorkspaceFileBrowserView: View {
 
 private struct LocalWorkspaceFilePreviewSheet: View {
     let item: TerminalFileItem
+    let location: LocalFileBrowserLocation
     var onDeleted: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -527,7 +672,7 @@ private struct LocalWorkspaceFilePreviewSheet: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("这个操作会从当前 /mnt/iexa 工作区删除该文件，无法撤销。")
+            Text(deleteWarningText)
         }
     }
 
@@ -663,15 +808,33 @@ private struct LocalWorkspaceFilePreviewSheet: View {
     private var previewSubtitle: String {
         var parts = [kind.label]
         if let size = item.formattedSize { parts.append(size) }
-        parts.append("/mnt/iexa\(item.path == "/" ? "" : item.path)")
+        parts.append(displayPath)
         return parts.joined(separator: " · ")
+    }
+
+    private var displayPath: String {
+        switch location {
+        case .workspace:
+            return "/mnt/iexa\(item.path == "/" ? "" : item.path)"
+        case .rootfs:
+            return item.path
+        }
+    }
+
+    private var deleteWarningText: String {
+        switch location {
+        case .workspace:
+            return "这个操作会从当前 /mnt/iexa 工作区删除该文件，无法撤销。"
+        case .rootfs:
+            return "这个操作会从本地 Alpine rootfs 中删除该文件，可能影响运行环境，无法撤销。"
+        }
     }
 
     private func loadFile() async {
         isLoading = true
         errorMessage = nil
         do {
-            let fileData = try await LocalAlpineTerminalService.shared.readFile(path: item.path)
+            let fileData = try await readCurrentFile()
             data = fileData
             if kind.isTextPreviewable {
                 text = Self.decodeText(fileData)
@@ -696,7 +859,7 @@ private struct LocalWorkspaceFilePreviewSheet: View {
             if let data {
                 fileData = data
             } else {
-                fileData = try await LocalAlpineTerminalService.shared.readFile(path: item.path)
+                fileData = try await readCurrentFile()
             }
             shareURL = try Self.writeTemporaryFile(data: fileData, fileName: item.name)
             Haptics.play(.light)
@@ -716,7 +879,7 @@ private struct LocalWorkspaceFilePreviewSheet: View {
                 if let data {
                     fileData = data
                 } else {
-                    fileData = try await LocalAlpineTerminalService.shared.readFile(path: item.path)
+                    fileData = try await readCurrentFile()
                 }
                 let writtenURL = try Self.writeTemporaryFile(data: fileData, fileName: item.name)
                 temporaryFileURL = writtenURL
@@ -732,13 +895,27 @@ private struct LocalWorkspaceFilePreviewSheet: View {
 
     private func deleteFile() async {
         do {
-            try await LocalAlpineTerminalService.shared.deleteItem(path: item.path)
+            switch location {
+            case .workspace:
+                try await LocalAlpineTerminalService.shared.deleteItem(path: item.path)
+            case .rootfs:
+                try await LocalAlpineTerminalService.shared.deleteRootFSItem(path: item.path)
+            }
             Haptics.notify(.success)
             onDeleted()
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
             Haptics.notify(.error)
+        }
+    }
+
+    private func readCurrentFile() async throws -> Data {
+        switch location {
+        case .workspace:
+            return try await LocalAlpineTerminalService.shared.readFile(path: item.path)
+        case .rootfs:
+            return try await LocalAlpineTerminalService.shared.readRootFSFile(path: item.path)
         }
     }
 

@@ -20,10 +20,12 @@ struct LocalAlpineTerminalConsoleView: View {
     @State private var historyCursor: Int?
     @State private var isControlLatched = false
     @State private var isAccessoryBarHidden = false
-    @State private var commandInputHeight: CGFloat = 34
+    @State private var commandInputHeight: CGFloat = 30
 
     private let prompt = "root@iexa:~#"
     private let terminalGreen = Color(red: 0.24, green: 0.82, blue: 0.36)
+    private let terminalCommandFontSize: CGFloat = 14
+    private let terminalOutputFontSize: CGFloat = 13
     @State private var cwd = "/mnt/iexa"
 
     var body: some View {
@@ -32,59 +34,62 @@ struct LocalAlpineTerminalConsoleView: View {
 
             VStack(spacing: 0) {
                 headerBar
-                    .padding(.horizontal, 22)
-                    .padding(.top, 14)
-                    .padding(.bottom, 8)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 6)
+                    .padding(.bottom, 4)
 
                 ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 8) {
-                            ForEach(entries) { entry in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("\(prompt) \(entry.command)")
-                                        .font(.system(size: 18, weight: .regular, design: .monospaced))
-                                        .foregroundStyle(.white.opacity(0.9))
-                                        .lineLimit(nil)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .textSelection(.enabled)
-
-                                    if !entry.output.isEmpty {
-                                        Text(entry.output)
-                                            .font(.system(size: 17, weight: .regular, design: .monospaced))
-                                            .foregroundStyle(terminalGreen.opacity(0.88))
+                    GeometryReader { geometry in
+                        ScrollView([.vertical, .horizontal], showsIndicators: true) {
+                            LazyVStack(alignment: .leading, spacing: 7) {
+                                ForEach(entries) { entry in
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("\(prompt) \(entry.command)")
+                                            .font(.system(size: terminalCommandFontSize, weight: .regular, design: .monospaced))
+                                            .foregroundStyle(.white.opacity(0.9))
                                             .lineLimit(nil)
-                                            .fixedSize(horizontal: false, vertical: true)
+                                            .fixedSize(horizontal: true, vertical: true)
                                             .textSelection(.enabled)
-                                    } else if entry.isRunning {
-                                        Text("执行中...")
-                                            .font(.system(size: 17, weight: .regular, design: .monospaced))
-                                            .foregroundStyle(.white.opacity(0.45))
-                                    } else if let exitCode = entry.exitCode, exitCode != 0 {
-                                        Text("[exit \(exitCode), no output]")
-                                            .font(.system(size: 17, weight: .regular, design: .monospaced))
-                                            .foregroundStyle(.white.opacity(0.45))
-                                            .textSelection(.enabled)
-                                    }
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(entry.id)
-                            }
 
-                            commandLine
-                                .id("commandLine")
+                                        if !entry.output.isEmpty {
+                                            Text(entry.output)
+                                                .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
+                                                .foregroundStyle(terminalGreen.opacity(0.88))
+                                                .lineLimit(nil)
+                                                .fixedSize(horizontal: true, vertical: true)
+                                                .textSelection(.enabled)
+                                        } else if entry.isRunning {
+                                            Text("执行中...")
+                                                .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
+                                                .foregroundStyle(.white.opacity(0.45))
+                                        } else if let exitCode = entry.exitCode, exitCode != 0 {
+                                            Text("[exit \(exitCode), no output]")
+                                                .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
+                                                .foregroundStyle(.white.opacity(0.45))
+                                                .textSelection(.enabled)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .id(entry.id)
+                                }
+
+                                commandLine
+                                    .id("commandLine")
+                            }
+                            .frame(minWidth: max(1, geometry.size.width - 8), alignment: .leading)
+                            .padding(.horizontal, 2)
+                            .padding(.top, 4)
+                            .padding(.bottom, 18)
                         }
-                        .padding(.horizontal, 2)
-                        .padding(.top, 6)
-                        .padding(.bottom, 24)
-                    }
-                    .onChange(of: entries.count) { _, _ in
-                        withAnimation(.easeOut(duration: 0.16)) {
-                            proxy.scrollTo("commandLine", anchor: .bottom)
+                        .onChange(of: entries.count) { _, _ in
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                proxy.scrollTo("commandLine", anchor: .bottom)
+                            }
                         }
-                    }
-                    .onChange(of: commandInputHeight) { _, _ in
-                        withAnimation(.easeOut(duration: 0.12)) {
-                            proxy.scrollTo("commandLine", anchor: .bottom)
+                        .onChange(of: commandInputHeight) { _, _ in
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                proxy.scrollTo("commandLine", anchor: .bottom)
+                            }
                         }
                     }
                 }
@@ -134,9 +139,9 @@ struct LocalAlpineTerminalConsoleView: View {
                 onDismiss()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 34, weight: .light))
+                    .font(.system(size: 27, weight: .light))
                     .foregroundStyle(Color.blue)
-                    .frame(width: 44, height: 44)
+                    .frame(width: 38, height: 38)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -154,9 +159,9 @@ struct LocalAlpineTerminalConsoleView: View {
                 Haptics.play(.light)
             } label: {
                 Image(systemName: "paintbrush")
-                    .font(.system(size: 30, weight: .light))
+                    .font(.system(size: 24, weight: .light))
                     .foregroundStyle(Color.blue)
-                    .frame(width: 44, height: 44)
+                    .frame(width: 38, height: 38)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -175,7 +180,9 @@ struct LocalAlpineTerminalConsoleView: View {
             isEnabled: !isRunning,
             textColor: .white,
             cursorColor: UIColor(red: 0.24, green: 0.82, blue: 0.36, alpha: 1),
+            fontSize: terminalCommandFontSize,
             controlLatch: $isControlLatched,
+            shouldExecuteOnReturn: { Self.commandIsCompleteForExecution($0) },
             onReturn: {
                 Task { await executeCurrentCommand() }
             },
@@ -201,7 +208,7 @@ struct LocalAlpineTerminalConsoleView: View {
                     pasteIntoCommandLine()
                 }
                 accessoryTextButton("↵ 回车") {
-                    Task { await executeCurrentCommand() }
+                    handleReturnAction()
                 }
                 accessoryTextButton("Esc") {
                     cancelCurrentInput()
@@ -242,8 +249,8 @@ struct LocalAlpineTerminalConsoleView: View {
                     runShortcutCommand("pwd && ls -la /")
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
         }
         .background(Color(red: 0.13, green: 0.13, blue: 0.13))
     }
@@ -251,12 +258,12 @@ struct LocalAlpineTerminalConsoleView: View {
     private func accessoryButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: systemImage)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color(red: 0.24, green: 0.82, blue: 0.36))
                 .lineLimit(1)
-                .frame(height: 36)
-                .padding(.horizontal, 12)
-                .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .frame(height: 30)
+                .padding(.horizontal, 10)
+                .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -264,14 +271,240 @@ struct LocalAlpineTerminalConsoleView: View {
     private func accessoryTextButton(_ title: String, active: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(active ? Color.black : Color(red: 0.24, green: 0.82, blue: 0.36))
                 .lineLimit(1)
-                .frame(height: 36)
-                .padding(.horizontal, 14)
-                .background(active ? Color(red: 0.24, green: 0.82, blue: 0.36) : Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .frame(height: 30)
+                .padding(.horizontal, 11)
+                .background(active ? Color(red: 0.24, green: 0.82, blue: 0.36) : Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .buttonStyle(.plain)
+    }
+
+    private static func commandIsCompleteForExecution(_ command: String) -> Bool {
+        let normalized = command
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.hasSuffix("\\") {
+            return false
+        }
+        if !pendingHeredocDelimiters(in: normalized).isEmpty {
+            return false
+        }
+        let controlText = shellControlTextExcludingHeredocBodies(in: normalized)
+        if hasUnclosedShellQuote(in: controlText)
+            || hasUnclosedShellGrouping(in: controlText)
+            || hasIncompleteShellCompoundSyntax(in: controlText) {
+            return false
+        }
+        return true
+    }
+
+    private static func hasUnclosedShellQuote(in command: String) -> Bool {
+        var singleQuoted = false
+        var doubleQuoted = false
+        var escaped = false
+        for character in command {
+            if escaped {
+                escaped = false
+                continue
+            }
+            if character == "\\" {
+                escaped = doubleQuoted || !singleQuoted
+                continue
+            }
+            if character == "'", !doubleQuoted {
+                singleQuoted.toggle()
+            } else if character == "\"", !singleQuoted {
+                doubleQuoted.toggle()
+            }
+        }
+        return singleQuoted || doubleQuoted || escaped
+    }
+
+    private static func hasUnclosedShellGrouping(in command: String) -> Bool {
+        var singleQuoted = false
+        var doubleQuoted = false
+        var escaped = false
+        var stack: [Character] = []
+        let pairs: [Character: Character] = ["(": ")", "[": "]", "{": "}"]
+        for character in command {
+            if escaped {
+                escaped = false
+                continue
+            }
+            if character == "\\" {
+                escaped = doubleQuoted || !singleQuoted
+                continue
+            }
+            if character == "'", !doubleQuoted {
+                singleQuoted.toggle()
+                continue
+            }
+            if character == "\"", !singleQuoted {
+                doubleQuoted.toggle()
+                continue
+            }
+            guard !singleQuoted && !doubleQuoted else { continue }
+            if pairs.keys.contains(character) {
+                stack.append(character)
+            } else if let last = stack.last, pairs[last] == character {
+                stack.removeLast()
+            }
+        }
+        return !stack.isEmpty
+    }
+
+    private static func pendingHeredocDelimiters(in command: String) -> [String] {
+        var pending: [String] = []
+        let pattern = #"<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_.-]*)['"]?"#
+        let regex = try? NSRegularExpression(pattern: pattern)
+        for rawLine in command.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let last = pending.last, line == last {
+                pending.removeLast()
+                continue
+            }
+            guard let regex else { continue }
+            let nsLine = rawLine as NSString
+            let matches = regex.matches(in: rawLine, range: NSRange(location: 0, length: nsLine.length))
+            for match in matches where match.numberOfRanges >= 2 {
+                let delimiter = nsLine.substring(with: match.range(at: 1))
+                if !delimiter.isEmpty {
+                    pending.append(delimiter)
+                }
+            }
+        }
+        return pending
+    }
+
+    private static func shellControlTextExcludingHeredocBodies(in command: String) -> String {
+        var result: [String] = []
+        var pending: [String] = []
+        let pattern = #"<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_.-]*)['"]?"#
+        let regex = try? NSRegularExpression(pattern: pattern)
+
+        for rawLine in command.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let last = pending.last {
+                if line == last {
+                    pending.removeLast()
+                    result.append(rawLine)
+                }
+                continue
+            }
+
+            result.append(rawLine)
+            guard let regex else { continue }
+            let nsLine = rawLine as NSString
+            let matches = regex.matches(in: rawLine, range: NSRange(location: 0, length: nsLine.length))
+            for match in matches where match.numberOfRanges >= 2 {
+                let delimiter = nsLine.substring(with: match.range(at: 1))
+                if !delimiter.isEmpty {
+                    pending.append(delimiter)
+                }
+            }
+        }
+
+        return result.joined(separator: "\n")
+    }
+
+    private static func hasIncompleteShellCompoundSyntax(in command: String) -> Bool {
+        var ifDepth = 0
+        var loopDepth = 0
+        var caseDepth = 0
+        let tokenPattern = #"(?m)(^|[;&|]\s*)\s*(if|for|while|until|case)\b|\b(fi|done|esac)\b"#
+        guard let regex = try? NSRegularExpression(pattern: tokenPattern) else { return false }
+        let syntaxText = shellTextForCompoundSyntax(command)
+        let nsCommand = syntaxText as NSString
+        let matches = regex.matches(in: syntaxText, range: NSRange(location: 0, length: nsCommand.length))
+        for match in matches {
+            let tokenRange = (2..<match.numberOfRanges)
+                .map { match.range(at: $0) }
+                .first { $0.location != NSNotFound }
+            guard let tokenRange else { continue }
+            let token = nsCommand.substring(with: tokenRange).lowercased()
+            switch token {
+            case "if":
+                ifDepth += 1
+            case "fi":
+                ifDepth = max(0, ifDepth - 1)
+            case "for", "while", "until":
+                loopDepth += 1
+            case "done":
+                loopDepth = max(0, loopDepth - 1)
+            case "case":
+                caseDepth += 1
+            case "esac":
+                caseDepth = max(0, caseDepth - 1)
+            default:
+                break
+            }
+        }
+        return ifDepth > 0 || loopDepth > 0 || caseDepth > 0
+    }
+
+    private static func shellTextForCompoundSyntax(_ command: String) -> String {
+        var result = ""
+        var singleQuoted = false
+        var doubleQuoted = false
+        var escaped = false
+        var inComment = false
+
+        for character in command {
+            if inComment {
+                if character == "\n" {
+                    inComment = false
+                    result.append("\n")
+                } else {
+                    result.append(" ")
+                }
+                continue
+            }
+            if escaped {
+                escaped = false
+                result.append(singleQuoted || doubleQuoted ? " " : String(character))
+                continue
+            }
+            if character == "\\" {
+                escaped = doubleQuoted || !singleQuoted
+                result.append(singleQuoted || doubleQuoted ? " " : "\\")
+                continue
+            }
+            if character == "'", !doubleQuoted {
+                singleQuoted.toggle()
+                result.append(" ")
+                continue
+            }
+            if character == "\"", !singleQuoted {
+                doubleQuoted.toggle()
+                result.append(" ")
+                continue
+            }
+            if character == "#", !singleQuoted && !doubleQuoted {
+                inComment = true
+                result.append(" ")
+                continue
+            }
+            result.append(singleQuoted || doubleQuoted ? " " : String(character))
+        }
+
+        return result
+    }
+
+    private func handleReturnAction() {
+        let trimmed = commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            refocusCommandLine()
+            return
+        }
+        if Self.commandIsCompleteForExecution(commandInput) {
+            Task { await executeCurrentCommand() }
+        } else {
+            sendTextControl(.insert("\n"))
+        }
     }
 
     private func executeCurrentCommand() async {
@@ -579,13 +812,15 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
     var isEnabled: Bool
     var textColor: UIColor
     var cursorColor: UIColor
+    var fontSize: CGFloat
     @Binding var controlLatch: Bool
+    var shouldExecuteOnReturn: (String) -> Bool
     var onReturn: () -> Void
     var onControlCharacter: (Character) -> Void
 
     func makeUIView(context: Context) -> UITextView {
         let view = LocalAlpineConsoleInputView()
-        view.font = .monospacedSystemFont(ofSize: 18, weight: .regular)
+        view.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
         view.textColor = textColor
         view.tintColor = cursorColor
         view.backgroundColor = .clear
@@ -615,6 +850,8 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
 
     func updateUIView(_ view: UITextView, context: Context) {
         context.coordinator.prompt = prompt
+        context.coordinator.shouldExecuteOnReturn = shouldExecuteOnReturn
+        view.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
         let displayedText = prompt + text
         let previousCommandCursorOffset = context.coordinator.commandCursorOffset(in: view)
         if view.text != displayedText {
@@ -653,6 +890,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
             isFocused: $isFocused,
             measuredHeight: $measuredHeight,
             controlLatch: $controlLatch,
+            shouldExecuteOnReturn: shouldExecuteOnReturn,
             onReturn: onReturn,
             onControlCharacter: onControlCharacter
         )
@@ -664,6 +902,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
         @Binding var isFocused: Bool
         @Binding var measuredHeight: CGFloat
         @Binding var controlLatch: Bool
+        var shouldExecuteOnReturn: (String) -> Bool
         var onReturn: () -> Void
         var onControlCharacter: (Character) -> Void
         var lastFocusRequestID: UUID?
@@ -675,6 +914,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
             isFocused: Binding<Bool>,
             measuredHeight: Binding<CGFloat>,
             controlLatch: Binding<Bool>,
+            shouldExecuteOnReturn: @escaping (String) -> Bool,
             onReturn: @escaping () -> Void,
             onControlCharacter: @escaping (Character) -> Void
         ) {
@@ -683,6 +923,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
             _isFocused = isFocused
             _measuredHeight = measuredHeight
             _controlLatch = controlLatch
+            self.shouldExecuteOnReturn = shouldExecuteOnReturn
             self.onReturn = onReturn
             self.onControlCharacter = onControlCharacter
         }
@@ -723,11 +964,19 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
             }
 
             if string == "\n" || string == "\r" || string == "\r\n" {
-                onReturn()
+                let currentCommand = commandText(in: textView)
+                guard !currentCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return false
+                }
+                if shouldExecuteOnReturn(currentCommand) {
+                    onReturn()
+                } else {
+                    replaceCharacters(in: textView, range: range, with: "\n")
+                }
                 return false
             }
 
-            let sanitized = Self.sanitizedInlineText(string)
+            let sanitized = Self.sanitizedPastedText(string)
             guard sanitized == string else {
                 replaceCharacters(in: textView, range: range, with: sanitized)
                 return false
@@ -746,7 +995,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
 
             switch action {
             case .insert(let value):
-                let sanitized = Self.sanitizedInlineText(value)
+                let sanitized = Self.sanitizedPastedText(value)
                 if !sanitized.isEmpty {
                     replaceCharacters(in: view, range: view.selectedNSRange, with: sanitized)
                 }
@@ -776,16 +1025,15 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
             return Character(String(scalar).lowercased())
         }
 
-        private static func sanitizedInlineText(_ text: String) -> String {
+        private static func sanitizedPastedText(_ text: String) -> String {
             text
                 .replacingOccurrences(
                     of: #"\\[ \t]*\r?\n[ \t]*"#,
-                    with: " ",
+                    with: "\\\n",
                     options: .regularExpression
                 )
-                .replacingOccurrences(of: "\r\n", with: " ")
-                .replacingOccurrences(of: "\r", with: " ")
-                .replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
         }
 
         private func replaceCharacters(in view: UITextView, range: NSRange, with replacement: String) {
@@ -808,7 +1056,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
         func updateHeight(for view: UITextView) {
             let width = max(24, view.bounds.width)
             let fittingSize = CGSize(width: width, height: .greatestFiniteMagnitude)
-            let maxHeight: CGFloat = 360
+            let maxHeight: CGFloat = 260
             let contentHeight = ceil(view.sizeThatFits(fittingSize).height)
             let needsInternalScroll = contentHeight > maxHeight + 0.5
             if view.isScrollEnabled != needsInternalScroll {
@@ -817,7 +1065,7 @@ private struct LocalAlpineConsoleTextView: UIViewRepresentable {
             view.showsVerticalScrollIndicator = needsInternalScroll
             view.alwaysBounceVertical = needsInternalScroll
 
-            let height = max(34, min(maxHeight, contentHeight))
+            let height = max(30, min(maxHeight, contentHeight))
             if abs(measuredHeight - height) > 0.5 {
                 DispatchQueue.main.async {
                     self.measuredHeight = height
