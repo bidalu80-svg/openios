@@ -15,6 +15,50 @@ private struct MessageShareItem: Identifiable {
     let text: String
 }
 
+private struct AgentActivityItem: Identifiable, Hashable {
+    let id: String
+    let timestamp: Date
+    let isStreaming: Bool
+    let summary: String
+    let rawOutput: String
+    let writtenFiles: [LocalAlpineWrittenFile]
+    let commandResults: [LocalAlpineAgentCommandResult]
+
+    init?(message: ChatMessage) {
+        guard message.metadata?["iexa_local_alpine_result"] == "true"
+            || message.content.hasPrefix("Local Alpine 执行结果")
+            || message.model == "Local Alpine" else {
+            return nil
+        }
+        let metadata = message.metadata
+        let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata?["iexa_local_alpine_written_files"])
+        let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata?["iexa_local_alpine_command_results"])
+        let parsed = ParsedLocalAlpineResult(content: message.content, metadata: metadata)
+        let visibleCommands = commandResults.filter {
+            $0.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "write_files"
+        }
+        let hasError = parsed.hasNonZeroExit || commandResults.contains { $0.failed }
+
+        self.id = message.id
+        self.timestamp = message.timestamp
+        self.isStreaming = message.isStreaming
+        self.summary = message.isStreaming
+            ? "正在运行本地 Alpine"
+            : parsed.activitySummary(
+                editedFileCount: writtenFiles.isEmpty ? nil : writtenFiles.count,
+                commandCount: visibleCommands.isEmpty ? nil : visibleCommands.count,
+                hasError: hasError
+            )
+        self.rawOutput = metadata?["iexa_local_alpine_raw_result"] ?? parsed.outputText
+        self.writtenFiles = writtenFiles
+        self.commandResults = visibleCommands
+    }
+
+    var hasFailure: Bool {
+        commandResults.contains { $0.failed }
+    }
+}
+
 struct ChatDetailView: View {
     @Environment(AppDependencyContainer.self) private var dependencies
     @Environment(AppRouter.self) private var router
@@ -99,6 +143,7 @@ struct ChatDetailView: View {
     @State private var usagePopoverMessageId: String?
     @State private var sourcesSheetMessage: ChatMessage?
     @State private var randomPrompts: [SuggestedPrompt] = []
+    @State private var showAgentTaskPanel = false
 
     private var tokenUsageTotalsSnapshot: ChatTokenUsageSnapshot {
         ChatTokenUsageSnapshot(
@@ -111,6 +156,18 @@ struct ChatDetailView: View {
             exactUsageMessages: tokenUsageExactMessagesTotal,
             estimatedMessages: tokenUsageEstimatedMessagesTotal
         )
+    }
+
+    private var agentActivityItems: [AgentActivityItem] {
+        viewModel.messages.compactMap(AgentActivityItem.init(message:))
+    }
+
+    private var toolbarControlsMinWidth: CGFloat {
+        var buttonCount = 1
+        if onNewChat != nil { buttonCount += 1 }
+        if viewModel.messages.isEmpty { buttonCount += 1 }
+        if !agentActivityItems.isEmpty { buttonCount += 1 }
+        return CGFloat(buttonCount * 34 + max(0, buttonCount - 1) * 2 + 12)
     }
 
     private func resetTokenUsageTotals() {
@@ -419,6 +476,10 @@ struct ChatDetailView: View {
         .sheet(item: $sourcesSheetMessage) { message in
             SourcesDetailSheet(sources: message.sources)
         }
+        .sheet(isPresented: $showAgentTaskPanel) {
+            AgentTaskPanelView(items: agentActivityItems)
+                .themed()
+        }
         .sheet(item: $previewWebURL) { item in
             InAppWebPreviewSheet(url: item.url)
                 .themed()
@@ -616,6 +677,20 @@ struct ChatDetailView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Chat parameters")
+                if !agentActivityItems.isEmpty {
+                    Button {
+                        Haptics.play(.light)
+                        showAgentTaskPanel = true
+                    } label: {
+                        Image(systemName: "checklist")
+                            .scaledFont(size: 15, weight: .semibold)
+                            .foregroundStyle(agentActivityItems.contains { $0.hasFailure } ? .orange : theme.textSecondary)
+                            .frame(width: 34, height: 34)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Agent 任务")
+                }
                 if viewModel.messages.isEmpty {
                     Button {
                         withAnimation(MicroAnimation.snappy) {
@@ -633,7 +708,7 @@ struct ChatDetailView: View {
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
-            .frame(minWidth: viewModel.messages.isEmpty ? 120 : 84, minHeight: 40)
+            .frame(minWidth: toolbarControlsMinWidth, minHeight: 40)
             .iexaToolbarGlass(cornerRadius: 20, compact: true)
             .clipShape(Capsule(style: .continuous))
         }
@@ -4784,6 +4859,332 @@ private struct LocalAlpineResultCard: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+}
+
+private struct AgentTaskPanelView: View {
+    let items: [AgentActivityItem]
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if items.isEmpty {
+                    ContentUnavailableView("暂无 Agent 任务", systemImage: "checklist")
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 12) {
+                            AgentTaskPanelSummary(items: items)
+                            ForEach(items.reversed()) { item in
+                                AgentTaskCard(item: item)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                    }
+                    .background(theme.background)
+                }
+            }
+            .navigationTitle("Agent 任务")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+}
+
+private struct AgentTaskPanelSummary: View {
+    let items: [AgentActivityItem]
+
+    @Environment(\.theme) private var theme
+
+    private var commandCount: Int {
+        items.reduce(0) { $0 + $1.commandResults.count }
+    }
+
+    private var fileCount: Int {
+        items.reduce(0) { $0 + $1.writtenFiles.count }
+    }
+
+    private var failedCount: Int {
+        items.filter { $0.hasFailure }.count
+    }
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                AgentTaskMetricPill(icon: "checklist", title: "任务", value: "\(items.count)", tint: theme.brandPrimary)
+                AgentTaskMetricPill(icon: "terminal.fill", title: "命令", value: "\(commandCount)", tint: theme.textSecondary)
+                AgentTaskMetricPill(icon: "square.and.pencil", title: "文件", value: "\(fileCount)", tint: theme.brandPrimary)
+                if failedCount > 0 {
+                    AgentTaskMetricPill(icon: "exclamationmark.circle.fill", title: "错误", value: "\(failedCount)", tint: .orange)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct AgentTaskMetricPill: View {
+    let icon: String
+    let title: String
+    let value: String
+    let tint: Color
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .scaledFont(size: 11, weight: .semibold)
+            Text(title)
+                .scaledFont(size: 11, weight: .semibold)
+            Text(value)
+                .scaledFont(size: 11, weight: .bold)
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 9)
+        .frame(height: 28)
+        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.34 : 0.70))
+        .clipShape(Capsule(style: .continuous))
+    }
+}
+
+private struct AgentTaskCard: View {
+    let item: AgentActivityItem
+
+    @Environment(\.theme) private var theme
+    @State private var isExpanded = false
+    @State private var didCopy = false
+
+    private var statusIcon: String {
+        if item.isStreaming { return "progress.indicator" }
+        return item.hasFailure ? "exclamationmark.circle.fill" : "checkmark.circle.fill"
+    }
+
+    private var statusColor: Color {
+        if item.isStreaming { return theme.brandPrimary }
+        return item.hasFailure ? .orange : .green
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(MicroAnimation.snappy) { isExpanded.toggle() }
+            } label: {
+                HStack(alignment: .top, spacing: 9) {
+                    Image(systemName: statusIcon)
+                        .scaledFont(size: 14, weight: .semibold)
+                        .foregroundStyle(statusColor)
+                        .frame(width: 20, height: 20)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.summary)
+                            .scaledFont(size: 14, weight: .semibold)
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(2)
+                        Text(item.timestamp.formatted(date: .omitted, time: .shortened))
+                            .scaledFont(size: 11, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .scaledFont(size: 11, weight: .semibold)
+                        .foregroundStyle(theme.textTertiary)
+                        .frame(width: 22, height: 22)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if !item.writtenFiles.isEmpty {
+                compactSection(title: "文件") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(item.writtenFiles.prefix(isExpanded ? item.writtenFiles.count : 3), id: \.path) { file in
+                            AgentTaskFileRow(file: file)
+                        }
+                    }
+                }
+            }
+
+            if !item.commandResults.isEmpty {
+                compactSection(title: "命令") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(Array(item.commandResults.prefix(isExpanded ? item.commandResults.count : 3).enumerated()), id: \.offset) { _, result in
+                            AgentTaskCommandRow(result: result, isExpanded: isExpanded)
+                        }
+                    }
+                }
+            }
+
+            if isExpanded && !item.rawOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                AgentTaskOutputBlock(title: "原始输出", text: item.rawOutput)
+            }
+
+            if isExpanded {
+                HStack(spacing: 8) {
+                    Button {
+                        UIPasteboard.general.string = exportText
+                        didCopy = true
+                        Haptics.play(.light)
+                        Task {
+                            try? await Task.sleep(nanoseconds: 1_200_000_000)
+                            await MainActor.run { didCopy = false }
+                        }
+                    } label: {
+                        Label(didCopy ? "已复制" : "复制记录", systemImage: didCopy ? "checkmark" : "doc.on.doc")
+                            .scaledFont(size: 12, weight: .semibold)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.surfaceContainer.opacity(theme.isDark ? 0.72 : 0.96))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.45 : 0.62), lineWidth: 0.8)
+        )
+    }
+
+    @ViewBuilder
+    private func compactSection<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .scaledFont(size: 11, weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
+            content()
+        }
+    }
+
+    private var exportText: String {
+        var parts: [String] = [item.summary]
+        for file in item.writtenFiles {
+            parts.append("FILE \(file.path) \(file.lineCount) lines \(file.byteCount) bytes")
+        }
+        for result in item.commandResults {
+            parts.append("COMMAND \(result.command)\nCWD \(result.cwd)\nEXIT \(result.exitCode.map(String.init) ?? "unknown")\n\(result.outputPreview)")
+        }
+        if !item.rawOutput.isEmpty {
+            parts.append("RAW\n\(item.rawOutput)")
+        }
+        return parts.joined(separator: "\n\n")
+    }
+}
+
+private struct AgentTaskFileRow: View {
+    let file: LocalAlpineWrittenFile
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "square.and.pencil")
+                .scaledFont(size: 12, weight: .semibold)
+                .foregroundStyle(theme.brandPrimary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(file.path)
+                    .scaledFont(size: 12, weight: .semibold, design: .monospaced)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("\(file.lineCount) 行 · \(file.byteCount) B")
+                    .scaledFont(size: 10, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.26 : 0.58))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+}
+
+private struct AgentTaskCommandRow: View {
+    let result: LocalAlpineAgentCommandResult
+    let isExpanded: Bool
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: result.failed ? "exclamationmark.circle.fill" : "terminal.fill")
+                    .scaledFont(size: 12, weight: .semibold)
+                    .foregroundStyle(result.failed ? .orange : theme.textSecondary)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(oneLineCommand(result.command))
+                        .scaledFont(size: 12, weight: .semibold, design: .monospaced)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(isExpanded ? 3 : 1)
+                        .truncationMode(.middle)
+                    Text("退出码 \(result.exitCode.map(String.init) ?? "unknown") · \(result.cwd)")
+                        .scaledFont(size: 10, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+            }
+
+            if isExpanded && !result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                AgentTaskOutputBlock(title: "输出", text: result.outputPreview)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.26 : 0.58))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+
+    private func oneLineCommand(_ command: String) -> String {
+        command
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private struct AgentTaskOutputBlock: View {
+    let title: String
+    let text: String
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .scaledFont(size: 10, weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
+            ScrollView(.vertical) {
+                Text(text)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(theme.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .textSelection(.enabled)
+            }
+            .frame(maxHeight: 180)
+            .background(Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+    }
 }
 
 private struct LocalAlpineWrittenFilesCard: View {
