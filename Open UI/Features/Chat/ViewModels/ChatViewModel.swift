@@ -37,6 +37,11 @@ private struct ParsedLocalAlpineCommand {
     let writeFilePaths: [String]
 }
 
+private struct RunnableCodeBlock {
+    let language: String
+    let code: String
+}
+
 struct ChatContextBudgetStatus: Sendable, Equatable {
     var modelId: String = ""
     var usedTokens: Int = 0
@@ -1316,6 +1321,8 @@ final class ChatViewModel {
             - You already know the static environment: Alpine 3.19.x x86/iSH, POSIX sh/ash, working directory `/mnt/iexa`, package manager `apk`, lightweight rootfs.
             - If the task depends on runtimes, packages, compilers, current files, or previous generated files, first get a small real environment snapshot and workspace listing, then continue from that observation.
             - If the user gave an explicit simple file operation target, you may combine the operation with a minimal `pwd`/`ls` verification instead of running a separate bootstrap.
+            - If the user asks to run/test/build/fix/install/read/write/delete/search, this is an operation request, not a request for advice. Emit one executable `iexa_alpine` block; do not ask the user to run commands manually.
+            - For "run this code" follow-ups, use the latest runnable code block, write it under `/mnt/iexa`, run the matching interpreter/compiler, and summarize the real output.
             - Do not ask the user how to operate the environment. Use one fenced `iexa_alpine` block as the first tool_use.
 
             Preferred first tool_use shape when environment knowledge is needed:
@@ -4086,6 +4093,21 @@ final class ChatViewModel {
         if !shouldKeepMediaRoute,
            !shouldKeepNativeLinkRoute,
            processedAttachments.isEmpty,
+           localAlpineModeForThisTurn,
+           let recentCodeBlock = fallbackLocalAlpineBlockForRecentCodeRun(
+               userText: currentText,
+               messages: conversation?.messages ?? []
+           ) {
+            await sendDirectLocalAlpineAgentBlock(
+                userText: currentText,
+                executableContent: recentCodeBlock,
+                modelId: modelId
+            )
+            return
+        }
+        if !shouldKeepMediaRoute,
+           !shouldKeepNativeLinkRoute,
+           processedAttachments.isEmpty,
            shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText),
            localAlpineModeForThisTurn {
             await sendDirectLocalAlpineCommand(currentText, modelId: modelId)
@@ -4616,7 +4638,9 @@ final class ChatViewModel {
                     if !fileRefs.isEmpty { request.files = fileRefs }
                     await self.populateCommonRequestFields(&request)
                     if !currentSkillIds.isEmpty { request.skillIds = currentSkillIds }
-                    let sseStream = try await manager.sendMessageStreaming(request: request)
+                    let sseStream = try await manager.sendPreferredOpenAIStreaming(
+                        request: request
+                    )
 
                     for try await event in sseStream {
                         if Task.isCancelled { break }
@@ -4999,6 +5023,10 @@ final class ChatViewModel {
         if Self.isLocalAlpineDependencyActionRequest(text) {
             return true
         }
+        if Self.isRunRecentCodeBlockRequest(text),
+           Self.latestRunnableCodeBlock(in: conversation?.messages ?? []) != nil {
+            return true
+        }
         return Self.isLocalAlpineFollowUpFileOperation(text, messages: conversation?.messages ?? [])
     }
 
@@ -5048,10 +5076,13 @@ final class ChatViewModel {
             "iexa_alpine", "local alpine", "/mnt/iexa", "alpine 执行", "alpine运行",
             "终端", "命令", "用 shell", "用 bash", "shell command", "bash command",
             "执行脚本", "运行脚本", "执行代码", "运行代码",
+            "执行这段代码", "运行这段代码", "执行上面的代码", "运行上面的代码",
+            "跑这段代码", "跑上面的代码", "运行刚刚的代码", "执行刚刚的代码",
             "安装依赖", "装依赖", "安装包", "装包", "编译项目", "构建项目",
             "创建文件", "新建文件", "生成文件", "写入文件", "保存文件",
             "创建脚本", "生成脚本", "写脚本", "创建项目", "生成项目",
             "run command", "execute command", "run script", "execute script",
+            "run this code", "execute this code", "run the code above", "execute the code above",
             "install dependencies", "install deps", "install package",
             "build project", "compile project", "create file", "write file",
             "save file", "generate file", "create project", "generate project"
@@ -5133,6 +5164,9 @@ final class ChatViewModel {
             "帮我执行", "帮我运行",
             "写个脚本运行", "写一个脚本运行", "写个项目运行", "写一个项目运行",
             "创建项目并运行", "创建脚本并运行", "测试项目", "运行项目",
+            "运行这段代码", "执行这段代码", "跑这段代码", "测试这段代码",
+            "运行上面的代码", "执行上面的代码", "跑上面的代码", "测试上面的代码",
+            "运行刚刚的代码", "执行刚刚的代码", "跑刚刚的代码",
             "安装依赖", "装依赖", "装一下依赖", "安装包", "装包", "安装模块", "安装库",
             "创建文件", "新建文件", "生成文件", "写入文件", "保存文件", "修改文件",
             "删除文件", "重命名文件", "移动文件", "复制文件", "搜索文件", "查找文件",
@@ -5142,6 +5176,7 @@ final class ChatViewModel {
             "跑一下", "跑下", "执行一下", "运行一下", "查一下命令", "用 bash", "用 shell",
             "local alpine", "alpine 执行", "alpine运行",
             "run command", "execute command", "run script", "run project",
+            "run this code", "execute this code", "run the code above", "execute the code above",
             "install dependencies", "install deps", "install package", "build project", "compile project",
             "create file", "write file", "save file", "generate file", "modify file",
             "delete file", "rename file", "move file", "copy file", "search files",
@@ -5289,10 +5324,29 @@ final class ChatViewModel {
 
     private func fallbackLocalAlpineBlockForFollowUpOperation(userText: String) -> String? {
         guard let messages = conversation?.messages else { return nil }
+        if let block = fallbackLocalAlpineBlockForRecentCodeRun(userText: userText, messages: messages) {
+            return block
+        }
         guard let command = Self.localAlpineFollowUpCommand(for: userText, messages: messages) else { return nil }
         return """
         ```iexa_alpine
         \(command)
+        ```
+        """
+    }
+
+    private func fallbackLocalAlpineBlockForRecentCodeRun(userText: String, messages: [ChatMessage]) -> String? {
+        guard Self.isRunRecentCodeBlockRequest(userText),
+              let runnable = Self.preferredRunnableCodeBlock(from: Self.runnableCodeBlocks(in: userText))
+                ?? Self.latestRunnableCodeBlock(in: messages),
+              let object = Self.localAlpineRunObject(for: runnable),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+              let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return """
+        ```iexa_alpine
+        \(json)
         ```
         """
     }
@@ -5660,6 +5714,161 @@ final class ChatViewModel {
         """
     }
 
+    private static func isRunRecentCodeBlockRequest(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        let actionTerms = [
+            "运行", "执行", "跑", "测试", "验证",
+            "run", "execute", "test", "verify"
+        ]
+        let referenceTerms = [
+            "这段代码", "这个代码", "上面的代码", "刚刚的代码", "刚才的代码",
+            "这段脚本", "这个脚本", "上面的脚本", "刚刚的脚本",
+            "the code", "this code", "above code", "previous code",
+            "the script", "this script", "above script", "previous script"
+        ]
+        return containsAny(normalized, actionTerms) && containsAny(normalized, referenceTerms)
+    }
+
+    private static func latestRunnableCodeBlock(in messages: [ChatMessage]) -> RunnableCodeBlock? {
+        for message in messages.reversed() where message.role == .assistant && !isLocalAlpineAgentResult(message) {
+            if let preferred = preferredRunnableCodeBlock(from: runnableCodeBlocks(in: message.content)) {
+                return preferred
+            }
+        }
+        return nil
+    }
+
+    private static func preferredRunnableCodeBlock(from blocks: [RunnableCodeBlock]) -> RunnableCodeBlock? {
+        let ignoredLanguages: Set<String> = [
+            "iexa_alpine", "local_alpine_exec", "iexa_workspace", "iexa_native",
+            "text", "txt", "plain", "plaintext", "markdown", "md", "json", "yaml", "yml",
+            "diff", "patch"
+        ]
+        if let preferred = blocks.reversed().first(where: {
+            !ignoredLanguages.contains($0.language) && languageFileExtension($0.language) != nil
+        }) {
+            return preferred
+        }
+        return blocks.reversed().first(where: { !ignoredLanguages.contains($0.language) })
+    }
+
+    private static func runnableCodeBlocks(in content: String) -> [RunnableCodeBlock] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"```([^\n`]*)\n([\s\S]*?)```"#,
+            options: [.caseInsensitive]
+        ) else { return [] }
+        let nsContent = content as NSString
+        return regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
+            .compactMap { match -> RunnableCodeBlock? in
+                guard match.numberOfRanges >= 3 else { return nil }
+                let rawLanguage = nsContent.substring(with: match.range(at: 1))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .split(whereSeparator: { $0 == " " || $0 == "\t" })
+                    .first
+                    .map(String.init) ?? ""
+                let language = normalizedCodeBlockLanguage(rawLanguage)
+                let body = nsContent.substring(with: match.range(at: 2))
+                    .replacingOccurrences(of: "\r\n", with: "\n")
+                    .replacingOccurrences(of: "\r", with: "\n")
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\n"))
+                guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return RunnableCodeBlock(language: language, code: body)
+            }
+    }
+
+    private static func localAlpineRunObject(for block: RunnableCodeBlock) -> [String: Any]? {
+        let language = block.language.isEmpty ? inferCodeLanguage(from: block.code) : block.language
+        let ext = languageFileExtension(language) ?? "txt"
+        let path = "iexa_recent_code.\(ext)"
+        let command = localAlpineRecentCodeRunCommand(language: language, path: path)
+        return [
+            "cwd": "/mnt/iexa",
+            "write_files": [[
+                "path": path,
+                "code_lines": block.code.components(separatedBy: "\n")
+            ]],
+            "command": command
+        ]
+    }
+
+    private static func localAlpineRecentCodeRunCommand(language: String, path: String) -> String {
+        let quotedPath = shellQuoted(path)
+        let runtimePath = "/mnt/iexa/\(path)"
+        let run = localAlpineRunCommand(for: runtimePath) ?? localAlpineExecutableFallbackCommand()
+        if language == "sh" || language == "bash" || language == "shell" {
+            return """
+            set -u
+            target=\(quotedPath)
+            printf '== running recent code: %s ==\\n' "$target"
+            \(run)
+            """
+        }
+        return """
+        set -u
+        target=\(quotedPath)
+        printf '== running recent code: %s ==\\n' "$target"
+        \(run)
+        """
+    }
+
+    private static func normalizedCodeBlockLanguage(_ language: String) -> String {
+        let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "python", "py", "python3":
+            return "python"
+        case "javascript", "js", "node", "nodejs":
+            return "javascript"
+        case "typescript", "ts":
+            return "typescript"
+        case "shell", "bash", "sh", "zsh", "terminal", "console":
+            return "sh"
+        case "c++", "cpp", "cc", "cxx":
+            return "cpp"
+        case "c":
+            return "c"
+        default:
+            return normalized
+        }
+    }
+
+    private static func languageFileExtension(_ language: String) -> String? {
+        switch normalizedCodeBlockLanguage(language) {
+        case "python": return "py"
+        case "javascript": return "js"
+        case "typescript": return "ts"
+        case "sh": return "sh"
+        case "lua": return "lua"
+        case "go", "golang": return "go"
+        case "rust", "rs": return "rs"
+        case "java": return "java"
+        case "cpp": return "cpp"
+        case "c": return "c"
+        case "ruby", "rb": return "rb"
+        case "php": return "php"
+        case "perl", "pl": return "pl"
+        case "html": return "html"
+        default: return nil
+        }
+    }
+
+    private static func inferCodeLanguage(from code: String) -> String {
+        let lower = code.lowercased()
+        if lower.contains("def ") || lower.contains("import ") || lower.contains("print(") {
+            return "python"
+        }
+        if lower.contains("#include") || lower.contains("std::") {
+            return "cpp"
+        }
+        if lower.contains("console.log") || lower.contains("function ") || lower.contains("const ") {
+            return "javascript"
+        }
+        if lower.contains("#!/bin/sh") || lower.contains("#!/usr/bin/env sh") || lower.contains("echo ") {
+            return "sh"
+        }
+        return "python"
+    }
+
     private static func isLocalAlpineManualRunOrRefusalResponse(_ content: String) -> Bool {
         let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return false }
@@ -5669,10 +5878,14 @@ final class ChatViewModel {
             "无法直接执行", "不能直接执行", "无法执行 shell", "不能执行 shell",
             "无法直接运行", "不能直接运行", "无法在 /mnt/iexa", "不能在 /mnt/iexa",
             "无法代你", "不能代你", "不能落盘", "无法落盘",
+            "我无法直接执行", "我不能直接执行", "我可以模拟运行",
+            "模拟运行上述", "模拟运行这段", "模拟执行上述", "模拟执行这段",
             "请手动", "手动运行", "手动执行", "复制下面", "复制以下",
             "在终端运行", "到终端运行", "运行以下命令", "执行以下命令",
             "cannot directly execute", "can't directly execute", "cannot execute shell",
             "unable to execute", "unable to run", "cannot run commands",
+            "i cannot directly execute", "i can't directly execute",
+            "simulate running", "simulate the output",
             "run manually", "manually run", "copy and paste", "paste into terminal"
         ]
         if refusalTerms.contains(where: { normalized.contains($0) }) {
@@ -6645,6 +6858,71 @@ final class ChatViewModel {
         }
     }
 
+    private func sendDirectLocalAlpineAgentBlock(
+        userText: String,
+        executableContent: String,
+        modelId: String
+    ) async {
+        resetLocalAlpineAgentLoopForNewTurn()
+        localAlpineAgentStopRequested = false
+        localAlpineAutoExecutionPaused = false
+
+        inputText = ""
+        attachments = []
+        errorMessage = nil
+
+        let userMessage = ChatMessage(
+            role: .user,
+            content: userText.trimmingCharacters(in: .whitespacesAndNewlines),
+            timestamp: .now
+        )
+        let userMessageParentId = conversation?.messages.last(where: {
+            !Self.isLocalWorkspaceAgentResult($0) && !Self.isLocalAlpineAgentResult($0)
+        })?.id
+
+        if conversation == nil {
+            let title = userMessage.content.isEmpty ? "运行代码" : String(userMessage.content.prefix(50))
+            conversation = Conversation(
+                id: isTemporaryChat ? "local:\(UUID().uuidString)" : UUID().uuidString,
+                title: title,
+                model: modelId,
+                messages: [userMessage]
+            )
+            if let pending = pendingChatParams {
+                conversation?.chatParams = pending
+                pendingChatParams = nil
+            }
+            if isOpenAICompatibleProvider, let id = conversation?.id {
+                activeChatStore?.promoteNewChat(to: id)
+            }
+            NotificationService.shared.activeConversationId = conversation?.id
+        } else {
+            conversation?.messages.append(userMessage)
+        }
+
+        let userHistoryNode = HistoryNode(
+            id: userMessage.id,
+            parentId: userMessageParentId,
+            childrenIds: [],
+            role: .user,
+            content: userMessage.content,
+            timestamp: userMessage.timestamp,
+            models: [modelId]
+        )
+        conversation?.history.nodes[userMessage.id] = userHistoryNode
+        if let pid = userMessageParentId {
+            conversation?.history.appendChildId(userMessage.id, to: pid)
+        }
+        conversation?.history.currentId = userMessage.id
+
+        await persistLocalConversationIfNeeded()
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        isStreaming = true
+        hasFinishedStreaming = false
+        selfInitiatedStream = true
+        await executeLocalAlpineAgent(messageId: userMessage.id, content: executableContent)
+    }
+
     private func localAlpineInitialStatus(for command: String) -> ChatStatusUpdate {
         localAlpineStatus(description: localAlpineRunningDescription(for: command), done: false)
     }
@@ -7113,7 +7391,9 @@ final class ChatViewModel {
                 do {
                     var request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
                     await self.populateCommonRequestFields(&request)
-                    let sseStream = try await manager.sendMessageStreaming(request: request)
+                    let sseStream = try await manager.sendPreferredOpenAIStreaming(
+                        request: request
+                    )
 
                     for try await event in sseStream {
                         if Task.isCancelled { break }
@@ -10289,6 +10569,15 @@ final class ChatViewModel {
         - Common packages to install on demand for generated projects: `python3`, `py3-pip`, `nodejs`, `npm`, `git`, `make`, `g++`, `build-base`, `linux-headers`, `cmake`, `pkgconf`, `zip`, `unzip`, and `openssl-dev`.
         - The execution is non-interactive. Do not rely on prompts, REPLs, `input()`, `read`, `scanf`, `cin`, `npm init` prompts, editors waiting for input, or long-running servers that never exit.
 
+        Iexa local environment contract:
+        - Treat `/mnt/iexa` as the user's current local workspace. Relative paths resolve there unless the user names an absolute rootfs path.
+        - Treat rootfs paths such as `/bin`, `/etc`, `/usr`, `/lib`, and `/var` as system areas. Inspect them when debugging environment issues, but only modify rootfs through package-manager operations or explicit user requests.
+        - Available local operations are: read, list, search, create, write, edit, delete, rename, move, copy, install, run, test, build, compile, diagnose, fix, verify, summarize.
+        - If the user requests one of those operations, perform it with `iexa_alpine`; do not replace the action with advice, simulated output, or instructions for the user to run manually.
+        - If you are unsure what is installed or where files are, run a small real preflight/listing first, then continue from the observation. Environment uncertainty is solved by tool use, not by asking the user to inspect the app for you.
+        - A successful preflight or install is not the same as completing the user's original goal. Continue to the requested run/test/build/fix step unless the user only asked for the preflight/install.
+        - When blocked, report the exact blocker from real output: missing file, missing package, DNS/network failure, permission issue, non-interactive input need, or unsupported platform behavior.
+
         Operational rules:
         - Act like a Codex CLI style agent loop: understand the user's goal, choose one bounded next step, execute it, read the real output, then either continue with the next step or stop with a concise summary.
         - Treat a fenced `iexa_alpine` block as the app's local execution request: emit one block as text, wait for the app's real result, then decide the next action from that result.
@@ -10301,6 +10590,7 @@ final class ChatViewModel {
         - Intent to tool mapping: read/list/search -> inspect real files; create/write/modify -> structured `write_files` plus verification; delete/rename/move/copy -> scoped file operation plus `ls` verification; install -> check then install only missing packages; run/test/build -> dependency check then execute; fix/debug -> reproduce, inspect, patch, verify; summarize/report -> use the latest real observation and stop tool use unless more execution is required.
         - Local Alpine terminal mode owns local project operations. If the user asks to list/read/search/create/modify/delete project files, inspect a directory, run a script, or "read the mnt directory", use `/mnt/iexa` via `iexa_alpine`; do not use the Documents/Iexa Workspace tool.
         - If the user asks you to run, execute, test, verify, inspect the environment, install packages, write or modify code, fix an error, rerun after a fix, write a runnable script/project, crawl/fetch/scrape a website, or diagnose command output, use `iexa_alpine`.
+        - If the user says "运行这段代码", "执行这段代码", "跑一下上面的代码", "运行刚刚的代码", "run this code", or "run the code above", use the most recent runnable fenced code block from the conversation. Do not simulate the result. Write it to `/mnt/iexa/iexa_recent_code.<ext>` with JSON `write_files`, install/check the needed runtime only if missing, run it, and summarize the real output.
         - Dependency installs are an action, not a consultation. For "安装 Python 依赖" or similar, search `/mnt/iexa` for `requirements.txt`, `pyproject.toml`, `setup.py`, or obvious project folders; if one exists, install from it. If none exists, report the concrete search result and stop. Do not ask the user for a path before searching the workspace yourself.
         - If the user asks for a crawler/scraper for a URL, do not stop at a code sample. Write the script into `/mnt/iexa`, install/check dependencies if needed, run it against the URL, and summarize the real output.
         - If the user says "修好", "修改代码", "重新运行", "怎么不是直接执行", or similar after a Local Alpine result, treat it as a request to continue operating. Inspect the target file/output, fix with `write_files` when needed, then verify.
@@ -11898,7 +12188,9 @@ final class ChatViewModel {
                 await self.populateCommonRequestFields(&request)
 
                 if self.isOpenAICompatibleProvider {
-                    let stream = try await manager.sendMessageStreaming(request: request)
+                    let stream = try await manager.sendPreferredOpenAIStreaming(
+                        request: request
+                    )
                     for try await event in stream {
                         if Task.isCancelled { break }
                         if let usage = event.usage, !usage.isEmpty {
@@ -12233,6 +12525,7 @@ final class ChatViewModel {
         IEXA_AGENT_KICKOFF
         \(reason)
         NEXT_ACTION_REQUIRED: You must emit exactly one fenced iexa_alpine block now. Do not explain commands for the user to run manually. For environment/dependency inspection, execute commands such as uname, cat /etc/alpine-release, apk --version, apk info, command -v python3 node npm gcc g++ git curl wget, and ls -la /mnt/iexa. For action requests, follow the user's verb: read/list/search/create/write/delete/fix/run/test/build/install, then verify from real output.
+        If the user asked to run this/above/recent code, extract the most recent runnable fenced code block from the conversation, write it into /mnt/iexa with JSON write_files, then execute it. Never simulate code output.
         ```
         """
         return appendAssistantResult(parentId: parentId, model: "Local Alpine", content: content, metadata: [
@@ -12939,7 +13232,9 @@ final class ChatViewModel {
                 await self.populateCommonRequestFields(&request)
 
                 if self.isOpenAICompatibleProvider {
-                    let sseStream = try await manager.sendMessageStreaming(request: request)
+                    let sseStream = try await manager.sendPreferredOpenAIStreaming(
+                        request: request
+                    )
                     for try await event in sseStream {
                         if Task.isCancelled { break }
                         if let usage = event.usage, !usage.isEmpty {
@@ -13491,6 +13786,11 @@ final class ChatViewModel {
         - Use exactly one next tool action per assistant turn. For local shell/files, emit one `iexa_alpine` block. For current web facts, rely on the web-search context already injected by the app; if more current info is needed, ask for/perform a more precise search before guessing.
         - Never emit `to=local_alpine_exec code` or any other pseudo tool-call text. This app executes only `iexa_alpine`; use that exact fenced block.
         - Before the block, write at most one short visible sentence naming the current step. Do not reveal detailed hidden reasoning.
+        Iexa Environment:
+        - `/mnt/iexa` is the user workspace. Relative files live there. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, and `/var` are system paths and should normally be inspected, not edited directly.
+        - If the latest output shows missing runtime/compiler/package, install the smallest needed Alpine package and then continue to the user's requested operation.
+        - If the latest output only proves environment state, package status, or file listing, decide the next actual operation from the original user goal instead of treating the observation as done.
+        - If the user asks "为什么", "这是什么问题", or similar after an error, explain the latest observation and wait. If the user says "修", "继续", "跑", "执行", or "重新", resume with the next `iexa_alpine` step.
         Code Writes:
         - For source/code files, write through `write_files.code_lines`, `content_lines`, or `content_base64`; never plain `content`/`text`/`code`, because visible text can corrupt indentation or escapes.
         Python Writes:
@@ -13506,6 +13806,7 @@ final class ChatViewModel {
         - If the last command failed, inspect the exit code/output first, then emit a different bounded diagnostic or fix command before rerunning verification.
         - Retry only after changing something meaningful: edited file, installed a dependency that was proven missing, changed cwd, changed command arguments, or gathered new diagnostics.
         - If the last output contains `IEXA_AGENT_KICKOFF` or `NEXT_ACTION_REQUIRED`, it means the app routed an explicit local task to you but your previous answer did not include an executable block. Your next response must emit one concrete `iexa_alpine` block with `write_files` and/or `command` for the user's request.
+        - For "运行这段代码" / "run this code" follow-ups, do not answer with simulated output. Find the latest runnable fenced code block in conversation context, save it under `/mnt/iexa`, run it with the right interpreter/compiler, then continue from the real output.
         Stuck Detection:
         - Never repeat the exact same failed command. If the app says a repeat was blocked, switch strategy immediately.
         - If the same error signature repeats twice after a fix, stop and summarize the blocker instead of looping.

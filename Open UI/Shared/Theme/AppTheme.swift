@@ -21,7 +21,7 @@ struct AppTheme: Equatable, Sendable {
 
     init(
         colorScheme: ColorScheme = .light,
-        accent: AppearanceManager.AccentColorPreset = .monochrome,
+        accent: AppearanceManager.AccentColorPreset = .blue,
         usePureBlack: Bool = false,
         useTintedBackgrounds: Bool = false,
         customColor: Color? = nil
@@ -307,7 +307,7 @@ struct ThemedViewModifier: ViewModifier {
     var accessibilityManager: AccessibilityManager?
 
     func body(content: Content) -> some View {
-        let accent = appearanceManager?.accentColorPreset ?? .monochrome
+        let accent = appearanceManager?.accentColorPreset ?? .blue
         let pureBlack = appearanceManager?.usePureBlackDark ?? false
         let tinted = appearanceManager?.useTintedBackgrounds ?? false
         let custom: Color? = (appearanceManager?.useCustomColor == true) ? appearanceManager?.customColor : nil

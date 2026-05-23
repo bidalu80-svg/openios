@@ -30,6 +30,8 @@ import MarkdownParser
         var selectionLoupeView: UIView?
         var selectionLoupeHideWorkItem: DispatchWorkItem?
         var lastSelectionRangeForLoupe: NSRange?
+        var lastSelectionTouchLocationForLoupe: CGPoint?
+        var lastSelectionTouchTimestamp: TimeInterval = 0
 
         // Block-level render cache: stores rendered output per MarkdownBlockNode so
         // unchanged blocks can be reused on the next streaming update without re-rendering.

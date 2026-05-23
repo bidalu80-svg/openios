@@ -6,6 +6,7 @@
 //
 
 import Litext
+import Foundation
 
 #if canImport(UIKit)
     import UIKit
@@ -15,6 +16,7 @@ import Litext
             guard let selection, selection.length > 0 else {
                 hideSelectionLoupe()
                 lastSelectionRangeForLoupe = selection
+                lastSelectionTouchLocationForLoupe = nil
                 return
             }
             showSelectionLoupe(for: label, selection: selection)
@@ -22,6 +24,8 @@ import Litext
         }
 
         public func ltxLabelDetectedUserEventMovingAtLocation(_ label: Litext.LTXLabel, location: CGPoint) {
+            lastSelectionTouchLocationForLoupe = label.convert(location, to: self)
+            lastSelectionTouchTimestamp = ProcessInfo.processInfo.systemUptime
             showSelectionLoupe(for: label, location: location)
 
             guard let scrollView = trackedScrollView else { return }
@@ -72,6 +76,10 @@ import Litext
 
     private extension MarkdownTextView {
         func showSelectionLoupe(for label: LTXLabel, selection: NSRange) {
+            if let touchLocation = currentSelectionTouchLocation(in: label) {
+                showSelectionLoupe(for: label, location: touchLocation)
+                return
+            }
             guard let location = selectionLoupeLocation(in: label, selection: selection) else { return }
             showSelectionLoupe(for: label, location: location)
         }
@@ -123,6 +131,18 @@ import Litext
             selectionLoupeHideWorkItem = nil
             selectionLoupeView?.removeFromSuperview()
             selectionLoupeView = nil
+            lastSelectionTouchLocationForLoupe = nil
+        }
+
+        func currentSelectionTouchLocation(in label: LTXLabel) -> CGPoint? {
+            guard ProcessInfo.processInfo.systemUptime - lastSelectionTouchTimestamp < 0.35,
+                  let markdownLocation = lastSelectionTouchLocationForLoupe else {
+                return nil
+            }
+            guard bounds.insetBy(dx: -40, dy: -80).contains(markdownLocation) else {
+                return nil
+            }
+            return convert(markdownLocation, to: label)
         }
 
         func selectionLoupeLocation(in label: LTXLabel, selection: NSRange) -> CGPoint? {
@@ -135,16 +155,15 @@ import Litext
             }()
 
             if let handle = handles.first(where: { wantsStartHandle ? $0.type == .start : $0.type == .end }) {
-                switch handle.type {
-                case .start:
-                    return CGPoint(x: handle.frame.maxX + 2, y: handle.frame.midY)
-                case .end:
-                    return CGPoint(x: handle.frame.minX - 2, y: handle.frame.midY)
-                }
+                let handlePoint = CGPoint(
+                    x: handle.type == .start ? handle.bounds.maxX + 2 : handle.bounds.minX - 2,
+                    y: handle.bounds.midY
+                )
+                return handle.convert(handlePoint, to: label)
             }
 
             if let handle = handles.last {
-                return CGPoint(x: handle.frame.midX, y: handle.frame.midY)
+                return handle.convert(CGPoint(x: handle.bounds.midX, y: handle.bounds.midY), to: label)
             }
             return nil
         }

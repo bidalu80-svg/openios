@@ -91,9 +91,16 @@ actor LocalAlpineTerminalService {
             cwd: "/mnt/iexa"
         )
         guard result.exitCode == 0 else {
-            throw LocalAlpineError.commandFailed(result.output)
+            throw LocalAlpineError.commandFailed(rootFSUserFacingError(from: result.output))
         }
-        return try parseRootFSListOutput(result.output, path: rootPath)
+        guard let output = rootFSCommandPayload(
+            from: result.output,
+            begin: "IEXA_ROOTFS_LIST_BEGIN",
+            end: "IEXA_ROOTFS_LIST_END"
+        ) else {
+            throw LocalAlpineError.commandFailed(rootFSUserFacingError(from: result.output))
+        }
+        return try parseRootFSListOutput(output, path: rootPath)
     }
 
     func createFolder(path: String) async throws {
@@ -126,18 +133,18 @@ actor LocalAlpineTerminalService {
             cwd: "/mnt/iexa"
         )
         guard result.exitCode == 0 else {
-            throw LocalAlpineError.commandFailed(result.output)
+            throw LocalAlpineError.commandFailed(rootFSUserFacingError(from: result.output))
         }
 
-        let begin = "IEXA_ROOTFS_B64_BEGIN"
-        let end = "IEXA_ROOTFS_B64_END"
-        guard let beginRange = result.output.range(of: begin),
-              let endRange = result.output.range(of: end, range: beginRange.upperBound..<result.output.endIndex) else {
-            throw LocalAlpineError.commandFailed(result.output)
+        guard let output = rootFSCommandPayload(
+            from: result.output,
+            begin: "IEXA_ROOTFS_B64_BEGIN",
+            end: "IEXA_ROOTFS_B64_END"
+        ) else {
+            throw LocalAlpineError.commandFailed(rootFSUserFacingError(from: result.output))
         }
 
-        let encoded = String(result.output[beginRange.upperBound..<endRange.lowerBound])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let encoded = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let data = Data(base64Encoded: encoded, options: [.ignoreUnknownCharacters]) else {
             throw LocalAlpineError.commandFailed("Unable to decode rootfs file data.")
         }
@@ -383,6 +390,9 @@ actor LocalAlpineTerminalService {
     private func normalizedRootFSPath(_ rawPath: String) throws -> String {
         var path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\\", with: "/")
+        guard path.rangeOfCharacter(from: .controlCharacters) == nil else {
+            throw LocalAlpineError.invalidPath(rawPath)
+        }
         if path.isEmpty || path == "." || path == "~" {
             return "/"
         }
@@ -420,6 +430,7 @@ actor LocalAlpineTerminalService {
           printf 'IEXA_ROOTFS_ERROR\\tNot a directory: %s\\n' "$target" >&2
           exit 20
         fi
+        printf 'IEXA_ROOTFS_LIST_BEGIN\\n'
         for entry in "$target"/* "$target"/.[!.]* "$target"/..?*; do
           [ -e "$entry" ] || [ -L "$entry" ] || continue
           name=${entry##*/}
@@ -441,6 +452,7 @@ actor LocalAlpineTerminalService {
           perms=$(stat -c '%A' "$entry" 2>/dev/null || true)
           printf 'IEXA_ROOTFS_ENTRY\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$kind" "$size" "$mtime" "$perms" "$name"
         done
+        printf 'IEXA_ROOTFS_LIST_END\\n'
         """
     }
 
@@ -460,13 +472,16 @@ actor LocalAlpineTerminalService {
           printf 'File is too large to preview: %s bytes (limit %s bytes)\\n' "$size" "$max_bytes" >&2
           exit 22
         fi
-        if ! command -v base64 >/dev/null 2>&1; then
+        if command -v base64 >/dev/null 2>&1; then
+          printf 'IEXA_ROOTFS_B64_BEGIN\\n'
+          base64 "$target" | tr -d '\\n'
+          printf '\\nIEXA_ROOTFS_B64_END\\n'
+        elif command -v python3 >/dev/null 2>&1; then
+          python3 -c 'import base64,pathlib,sys; data=pathlib.Path(sys.argv[1]).read_bytes(); print("IEXA_ROOTFS_B64_BEGIN"); print(base64.b64encode(data).decode("ascii")); print("IEXA_ROOTFS_B64_END")' "$target"
+        else
           printf 'base64 is unavailable in this rootfs.\\n' >&2
           exit 23
         fi
-        printf 'IEXA_ROOTFS_B64_BEGIN\\n'
-        base64 "$target" | tr -d '\\n'
-        printf '\\nIEXA_ROOTFS_B64_END\\n'
         """
     }
 
@@ -485,7 +500,7 @@ actor LocalAlpineTerminalService {
     private func parseRootFSListOutput(_ output: String, path: String) throws -> [TerminalFileItem] {
         let marker = "IEXA_ROOTFS_ENTRY\t"
         return output
-            .split(separator: "\n", omittingEmptySubsequences: false)
+            .split(whereSeparator: \.isNewline)
             .compactMap { rawLine -> TerminalFileItem? in
                 let line = String(rawLine)
                 guard line.hasPrefix(marker) else { return nil }
@@ -508,6 +523,42 @@ actor LocalAlpineTerminalService {
                     permissions: permissions.isEmpty ? nil : permissions
                 )
             }
+    }
+
+    private func rootFSCommandPayload(from output: String, begin: String, end: String) -> String? {
+        guard let beginRange = output.range(of: begin, options: .backwards),
+              let endRange = output.range(of: end, range: beginRange.upperBound..<output.endIndex) else {
+            return nil
+        }
+        return String(output[beginRange.upperBound..<endRange.lowerBound])
+    }
+
+    private func rootFSUserFacingError(from output: String) -> String {
+        let lines = output
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .compactMap { rootFSReadableErrorLine($0) }
+        let cleaned = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "Unable to read rootfs." : cleaned
+    }
+
+    private func rootFSReadableErrorLine(_ rawLine: String) -> String? {
+        var line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        if line == "IEXA_ROOTFS_LIST_BEGIN"
+            || line == "IEXA_ROOTFS_LIST_END"
+            || line == "IEXA_ROOTFS_B64_BEGIN"
+            || line == "IEXA_ROOTFS_B64_END" {
+            return nil
+        }
+        if line.contains("IEXA_ROOTFS_ENTRY\t") || line.contains("IEXA_ROOTFS_ENTRY\\t") {
+            return nil
+        }
+        if let range = line.range(of: "IEXA_ROOTFS_ERROR\t") {
+            line = String(line[range.upperBound...])
+        }
+        line = line.replacingOccurrences(of: "IEXA_ROOTFS_ERROR\\t", with: "")
+        line = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        return line.isEmpty ? nil : line
     }
 
     private func isDeletableRootFSPath(_ path: String) -> Bool {

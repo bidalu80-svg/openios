@@ -457,6 +457,45 @@ struct ChatCompletionRequest: Sendable {
         return data
     }
 
+    /// Serialises the request to OpenAI's Responses API shape.
+    ///
+    /// This is deliberately text/chat focused. Image and video generation keep
+    /// using their dedicated media endpoints so the generation progress pipeline
+    /// is not affected by chat endpoint routing.
+    func toOpenAIResponsesJSON() -> [String: Any] {
+        let shouldDowngradeSystemRole = !supportsSystemRoleInMessages
+            || Self.openAICompatibleModelRejectsSystemRole(model)
+        let serializedMessages = shouldDowngradeSystemRole
+            ? Self.openAICompatibleMessagesConvertingSystemToUser(messages)
+            : messages
+
+        var data: [String: Any] = [
+            "stream": stream,
+            "model": model,
+            "input": Self.responsesInputItems(from: serializedMessages)
+        ]
+
+        if let params, !params.isEmpty {
+            let passthroughKeys: Set<String> = [
+                "temperature", "seed",
+                "top_p", "reasoning_effort",
+                "max_output_tokens"
+            ]
+            for (key, value) in params where passthroughKeys.contains(key) {
+                if key == "reasoning_effort" {
+                    data["reasoning"] = ["effort": value]
+                } else {
+                    data[key] = value
+                }
+            }
+            if data["max_output_tokens"] == nil, let maxTokens = params["max_tokens"] {
+                data["max_output_tokens"] = maxTokens
+            }
+        }
+
+        return data
+    }
+
     private static func openAICompatibleModelRejectsSystemRole(_ model: String) -> Bool {
         let lowercased = model.lowercased()
         return lowercased.contains("minimax")
@@ -496,6 +535,68 @@ struct ChatCompletionRequest: Sendable {
         }
 
         return "System context."
+    }
+
+    private static func responsesInputItems(from messages: [[String: Any]]) -> [[String: Any]] {
+        messages.map { message in
+            let role = responsesRole(from: (message["role"] as? String) ?? "user")
+            return [
+                "role": role,
+                "content": responsesContent(from: message["content"])
+            ]
+        }
+    }
+
+    private static func responsesRole(from rawRole: String) -> String {
+        switch rawRole.lowercased() {
+        case "assistant":
+            return "assistant"
+        case "system", "developer":
+            return "developer"
+        default:
+            return "user"
+        }
+    }
+
+    private static func responsesContent(from content: Any?) -> Any {
+        if let text = content as? String {
+            return text
+        }
+
+        if let parts = content as? [[String: Any]] {
+            let converted = parts.compactMap { responsesContentPart(from: $0) }
+            return converted.isEmpty ? "" : converted
+        }
+
+        if let content {
+            return "\(content)"
+        }
+
+        return ""
+    }
+
+    private static func responsesContentPart(from part: [String: Any]) -> [String: Any]? {
+        let type = (part["type"] as? String)?.lowercased()
+
+        if type == "text" || type == "input_text" || type == "output_text" {
+            return ["type": "input_text", "text": part["text"] as? String ?? ""]
+        }
+
+        if type == "image_url" || type == "input_image" {
+            if let image = part["image_url"] as? [String: Any],
+               let url = image["url"] as? String,
+               !url.isEmpty {
+                return ["type": "input_image", "image_url": url, "detail": "auto"]
+            }
+            if let url = part["image_url"] as? String, !url.isEmpty {
+                return ["type": "input_image", "image_url": url, "detail": "auto"]
+            }
+            if let url = part["image_url"] as? URL {
+                return ["type": "input_image", "image_url": url.absoluteString, "detail": "auto"]
+            }
+        }
+
+        return nil
     }
 
     private static func anthropicContentBlock(from part: [String: Any]) -> [String: Any]? {

@@ -24,8 +24,8 @@ struct LocalAlpineTerminalConsoleView: View {
 
     private let prompt = "root@iexa:~#"
     private let terminalGreen = Color(red: 0.24, green: 0.82, blue: 0.36)
-    private let terminalCommandFontSize: CGFloat = 14
-    private let terminalOutputFontSize: CGFloat = 13
+    private let terminalCommandFontSize: CGFloat = 11
+    private let terminalOutputFontSize: CGFloat = 10
     @State private var cwd = "/mnt/iexa"
 
     var body: some View {
@@ -139,9 +139,9 @@ struct LocalAlpineTerminalConsoleView: View {
                 onDismiss()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 27, weight: .light))
+                    .font(.system(size: 24, weight: .light))
                     .foregroundStyle(Color.blue)
-                    .frame(width: 38, height: 38)
+                    .frame(width: 34, height: 34)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -159,9 +159,9 @@ struct LocalAlpineTerminalConsoleView: View {
                 Haptics.play(.light)
             } label: {
                 Image(systemName: "paintbrush")
-                    .font(.system(size: 24, weight: .light))
+                    .font(.system(size: 21, weight: .light))
                     .foregroundStyle(Color.blue)
-                    .frame(width: 38, height: 38)
+                    .frame(width: 34, height: 34)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -258,12 +258,12 @@ struct LocalAlpineTerminalConsoleView: View {
     private func accessoryButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: systemImage)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color(red: 0.24, green: 0.82, blue: 0.36))
                 .lineLimit(1)
-                .frame(height: 30)
-                .padding(.horizontal, 10)
-                .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .frame(height: 26)
+                .padding(.horizontal, 8)
+                .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -271,12 +271,12 @@ struct LocalAlpineTerminalConsoleView: View {
     private func accessoryTextButton(_ title: String, active: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(active ? Color.black : Color(red: 0.24, green: 0.82, blue: 0.36))
                 .lineLimit(1)
-                .frame(height: 30)
-                .padding(.horizontal, 11)
-                .background(active ? Color(red: 0.24, green: 0.82, blue: 0.36) : Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .frame(height: 26)
+                .padding(.horizontal, 9)
+                .background(active ? Color(red: 0.24, green: 0.82, blue: 0.36) : Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
     }

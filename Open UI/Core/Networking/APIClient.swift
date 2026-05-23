@@ -61,6 +61,10 @@ final class APIClient: @unchecked Sendable {
         }
     }
 
+    private var responsesPath: String {
+        "/responses"
+    }
+
     private static func parseModelContextLength(_ raw: [String: Any]) -> Int? {
         let keys = [
             "context_length", "contextLength", "context_window", "contextWindow",
@@ -1793,6 +1797,30 @@ final class APIClient: @unchecked Sendable {
         )
     }
 
+    func sendResponsesStreaming(request: ChatCompletionRequest) async throws -> SSEStream {
+        try await network.streamRequestBytes(
+            path: responsesPath,
+            method: .post,
+            body: request.toOpenAIResponsesJSON(),
+            maxRetries: 0
+        )
+    }
+
+    func sendPreferredOpenAIStreaming(request: ChatCompletionRequest) async throws -> SSEStream {
+        guard providerType == .openAICompatible,
+              shouldPreferResponsesAPI(for: request) else {
+            return try await sendMessageStreaming(request: request)
+        }
+
+        do {
+            return try await sendResponsesStreaming(request: request)
+        } catch {
+            guard shouldFallbackFromResponsesAPI(after: error) else { throw error }
+            logger.warning("Responses API unavailable; falling back to chat/completions: \(error.localizedDescription)")
+            return try await sendMessageStreaming(request: request)
+        }
+    }
+
     /// Sends a chat completion request via HTTP POST. Returns immediately;
     /// actual content is delivered via Socket.IO events.
     func sendMessageHTTP(request: ChatCompletionRequest) async throws -> [String: Any] {
@@ -1811,6 +1839,87 @@ final class APIClient: @unchecked Sendable {
             return ["raw": str]
         }
         return [:]
+    }
+
+    private func shouldPreferResponsesAPI(for request: ChatCompletionRequest) -> Bool {
+        if request.files?.isEmpty == false { return false }
+        if request.isPipeModel { return false }
+        if providerType != .openAICompatible { return false }
+
+        let modelMetadata = [
+            request.model,
+            (request.modelItem?["id"] as? String) ?? "",
+            (request.modelItem?["name"] as? String) ?? "",
+            (request.modelItem?["connection_type"] as? String) ?? ""
+        ].joined(separator: " ").lowercased()
+
+        let mediaHints = [
+            "gpt-image", "dall-e", "dalle", "image", "imagen", "flux", "sdxl",
+            "stable-diffusion", "midjourney", "seedream", "jimeng", "kolors",
+            "video", "sora", "veo", "wan", "kling", "hailuo", "runway", "luma"
+        ]
+        if mediaHints.contains(where: { modelMetadata.contains($0) }) {
+            return false
+        }
+
+        if request.messages.contains(where: { Self.messageContainsMediaPart($0) }) {
+            return false
+        }
+
+        if let params = request.params {
+            if params["tools"] != nil || params["functions"] != nil {
+                return false
+            }
+            if let toolChoice = params["tool_choice"] as? String,
+               !toolChoice.isEmpty,
+               toolChoice.lowercased() != "none" {
+                return false
+            }
+            if params["function_call"] != nil {
+                return false
+            }
+        }
+
+        if modelMetadata.contains("chat_completions") || modelMetadata.contains("chat-completions") {
+            return false
+        }
+        if modelMetadata.contains("responses") || modelMetadata.contains("response") {
+            return true
+        }
+
+        // Standard OpenAI models are the safest default for the Responses path.
+        return modelMetadata.contains("gpt-")
+            || modelMetadata.contains("o3")
+            || modelMetadata.contains("o4")
+            || modelMetadata.contains("o5")
+    }
+
+    private static func messageContainsMediaPart(_ message: [String: Any]) -> Bool {
+        guard let parts = message["content"] as? [[String: Any]] else { return false }
+        return parts.contains { part in
+            let type = (part["type"] as? String)?.lowercased()
+            if type == "image_url" || type == "input_image" || type == "video" || type == "file" {
+                return true
+            }
+            return part["image_url"] != nil || part["input_image"] != nil || part["video_url"] != nil
+        }
+    }
+
+    private func shouldFallbackFromResponsesAPI(after error: Error) -> Bool {
+        switch APIError.from(error) {
+        case .httpError(let statusCode, let message, _):
+            if [400, 404, 405, 422].contains(statusCode) { return true }
+            let lowercased = (message ?? "").lowercased()
+            return lowercased.contains("unknown api route")
+                || lowercased.contains("invalid url")
+                || lowercased.contains("unsupported")
+                || lowercased.contains("not found")
+                || lowercased.contains("responses")
+        case .responseDecoding:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Sends a pipe-model chat completion request and streams the SSE response

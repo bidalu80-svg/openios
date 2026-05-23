@@ -134,6 +134,13 @@ enum SSEEvent: Sendable {
         }
 
         guard case .json(let json) = self else { return nil }
+        if let type = json["type"] as? String {
+            if (type == "response.output_text.delta" || type == "response.refusal.delta"),
+               let delta = json["delta"] as? String,
+               !delta.isEmpty {
+                return delta
+            }
+        }
         if let choices = json["choices"] as? [[String: Any]],
            let first = choices.first,
            let delta = first["delta"] as? [String: Any] {
@@ -185,7 +192,8 @@ enum SSEEvent: Sendable {
             return true
         case .json(let json):
             if let type = json["type"] as? String,
-               type == "message_stop" {
+               type == "message_stop" || type == "response.completed"
+                || type == "response.incomplete" || type == "response.failed" {
                 return true
             }
             if let choices = json["choices"] as? [[String: Any]],

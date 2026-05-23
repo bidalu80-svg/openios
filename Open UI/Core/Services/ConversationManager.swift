@@ -279,6 +279,10 @@ final class ConversationManager: @unchecked Sendable {
         try await apiClient.sendMessageStreaming(request: request)
     }
 
+    func sendPreferredOpenAIStreaming(request: ChatCompletionRequest) async throws -> SSEStream {
+        try await apiClient.sendPreferredOpenAIStreaming(request: request)
+    }
+
     func sendMessageHTTP(request: ChatCompletionRequest) async throws -> [String: Any] {
         try await apiClient.sendMessageHTTP(request: request)
     }
