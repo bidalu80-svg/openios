@@ -24,6 +24,7 @@ struct ChatDetailView: View {
     private let logger = Logger(subsystem: "com.openui", category: "ChatDetailView")
 
     private let initialConversationId: String?
+    private let onNewChat: (() -> Void)?
     @State private var viewModel: ChatViewModel
 
     // MARK: Model selector sheet
@@ -182,13 +183,15 @@ struct ChatDetailView: View {
 
     // MARK: Init
 
-    init(conversationId: String, viewModel: ChatViewModel) {
+    init(conversationId: String, viewModel: ChatViewModel, onNewChat: (() -> Void)? = nil) {
         self.initialConversationId = conversationId
+        self.onNewChat = onNewChat
         self._viewModel = State(initialValue: viewModel)
     }
 
-    init(viewModel: ChatViewModel) {
+    init(viewModel: ChatViewModel, onNewChat: (() -> Void)? = nil) {
         self.initialConversationId = nil
+        self.onNewChat = onNewChat
         self._folderWorkspace = nil
         self._viewModel = State(initialValue: viewModel)
     }
@@ -199,8 +202,9 @@ struct ChatDetailView: View {
     /// When `folderWorkspace` is set, the welcome/empty state shows the folder
     /// icon + name centered (matching the web UI). New chats are created inside
     /// the folder with its system prompt injected.
-    init(viewModel: ChatViewModel, folderWorkspace: ChatFolder?) {
+    init(viewModel: ChatViewModel, folderWorkspace: ChatFolder?, onNewChat: (() -> Void)? = nil) {
         self.initialConversationId = nil
+        self.onNewChat = onNewChat
         self._folderWorkspace = folderWorkspace
         self._viewModel = State(initialValue: viewModel)
     }
@@ -588,6 +592,18 @@ struct ChatDetailView: View {
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
             HStack(spacing: 2) {
+                if let onNewChat {
+                    Button {
+                        onNewChat()
+                    } label: {
+                        NewConversationIcon(size: 18)
+                            .foregroundStyle(theme.textSecondary)
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("新对话")
+                }
                 Button {
                     Haptics.play(.light)
                     isShowingChatParams = true

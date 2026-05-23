@@ -31,6 +31,16 @@ struct LocalAlpineInteractiveRequest: Identifiable, Sendable {
     let cwd: String
 }
 
+struct LocalAlpineRootFSResetResult: Sendable {
+    let resetImmediately: Bool
+    let message: String
+}
+
+struct LocalAlpineSessionStartResult: Sendable {
+    let sessionID: Int?
+    let message: String?
+}
+
 actor LocalAlpineTerminalService {
     static let shared = LocalAlpineTerminalService()
 
@@ -39,9 +49,11 @@ actor LocalAlpineTerminalService {
     private let rootArchiveName = "iexa-alpine-rootfs.fakefs"
     private let bundledRootFSVersion = "3.19.9-lite.1"
     private let rootVersionFileName = ".iexa-rootfs-version"
+    private let rootResetMarkerFileName = ".iexa-rootfs-reset-pending"
     private let workspaceFolderName = "Iexa Alpine"
     private let sharedFolderName = "shared"
     private let maximumInlineRuntimeCommandBytes = 3_072
+    private var nativeRuntimeStarted = false
 
     static let environmentDiagnosticCommand = """
     printf '== Local Alpine ==\\n'
@@ -81,6 +93,82 @@ actor LocalAlpineTerminalService {
 
     nonisolated func interruptRunningCommand() -> Bool {
         LocalAlpineNativeRuntime.shared.interrupt()
+    }
+
+    nonisolated func writeSessionInput(sessionID: Int, input: String) -> Bool {
+        LocalAlpineNativeRuntime.shared.writeSessionInput(sessionID: sessionID, input: input)
+    }
+
+    nonisolated func readSessionOutput(sessionID: Int) -> String {
+        LocalAlpineNativeRuntime.shared.readSessionOutput(sessionID: sessionID)
+    }
+
+    nonisolated func interruptSession(sessionID: Int) -> Bool {
+        LocalAlpineNativeRuntime.shared.interruptSession(sessionID: sessionID)
+    }
+
+    nonisolated func closeSession(sessionID: Int) -> Bool {
+        LocalAlpineNativeRuntime.shared.closeSession(sessionID: sessionID)
+    }
+
+    nonisolated func resizeSession(sessionID: Int, columns: Int, rows: Int) -> Bool {
+        LocalAlpineNativeRuntime.shared.resizeSession(sessionID: sessionID, columns: columns, rows: rows)
+    }
+
+    func startInteractiveSession(cwd: String, cwdIsRuntimePath: Bool = true) async -> LocalAlpineSessionStartResult {
+        let status = status()
+        guard let rootArchiveURL = bundledRootFSURL() else {
+            return LocalAlpineSessionStartResult(
+                sessionID: nil,
+                message: "Local Alpine rootfs is missing from the app bundle: \(rootArchiveName)"
+            )
+        }
+
+        let workspaceURL: URL
+        do {
+            workspaceURL = try ensureWorkspaceDirectory()
+            _ = try ensureSharedWorkspaceDirectory()
+        } catch {
+            return LocalAlpineSessionStartResult(
+                sessionID: nil,
+                message: "Local Alpine workspace is unavailable: \(error.localizedDescription)"
+            )
+        }
+
+        guard status.isRuntimeLinked else {
+            return LocalAlpineSessionStartResult(
+                sessionID: nil,
+                message: "Local Alpine runtime is staged but the iSH native core is not linked into this build yet."
+            )
+        }
+
+        let runtimeRootFSURL: URL
+        do {
+            runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
+            try ensureResolverConfiguration(in: runtimeRootFSURL)
+        } catch {
+            return LocalAlpineSessionStartResult(
+                sessionID: nil,
+                message: "Local Alpine rootfs could not be prepared for writable local execution: \(error.localizedDescription)"
+            )
+        }
+
+        let runtimeCWD = cwdIsRuntimePath ? normalizedAbsoluteRuntimePath(cwd) : normalizedRuntimePath(cwd)
+        let sessionID = await LocalAlpineNativeRuntime.shared.startSession(
+            LocalAlpineNativeCommand(
+                command: "",
+                cwd: runtimeCWD,
+                rootArchiveURL: runtimeRootFSURL,
+                workspaceURL: workspaceURL
+            )
+        )
+        if sessionID != nil {
+            nativeRuntimeStarted = true
+        }
+        return LocalAlpineSessionStartResult(
+            sessionID: sessionID,
+            message: sessionID == nil ? "Local Alpine interactive session could not be started." : nil
+        )
     }
 
     func listFiles(path: String, includeHidden: Bool = false) async throws -> [TerminalFileItem] {
@@ -199,7 +287,31 @@ actor LocalAlpineTerminalService {
         }
     }
 
-    func execute(command: String, cwd: String, stdinInput: String? = nil) async -> LocalAlpineCommandResult {
+    func resetRuntimeRootFS() async throws -> LocalAlpineRootFSResetResult {
+        let workspaceURL = try ensureWorkspaceDirectory()
+        let markerURL = workspaceURL.appendingPathComponent(rootResetMarkerFileName)
+
+        if nativeRuntimeStarted {
+            try "reset on next app launch\n".write(to: markerURL, atomically: true, encoding: .utf8)
+            return LocalAlpineRootFSResetResult(
+                resetImmediately: false,
+                message: "已标记重置本地 Alpine rootfs。当前 iSH runtime 已经启动，为避免破坏正在挂载的文件系统，重置会在下次重启 App 后生效。"
+            )
+        }
+
+        try resetRuntimeRootFSFiles(in: workspaceURL)
+        return LocalAlpineRootFSResetResult(
+            resetImmediately: true,
+            message: "已重置本地 Alpine rootfs。下次执行命令时会从内置 rootfs 重新初始化。"
+        )
+    }
+
+    func execute(
+        command: String,
+        cwd: String,
+        stdinInput: String? = nil,
+        cwdIsRuntimePath: Bool = false
+    ) async -> LocalAlpineCommandResult {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return LocalAlpineCommandResult(command: command, output: "", exitCode: 0, interactiveRequest: nil)
@@ -271,7 +383,9 @@ actor LocalAlpineTerminalService {
             )
         }
 
-        let runtimeCWD = normalizedRuntimePath(cwd)
+        let runtimeCWD = cwdIsRuntimePath
+            ? normalizedAbsoluteRuntimePath(cwd)
+            : normalizedRuntimePath(cwd)
         let compatibleCommand = compatibilityCommand(for: trimmed)
         let bootstrappedCommand = bootstrappedShellCommand(for: compatibleCommand)
         let runtimeCommand = stdinInput.map {
@@ -288,6 +402,9 @@ actor LocalAlpineTerminalService {
         )
         if let cleanupPath = materialized.cleanupPath {
             try? await deleteItem(path: cleanupPath)
+        }
+        if runtimeLikelyStarted(from: result) {
+            nativeRuntimeStarted = true
         }
         return LocalAlpineCommandResult(command: trimmed, output: result.output, exitCode: result.exitCode, interactiveRequest: nil)
     }
@@ -324,9 +441,18 @@ actor LocalAlpineTerminalService {
         let dataURL = writableURL.appendingPathComponent("data", isDirectory: true)
         let metadataURL = writableURL.appendingPathComponent("meta.db")
         let versionURL = workspaceURL.appendingPathComponent(rootVersionFileName)
+        let resetMarkerURL = workspaceURL.appendingPathComponent(rootResetMarkerFileName)
+        let hasPendingReset = fileManager.fileExists(atPath: resetMarkerURL.path)
         if fileManager.fileExists(atPath: dataURL.path),
            fileManager.fileExists(atPath: metadataURL.path),
-           storedRootFSVersion(at: versionURL) == bundledRootFSVersion {
+           storedRootFSVersion(at: versionURL) == bundledRootFSVersion,
+           !hasPendingReset {
+            return writableURL.standardizedFileURL
+        }
+
+        if hasPendingReset, nativeRuntimeStarted,
+           fileManager.fileExists(atPath: dataURL.path),
+           fileManager.fileExists(atPath: metadataURL.path) {
             return writableURL.standardizedFileURL
         }
 
@@ -338,7 +464,19 @@ actor LocalAlpineTerminalService {
         }
         try fileManager.moveItem(at: temporaryURL, to: writableURL)
         try? bundledRootFSVersion.write(to: versionURL, atomically: true, encoding: .utf8)
+        try? fileManager.removeItem(at: resetMarkerURL)
         return writableURL.standardizedFileURL
+    }
+
+    private func resetRuntimeRootFSFiles(in workspaceURL: URL) throws {
+        let writableURL = workspaceURL.appendingPathComponent("rootfs.fakefs", isDirectory: true)
+        let versionURL = workspaceURL.appendingPathComponent(rootVersionFileName)
+        let resetMarkerURL = workspaceURL.appendingPathComponent(rootResetMarkerFileName)
+        for url in [writableURL, versionURL, resetMarkerURL] {
+            if fileManager.fileExists(atPath: url.path) {
+                try fileManager.removeItem(at: url)
+            }
+        }
     }
 
     private func storedRootFSVersion(at url: URL) -> String? {
@@ -410,6 +548,50 @@ actor LocalAlpineTerminalService {
     private func normalizedRuntimePath(_ rawPath: String) -> String {
         let hostPath = normalizedTerminalPath(rawPath)
         return hostPath == "/" ? "/mnt/iexa" : "/mnt/iexa\(hostPath)"
+    }
+
+    private func normalizedAbsoluteRuntimePath(_ rawPath: String) -> String {
+        var path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        if path.isEmpty || path == "." {
+            path = "/mnt/iexa"
+        } else if path == "~" {
+            path = "/root"
+        } else if path.hasPrefix("~/") {
+            path = "/root/" + String(path.dropFirst(2))
+        } else if !path.hasPrefix("/") {
+            path = "/\(path)"
+        }
+
+        var components: [String] = []
+        for component in path.split(separator: "/", omittingEmptySubsequences: true).map(String.init) {
+            if component == "." {
+                continue
+            }
+            if component == ".." {
+                if !components.isEmpty {
+                    components.removeLast()
+                }
+                continue
+            }
+            components.append(component)
+        }
+        return components.isEmpty ? "/" : "/" + components.joined(separator: "/")
+    }
+
+    private func runtimeLikelyStarted(from result: LocalAlpineCommandResult) -> Bool {
+        let output = result.output.lowercased()
+        let bootFailureMarkers = [
+            "local alpine boot failed",
+            "mount_root failed",
+            "become_first_process failed",
+            "bundled local alpine fakefs is missing",
+            "fakefs is missing",
+            "native runtime was not compiled",
+            "no ish core implementation is linked",
+            "runtime is staged but the ish native core is not linked"
+        ]
+        return !bootFailureMarkers.contains { output.contains($0) }
     }
 
     private func normalizedRootFSPath(_ rawPath: String) throws -> String {

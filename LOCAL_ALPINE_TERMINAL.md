@@ -49,6 +49,22 @@ The native iSH mount path uses `rootfs.fakefs/data` from Documents, so `apk add`
 can modify the local rootfs. It does not depend on a server and does not shell
 out to unpack archives on device.
 
+The Local Alpine file browser has two scopes:
+
+- `工作区` maps to `/mnt/iexa` and stores user/AI-created files.
+- `rootfs` browses the Alpine root filesystem itself, including `/bin`, `/etc`,
+  `/root`, `/tmp`, and package-managed files.
+
+The `rootfs` menu includes a destructive reset action. If the iSH runtime has
+not been booted in the current app session, reset removes the writable
+`Documents/Iexa Alpine/rootfs.fakefs/` copy immediately. If the runtime is
+already mounted, reset is marked with `.iexa-rootfs-reset-pending` and applied
+on the next app launch, leaving `/mnt/iexa` untouched.
+
+The full-screen Local Alpine console treats its cwd as a real Alpine path.
+`cd /`, `cd /root`, and `cd /tmp` stay in rootfs; `/mnt/iexa` remains the shared
+workspace mount.
+
 ## Native runtime bridge
 
 The Swift-side insertion point is:
@@ -76,6 +92,19 @@ low-level static libraries, it boots the iSH core and runs commands through a
 headless TTY capture path. The app's Documents workspace is mounted inside
 Alpine at `/mnt/iexa`, so terminal files stay local and visible to Iexa's file
 browser.
+
+The native ABI also includes an interactive session surface:
+
+- `iexa_local_alpine_session_start`
+- `iexa_local_alpine_session_write`
+- `iexa_local_alpine_session_read`
+- `iexa_local_alpine_session_resize`
+- `iexa_local_alpine_session_interrupt`
+- `iexa_local_alpine_session_close`
+
+The full-screen Local Alpine console tries this persistent PTY-backed shell
+first. If the native session cannot start, it falls back to the older one-shot
+command runner so non-iSH/stub builds remain usable.
 
 Do not send `__iexa_local_alpine__` to the backend and do not link iSH's
 `main.m`, `AppDelegate.m`, or full UIKit terminal app into Iexa.

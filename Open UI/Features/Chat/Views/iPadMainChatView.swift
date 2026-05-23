@@ -431,14 +431,28 @@ struct iPadMainChatView: View {
                 if showTerminalBrowser {
                     Divider()
 
-                    TerminalBrowserView(
-                        viewModel: terminalBrowserVM,
-                        onDismiss: {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                                showTerminalBrowser = false
-                            }
+                    Group {
+                        if terminalBrowserVM.usesLocalAlpine {
+                            LocalAlpineWorkspacePanelView(
+                                viewModel: terminalBrowserVM,
+                                onDismiss: {
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                        showTerminalBrowser = false
+                                    }
+                                }
+                            )
+                            .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+                        } else {
+                            TerminalBrowserView(
+                                viewModel: terminalBrowserVM,
+                                onDismiss: {
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                        showTerminalBrowser = false
+                                    }
+                                }
+                            )
                         }
-                    )
+                    }
                     .frame(width: 340)
                     .background(theme.background)
                     .transition(.move(edge: .trailing))
@@ -498,25 +512,16 @@ struct iPadMainChatView: View {
         } else if let conversationId = activeConversationId {
             ChatDetailView(
                 conversationId: conversationId,
-                viewModel: dependencies.activeChatStore.viewModel(for: conversationId)
+                viewModel: dependencies.activeChatStore.viewModel(for: conversationId),
+                onNewChat: { startNewChat() }
             )
             .id(conversationId)
             .transition(.opacity)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { startNewChat() } label: {
-                        NewConversationIcon(size: 18)
-                            .foregroundStyle(theme.textSecondary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("新对话")
-                }
-            }
         } else if let folderWorkspaceId = activeFolderWorkspaceId {
             let vm = dependencies.activeChatStore.viewModel(for: nil)
             let folder = listViewModel.folderViewModel.folders.first { $0.id == folderWorkspaceId }
                 ?? listViewModel.folderViewModel.activeFolderDetail
-            ChatDetailView(viewModel: vm, folderWorkspace: folder)
+            ChatDetailView(viewModel: vm, folderWorkspace: folder, onNewChat: { startNewChat() })
                 .id("folder-workspace-\(folderWorkspaceId)-\(newChatGeneration)")
                 .transition(.opacity)
                 .onAppear {
@@ -527,30 +532,10 @@ struct iPadMainChatView: View {
                         modelIds: folderDetail?.modelIds ?? folder?.modelIds ?? []
                     )
                 }
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button { startNewChat() } label: {
-                            NewConversationIcon(size: 18)
-                                .foregroundStyle(theme.textSecondary)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("新对话")
-                    }
-                }
         } else {
-            ChatDetailView(viewModel: dependencies.activeChatStore.viewModel(for: nil))
+            ChatDetailView(viewModel: dependencies.activeChatStore.viewModel(for: nil), onNewChat: { startNewChat() })
                 .id("new-chat-\(newChatGeneration)")
                 .transition(.opacity)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button { startNewChat() } label: {
-                            NewConversationIcon(size: 18)
-                                .foregroundStyle(theme.textSecondary)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("新对话")
-                    }
-                }
         }
     }
 

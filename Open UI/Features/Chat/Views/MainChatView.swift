@@ -286,7 +286,7 @@ struct MainChatView: View {
                         }
 
                         ToolbarItem(placement: .topBarTrailing) {
-                            if activeChannelId == nil {
+                            if activeChannelId != nil {
                                 Button {
                                     startNewChat()
                                 } label: {
@@ -392,10 +392,20 @@ struct MainChatView: View {
                 )
 
             // MARK: File browser panel (right side)
-            TerminalBrowserView(
-                viewModel: terminalBrowserVM,
-                onDismiss: { closeFileBrowserAnimated() }
-            )
+            Group {
+                if terminalBrowserVM.usesLocalAlpine {
+                    LocalAlpineWorkspacePanelView(
+                        viewModel: terminalBrowserVM,
+                        onDismiss: { closeFileBrowserAnimated() }
+                    )
+                        .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+                } else {
+                    TerminalBrowserView(
+                        viewModel: terminalBrowserVM,
+                        onDismiss: { closeFileBrowserAnimated() }
+                    )
+                }
+            }
             .frame(width: fileBrowserWidth)
             .background(theme.background)
             .clipShape(
@@ -1652,7 +1662,8 @@ struct MainChatView: View {
         } else if let conversationId = activeConversationId {
             ChatDetailView(
                 conversationId: conversationId,
-                viewModel: dependencies.activeChatStore.viewModel(for: conversationId)
+                viewModel: dependencies.activeChatStore.viewModel(for: conversationId),
+                onNewChat: { startNewChat() }
             )
             .id(conversationId)
             .transition(.opacity)
@@ -1665,7 +1676,8 @@ struct MainChatView: View {
                 ?? listViewModel.folderViewModel.activeFolderDetail
             ChatDetailView(
                 viewModel: vm,
-                folderWorkspace: folder
+                folderWorkspace: folder,
+                onNewChat: { startNewChat() }
             )
             .id("folder-workspace-\(folderWorkspaceId)-\(newChatGeneration)")
             .transition(.opacity)
@@ -1683,7 +1695,8 @@ struct MainChatView: View {
             }
         } else {
             ChatDetailView(
-                viewModel: dependencies.activeChatStore.viewModel(for: nil)
+                viewModel: dependencies.activeChatStore.viewModel(for: nil),
+                onNewChat: { startNewChat() }
             )
             .id("new-chat-\(newChatGeneration)")
             .transition(.opacity)

@@ -272,6 +272,7 @@ flowchart TD
 | `Open UI/Core/Services/LocalAlpineNativeRuntime.swift` | Swift 到本地 iSH runtime 封装 | 本地运行时、rootfs、挂载 |
 | `Open UI/Core/Services/LocalAlpineNativeRuntimeBridge.c` | C bridge | native runtime 编译/链接 |
 | `Open UI/Core/Services/LocalAlpineNativeRuntimeABI.h` | ABI 头文件 | Swift/C 接口 |
+| `Open UI/Features/Terminal/Views/LocalWorkspaceFileBrowserView.swift` | 本地 Alpine 工作区/rootfs 浏览、预览、分享、删除、rootfs 重置 | 文件浏览、rootfs 管理 |
 | `Open UI/Resources/iexa-alpine-rootfs.tar.gz` | 内置 Alpine rootfs | rootfs 更新 |
 | `scripts/prepare-local-alpine-rootfs.*` | 准备 rootfs | 构建资源 |
 | `scripts/prepare-ish-source.*` | 准备 iSH source | CI 本地 Alpine runtime |
@@ -284,6 +285,8 @@ flowchart TD
 - 代码写入应走结构化字段：`code_lines`、`content_lines`、`content_base64`、`code_block`。
 - `LocalAlpineAgentService` 会拦截易破坏缩进的纯文本写入方式。
 - `.py/.pyw` 现在要求来源足够结构化，避免模型输出在 shell 字符串里被二次转义或丢缩进。
+- 全屏 Local Alpine 终端的 cwd 是真实 Alpine 路径；`/mnt/iexa` 是共享工作区，`/`、`/root`、`/tmp` 属于 rootfs。
+- rootfs 浏览器可以重置 writable rootfs；已经启动 iSH runtime 时会延迟到下次 App 启动生效，避免删除已挂载文件系统。
 
 如果“AI 落盘文件缩进错”：
 

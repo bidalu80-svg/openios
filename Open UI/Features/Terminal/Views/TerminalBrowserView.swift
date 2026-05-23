@@ -21,12 +21,32 @@ struct LocalAlpineTerminalConsoleView: View {
     @State private var isControlLatched = false
     @State private var isAccessoryBarHidden = false
     @State private var commandInputHeight: CGFloat = 30
+    @State private var shellEnvironment: [String: String] = [:]
+    @State private var interactiveSessionID: Int?
+    @State private var interactiveOutput = ""
+    @State private var sessionStartupMessage: String?
+    @State private var pollSessionOutput = false
+    @State private var isPollingSessionOutput = false
 
-    private let prompt = "root@iexa:~#"
     private let terminalGreen = Color(red: 0.24, green: 0.82, blue: 0.36)
     private let terminalCommandFontSize: CGFloat = 10
     private let terminalOutputFontSize: CGFloat = 9
     @State private var cwd = "/mnt/iexa"
+    private let stateMarkerPrefix = "__IEXA_SHELL_STATE__"
+
+    private var prompt: String {
+        "root@iexa:\(displayCWD)#"
+    }
+
+    private var displayCWD: String {
+        if cwd == "/root" { return "~" }
+        if cwd.hasPrefix("/root/") { return "~/" + String(cwd.dropFirst("/root/".count)) }
+        return cwd
+    }
+
+    private var usesInteractiveSession: Bool {
+        interactiveSessionID != nil
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -42,35 +62,52 @@ struct LocalAlpineTerminalConsoleView: View {
                     GeometryReader { geometry in
                         ScrollView([.vertical, .horizontal], showsIndicators: true) {
                             LazyVStack(alignment: .leading, spacing: 7) {
-                                ForEach(entries) { entry in
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("\(prompt) \(entry.command)")
-                                            .font(.system(size: terminalCommandFontSize, weight: .regular, design: .monospaced))
-                                            .foregroundStyle(.white.opacity(0.9))
-                                            .lineLimit(nil)
+                                if usesInteractiveSession {
+                                    if let sessionStartupMessage {
+                                        Text(sessionStartupMessage)
+                                            .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
+                                            .foregroundStyle(.white.opacity(0.45))
                                             .fixedSize(horizontal: true, vertical: true)
                                             .textSelection(.enabled)
-
-                                        if !entry.output.isEmpty {
-                                            Text(entry.output)
-                                                .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
-                                                .foregroundStyle(terminalGreen.opacity(0.88))
+                                    }
+                                    Text(interactiveOutput.isEmpty ? "启动 shell..." : interactiveOutput)
+                                        .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
+                                        .foregroundStyle(terminalGreen.opacity(0.88))
+                                        .lineLimit(nil)
+                                        .fixedSize(horizontal: true, vertical: true)
+                                        .textSelection(.enabled)
+                                        .id("interactiveOutput")
+                                } else {
+                                    ForEach(entries) { entry in
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("\(entry.prompt) \(entry.command)")
+                                                .font(.system(size: terminalCommandFontSize, weight: .regular, design: .monospaced))
+                                                .foregroundStyle(.white.opacity(0.9))
                                                 .lineLimit(nil)
                                                 .fixedSize(horizontal: true, vertical: true)
                                                 .textSelection(.enabled)
-                                        } else if entry.isRunning {
-                                            Text("执行中...")
-                                                .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
-                                                .foregroundStyle(.white.opacity(0.45))
-                                        } else if let exitCode = entry.exitCode, exitCode != 0 {
-                                            Text("[exit \(exitCode), no output]")
-                                                .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
-                                                .foregroundStyle(.white.opacity(0.45))
-                                                .textSelection(.enabled)
+
+                                            if !entry.output.isEmpty {
+                                                Text(entry.output)
+                                                    .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
+                                                    .foregroundStyle(terminalGreen.opacity(0.88))
+                                                    .lineLimit(nil)
+                                                    .fixedSize(horizontal: true, vertical: true)
+                                                    .textSelection(.enabled)
+                                            } else if entry.isRunning {
+                                                Text("执行中...")
+                                                    .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
+                                                    .foregroundStyle(.white.opacity(0.45))
+                                            } else if let exitCode = entry.exitCode, exitCode != 0 {
+                                                Text("[exit \(exitCode), no output]")
+                                                    .font(.system(size: terminalOutputFontSize, weight: .regular, design: .monospaced))
+                                                    .foregroundStyle(.white.opacity(0.45))
+                                                    .textSelection(.enabled)
+                                            }
                                         }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .id(entry.id)
                                     }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .id(entry.id)
                                 }
 
                                 commandLine
@@ -93,6 +130,12 @@ struct LocalAlpineTerminalConsoleView: View {
                                 proxy.scrollTo("commandLine", anchor: .bottom)
                             }
                         }
+                        .onChange(of: interactiveOutput) { _, _ in
+                            guard usesInteractiveSession else { return }
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                proxy.scrollTo("commandLine", anchor: .bottom)
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, 2)
@@ -104,6 +147,17 @@ struct LocalAlpineTerminalConsoleView: View {
         }
         .task {
             refocusCommandLine()
+            await startInteractiveSessionIfPossible()
+        }
+        .task(id: pollSessionOutput) {
+            await pollInteractiveSessionOutput()
+        }
+        .onDisappear {
+            pollSessionOutput = false
+            if let interactiveSessionID {
+                _ = LocalAlpineTerminalService.shared.closeSession(sessionID: interactiveSessionID)
+            }
+            interactiveSessionID = nil
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if !isAccessoryBarHidden && (isCommandFocused || !commandInput.isEmpty) {
@@ -184,7 +238,7 @@ struct LocalAlpineTerminalConsoleView: View {
             cursorColor: UIColor(red: 0.24, green: 0.82, blue: 0.36, alpha: 1),
             fontSize: terminalCommandFontSize,
             controlLatch: $isControlLatched,
-            shouldExecuteOnReturn: { Self.commandIsCompleteForExecution($0) },
+            shouldExecuteOnReturn: { usesInteractiveSession || Self.commandIsCompleteForExecution($0) },
             onReturn: {
                 Task { await executeCurrentCommand() }
             },
@@ -500,6 +554,17 @@ struct LocalAlpineTerminalConsoleView: View {
     }
 
     private func handleReturnAction() {
+        if usesInteractiveSession {
+            sendInteractiveInput(commandInput + "\n")
+            if !commandInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                commandHistory.append(commandInput)
+            }
+            commandInput = ""
+            historyCursor = nil
+            isControlLatched = false
+            refocusCommandLine()
+            return
+        }
         let trimmed = commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             refocusCommandLine()
@@ -514,6 +579,17 @@ struct LocalAlpineTerminalConsoleView: View {
 
     private func executeCurrentCommand() async {
         let command = commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if usesInteractiveSession {
+            sendInteractiveInput(commandInput + "\n")
+            if !command.isEmpty {
+                commandHistory.append(commandInput)
+            }
+            commandInput = ""
+            historyCursor = nil
+            isControlLatched = false
+            refocusCommandLine()
+            return
+        }
         guard !command.isEmpty, !isRunning else { return }
 
         commandInput = ""
@@ -523,10 +599,14 @@ struct LocalAlpineTerminalConsoleView: View {
         isRunning = true
         Haptics.play(.light)
 
-        entries.append(LocalAlpineConsoleEntry(command: command, output: "", exitCode: nil, isRunning: true))
-        let result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: cwd)
+        entries.append(LocalAlpineConsoleEntry(prompt: prompt, command: command, output: "", exitCode: nil, isRunning: true))
+        let result = await LocalAlpineTerminalService.shared.execute(
+            command: stateTrackingCommand(for: command),
+            cwd: cwd,
+            cwdIsRuntimePath: true
+        )
         applyResult(result)
-        updateWorkingDirectory(after: command, result: result)
+        updateShellState(from: result)
     }
 
     private func continueInteractiveCommand(_ request: LocalAlpineInteractiveRequest, input: String) async {
@@ -535,12 +615,13 @@ struct LocalAlpineTerminalConsoleView: View {
         isRunning = true
 
         let result = await LocalAlpineTerminalService.shared.execute(
-            command: request.command,
+            command: stateTrackingCommand(for: request.command),
             cwd: request.cwd,
-            stdinInput: input
+            stdinInput: input,
+            cwdIsRuntimePath: true
         )
         applyResult(result)
-        updateWorkingDirectory(after: request.command, result: result)
+        updateShellState(from: result)
     }
 
     private func applyResult(_ result: LocalAlpineCommandResult) {
@@ -578,8 +659,9 @@ struct LocalAlpineTerminalConsoleView: View {
     }
 
     private func visibleOutput(for result: LocalAlpineCommandResult) -> String {
-        let output = result.output.trimmingCharacters(in: .newlines)
-        guard output.isEmpty else { return result.output }
+        let cleaned = outputWithoutStateMarker(result.output)
+        let output = cleaned.trimmingCharacters(in: .newlines)
+        guard output.isEmpty else { return cleaned }
         if result.exitCode == 0 {
             return ""
         }
@@ -624,6 +706,12 @@ struct LocalAlpineTerminalConsoleView: View {
     }
 
     private func cancelCurrentInput() {
+        if usesInteractiveSession {
+            sendInteractiveInput("\u{1b}")
+            isControlLatched = false
+            refocusCommandLine()
+            return
+        }
         commandInput = ""
         historyCursor = nil
         isControlLatched = false
@@ -697,16 +785,23 @@ struct LocalAlpineTerminalConsoleView: View {
 
     private func handleControlC() {
         isControlLatched = false
-        if isRunning {
+        if let interactiveSessionID {
+            let sent = LocalAlpineTerminalService.shared.interruptSession(sessionID: interactiveSessionID)
+            if !sent {
+                interactiveOutput += "\r\n[Ctrl-C 发送失败]\r\n"
+            }
+            commandInput = ""
+            refocusCommandLine()
+        } else if isRunning {
             let sent = LocalAlpineTerminalService.shared.interruptRunningCommand()
             appendRunningNotice(sent ? "^C" : "[Ctrl-C 发送失败；当前命令会在返回或超时后结束]")
         } else if !commandInput.isEmpty {
-            entries.append(LocalAlpineConsoleEntry(command: commandInput, output: "^C", exitCode: 130, isRunning: false))
+            entries.append(LocalAlpineConsoleEntry(prompt: prompt, command: commandInput, output: "^C", exitCode: 130, isRunning: false))
             commandInput = ""
             historyCursor = nil
             refocusCommandLine()
         } else {
-            entries.append(LocalAlpineConsoleEntry(command: "^C", output: "", exitCode: 130, isRunning: false))
+            entries.append(LocalAlpineConsoleEntry(prompt: prompt, command: "^C", output: "", exitCode: 130, isRunning: false))
             refocusCommandLine()
         }
         Haptics.play(.light)
@@ -723,6 +818,11 @@ struct LocalAlpineTerminalConsoleView: View {
 
     private func handleControlD() {
         isControlLatched = false
+        if usesInteractiveSession, commandInput.isEmpty {
+            sendInteractiveInput("\u{4}")
+            Haptics.play(.light)
+            return
+        }
         guard !commandInput.isEmpty else {
             refocusCommandLine()
             Haptics.play(.light)
@@ -734,58 +834,143 @@ struct LocalAlpineTerminalConsoleView: View {
 
     private func runShortcutCommand(_ command: String) {
         guard !isRunning else { return }
+        if usesInteractiveSession {
+            sendInteractiveInput(command + "\n")
+            commandHistory.append(command)
+            return
+        }
         commandInput = command
         Task { await executeCurrentCommand() }
     }
 
-    private func updateWorkingDirectory(after command: String, result: LocalAlpineCommandResult) {
-        guard result.exitCode == 0, result.interactiveRequest == nil else { return }
-        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("cd ") || trimmed == "cd" || trimmed == "cd ~" else { return }
+    private func startInteractiveSessionIfPossible() async {
+        guard interactiveSessionID == nil else { return }
+        let result = await LocalAlpineTerminalService.shared.startInteractiveSession(
+            cwd: cwd,
+            cwdIsRuntimePath: true
+        )
+        if let sessionID = result.sessionID {
+            interactiveSessionID = sessionID
+            sessionStartupMessage = nil
+            pollSessionOutput = true
+            _ = LocalAlpineTerminalService.shared.resizeSession(sessionID: sessionID, columns: 120, rows: 40)
+        } else if let message = result.message {
+            sessionStartupMessage = "\(message)\n已回退到一次性命令执行模式。"
+        }
+        refocusCommandLine()
+    }
 
-        let target = trimmed == "cd" || trimmed == "cd ~"
-            ? "/mnt/iexa"
-            : String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !target.isEmpty else { return }
-        guard target.range(of: #"[;&|`$<>(){}]"#, options: .regularExpression) == nil else { return }
-
-        if target == "/" || target == "/mnt/iexa" || target == "~" {
-            cwd = "/mnt/iexa"
-        } else if target.hasPrefix("/mnt/iexa") {
-            cwd = normalizedConsolePath(target)
-        } else if target.hasPrefix("/") {
-            cwd = normalizedConsolePath("/mnt/iexa\(target)")
-        } else if target == ".." {
-            let parent = URL(fileURLWithPath: cwd).deletingLastPathComponent().path
-            cwd = parent.hasPrefix("/mnt/iexa") ? parent : "/mnt/iexa"
-        } else if target.hasPrefix("../") {
-            var path = cwd
-            for component in target.split(separator: "/").map(String.init) {
-                if component == ".." {
-                    let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
-                    path = parent.hasPrefix("/mnt/iexa") ? parent : "/mnt/iexa"
-                } else if component != "." {
-                    path += "/\(component)"
+    private func pollInteractiveSessionOutput() async {
+        guard pollSessionOutput else { return }
+        guard !isPollingSessionOutput else { return }
+        isPollingSessionOutput = true
+        defer { isPollingSessionOutput = false }
+        while pollSessionOutput {
+            if let sessionID = interactiveSessionID {
+                let output = LocalAlpineTerminalService.shared.readSessionOutput(sessionID: sessionID)
+                if !output.isEmpty {
+                    interactiveOutput += output
                 }
             }
-            cwd = normalizedConsolePath(path)
-        } else {
-            cwd = normalizedConsolePath(cwd + "/" + target)
+            try? await Task.sleep(nanoseconds: 120_000_000)
         }
     }
 
-    private func normalizedConsolePath(_ rawPath: String) -> String {
+    private func sendInteractiveInput(_ input: String) {
+        guard let interactiveSessionID else { return }
+        _ = LocalAlpineTerminalService.shared.writeSessionInput(
+            sessionID: interactiveSessionID,
+            input: input
+        )
+    }
+
+    private func normalizedRuntimeCWD(_ rawPath: String) -> String {
         var path = rawPath.replacingOccurrences(of: "\\", with: "/")
+        if path == "~" {
+            path = "/root"
+        } else if path.hasPrefix("~/") {
+            path = "/root/" + String(path.dropFirst(2))
+        }
+        if !path.hasPrefix("/") {
+            path = "/" + path
+        }
         while path.contains("//") {
             path = path.replacingOccurrences(of: "//", with: "/")
         }
-        guard path.hasPrefix("/mnt/iexa") else { return "/mnt/iexa" }
-        return path
+
+        var components: [String] = []
+        for component in path.split(separator: "/", omittingEmptySubsequences: true).map(String.init) {
+            if component == "." {
+                continue
+            }
+            if component == ".." {
+                if !components.isEmpty {
+                    components.removeLast()
+                }
+                continue
+            }
+            components.append(component)
+        }
+        return components.isEmpty ? "/" : "/" + components.joined(separator: "/")
+    }
+
+    private func stateTrackingCommand(for command: String) -> String {
+        if command.contains(stateMarkerPrefix) {
+            return command
+        }
+        let envExports = shellEnvironment
+            .sorted { $0.key < $1.key }
+            .map { "export \($0.key)=\(shellSingleQuoted($0.value))" }
+            .joined(separator: "\n")
+        let prefix = envExports.isEmpty ? "" : "\(envExports)\n"
+        return """
+        \(prefix){
+        \(command)
+        }
+        __iexa_status=$?
+        printf '\\n\(stateMarkerPrefix)PWD=%s\\tPATH=%s\\tHOME=%s\\n' "$PWD" "${PATH:-}" "${HOME:-}"
+        exit "$__iexa_status"
+        """
+    }
+
+    private func updateShellState(from result: LocalAlpineCommandResult) {
+        guard result.interactiveRequest == nil else { return }
+        guard let line = result.output
+            .split(whereSeparator: \.isNewline)
+            .last(where: { $0.hasPrefix(stateMarkerPrefix) }) else { return }
+
+        let payload = String(line.dropFirst(stateMarkerPrefix.count))
+        for part in payload.split(separator: "\t", omittingEmptySubsequences: false) {
+            let pieces = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pieces.count == 2 else { continue }
+            let key = String(pieces[0])
+            let value = String(pieces[1])
+            switch key {
+            case "PWD":
+                cwd = normalizedRuntimeCWD(value)
+            case "PATH", "HOME":
+                shellEnvironment[key] = value
+            default:
+                break
+            }
+        }
+    }
+
+    private func outputWithoutStateMarker(_ output: String) -> String {
+        output
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix(stateMarkerPrefix) }
+            .joined(separator: "\n")
+    }
+
+    private func shellSingleQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 }
 
 private struct LocalAlpineConsoleEntry: Identifiable {
     let id = UUID()
+    let prompt: String
     let command: String
     var output: String
     var exitCode: Int?
@@ -1714,6 +1899,160 @@ struct TerminalBrowserView: View {
                     }
                 )
                 .frame(height: 28)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.black.opacity(0.2))
+        }
+    }
+}
+
+struct LocalAlpineWorkspacePanelView: View {
+    @Bindable var viewModel: TerminalBrowserViewModel
+    var onDismiss: () -> Void
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            LocalWorkspaceFileBrowserView(onDismiss: onDismiss)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Divider().foregroundStyle(theme.cardBorder.opacity(0.3))
+            LocalAlpinePanelMiniTerminalView(viewModel: viewModel)
+        }
+        .background(theme.background)
+        .onAppear {
+            if !viewModel.usesLocalAlpine {
+                viewModel.configureLocalAlpine()
+            }
+        }
+    }
+}
+
+private struct LocalAlpinePanelMiniTerminalView: View {
+    @Bindable var viewModel: TerminalBrowserViewModel
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            terminalToggleBar
+            if viewModel.isTerminalExpanded {
+                Divider().foregroundStyle(theme.cardBorder.opacity(0.3))
+                terminalSection
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .sheet(item: Binding(
+            get: { viewModel.pendingInteractiveRequest },
+            set: { if $0 == nil, viewModel.pendingInteractiveRequest != nil { viewModel.cancelPendingInteractiveCommand() } }
+        )) { request in
+            ActionInputSheet(
+                request: ActionInputRequest(
+                    title: request.title,
+                    message: request.message,
+                    placeholder: request.placeholder,
+                    defaultValue: request.defaultValue
+                ),
+                text: $viewModel.pendingInteractiveInput,
+                onConfirm: {
+                    let input = viewModel.pendingInteractiveInput
+                    Task { await viewModel.continuePendingInteractiveCommand(input: input) }
+                },
+                onCancel: {
+                    viewModel.cancelPendingInteractiveCommand()
+                }
+            )
+            .presentationDetents([.height(300)])
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled()
+        }
+    }
+
+    private var terminalToggleBar: some View {
+        Button {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                viewModel.isTerminalExpanded.toggle()
+            }
+            Haptics.play(.light)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "terminal")
+                    .scaledFont(size: 13, weight: .semibold)
+                Text("终端")
+                    .scaledFont(size: 13, weight: .semibold)
+                Spacer()
+                Image(systemName: viewModel.isTerminalExpanded ? "chevron.down" : "chevron.up")
+                    .scaledFont(size: 11, weight: .bold)
+            }
+            .foregroundStyle(viewModel.isTerminalExpanded ? theme.brandPrimary : theme.textSecondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(theme.surfaceContainer.opacity(0.5))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var terminalSection: some View {
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(viewModel.commandHistory) { entry in
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 4) {
+                                    Text("$")
+                                        .foregroundStyle(.green)
+                                    Text(entry.command)
+                                        .foregroundStyle(theme.textPrimary)
+                                }
+                                .scaledFont(size: 12, design: .monospaced)
+
+                                if !entry.output.isEmpty {
+                                    Text(entry.output)
+                                        .scaledFont(size: 11, design: .monospaced)
+                                        .foregroundStyle(theme.textSecondary)
+                                        .textSelection(.enabled)
+                                }
+
+                                if entry.isRunning {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                        .padding(.top, 2)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id(entry.id)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .frame(minHeight: 150, maxHeight: 240)
+                .background(Color.black.opacity(0.3))
+                .onChange(of: viewModel.commandHistory.count) { _, _ in
+                    if let last = viewModel.commandHistory.last {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Text("$")
+                    .scaledFont(size: 14, design: .monospaced)
+                    .foregroundStyle(.green)
+
+                TerminalTextField(
+                    text: $viewModel.commandInput,
+                    textColor: UIColor(theme.textPrimary),
+                    onReturn: {
+                        let cmd = viewModel.commandInput
+                        Task { await viewModel.executeCommand(cmd) }
+                    }
+                )
+                .frame(height: 28)
+                .disabled(viewModel.isExecutingCommand)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)

@@ -46,6 +46,8 @@ private struct LocalFileBrowserDeleteTarget: Identifiable {
 }
 
 struct LocalWorkspaceFileBrowserView: View {
+    var onDismiss: (() -> Void)? = nil
+
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
 
@@ -61,6 +63,8 @@ struct LocalWorkspaceFileBrowserView: View {
     @State private var previewTarget: LocalFileBrowserPreviewTarget?
     @State private var shareURL: URL?
     @State private var confirmDeleteTarget: LocalFileBrowserDeleteTarget?
+    @State private var confirmRootFSReset = false
+    @State private var rootFSResetMessage: String?
 
     private var activePath: String {
         switch location {
@@ -129,16 +133,30 @@ struct LocalWorkspaceFileBrowserView: View {
             .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索文件")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("完成") { dismiss() }
+                    Button("完成") { close() }
                         .fontWeight(.semibold)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        Task { await loadDirectory() }
-                        Haptics.play(.light)
+                    Menu {
+                        Button {
+                            Task { await loadDirectory() }
+                            Haptics.play(.light)
+                        } label: {
+                            Label("重新加载", systemImage: "arrow.clockwise")
+                        }
+
+                        if location == .rootfs {
+                            Divider()
+
+                            Button(role: .destructive) {
+                                confirmRootFSReset = true
+                            } label: {
+                                Label("重置 rootfs", systemImage: "arrow.counterclockwise.circle")
+                            }
+                        }
                     } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .scaledFont(size: 14, weight: .semibold)
+                        Image(systemName: "ellipsis.circle")
+                            .scaledFont(size: 18, weight: .semibold)
                     }
                 }
             }
@@ -179,6 +197,24 @@ struct LocalWorkspaceFileBrowserView: View {
         } message: {
             Text(deleteWarningText)
         }
+        .confirmationDialog("重置本地 Alpine rootfs？", isPresented: $confirmRootFSReset, titleVisibility: .visible) {
+            Button("重置 rootfs", role: .destructive) {
+                Task { await resetRootFS() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这会丢弃 apk 安装的软件和 rootfs 内的改动，但不会删除 /mnt/iexa 工作区文件。")
+        }
+        .alert("Local Alpine", isPresented: Binding(
+            get: { rootFSResetMessage != nil },
+            set: { if !$0 { rootFSResetMessage = nil } }
+        )) {
+            Button("好") {
+                rootFSResetMessage = nil
+            }
+        } message: {
+            Text(rootFSResetMessage ?? "")
+        }
     }
 
     private var locationPicker: some View {
@@ -193,6 +229,14 @@ struct LocalWorkspaceFileBrowserView: View {
         .onChange(of: location) { _, _ in
             searchText = ""
             Task { await loadDirectory() }
+        }
+    }
+
+    private func close() {
+        if let onDismiss {
+            onDismiss()
+        } else {
+            dismiss()
         }
     }
 
@@ -525,6 +569,24 @@ struct LocalWorkspaceFileBrowserView: View {
             errorMessage = error.localizedDescription
             Haptics.notify(.error)
             return nil
+        }
+    }
+
+    private func resetRootFS() async {
+        do {
+            let result = try await LocalAlpineTerminalService.shared.resetRuntimeRootFS()
+            rootFSResetMessage = result.message
+            if result.resetImmediately {
+                rootfsPath = "/"
+                rootfsPathHistory = []
+                if location == .rootfs {
+                    await loadDirectory()
+                }
+            }
+            Haptics.notify(.success)
+        } catch {
+            rootFSResetMessage = error.localizedDescription
+            Haptics.notify(.error)
         }
     }
 

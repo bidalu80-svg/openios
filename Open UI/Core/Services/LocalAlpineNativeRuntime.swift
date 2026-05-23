@@ -6,6 +6,36 @@ private func iexaLocalAlpineRuntimeAvailable() -> Int32
 @_silgen_name("iexa_local_alpine_interrupt")
 private func iexaLocalAlpineInterrupt() -> Int32
 
+@_silgen_name("iexa_local_alpine_session_start")
+private func iexaLocalAlpineSessionStart(
+    _ cwd: UnsafePointer<CChar>,
+    _ rootArchivePath: UnsafePointer<CChar>,
+    _ workspacePath: UnsafePointer<CChar>,
+    _ timeZone: UnsafePointer<CChar>
+) -> Int32
+
+@_silgen_name("iexa_local_alpine_session_write")
+private func iexaLocalAlpineSessionWrite(
+    _ sessionID: Int32,
+    _ input: UnsafePointer<CChar>
+) -> Int32
+
+@_silgen_name("iexa_local_alpine_session_read")
+private func iexaLocalAlpineSessionRead(_ sessionID: Int32) -> UnsafeMutablePointer<CChar>?
+
+@_silgen_name("iexa_local_alpine_session_resize")
+private func iexaLocalAlpineSessionResize(
+    _ sessionID: Int32,
+    _ columns: Int32,
+    _ rows: Int32
+) -> Int32
+
+@_silgen_name("iexa_local_alpine_session_interrupt")
+private func iexaLocalAlpineSessionInterrupt(_ sessionID: Int32) -> Int32
+
+@_silgen_name("iexa_local_alpine_session_close")
+private func iexaLocalAlpineSessionClose(_ sessionID: Int32) -> Int32
+
 @_silgen_name("iexa_local_alpine_execute")
 private func iexaLocalAlpineExecute(
     _ command: UnsafePointer<CChar>,
@@ -51,6 +81,61 @@ nonisolated struct LocalAlpineNativeRuntime: Sendable {
     func interrupt() -> Bool {
         guard isLinked else { return false }
         return iexaLocalAlpineInterrupt() == 1
+    }
+
+    func startSession(_ command: LocalAlpineNativeCommand) async -> Int? {
+        guard isLinked else { return nil }
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let sessionID = command.cwd.withCString { cwdCString in
+                    command.rootArchiveURL.path.withCString { rootArchiveCString in
+                        command.workspaceURL.path.withCString { workspaceCString in
+                            command.timeZone.withCString { timeZoneCString in
+                                iexaLocalAlpineSessionStart(
+                                    cwdCString,
+                                    rootArchiveCString,
+                                    workspaceCString,
+                                    timeZoneCString
+                                )
+                            }
+                        }
+                    }
+                }
+                continuation.resume(returning: sessionID > 0 ? Int(sessionID) : nil)
+            }
+        }
+    }
+
+    func writeSessionInput(sessionID: Int, input: String) -> Bool {
+        guard isLinked else { return false }
+        return input.withCString { inputCString in
+            iexaLocalAlpineSessionWrite(Int32(sessionID), inputCString) == 1
+        }
+    }
+
+    func readSessionOutput(sessionID: Int) -> String {
+        guard isLinked else { return "" }
+        let outputPointer = iexaLocalAlpineSessionRead(Int32(sessionID))
+        let output = outputPointer.map { String(cString: $0) } ?? ""
+        if let outputPointer {
+            iexaLocalAlpineFree(outputPointer)
+        }
+        return output
+    }
+
+    func resizeSession(sessionID: Int, columns: Int, rows: Int) -> Bool {
+        guard isLinked else { return false }
+        return iexaLocalAlpineSessionResize(Int32(sessionID), Int32(columns), Int32(rows)) == 1
+    }
+
+    func interruptSession(sessionID: Int) -> Bool {
+        guard isLinked else { return false }
+        return iexaLocalAlpineSessionInterrupt(Int32(sessionID)) == 1
+    }
+
+    func closeSession(sessionID: Int) -> Bool {
+        guard isLinked else { return false }
+        return iexaLocalAlpineSessionClose(Int32(sessionID)) == 1
     }
 
     func execute(_ command: LocalAlpineNativeCommand) async -> LocalAlpineCommandResult {
