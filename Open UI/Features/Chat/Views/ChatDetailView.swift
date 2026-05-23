@@ -167,7 +167,11 @@ struct ChatDetailView: View {
         if onNewChat != nil { buttonCount += 1 }
         if viewModel.messages.isEmpty { buttonCount += 1 }
         if !agentActivityItems.isEmpty { buttonCount += 1 }
-        return CGFloat(buttonCount * 34 + max(0, buttonCount - 1) * 2 + 12)
+        let buttonWidth = 34
+        let buttonSpacing = 2
+        let horizontalPadding = 12
+        let spacingWidth = max(0, buttonCount - 1) * buttonSpacing
+        return CGFloat(buttonCount * buttonWidth + spacingWidth + horizontalPadding)
     }
 
     private func resetTokenUsageTotals() {
