@@ -20,7 +20,6 @@ private struct AgentActivityItem: Identifiable, Hashable {
     let timestamp: Date
     let isStreaming: Bool
     let summary: String
-    let rawOutput: String
     let writtenFiles: [LocalAlpineWrittenFile]
     let commandResults: [LocalAlpineAgentCommandResult]
 
@@ -49,7 +48,6 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 commandCount: visibleCommands.isEmpty ? nil : visibleCommands.count,
                 hasError: hasError
             )
-        self.rawOutput = metadata?["iexa_local_alpine_raw_result"] ?? parsed.outputText
         self.writtenFiles = writtenFiles
         self.commandResults = visibleCommands
     }
@@ -144,6 +142,7 @@ struct ChatDetailView: View {
     @State private var sourcesSheetMessage: ChatMessage?
     @State private var randomPrompts: [SuggestedPrompt] = []
     @State private var showAgentTaskPanel = false
+    @State private var agentActivitySnapshot: [AgentActivityItem] = []
 
     private var tokenUsageTotalsSnapshot: ChatTokenUsageSnapshot {
         ChatTokenUsageSnapshot(
@@ -158,20 +157,30 @@ struct ChatDetailView: View {
         )
     }
 
-    private var agentActivityItems: [AgentActivityItem] {
-        viewModel.messages.compactMap(AgentActivityItem.init(message:))
-    }
-
     private var toolbarControlsMinWidth: CGFloat {
         var buttonCount = 1
         if onNewChat != nil { buttonCount += 1 }
         if viewModel.messages.isEmpty { buttonCount += 1 }
-        if !agentActivityItems.isEmpty { buttonCount += 1 }
+        if hasRecentAgentActivity { buttonCount += 1 }
         let buttonWidth = 34
         let buttonSpacing = 2
         let horizontalPadding = 12
         let spacingWidth = max(0, buttonCount - 1) * buttonSpacing
         return CGFloat(buttonCount * buttonWidth + spacingWidth + horizontalPadding)
+    }
+
+    private var hasRecentAgentActivity: Bool {
+        viewModel.messages.suffix(30).contains { message in
+            message.metadata?["iexa_local_alpine_result"] == "true"
+                || message.content.hasPrefix("Local Alpine 执行结果")
+                || message.model == "Local Alpine"
+        }
+    }
+
+    private func refreshAgentActivitySnapshot() {
+        agentActivitySnapshot = viewModel.messages
+            .suffix(40)
+            .compactMap(AgentActivityItem.init(message:))
     }
 
     private func resetTokenUsageTotals() {
@@ -481,7 +490,7 @@ struct ChatDetailView: View {
             SourcesDetailSheet(sources: message.sources)
         }
         .sheet(isPresented: $showAgentTaskPanel) {
-            AgentTaskPanelView(items: agentActivityItems)
+            AgentTaskPanelView(items: agentActivitySnapshot)
                 .themed()
         }
         .sheet(item: $previewWebURL) { item in
@@ -681,19 +690,20 @@ struct ChatDetailView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Chat parameters")
-                if !agentActivityItems.isEmpty {
+                if hasRecentAgentActivity {
                     Button {
                         Haptics.play(.light)
+                        refreshAgentActivitySnapshot()
                         showAgentTaskPanel = true
                     } label: {
                         Image(systemName: "checklist")
                             .scaledFont(size: 15, weight: .semibold)
-                            .foregroundStyle(agentActivityItems.contains { $0.hasFailure } ? .orange : theme.textSecondary)
+                            .foregroundStyle(theme.textSecondary)
                             .frame(width: 34, height: 34)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Agent 任务")
+                    .accessibilityLabel("Agent 步骤")
                 }
                 if viewModel.messages.isEmpty {
                     Button {
@@ -4890,7 +4900,7 @@ private struct AgentTaskPanelView: View {
                     .background(theme.background)
                 }
             }
-            .navigationTitle("Agent 任务")
+            .navigationTitle("Agent 步骤")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -4966,7 +4976,6 @@ private struct AgentTaskCard: View {
 
     @Environment(\.theme) private var theme
     @State private var isExpanded = false
-    @State private var didCopy = false
 
     private var statusIcon: String {
         if item.isStreaming { return "progress.indicator" }
@@ -5029,31 +5038,6 @@ private struct AgentTaskCard: View {
                     }
                 }
             }
-
-            if isExpanded && !item.rawOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                AgentTaskOutputBlock(title: "原始输出", text: item.rawOutput)
-            }
-
-            if isExpanded {
-                HStack(spacing: 8) {
-                    Button {
-                        UIPasteboard.general.string = exportText
-                        didCopy = true
-                        Haptics.play(.light)
-                        Task {
-                            try? await Task.sleep(nanoseconds: 1_200_000_000)
-                            await MainActor.run { didCopy = false }
-                        }
-                    } label: {
-                        Label(didCopy ? "已复制" : "复制记录", systemImage: didCopy ? "checkmark" : "doc.on.doc")
-                            .scaledFont(size: 12, weight: .semibold)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-
-                    Spacer(minLength: 0)
-                }
-            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -5073,20 +5057,6 @@ private struct AgentTaskCard: View {
                 .foregroundStyle(theme.textTertiary)
             content()
         }
-    }
-
-    private var exportText: String {
-        var parts: [String] = [item.summary]
-        for file in item.writtenFiles {
-            parts.append("FILE \(file.path) \(file.lineCount) lines \(file.byteCount) bytes")
-        }
-        for result in item.commandResults {
-            parts.append("COMMAND \(result.command)\nCWD \(result.cwd)\nEXIT \(result.exitCode.map(String.init) ?? "unknown")\n\(result.outputPreview)")
-        }
-        if !item.rawOutput.isEmpty {
-            parts.append("RAW\n\(item.rawOutput)")
-        }
-        return parts.joined(separator: "\n\n")
     }
 }
 
@@ -5148,9 +5118,6 @@ private struct AgentTaskCommandRow: View {
                 Spacer(minLength: 0)
             }
 
-            if isExpanded && !result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                AgentTaskOutputBlock(title: "输出", text: result.outputPreview)
-            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -5162,32 +5129,6 @@ private struct AgentTaskCommandRow: View {
         command
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-}
-
-private struct AgentTaskOutputBlock: View {
-    let title: String
-    let text: String
-
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title)
-                .scaledFont(size: 10, weight: .semibold)
-                .foregroundStyle(theme.textTertiary)
-            ScrollView(.vertical) {
-                Text(text)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(theme.textPrimary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .textSelection(.enabled)
-            }
-            .frame(maxHeight: 180)
-            .background(Color(.secondarySystemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-        }
     }
 }
 

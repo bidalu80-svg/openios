@@ -367,6 +367,40 @@ actor LocalAlpineAgentService {
             let effectiveCWD = (cwd?.isEmpty == false) ? cwd! : defaultCWD
             var stepLines: [String] = []
             var shouldRunShellCommand = true
+            if !command.readFiles.isEmpty {
+                let readResult = await readFiles(command.readFiles, cwd: effectiveCWD)
+                stepLines.append(readResult.summary)
+                commandResults.append(contentsOf: readResult.commandResults)
+                if readResult.hadFailure {
+                    shouldRunShellCommand = false
+                    stopRemainingCommands = true
+                }
+            }
+
+            if !command.editFiles.isEmpty {
+                let editResult = await editFiles(command.editFiles, cwd: effectiveCWD)
+                stepLines.append(editResult.summary)
+                commandResults.append(contentsOf: editResult.commandResults)
+                editResult.editedPaths.forEach { editedFilePaths.insert($0) }
+                writtenFiles.append(contentsOf: editResult.writtenFiles)
+                if editResult.hadFailure {
+                    shouldRunShellCommand = false
+                    stopRemainingCommands = true
+                }
+            }
+
+            if !command.patchFiles.isEmpty {
+                let patchResult = await patchFiles(command.patchFiles, cwd: effectiveCWD)
+                stepLines.append(patchResult.summary)
+                commandResults.append(contentsOf: patchResult.commandResults)
+                patchResult.editedPaths.forEach { editedFilePaths.insert($0) }
+                writtenFiles.append(contentsOf: patchResult.writtenFiles)
+                if patchResult.hadFailure {
+                    shouldRunShellCommand = false
+                    stopRemainingCommands = true
+                }
+            }
+
             if !command.writeFiles.isEmpty {
                 let writeResult = await writeFiles(command.writeFiles, cwd: effectiveCWD)
                 stepLines.append(writeResult.summary)
@@ -533,7 +567,20 @@ actor LocalAlpineAgentService {
                 return "\(path):\(file.content.hashValue):\(file.source.displayName)"
             }
             .joined(separator: "|")
-        return "\(cwd)\n\(shell)\n\(files)"
+        let reads = command.readFiles
+            .map { $0.path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .joined(separator: "|")
+        let edits = command.editFiles
+            .map { edit in
+                let path = edit.path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let replacements = edit.replacements.map { "\($0.oldText.hashValue):\($0.newText.hashValue)" }.joined(separator: ",")
+                return "\(path):\(replacements)"
+            }
+            .joined(separator: "|")
+        let patches = command.patchFiles
+            .map { "\(($0.path ?? "").lowercased()):\($0.patch.hashValue)" }
+            .joined(separator: "|")
+        return "\(cwd)\n\(shell)\n\(files)\n\(reads)\n\(edits)\n\(patches)"
     }
 
     private nonisolated static func commandResult(
@@ -564,7 +611,7 @@ actor LocalAlpineAgentService {
         let shell = block.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !shell.isEmpty else { throw LocalAlpineAgentError.noCommands }
         guard Self.looksLikeShellBlock(shell) else { throw LocalAlpineAgentError.noCommands }
-        return [LocalAlpineAgentCommand(command: shell, cwd: nil, writeFiles: [])]
+        return [LocalAlpineAgentCommand(command: shell, cwd: nil)]
     }
 
     private func parseCommands(from object: Any) -> [LocalAlpineAgentCommand] {
@@ -587,7 +634,10 @@ actor LocalAlpineAgentService {
             return [LocalAlpineAgentCommand(
                 command: command,
                 cwd: dict["cwd"] as? String,
-                writeFiles: parseWriteFilesForCommand(from: dict)
+                writeFiles: parseWriteFilesForCommand(from: dict),
+                readFiles: parseReadFilesForCommand(from: dict),
+                editFiles: parseEditFilesForCommand(from: dict),
+                patchFiles: parsePatchFilesForCommand(from: dict)
             )]
         }
 
@@ -595,16 +645,186 @@ actor LocalAlpineAgentService {
             return [LocalAlpineAgentCommand(
                 command: command,
                 cwd: dict["cwd"] as? String,
-                writeFiles: parseWriteFilesForCommand(from: dict)
+                writeFiles: parseWriteFilesForCommand(from: dict),
+                readFiles: parseReadFilesForCommand(from: dict),
+                editFiles: parseEditFilesForCommand(from: dict),
+                patchFiles: parsePatchFilesForCommand(from: dict)
             )]
         }
 
         let files = parseWriteFilesForCommand(from: dict)
-        if !files.isEmpty {
-            return [LocalAlpineAgentCommand(command: nil, cwd: dict["cwd"] as? String, writeFiles: files)]
+        let readFiles = parseReadFilesForCommand(from: dict)
+        let editFiles = parseEditFilesForCommand(from: dict)
+        let patchFiles = parsePatchFilesForCommand(from: dict)
+        if !files.isEmpty || !readFiles.isEmpty || !editFiles.isEmpty || !patchFiles.isEmpty {
+            return [LocalAlpineAgentCommand(
+                command: nil,
+                cwd: dict["cwd"] as? String,
+                writeFiles: files,
+                readFiles: readFiles,
+                editFiles: editFiles,
+                patchFiles: patchFiles
+            )]
         }
 
         return []
+    }
+
+    private func parseReadFilesForCommand(from dict: [String: Any]) -> [LocalAlpineReadFileRequest] {
+        parseReadFiles(from: Self.readFilesObject(from: dict))
+    }
+
+    private nonisolated static func readFilesObject(from dict: [String: Any]) -> Any? {
+        dict["read_file"] ?? dict["read_files"] ?? dict["read"]
+    }
+
+    private func parseReadFiles(from object: Any?) -> [LocalAlpineReadFileRequest] {
+        if let array = object as? [Any] {
+            return array.flatMap { parseReadFiles(from: $0) }
+        }
+        if let path = object as? String {
+            return [LocalAlpineReadFileRequest(path: path)]
+        }
+        if let dict = object as? [String: Any] {
+            let nestedFiles = parseReadFiles(from: Self.readFilesObject(from: dict))
+            guard nestedFiles.isEmpty else { return nestedFiles }
+            guard let path = Self.pathString(from: dict) else { return [] }
+            return [LocalAlpineReadFileRequest(
+                path: path,
+                startLine: Self.intValue(dict["start_line"] ?? dict["line_start"] ?? dict["from_line"]),
+                lineCount: Self.intValue(dict["line_count"] ?? dict["max_lines"] ?? dict["lines"]),
+                maxBytes: Self.intValue(dict["max_bytes"])
+            )]
+        }
+        return []
+    }
+
+    private func parseEditFilesForCommand(from dict: [String: Any]) -> [LocalAlpineEditFileRequest] {
+        parseEditFiles(from: Self.editFilesObject(from: dict))
+    }
+
+    private nonisolated static func editFilesObject(from dict: [String: Any]) -> Any? {
+        dict["edit_file"] ?? dict["edit_files"] ?? dict["replace_file"]
+    }
+
+    private func parseEditFiles(from object: Any?) -> [LocalAlpineEditFileRequest] {
+        if let array = object as? [Any] {
+            return array.flatMap { parseEditFiles(from: $0) }
+        }
+        guard let dict = object as? [String: Any] else { return [] }
+        let nestedEdits = parseEditFiles(from: Self.editFilesObject(from: dict))
+        guard nestedEdits.isEmpty else { return nestedEdits }
+        guard let path = Self.pathString(from: dict) else { return [] }
+        let replacements = parseEditReplacements(from: dict)
+        guard !replacements.isEmpty else { return [] }
+        return [LocalAlpineEditFileRequest(path: path, replacements: replacements)]
+    }
+
+    private func parseEditReplacements(from dict: [String: Any]) -> [LocalAlpineEditReplacement] {
+        if let array = (dict["replacements"] ?? dict["edits"]) as? [Any] {
+            return array.compactMap { parseEditReplacement(from: $0) }
+        }
+        return parseEditReplacement(from: dict).map { [$0] } ?? []
+    }
+
+    private func parseEditReplacement(from object: Any) -> LocalAlpineEditReplacement? {
+        guard let dict = object as? [String: Any],
+              let oldText = Self.textPayload(
+                from: dict,
+                keys: ["old_text", "old_string", "find", "search", "before"],
+                lineKeys: ["old_lines", "find_lines", "before_lines"],
+                base64Keys: ["old_text_base64", "old_base64"]
+              ),
+              let newText = Self.textPayload(
+                from: dict,
+                keys: ["new_text", "new_string", "replace", "replacement", "after"],
+                lineKeys: ["new_lines", "replace_lines", "after_lines"],
+                base64Keys: ["new_text_base64", "new_base64"]
+              ) else {
+            return nil
+        }
+        return LocalAlpineEditReplacement(
+            oldText: oldText,
+            newText: newText,
+            replaceAll: (dict["replace_all"] as? Bool) ?? false,
+            expectedCount: Self.intValue(dict["expected_count"] ?? dict["count"])
+        )
+    }
+
+    private func parsePatchFilesForCommand(from dict: [String: Any]) -> [LocalAlpinePatchFileRequest] {
+        parsePatchFiles(from: Self.patchFilesObject(from: dict))
+    }
+
+    private nonisolated static func patchFilesObject(from dict: [String: Any]) -> Any? {
+        dict["patch_file"] ?? dict["patch_files"] ?? dict["apply_patch"]
+    }
+
+    private func parsePatchFiles(from object: Any?) -> [LocalAlpinePatchFileRequest] {
+        if let array = object as? [Any] {
+            return array.flatMap { parsePatchFiles(from: $0) }
+        }
+        if let patch = object as? String {
+            return [LocalAlpinePatchFileRequest(path: nil, patch: patch)]
+        }
+        if let dict = object as? [String: Any] {
+            let nestedPatches = parsePatchFiles(from: Self.patchFilesObject(from: dict))
+            guard nestedPatches.isEmpty else { return nestedPatches }
+            guard let patch = Self.textPayload(
+                from: dict,
+                keys: ["patch", "diff", "unified_diff"],
+                lineKeys: ["patch_lines", "diff_lines"],
+                base64Keys: ["patch_base64", "diff_base64"]
+            ) else { return [] }
+            return [LocalAlpinePatchFileRequest(path: Self.pathString(from: dict), patch: patch)]
+        }
+        return []
+    }
+
+    private nonisolated static func pathString(from dict: [String: Any]) -> String? {
+        ((dict["path"] as? String)
+            ?? (dict["file_path"] as? String)
+            ?? (dict["file"] as? String)
+            ?? (dict["name"] as? String)
+            ?? (dict["filename"] as? String)
+            ?? (dict["target"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private nonisolated static func intValue(_ value: Any?) -> Int? {
+        if let intValue = value as? Int { return intValue }
+        if let doubleValue = value as? Double { return Int(doubleValue) }
+        if let stringValue = value as? String { return Int(stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return nil
+    }
+
+    private nonisolated static func textPayload(
+        from dict: [String: Any],
+        keys: [String],
+        lineKeys: [String],
+        base64Keys: [String]
+    ) -> String? {
+        for key in base64Keys {
+            if let base64 = dict[key] as? String,
+               let data = Data(base64Encoded: base64),
+               let text = String(data: data, encoding: .utf8) {
+                return text
+            }
+        }
+        for key in lineKeys {
+            if let lines = dict[key] as? [String] {
+                var text = lines.joined(separator: "\n")
+                if (dict["append_newline"] as? Bool) ?? true, !text.hasSuffix("\n") {
+                    text += "\n"
+                }
+                return text
+            }
+        }
+        for key in keys {
+            if let text = dict[key] as? String {
+                return text
+            }
+        }
+        return nil
     }
 
     private func parseWriteFilesForCommand(from dict: [String: Any]) -> [LocalAlpineAgentFile] {
@@ -723,12 +943,393 @@ actor LocalAlpineAgentService {
         )
     }
 
+    private func readFiles(_ requests: [LocalAlpineReadFileRequest], cwd: String) async -> LocalAlpineStructuredToolResult {
+        var lines = ["读取文件（read_file）"]
+        var commandResults: [LocalAlpineAgentCommandResult] = []
+        var hadFailure = false
+
+        for request in requests.prefix(maxCommandsPerResponse) {
+            let target = resolvedFilePath(request.path, cwd: cwd)
+            let maxBytes = max(1, min(request.maxBytes ?? 32_000, 256_000))
+            do {
+                let data = try await LocalAlpineTerminalService.shared.readFile(path: target)
+                let output: String
+                if let content = String(data: data, encoding: .utf8) {
+                    output = Self.numberedText(
+                        content,
+                        path: target,
+                        byteCount: data.count,
+                        startLine: request.startLine,
+                        lineCount: request.lineCount,
+                        maxBytes: maxBytes
+                    )
+                } else {
+                    output = "== file ==\n\(target)\n\nbinary file: \(data.count) B"
+                }
+                lines.append(output)
+                let result = LocalAlpineCommandResult(
+                    command: "read_file \(target)",
+                    output: output,
+                    exitCode: 0,
+                    interactiveRequest: nil
+                )
+                commandResults.append(Self.commandResult(command: "read_file \(target)", cwd: cwd, result: result))
+            } catch {
+                let output = "read_file failed for `\(target)`: \(error.localizedDescription)"
+                lines.append("- \(output)")
+                let result = LocalAlpineCommandResult(
+                    command: "read_file \(target)",
+                    output: output,
+                    exitCode: 1,
+                    interactiveRequest: nil
+                )
+                commandResults.append(Self.commandResult(command: "read_file \(target)", cwd: cwd, result: result))
+                hadFailure = true
+            }
+        }
+
+        let skipped = max(0, requests.count - maxCommandsPerResponse)
+        if skipped > 0 {
+            lines.append("- 已跳过 \(skipped) 个多余读取请求，避免一次读取过多。")
+        }
+
+        return LocalAlpineStructuredToolResult(
+            summary: lines.joined(separator: "\n\n"),
+            commandResults: commandResults,
+            writtenFiles: [],
+            editedPaths: [],
+            hadFailure: hadFailure
+        )
+    }
+
+    private nonisolated static func numberedText(
+        _ content: String,
+        path: String,
+        byteCount: Int,
+        startLine: Int?,
+        lineCount: Int?,
+        maxBytes: Int
+    ) -> String {
+        let normalized = content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let allLines = normalized.components(separatedBy: "\n")
+        let totalLines = normalized.isEmpty ? 0 : (normalized.hasSuffix("\n") ? allLines.count - 1 : allLines.count)
+        let firstLine = max(1, startLine ?? 1)
+        let count = max(1, min(lineCount ?? 240, 1_000))
+        let startIndex = min(max(0, firstLine - 1), max(0, totalLines))
+        let endIndex = min(totalLines, startIndex + count)
+        var body = (startIndex..<endIndex)
+            .map { index in "\(index + 1)\t\(allLines[index])" }
+            .joined(separator: "\n")
+        if (body.data(using: .utf8)?.count ?? 0) > maxBytes {
+            body = String(body.prefix(maxBytes)) + "\n...（read_file 输出过长，已截断）"
+        }
+        if body.isEmpty {
+            body = "（空文件或请求范围无内容）"
+        }
+        return """
+        == file ==
+        \(path)
+        bytes: \(byteCount)
+        lines: \(totalLines)
+        range: \(startIndex + 1)-\(endIndex)
+
+        == content ==
+        \(body)
+        """
+    }
+
+    private func editFiles(_ requests: [LocalAlpineEditFileRequest], cwd: String) async -> LocalAlpineStructuredToolResult {
+        var lines = ["编辑文件（edit_file）"]
+        var commandResults: [LocalAlpineAgentCommandResult] = []
+        var writtenFiles: [LocalAlpineWrittenFile] = []
+        var editedPaths: [String] = []
+        var hadFailure = false
+
+        for request in requests.prefix(maxCommandsPerResponse) {
+            let target = resolvedFilePath(request.path, cwd: cwd)
+            do {
+                let data = try await LocalAlpineTerminalService.shared.readFile(path: target)
+                guard var content = String(data: data, encoding: .utf8) else {
+                    throw LocalAlpineAgentEditError.binaryFile(target)
+                }
+
+                var replacementNotes: [String] = []
+                for replacement in request.replacements {
+                    let count = Self.occurrenceCount(of: replacement.oldText, in: content)
+                    if let expected = replacement.expectedCount, count != expected {
+                        throw LocalAlpineAgentEditError.unexpectedMatchCount(
+                            path: target,
+                            expected: expected,
+                            actual: count
+                        )
+                    }
+                    if count == 0 {
+                        throw LocalAlpineAgentEditError.noMatch(path: target)
+                    }
+                    if !replacement.replaceAll && count != 1 {
+                        throw LocalAlpineAgentEditError.ambiguousMatch(path: target, count: count)
+                    }
+                    content = replacement.replaceAll
+                        ? content.replacingOccurrences(of: replacement.oldText, with: replacement.newText)
+                        : Self.replacingFirstOccurrence(
+                            of: replacement.oldText,
+                            with: replacement.newText,
+                            in: content
+                        )
+                    replacementNotes.append("  - 替换 \(replacement.replaceAll ? count : 1) 处。")
+                }
+
+                let outcome = await writeProtectedFile(
+                    LocalAlpineAgentFile(path: target, content: content, source: .editFile),
+                    cwd: cwd
+                )
+                lines.append("- `\(target)`")
+                lines.append(contentsOf: replacementNotes)
+                lines.append(contentsOf: outcome.lines.map { "  \($0)" })
+                if let writtenFile = outcome.writtenFile {
+                    writtenFiles.append(writtenFile)
+                }
+                if let writtenPath = outcome.writtenPath {
+                    editedPaths.append(writtenPath)
+                }
+                hadFailure = hadFailure || outcome.hadFailure
+                let result = LocalAlpineCommandResult(
+                    command: "edit_file \(target)",
+                    output: outcome.lines.joined(separator: "\n"),
+                    exitCode: outcome.hadFailure ? 125 : 0,
+                    interactiveRequest: nil
+                )
+                commandResults.append(Self.commandResult(command: "edit_file \(target)", cwd: cwd, result: result))
+            } catch {
+                let output = "edit_file failed for `\(target)`: \(error.localizedDescription)"
+                lines.append("- \(output)")
+                let result = LocalAlpineCommandResult(
+                    command: "edit_file \(target)",
+                    output: output,
+                    exitCode: 1,
+                    interactiveRequest: nil
+                )
+                commandResults.append(Self.commandResult(command: "edit_file \(target)", cwd: cwd, result: result))
+                hadFailure = true
+            }
+        }
+
+        let skipped = max(0, requests.count - maxCommandsPerResponse)
+        if skipped > 0 {
+            lines.append("- 已跳过 \(skipped) 个多余编辑请求，避免一次编辑过多。")
+        }
+
+        return LocalAlpineStructuredToolResult(
+            summary: lines.joined(separator: "\n"),
+            commandResults: commandResults,
+            writtenFiles: writtenFiles,
+            editedPaths: editedPaths,
+            hadFailure: hadFailure
+        )
+    }
+
+    private nonisolated static func occurrenceCount(of needle: String, in haystack: String) -> Int {
+        guard !needle.isEmpty else { return 0 }
+        return haystack.components(separatedBy: needle).count - 1
+    }
+
+    private nonisolated static func replacingFirstOccurrence(
+        of oldText: String,
+        with newText: String,
+        in content: String
+    ) -> String {
+        guard let range = content.range(of: oldText) else { return content }
+        var updated = content
+        updated.replaceSubrange(range, with: newText)
+        return updated
+    }
+
+    private func patchFiles(_ requests: [LocalAlpinePatchFileRequest], cwd: String) async -> LocalAlpineStructuredToolResult {
+        var lines = ["修补文件（patch_file）"]
+        var commandResults: [LocalAlpineAgentCommandResult] = []
+        var writtenFiles: [LocalAlpineWrittenFile] = []
+        var editedPaths: [String] = []
+        var hadFailure = false
+
+        for request in requests.prefix(maxCommandsPerResponse) {
+            do {
+                let patchTarget = request.path ?? Self.pathFromUnifiedDiff(request.patch)
+                guard let patchTarget, !patchTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw LocalAlpineAgentEditError.missingPatchPath
+                }
+                let target = resolvedFilePath(patchTarget, cwd: cwd)
+                let data = try await LocalAlpineTerminalService.shared.readFile(path: target)
+                guard let content = String(data: data, encoding: .utf8) else {
+                    throw LocalAlpineAgentEditError.binaryFile(target)
+                }
+                let patched = try Self.applyUnifiedDiff(request.patch, to: content)
+                let outcome = await writeProtectedFile(
+                    LocalAlpineAgentFile(path: target, content: patched, source: .patchFile),
+                    cwd: cwd
+                )
+                lines.append("- `\(target)`")
+                lines.append(contentsOf: outcome.lines.map { "  \($0)" })
+                if let writtenFile = outcome.writtenFile {
+                    writtenFiles.append(writtenFile)
+                }
+                if let writtenPath = outcome.writtenPath {
+                    editedPaths.append(writtenPath)
+                }
+                hadFailure = hadFailure || outcome.hadFailure
+                let result = LocalAlpineCommandResult(
+                    command: "patch_file \(target)",
+                    output: outcome.lines.joined(separator: "\n"),
+                    exitCode: outcome.hadFailure ? 125 : 0,
+                    interactiveRequest: nil
+                )
+                commandResults.append(Self.commandResult(command: "patch_file \(target)", cwd: cwd, result: result))
+            } catch {
+                let target = request.path ?? "(diff header)"
+                let output = "patch_file failed for `\(target)`: \(error.localizedDescription)"
+                lines.append("- \(output)")
+                let result = LocalAlpineCommandResult(
+                    command: "patch_file \(target)",
+                    output: output,
+                    exitCode: 1,
+                    interactiveRequest: nil
+                )
+                commandResults.append(Self.commandResult(command: "patch_file \(target)", cwd: cwd, result: result))
+                hadFailure = true
+            }
+        }
+
+        let skipped = max(0, requests.count - maxCommandsPerResponse)
+        if skipped > 0 {
+            lines.append("- 已跳过 \(skipped) 个多余补丁请求，避免一次编辑过多。")
+        }
+
+        return LocalAlpineStructuredToolResult(
+            summary: lines.joined(separator: "\n"),
+            commandResults: commandResults,
+            writtenFiles: writtenFiles,
+            editedPaths: editedPaths,
+            hadFailure: hadFailure
+        )
+    }
+
+    private nonisolated static func pathFromUnifiedDiff(_ patch: String) -> String? {
+        let lines = patch
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+        for line in lines where line.hasPrefix("+++ ") {
+            var path = String(line.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if path == "/dev/null" { continue }
+            path = path.components(separatedBy: "\t").first ?? path
+            if path.hasPrefix("b/") || path.hasPrefix("a/") {
+                path.removeFirst(2)
+            }
+            return path
+        }
+        return nil
+    }
+
+    private nonisolated static func applyUnifiedDiff(_ patch: String, to content: String) throws -> String {
+        let normalizedPatch = patch
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let patchLines = normalizedPatch.components(separatedBy: "\n")
+        let hadTrailingNewline = content.hasSuffix("\n")
+        var original = content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+        if hadTrailingNewline {
+            original.removeLast()
+        }
+
+        var result: [String] = []
+        var originalIndex = 0
+        var patchIndex = 0
+        var sawHunk = false
+
+        while patchIndex < patchLines.count {
+            let line = patchLines[patchIndex]
+            guard line.hasPrefix("@@ ") else {
+                patchIndex += 1
+                continue
+            }
+            sawHunk = true
+            let oldStart = try Self.oldStartLine(fromHunkHeader: line)
+            let copyUntil = max(0, oldStart - 1)
+            guard copyUntil >= originalIndex, copyUntil <= original.count else {
+                throw LocalAlpineAgentEditError.patchMismatch("hunk starts outside file")
+            }
+            result.append(contentsOf: original[originalIndex..<copyUntil])
+            originalIndex = copyUntil
+            patchIndex += 1
+
+            while patchIndex < patchLines.count {
+                let patchLine = patchLines[patchIndex]
+                if patchLine.hasPrefix("@@ ") || patchLine.hasPrefix("diff ") || patchLine.hasPrefix("--- ") || patchLine.hasPrefix("+++ ") {
+                    break
+                }
+                if patchLine.hasPrefix("\\") {
+                    patchIndex += 1
+                    continue
+                }
+                guard let marker = patchLine.first else {
+                    patchIndex += 1
+                    continue
+                }
+                let text = String(patchLine.dropFirst())
+                switch marker {
+                case " ":
+                    guard originalIndex < original.count, original[originalIndex] == text else {
+                        throw LocalAlpineAgentEditError.patchMismatch("context mismatch near original line \(originalIndex + 1)")
+                    }
+                    result.append(text)
+                    originalIndex += 1
+                case "-":
+                    guard originalIndex < original.count, original[originalIndex] == text else {
+                        throw LocalAlpineAgentEditError.patchMismatch("removal mismatch near original line \(originalIndex + 1)")
+                    }
+                    originalIndex += 1
+                case "+":
+                    result.append(text)
+                default:
+                    throw LocalAlpineAgentEditError.patchMismatch("unsupported patch line: \(patchLine)")
+                }
+                patchIndex += 1
+            }
+        }
+
+        guard sawHunk else {
+            throw LocalAlpineAgentEditError.patchMismatch("no unified diff hunk found")
+        }
+
+        result.append(contentsOf: original[originalIndex...])
+        var updated = result.joined(separator: "\n")
+        if hadTrailingNewline {
+            updated += "\n"
+        }
+        return updated
+    }
+
+    private nonisolated static func oldStartLine(fromHunkHeader header: String) throws -> Int {
+        guard let regex = try? NSRegularExpression(pattern: #"^@@\s+-(\d+)(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@"#),
+              let match = regex.firstMatch(in: header, range: NSRange(header.startIndex..<header.endIndex, in: header)),
+              match.numberOfRanges >= 2,
+              let range = Range(match.range(at: 1), in: header),
+              let value = Int(header[range]) else {
+            throw LocalAlpineAgentEditError.patchMismatch("invalid hunk header: \(header)")
+        }
+        return value
+    }
+
     private func writeProtectedFile(_ file: LocalAlpineAgentFile, cwd: String) async -> LocalAlpineProtectedWriteOutcome {
         let target = resolvedFilePath(file.path, cwd: cwd)
         if Self.isPythonTarget(target), !file.source.isAllowedPythonWriteSource {
             return LocalAlpineProtectedWriteOutcome(
                 lines: [
-                    "- `\(target)` Python 写入已拒绝：`.py` 文件不能使用 `\(file.source.displayName)` 来源写入。请重新输出完整 `iexa_alpine` JSON，并用 `write_files.code_lines` 或 `content_base64` 携带文件内容。目标文件未被覆盖。"
+                    "- `\(target)` Python 写入已拒绝：`.py` 文件不能使用 `\(file.source.displayName)` 来源写入。请改用 `edit_file`/`patch_file` 修复原路径，或用 `write_files.code_lines` / `content_base64` 写回同一路径。目标文件未被覆盖。"
                 ],
                 writtenPath: nil,
                 writtenFile: nil,
@@ -755,6 +1356,15 @@ actor LocalAlpineAgentService {
             )
         }
         if Self.isPythonTarget(target) {
+            if file.source == .editFile || file.source == .patchFile {
+                return await writePythonEditPatchFile(
+                    data: data,
+                    target: target,
+                    cwd: cwd,
+                    source: file.source,
+                    initialNotes: writeNotes(target: target)
+                )
+            }
             return await writeValidatedPythonFile(
                 data: data,
                 target: target,
@@ -839,6 +1449,74 @@ actor LocalAlpineAgentService {
         }
     }
 
+    private func writePythonEditPatchFile(
+        data: Data,
+        target: String,
+        cwd: String,
+        source: LocalAlpineAgentFileSource,
+        initialNotes: [String] = []
+    ) async -> LocalAlpineProtectedWriteOutcome {
+        guard let content = String(data: data, encoding: .utf8) else {
+            return LocalAlpineProtectedWriteOutcome(
+                lines: ["- `\(target)` 写入失败：内容不是有效 UTF-8"],
+                writtenPath: nil,
+                writtenFile: nil,
+                hadFailure: true
+            )
+        }
+
+        let validationResult = await validatePythonContent(content, cwd: cwd)
+        if validationResult.exitCode == 0 {
+            let directWrite = await writeFileBytes(
+                data: data,
+                content: content,
+                target: target,
+                source: source,
+                notes: initialNotes + ["Python 局部修复通过 AST 语法校验后写入。"]
+            )
+            guard !directWrite.hadFailure else { return directWrite }
+
+            var lines = directWrite.lines
+            lines.append("  - Python 语法校验通过。")
+            return LocalAlpineProtectedWriteOutcome(
+                lines: lines,
+                writtenPath: directWrite.writtenPath,
+                writtenFile: directWrite.writtenFile,
+                hadFailure: false
+            )
+        }
+
+        let directWrite = await writeFileBytes(
+            data: data,
+            content: content,
+            target: target,
+            source: source,
+            notes: initialNotes + [
+                "Python 局部修复已写回原路径；完整文件语法/缩进校验仍未通过，允许继续逐步修复。"
+            ]
+        )
+        guard !directWrite.hadFailure else { return directWrite }
+
+        var lines = directWrite.lines
+        let output = validationResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !output.isEmpty {
+            lines.append("  - Python 语法/缩进校验仍未通过：\(String(output.prefix(1_000)))")
+        }
+        let errorLine = Self.pythonValidationLineNumber(from: output)
+        let snippet = Self.numberedPythonSnippet(content, around: errorLine, radius: 5)
+        if !snippet.isEmpty {
+            lines.append("  - 当前失败片段：\n\(snippet)")
+        }
+        lines.append("  - NEXT_ACTION_REQUIRED: continue repairing this same Python file with read_file/edit_file/patch_file, then run validation again.")
+
+        return LocalAlpineProtectedWriteOutcome(
+            lines: lines,
+            writtenPath: directWrite.writtenPath,
+            writtenFile: directWrite.writtenFile,
+            hadFailure: true
+        )
+    }
+
     private func writeValidatedPythonFile(
         data: Data,
         target: String,
@@ -875,7 +1553,7 @@ actor LocalAlpineAgentService {
             if !snippet.isEmpty {
                 lines.append("  - 失败草稿片段：\n\(snippet)")
             }
-            lines.append("  - NEXT_ACTION_REQUIRED: rewrite the complete Python file through structured write_files/code_lines or content_base64, then verify again.")
+            lines.append("  - NEXT_ACTION_REQUIRED: inspect/read the target, then repair the same Python file with edit_file, patch_file, or same-path write_files/code_lines or content_base64, then verify again.")
             return LocalAlpineProtectedWriteOutcome(
                 lines: lines,
                 writtenPath: nil,
@@ -1136,7 +1814,7 @@ actor LocalAlpineAgentService {
         Unsafe code file write blocked.
 
         Code files are indentation/escaping-sensitive. Do not write source files through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts.
-        Re-send the complete file through structured `iexa_alpine` JSON `write_files` using `code_lines`, `content_lines`, or `content_base64`, then run a bounded verification command before executing it.
+        Re-send the change through structured `iexa_alpine` JSON using `edit_file`, `patch_file`, or same-path `write_files` with `code_lines`, `content_lines`, or `content_base64`, then run a bounded verification command before executing it.
         """
     }
 
@@ -1517,12 +2195,62 @@ private struct LocalAlpineAgentCommand: Sendable {
     let command: String?
     let cwd: String?
     let writeFiles: [LocalAlpineAgentFile]
+    let readFiles: [LocalAlpineReadFileRequest]
+    let editFiles: [LocalAlpineEditFileRequest]
+    let patchFiles: [LocalAlpinePatchFileRequest]
+
+    init(
+        command: String?,
+        cwd: String?,
+        writeFiles: [LocalAlpineAgentFile] = [],
+        readFiles: [LocalAlpineReadFileRequest] = [],
+        editFiles: [LocalAlpineEditFileRequest] = [],
+        patchFiles: [LocalAlpinePatchFileRequest] = []
+    ) {
+        self.command = command
+        self.cwd = cwd
+        self.writeFiles = writeFiles
+        self.readFiles = readFiles
+        self.editFiles = editFiles
+        self.patchFiles = patchFiles
+    }
 }
 
 private struct LocalAlpineAgentFile: Sendable {
     let path: String
     let content: String
     let source: LocalAlpineAgentFileSource
+}
+
+private struct LocalAlpineReadFileRequest: Sendable {
+    let path: String
+    let startLine: Int?
+    let lineCount: Int?
+    let maxBytes: Int?
+
+    init(path: String, startLine: Int? = nil, lineCount: Int? = nil, maxBytes: Int? = nil) {
+        self.path = path
+        self.startLine = startLine
+        self.lineCount = lineCount
+        self.maxBytes = maxBytes
+    }
+}
+
+private struct LocalAlpineEditFileRequest: Sendable {
+    let path: String
+    let replacements: [LocalAlpineEditReplacement]
+}
+
+private struct LocalAlpineEditReplacement: Sendable {
+    let oldText: String
+    let newText: String
+    let replaceAll: Bool
+    let expectedCount: Int?
+}
+
+private struct LocalAlpinePatchFileRequest: Sendable {
+    let path: String?
+    let patch: String
 }
 
 private enum LocalAlpineAgentFileSource: Equatable, Sendable {
@@ -1532,11 +2260,13 @@ private enum LocalAlpineAgentFileSource: Equatable, Sendable {
     case contentBase64
     case heredoc
     case codeBlock
+    case editFile
+    case patchFile
     case rejectedPythonPlainContent
 
     var isAllowedPythonWriteSource: Bool {
         switch self {
-        case .codeLines, .contentBase64, .codeBlock:
+        case .codeLines, .contentBase64, .codeBlock, .editFile, .patchFile:
             return true
         case .content, .contentLines, .heredoc, .rejectedPythonPlainContent:
             return false
@@ -1545,7 +2275,7 @@ private enum LocalAlpineAgentFileSource: Equatable, Sendable {
 
     var isAllowedCodeWriteSource: Bool {
         switch self {
-        case .codeLines, .contentLines, .contentBase64, .codeBlock:
+        case .codeLines, .contentLines, .contentBase64, .codeBlock, .editFile, .patchFile:
             return true
         case .content, .heredoc, .rejectedPythonPlainContent:
             return false
@@ -1560,6 +2290,8 @@ private enum LocalAlpineAgentFileSource: Equatable, Sendable {
         case .contentBase64: return "content_base64"
         case .heredoc: return "heredoc"
         case .codeBlock: return "code_block"
+        case .editFile: return "edit_file"
+        case .patchFile: return "patch_file"
         case .rejectedPythonPlainContent: return "rejected_python_plain_content"
         }
     }
@@ -1578,6 +2310,40 @@ private struct LocalAlpineWriteResult {
     let writtenPaths: [String]
     let writtenFiles: [LocalAlpineWrittenFile]
     let hadFailure: Bool
+}
+
+private struct LocalAlpineStructuredToolResult {
+    let summary: String
+    let commandResults: [LocalAlpineAgentCommandResult]
+    let writtenFiles: [LocalAlpineWrittenFile]
+    let editedPaths: [String]
+    let hadFailure: Bool
+}
+
+private enum LocalAlpineAgentEditError: LocalizedError {
+    case binaryFile(String)
+    case noMatch(path: String)
+    case ambiguousMatch(path: String, count: Int)
+    case unexpectedMatchCount(path: String, expected: Int, actual: Int)
+    case missingPatchPath
+    case patchMismatch(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .binaryFile(let path):
+            return "`\(path)` 不是 UTF-8 文本文件。"
+        case .noMatch(let path):
+            return "`\(path)` 未找到 old_text，未修改文件。"
+        case .ambiguousMatch(let path, let count):
+            return "`\(path)` 找到 \(count) 处 old_text。为避免误改，请提供更精确上下文或设置 replace_all。"
+        case .unexpectedMatchCount(let path, let expected, let actual):
+            return "`\(path)` 匹配数量不符合预期：expected \(expected), actual \(actual)。"
+        case .missingPatchPath:
+            return "patch_file 缺少 path，且 unified diff 里没有可用的 +++ 文件路径。"
+        case .patchMismatch(let detail):
+            return "补丁上下文不匹配：\(detail)。"
+        }
+    }
 }
 
 private enum LocalAlpineAgentError: LocalizedError {

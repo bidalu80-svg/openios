@@ -1434,7 +1434,7 @@ final class ChatViewModel {
             }
             if localAlpineOutputHasPythonSyntaxIssue(content + "\n" + (rawResult ?? "")) {
                 lines.append("  required next action:")
-                lines.append(indentForSystemContext("Python syntax/indentation error detected. Rewrite the complete corrected Python file through byte-preserving iexa_alpine JSON write_files, then run a bounded verification command. Do not repeat only the same failed command."))
+                lines.append(indentForSystemContext("Python syntax/indentation error detected. Inspect the target project file, then repair the original path in place through byte-preserving iexa_alpine JSON write_files and run a bounded verification command. Use a complete-file write only for the same target path when the Python write gate requires it. Do not create a replacement filename or repeat only the same failed command."))
             }
             let observationText = [content, rawResult].compactMap { $0 }.joined(separator: "\n")
             let normalizedObservation = normalizedLocalAlpineResultTextForFollowUpCheck(observationText)
@@ -1480,7 +1480,7 @@ final class ChatViewModel {
         - If prior observations already prove a tool/package exists, do not repeat a generic environment probe. Move to the user's concrete task.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
-        - If the latest result contains Python IndentationError or SyntaxError, emit one complete corrected Python file through byte-preserving `iexa_alpine` JSON `write_files`, then run a bounded verification command. Keep the file body complete and exact; do not repeat only the same failed command.
+        - If the latest result contains Python IndentationError or SyntaxError, inspect the target project file, then emit the corrected content to the same original path through byte-preserving `iexa_alpine` JSON `write_files`, then run a bounded verification command. Keep the file body complete and exact when the Python write gate requires a full-file write; do not create a sibling replacement file and do not repeat only the same failed command.
         [/Local Alpine execution state]
         """
     }
@@ -4144,6 +4144,19 @@ final class ChatViewModel {
         if !shouldKeepMediaRoute,
            !shouldKeepNativeLinkRoute,
            processedAttachments.isEmpty,
+           localAlpineModeForThisTurn,
+           let command = Self.localAlpineNaturalLanguageCommand(for: currentText),
+           let executableBlock = Self.localAlpineFenceBlock(command) {
+            await sendDirectLocalAlpineAgentBlock(
+                userText: currentText,
+                executableContent: executableBlock,
+                modelId: modelId
+            )
+            return
+        }
+        if !shouldKeepMediaRoute,
+           !shouldKeepNativeLinkRoute,
+           processedAttachments.isEmpty,
            shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText),
            localAlpineModeForThisTurn {
             await sendDirectLocalAlpineCommand(currentText, modelId: modelId)
@@ -6632,8 +6645,11 @@ final class ChatViewModel {
         return """
         target=\(quoted)
         if [ -f "$target" ]; then
-          sed -n '1,240p' "$target"
+          printf '== file ==\\n%s\\n\\n' "$target"
+          printf '== content with line numbers ==\\n'
+          nl -ba "$target" | sed -n '1,240p'
         elif [ -d "$target" ]; then
+          printf '== directory ==\\n%s\\n\\n' "$target"
           ls -la "$target"
         else
           printf 'missing: %s\\n' "$target"
@@ -10698,30 +10714,30 @@ final class ChatViewModel {
         - For project/code-generation requests in any language, create the needed files under `/mnt/iexa`, include entrypoints and config/dependency files, check the relevant runtime/compiler/package manager, install only missing dependencies with `apk`/`npm`/`pip` as appropriate, then run a bounded verification command.
         - Keep an internal step ledger: what has already been inspected, what command/file write was just attempted, what the output proved, and what the next smallest useful step is. Do not rely on memory guesses when the Local Alpine result is available.
         - For multi-step tasks, include one short visible step note before the `iexa_alpine` block, such as "先检查文件" or "现在修复并验证". Keep detailed reasoning internal.
-        - Intent to tool mapping: read/list/search -> inspect real files; create/write/modify -> structured `write_files` plus verification; delete/rename/move/copy -> scoped file operation plus `ls` verification; install -> check then install only missing packages; run/test/build -> dependency check then execute; fix/debug -> reproduce, inspect, patch, verify; summarize/report -> use the latest real observation and stop tool use unless more execution is required.
+        - Intent to tool mapping: read -> JSON `read_file`; modify existing files -> JSON `edit_file` or `patch_file` on the same original path; create/replace complete files -> structured `write_files` plus verification; list/search -> scoped shell command; delete/rename/move/copy -> scoped file operation plus `ls` verification; install -> check then install only missing packages; run/test/build -> dependency check then execute; fix/debug -> reproduce, read_file, edit_file/patch_file or write_files, verify; summarize/report -> use the latest real observation and stop tool use unless more execution is required.
         - Local Alpine terminal mode owns local project operations. If the user asks to list/read/search/create/modify/delete project files, inspect a directory, run a script, or "read the mnt directory", use `/mnt/iexa` via `iexa_alpine`; do not use the Documents/Iexa Workspace tool.
         - If the user asks you to run, execute, test, verify, inspect the environment, install packages, write or modify code, fix an error, rerun after a fix, write a runnable script/project, crawl/fetch/scrape a website, or diagnose command output, use `iexa_alpine`.
         - If the user says "运行这段代码", "执行这段代码", "跑一下上面的代码", "运行刚刚的代码", "run this code", or "run the code above", use the most recent runnable fenced code block from the conversation. Do not simulate the result. Write it to `/mnt/iexa/iexa_recent_code.<ext>` with JSON `write_files`, install/check the needed runtime only if missing, run it, and summarize the real output.
         - Dependency installs are an action, not a consultation. For "安装 Python 依赖" or similar, search `/mnt/iexa` for `requirements.txt`, `pyproject.toml`, `setup.py`, or obvious project folders; if one exists, install from it. If none exists, report the concrete search result and stop. Do not ask the user for a path before searching the workspace yourself.
         - If the user asks for a crawler/scraper for a URL, do not stop at a code sample. Write the script into `/mnt/iexa`, install/check dependencies if needed, run it against the URL, and summarize the real output.
-        - If the user says "修好", "修改代码", "重新运行", "怎么不是直接执行", or similar after a Local Alpine result, treat it as a request to continue operating. Inspect the target file/output, fix with `write_files` when needed, then verify.
+        - If the user says "修好", "修改代码", "重新运行", "怎么不是直接执行", or similar after a Local Alpine result, treat it as a request to continue operating. Inspect the target file/output, fix the same file with `edit_file`/`patch_file` when possible or `write_files` when a complete replacement is safer, then verify.
         - Do not merely explain commands when the user wants action. Emit the block so the app executes it.
         - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
         - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, follow the language/dependency playbook above. Use a focused preflight only for unknown dependencies, install only missing packages, and do not repeat install commands after a successful install.
         - A preflight command is not the final answer for install/run/fix requests. If it succeeds, continue with the install/run/fix step. If it shows missing dependencies, install them. If it shows missing project files, search `/mnt/iexa` before asking the user.
-        - Interpret user intent as an operation plan, not advice. Read/list/search requests require file-system inspection; create/write/modify requests require structured writes; delete requests require scoped deletion plus verification; fix/debug requests require reproduce -> inspect -> patch -> verify; run/test/build requests require dependency check -> execute -> summarize real output.
+        - Interpret user intent as an operation plan, not advice. Read requests require `read_file`; list/search requests require file-system inspection; create/write requests require structured writes; modify/fix requests require reproduce -> `read_file` -> same-path `edit_file`/`patch_file` or complete same-path `write_files` -> verify; delete requests require scoped deletion plus verification; run/test/build requests require dependency check -> execute -> summarize real output.
         - If an install command succeeds and the user asked to run/test/build/fix something, continue to the run/test/build/fix step. Do not stop with "installed successfully" unless the user's only goal was installation.
         - If a command exits 0 but the output only lists versions, paths, files, package metadata, or dependency status, treat it as observation, not task completion. Continue to the next operation needed by the user's original goal.
         - If output says a command/package/file is missing, choose the smallest safe next step: install the package, search the workspace, or create the missing file. Do not ask the user to do that work manually.
         - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
-        - For scripts/projects, use JSON `write_files` inside `iexa_alpine`, then run a bounded verification command. For code files, use `code_lines`, `content_lines`, or `content_base64`; never use plain `content`/`text`/`code` for source files because display text can corrupt indentation.
-        - Python write protocol is mandatory: send the complete intended `.py` file through `iexa_alpine` JSON `write_files` using `code_lines` for normal files or `content_base64` for very long/complex content. Do not write Python through visible Markdown, partial snippets, shell heredocs, `echo`, or `cat > file.py` unless explicitly debugging the writer itself.
+        - For scripts/projects, use JSON file tools inside `iexa_alpine`, then run a bounded verification command. Use `read_file` before modifying existing files. Use `edit_file` for exact old_text/new_text replacements and `patch_file` for unified diffs. Use `write_files` for new files or complete same-path replacement. For code files, use `code_lines`, `content_lines`, or `content_base64`; never use plain `content`/`text`/`code` for source files because display text can corrupt indentation.
+        - Python write protocol is mandatory: for new or complete `.py` replacements, send the complete intended file through `iexa_alpine` JSON `write_files` using `code_lines` or `content_base64`; for existing `.py` repairs, prefer same-path `edit_file`/`patch_file` after `read_file` when the change is localized. Do not write Python through visible Markdown, partial snippets, shell heredocs, `echo`, or `cat > file.py` unless explicitly debugging the writer itself.
         - When showing copyable shell/Python examples to the user, make the fenced block itself directly runnable: no line numbers, no prompts like `$` or `>>>`, no explanatory text inside the fence, and keep indentation exactly as source code. For command-line Python heredocs, use one complete `bash`/`sh` block with the closing `EOF` included.
-        - Python `write_files` accepts only `code_lines` or `content_base64` for `.py`/`.pyw` targets. Plain `content`/`text`/`code` and `content_lines` are rejected for Python because they can come from display text. The app does not re-indent, normalize, or repair Python source.
-        - The app treats Python AST/compile validation as the write gate. If that gate fails, the command after `write_files` is blocked; your next step must be a complete-file rewrite through structured `write_files`, not a line patch or a repeated run command.
-        - When fixing an existing Python file after a syntax/indentation error, rewrite the complete corrected target Python file with `iexa_alpine` JSON `write_files`. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
-        - Prefer complete structured Python writes for class/function bodies, then run the requested script or a bounded verification command.
-        - After writing Python, run the requested script or a bounded verification command. If syntax or indentation fails, return one complete corrected file through `write_files`; do not try to fix only the reported line.
+        - Python `write_files` accepts only `code_lines` or `content_base64` for `.py`/`.pyw` targets. `edit_file` and `patch_file` write the same original path and then validate Python; if validation still fails, continue repairing the same file instead of creating a replacement file. Plain `content`/`text`/`code` and `content_lines` are rejected for Python because they can come from display text.
+        - The app treats Python AST/compile validation as the strict write gate only for new or complete `write_files` Python writes. For localized `edit_file`/`patch_file`, a still-failing AST result means the patch was written but more same-path repair is required.
+        - When fixing an existing Python file after a syntax/indentation error, inspect the user project file named by the traceback, then patch or rewrite that same target path. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
+        - Prefer `edit_file`/`patch_file` for localized fixes and complete structured Python writes for large class/function rewrites, then run the requested script or a bounded verification command.
+        - After writing Python, run the requested script or a bounded verification command. If syntax or indentation fails, repair the same target file; do not create replacement files.
         - Use normal UTF-8 text in generated files. If visible Chinese text is needed, write the real Chinese characters, never mojibake such as `æå` or `é¡µé¢`.
         - Format Python with VS Code/Python defaults: 4 spaces per block level, no tabs, and aligned continuation indentation inside dictionaries, function calls, lists, and multi-line arguments.
         - When generating runnable Python examples for a code block, include a small `main()` call or explicit `print()` statements so the Run button can show a real result; code that only defines variables/functions/classes will execute successfully but produce no output.
@@ -10736,9 +10752,13 @@ final class ChatViewModel {
 
         Tool request schema:
         - To execute commands, include exactly one fenced block with language `iexa_alpine`. The block may contain POSIX shell, or JSON with one object or an `iexa_alpine` array.
-        - JSON objects support `cwd`, `write_files`, and `command`. `write_files` entries support `path` or `file_path`, plus `code_lines`, `content_lines`, `content`, or `content_base64`. For code files use `code_lines`, `content_lines`, or `content_base64`; for Python targets use only `code_lines` or `content_base64`. Plain `content` is only for non-code text files.
-        - For create/modify project tasks, prefer JSON `write_files` plus a verification `command` in the same object.
-        - For read/list/delete/search tasks, prefer a minimal shell command scoped to `/mnt/iexa`.
+        - JSON objects support `cwd`, `read_file`, `edit_file`, `patch_file`, `write_files`, and `command`.
+        - `read_file` accepts a string path or objects with `path`, optional `start_line`, `line_count`, and `max_bytes`. Use it for file reading instead of `cat` unless rootfs inspection requires shell.
+        - `edit_file` accepts `path` plus `old_text`/`new_text`, or `replacements` entries. By default `old_text` must match exactly once; set `replace_all` or `expected_count` only when intentional.
+        - `patch_file` accepts `path` plus a unified diff in `patch`/`patch_lines`; use one file per patch. The app applies it to the same path; Python targets are validated after write and may require another same-path repair step.
+        - `write_files` entries support `path` or `file_path`, plus `code_lines`, `content_lines`, `content`, or `content_base64`. For code files use `code_lines`, `content_lines`, or `content_base64`; for Python targets use only `code_lines` or `content_base64`. Plain `content` is only for non-code text files.
+        - For create project tasks, prefer JSON `write_files` plus a verification `command` in the same object. For modify/fix project tasks, prefer `read_file` first, then same-path `edit_file`/`patch_file`, then verification.
+        - For list/delete/search tasks, use a minimal shell command scoped to `/mnt/iexa`.
         - The app will run the request locally on the device and append the real output. Do not output this block unless command execution is actually needed.
 
         Example:
@@ -12747,17 +12767,17 @@ final class ChatViewModel {
 
         Python syntax/indentation guard
         已检测到 Python 缩进/语法错误。下一步不要只重复同一个失败命令。
-        必须先执行完整文件定位和完整文件修复：
-        1. 读取带行号文件：`\(Self.localAlpineInspectCommand(forPythonFile: pythonFile))`
-        2. 读取完整文件后，用 `iexa_alpine` JSON `write_files` 写回完整 Python 文件，内容必须完整准确。
-        3. 写回后直接运行脚本或一个有界验证命令。
+        必须先定位并读取用户项目文件，然后修复同一个路径：
+        1. 用 JSON `read_file` 读取目标文件（或执行带行号读取命令：`\(Self.localAlpineInspectCommand(forPythonFile: pythonFile))`）。
+        2. 优先用 JSON `edit_file`/`patch_file` 修改原文件；只有大段重写时才用 `write_files` 写回同一路径。
+        3. 修改后直接运行脚本或一个有界验证命令。
         """
         } else if failure.outputPreview.lowercased().contains("unsafe python file write blocked")
             || failure.outputPreview.lowercased().contains("unsafe code file write blocked") {
             pythonRepairInstruction = """
 
         Code file write retry
-        之前的写入命令被保护层拦过。下一步应改用结构化 `write_files` 写完整文件，并运行实际验证命令。
+        之前的写入命令被保护层拦过。下一步应改用结构化 `edit_file`/`patch_file` 修复原文件，或用 `write_files` 写回同一路径，并运行实际验证命令。
         """
         } else {
             pythonRepairInstruction = ""
@@ -12795,10 +12815,10 @@ final class ChatViewModel {
             pythonRepairInstruction = """
 
             Python repair required:
-            不要让用户手动复制或敲命令。下一步必须由你自己发出 `iexa_alpine` JSON `write_files`：
-            1. 重写完整 `.py` 文件，优先使用 `code_lines` 或 `content_base64`。
-            2. 同一条 action 里运行 `python3 -m py_compile <file> && python3 <file>`。
-            3. 如果再次失败，换完整文件实现，不要只修一行，不要重复同一条失败命令。
+            不要让用户手动复制或敲命令。下一步必须由你自己发出 `iexa_alpine` JSON：
+            1. 先 `read_file` 读取目标 `.py` 文件。
+            2. 优先 `edit_file`/`patch_file` 修复原路径；大段重写才用 `write_files` 写回同一路径。
+            3. 同一条 action 里运行 `python3 -m py_compile <file> && python3 <file>`。
             """
         } else {
             pythonRepairInstruction = ""
@@ -13904,6 +13924,7 @@ final class ChatViewModel {
         - Use exactly one next tool action per assistant turn. For local shell/files, emit one `iexa_alpine` block. For current web facts, rely on the web-search context already injected by the app; if more current info is needed, ask for/perform a more precise search before guessing.
         - Never emit `to=local_alpine_exec code` or any other pseudo tool-call text. This app executes only `iexa_alpine`; use that exact fenced block.
         - Before the block, write at most one short visible sentence naming the current step. Do not reveal detailed hidden reasoning.
+        - Prefer JSON file tools for workspace files: `read_file` for reading, `edit_file` for exact same-path replacements, `patch_file` for unified diffs, `write_files` for new files or complete same-path replacement.
         Iexa Environment:
         - `/mnt/iexa` is the user workspace. Relative files live there. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, and `/var` are system paths and should normally be inspected, not edited directly.
         - Cache what the latest Local Alpine observations already proved. If `gcc`, `g++`, `make`, `cmake`, or `pkgconf` were just found or listed as installed, do not probe them again in the same task.
@@ -13912,21 +13933,21 @@ final class ChatViewModel {
         - If the latest output only proves environment state, package status, or file listing, decide the next actual operation from the original user goal instead of treating the observation as done.
         - If the user asks "为什么", "这是什么问题", or similar after an error, explain the latest observation and wait. If the user says "修", "继续", "跑", "执行", or "重新", resume with the next `iexa_alpine` step.
         Code Writes:
-        - For source/code files, write through `write_files.code_lines`, `content_lines`, or `content_base64`; never plain `content`/`text`/`code`, because visible text can corrupt indentation or escapes.
+        - For existing source/code files, read the file first and prefer `edit_file`/`patch_file` on the same path. For new files or large rewrites, write through `write_files.code_lines`, `content_lines`, or `content_base64`; never plain `content`/`text`/`code`, because visible text can corrupt indentation or escapes.
         Python Writes:
-        - For `.py` files, always use fenced `iexa_alpine` JSON `write_files` with full-file `code_lines` or `content_base64`; the app writes those bytes exactly and then validates the file before running commands.
+        - For `.py` files, use `read_file` before repair. Prefer `edit_file`/`patch_file` for localized same-path fixes; use fenced `iexa_alpine` JSON `write_files` with full-file `code_lines` or `content_base64` only for new files or large rewrites. The app validates Python before running commands.
         - Copyable visible code blocks must be direct source text only: no line numbers, prompt markers, prose, or repaired-looking pseudo indentation. If using a shell heredoc, include the full command and closing delimiter in one block.
         - Never put `def main()` or `main()` inside a class unless the user explicitly asked for a class method. Top-level runnable Python must keep `def main():` and `if __name__ == "__main__": main()` at column 0.
         - For `HTMLParser` examples, parser callback methods belong inside the parser class, but crawler orchestration such as `main()` belongs outside the class at top level.
-        - Python writes are transactional: if the app reports Python AST/compile validation failed, it did not overwrite the target file. Rewrite the complete `.py` target through structured `write_files`, then verify again.
-        - After writing Python, run `python3 -m py_compile <file>` or the requested script. If indentation/syntax fails, rewrite the complete target file through `write_files`, then verify again.
+        - Python `write_files` writes are transactional: if AST/compile validation fails, the target file was not overwritten. Python `edit_file`/`patch_file` writes are same-path incremental repairs; if validation still fails, keep repairing the same `.py` target and verify again.
+        - After writing Python, run `python3 -m py_compile <file>` or the requested script. If indentation/syntax fails, repair the same target file; do not create a replacement filename.
         Browser:
         - If a website/API check is needed, use `curl -I`, `curl -L`, `curl -w`, or a short Python `urllib` fetch. Never execute a bare domain as a shell command.
         Retry:
         - If the last command failed, inspect the exit code/output first, then emit a different bounded diagnostic or fix command before rerunning verification.
         - Retry only after changing something meaningful: edited file, installed a dependency that was proven missing, changed cwd, changed command arguments, or gathered new diagnostics.
         - Do not emit the same command twice in one `iexa_alpine` response.
-        - If the last output contains `IEXA_AGENT_KICKOFF` or `NEXT_ACTION_REQUIRED`, it means the app routed an explicit local task to you but your previous answer did not include an executable block. Your next response must emit one concrete `iexa_alpine` block with `write_files` and/or `command` for the user's request.
+        - If the last output contains `IEXA_AGENT_KICKOFF` or `NEXT_ACTION_REQUIRED`, it means the app routed an explicit local task to you but your previous answer did not include an executable block. Your next response must emit one concrete `iexa_alpine` block with `read_file`, `edit_file`, `patch_file`, `write_files`, and/or `command` for the user's request.
         - For "运行这段代码" / "run this code" follow-ups, do not answer with simulated output. Find the latest runnable fenced code block in conversation context, save it under `/mnt/iexa`, run it with the right interpreter/compiler, then continue from the real output.
         Stuck Detection:
         - Never repeat the exact same failed command. If the app says a repeat was blocked, switch strategy immediately.
@@ -13934,9 +13955,9 @@ final class ChatViewModel {
         - Never tell the user to copy/paste/run commands manually for a Local Alpine task. If a local action is needed, emit `iexa_alpine` yourself. Only ask the user when external credentials, unavailable network access, or a destructive confirmation is required.
         - If the user interrupts with a question or taps stop, answer the question and wait. Do not resume automatic execution until the user explicitly asks to continue/fix/run.
         Strategy Switch:
-        - Switch among these paths as appropriate: inspect files, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, complete-file rewrite, then verification.
-        - For Python indentation/syntax errors, inspect the user project file named by the traceback if needed, then rewrite the complete corrected target `.py` file through JSON `write_files`. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
-        - For Python indentation-sensitive rewrites, use complete-file writes and then verify.
+        - Switch among these paths as appropriate: `read_file`, list cwd, syntax check, dependency/version check, minimal reproduction, targeted web lookup, same-path edit/patch, complete same-path rewrite, then verification.
+        - For Python indentation/syntax errors, inspect the user project file named by the traceback if needed, then patch or rewrite that same target `.py` file. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
+        - For Python indentation-sensitive changes, use same-path `edit_file`/`patch_file` when localized; otherwise use complete same-path writes and then verify.
         [/Local Alpine continuation]
         """
         if !messages.isEmpty, messages[0]["role"] as? String == "system" {
