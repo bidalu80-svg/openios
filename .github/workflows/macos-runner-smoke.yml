@@ -11,12 +11,20 @@ permissions:
 
 jobs:
   smoke:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-13
+          - macos-14
+          - macos-15
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
       - name: Show runner
         run: |
           set -euxo pipefail
+          echo "runner=${{ matrix.runner }}"
           uname -a
           sw_vers
           xcodebuild -version
