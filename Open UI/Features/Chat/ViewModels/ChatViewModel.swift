@@ -13107,13 +13107,24 @@ final class ChatViewModel {
         ].contains { combinedCommands.contains($0) }
         if didRealAction {
             if let latestUserText,
-               isLocalAlpineGoalActionRequest(latestUserText),
+               localAlpineUserRequestNeedsVerificationAfterSetup(latestUserText),
                localAlpineActionWasOnlyInstallOrWrite(combinedCommands) {
                 return true
             }
             return false
         }
         return preflightTerms.contains { combinedCommands.contains($0) }
+    }
+
+    private static func localAlpineUserRequestNeedsVerificationAfterSetup(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        let postSetupTerms = [
+            "运行", "执行", "跑", "测试", "验证", "修复", "调试", "编译", "构建",
+            "跑一下", "执行一下", "运行一下", "测试一下", "验证一下",
+            "run", "execute", "test", "verify", "fix", "debug", "compile", "build"
+        ]
+        return postSetupTerms.contains { normalized.contains($0) }
     }
 
     private static func localAlpineActionWasOnlyInstallOrWrite(_ combinedCommands: String) -> Bool {

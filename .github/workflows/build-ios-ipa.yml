@@ -284,7 +284,7 @@ jobs:
         run: |
           bash scripts/prepare-local-alpine-rootfs.sh
           test -s "Open UI/Resources/iexa-alpine-rootfs.tar.gz"
-          tar -tzf "Open UI/Resources/iexa-alpine-rootfs.tar.gz" > "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"
+          tar -tzf "Open UI/Resources/iexa-alpine-rootfs.tar.gz" | sed 's#^\./##' > "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"
           required_exact_paths=(
             bin/busybox
             bin/sh
@@ -432,4 +432,3 @@ jobs:
         run: |
           security delete-keychain "$KEYCHAIN_NAME" || true
           rm -f "$P12_PATH" "$PROFILE_PATH" || true
-
