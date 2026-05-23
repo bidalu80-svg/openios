@@ -292,10 +292,15 @@ jobs:
             etc/alpine-release
             etc/apk/repositories
             usr/bin/wget
-            usr/lib/libapk.so.2.14.0
+            lib/libapk.so.2.14.0
           )
           for required_path in "${required_exact_paths[@]}"; do
-            grep -Fxq "$required_path" "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"
+            if ! grep -Fxq "$required_path" "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"; then
+              echo "::error::Local Alpine rootfs is missing $required_path"
+              echo "Known libapk entries:"
+              grep -E '(^|/)libapk\.so' "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt" || true
+              exit 1
+            fi
           done
 
       - name: Prepare Local Alpine iSH runtime
@@ -328,13 +333,15 @@ jobs:
             etc/alpine-release
             etc/apk/repositories
             usr/bin/wget
-            usr/lib/libapk.so.2.14.0
+            lib/libapk.so.2.14.0
           )
           for tool_path in "${required_exact_tool_paths[@]}"; do
             fakefs_path="/$tool_path"
             count="$(sqlite3 ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db" "select count(*) from paths where cast(path as text) = '$fakefs_path';")"
             if [ "$count" != "1" ]; then
               echo "::error::Local Alpine fakefs is missing $fakefs_path"
+              echo "Known libapk fakefs entries:"
+              sqlite3 ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db" "select cast(path as text) from paths where cast(path as text) like '%libapk.so%' limit 20;" || true
               exit 1
             fi
           done
