@@ -24,8 +24,8 @@ struct LocalAlpineTerminalConsoleView: View {
 
     private let prompt = "root@iexa:~#"
     private let terminalGreen = Color(red: 0.24, green: 0.82, blue: 0.36)
-    private let terminalCommandFontSize: CGFloat = 11
-    private let terminalOutputFontSize: CGFloat = 10
+    private let terminalCommandFontSize: CGFloat = 10
+    private let terminalOutputFontSize: CGFloat = 9
     @State private var cwd = "/mnt/iexa"
 
     var body: some View {
@@ -78,15 +78,17 @@ struct LocalAlpineTerminalConsoleView: View {
                             }
                             .frame(minWidth: max(1, geometry.size.width - 8), alignment: .leading)
                             .padding(.horizontal, 2)
-                            .padding(.top, 4)
+                            .padding(.top, 0)
                             .padding(.bottom, 18)
                         }
                         .onChange(of: entries.count) { _, _ in
+                            guard !entries.isEmpty else { return }
                             withAnimation(.easeOut(duration: 0.16)) {
                                 proxy.scrollTo("commandLine", anchor: .bottom)
                             }
                         }
                         .onChange(of: commandInputHeight) { _, _ in
+                            guard !entries.isEmpty else { return }
                             withAnimation(.easeOut(duration: 0.12)) {
                                 proxy.scrollTo("commandLine", anchor: .bottom)
                             }
@@ -139,9 +141,9 @@ struct LocalAlpineTerminalConsoleView: View {
                 onDismiss()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 24, weight: .light))
+                    .font(.system(size: 21, weight: .light))
                     .foregroundStyle(Color.blue)
-                    .frame(width: 34, height: 34)
+                    .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -159,9 +161,9 @@ struct LocalAlpineTerminalConsoleView: View {
                 Haptics.play(.light)
             } label: {
                 Image(systemName: "paintbrush")
-                    .font(.system(size: 21, weight: .light))
+                    .font(.system(size: 19, weight: .light))
                     .foregroundStyle(Color.blue)
-                    .frame(width: 34, height: 34)
+                    .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -248,9 +250,12 @@ struct LocalAlpineTerminalConsoleView: View {
                 accessoryTextButton("◉ Rootfs") {
                     runShortcutCommand("pwd && ls -la /")
                 }
+                accessoryTextButton("◇ 自检") {
+                    runShortcutCommand(LocalAlpineTerminalService.environmentDiagnosticCommand)
+                }
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 5)
         }
         .background(Color(red: 0.13, green: 0.13, blue: 0.13))
     }
@@ -258,11 +263,11 @@ struct LocalAlpineTerminalConsoleView: View {
     private func accessoryButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: systemImage)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Color(red: 0.24, green: 0.82, blue: 0.36))
                 .lineLimit(1)
-                .frame(height: 26)
-                .padding(.horizontal, 8)
+                .frame(height: 24)
+                .padding(.horizontal, 7)
                 .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -271,11 +276,11 @@ struct LocalAlpineTerminalConsoleView: View {
     private func accessoryTextButton(_ title: String, active: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(active ? Color.black : Color(red: 0.24, green: 0.82, blue: 0.36))
                 .lineLimit(1)
-                .frame(height: 26)
-                .padding(.horizontal, 9)
+                .frame(height: 24)
+                .padding(.horizontal, 8)
                 .background(active ? Color(red: 0.24, green: 0.82, blue: 0.36) : Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -1405,6 +1410,18 @@ struct TerminalBrowserView: View {
                     .foregroundStyle(theme.textSecondary)
             }
             .buttonStyle(.plain)
+
+            if viewModel.usesLocalAlpine {
+                Button {
+                    Task { await viewModel.executeCommand(LocalAlpineTerminalService.environmentDiagnosticCommand) }
+                    Haptics.play(.light)
+                } label: {
+                    Label("自检", systemImage: "checkmark.circle")
+                        .scaledFont(size: 12, weight: .semibold)
+                        .foregroundStyle(theme.brandPrimary)
+                }
+                .buttonStyle(.plain)
+            }
 
             Spacer()
 

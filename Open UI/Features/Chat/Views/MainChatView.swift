@@ -278,7 +278,7 @@ struct MainChatView: View {
                                     .scaledFont(size: 14, weight: .medium)
                                     .foregroundStyle(theme.textSecondary)
                                     .frame(width: 34, height: 34)
-                                    .iexaToolbarGlass(cornerRadius: 17)
+                                    .iexaToolbarGlass(cornerRadius: 17, compact: true)
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
@@ -293,7 +293,7 @@ struct MainChatView: View {
                                     NewConversationIcon(size: 18)
                                         .foregroundStyle(theme.textSecondary)
                                         .frame(width: 34, height: 34)
-                                        .iexaToolbarGlass(cornerRadius: 17)
+                                        .iexaToolbarGlass(cornerRadius: 17, compact: true)
                                         .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
@@ -3068,7 +3068,7 @@ let conversationId: String?
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                     .frame(minHeight: 40)
-                    .iexaToolbarGlass(cornerRadius: 22)
+                    .iexaToolbarGlass(cornerRadius: 22, compact: true)
                     .clipShape(Capsule(style: .continuous))
                     .frame(maxWidth: 220)
                 }

@@ -4,6 +4,7 @@ private struct IexaToolbarGlassBackground: ViewModifier {
     @Environment(\.theme) private var theme
 
     let cornerRadius: CGFloat
+    let compact: Bool
 
     @ViewBuilder
     func body(content: Content) -> some View {
@@ -16,21 +17,21 @@ private struct IexaToolbarGlassBackground: ViewModifier {
                         .fill(.ultraThinMaterial)
                         .overlay {
                             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                .fill(theme.cardBackground.opacity(theme.isDark ? 0.16 : 0.34))
+                                .fill(theme.cardBackground.opacity(theme.isDark ? 0.10 : (compact ? 0.18 : 0.24)))
                         }
                         .overlay {
                             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                .strokeBorder(Color.white.opacity(theme.isDark ? 0.18 : 0.58), lineWidth: 0.6)
+                                .strokeBorder(Color.white.opacity(theme.isDark ? 0.14 : 0.42), lineWidth: 0.5)
                         }
-                        .shadow(color: Color.black.opacity(theme.isDark ? 0.24 : 0.08), radius: 12, x: 0, y: 6)
+                        .shadow(color: Color.black.opacity(theme.isDark ? 0.18 : 0.07), radius: compact ? 8 : 10, x: 0, y: 5)
                 }
         }
     }
 }
 
 extension View {
-    func iexaToolbarGlass(cornerRadius: CGFloat = 18) -> some View {
-        modifier(IexaToolbarGlassBackground(cornerRadius: cornerRadius))
+    func iexaToolbarGlass(cornerRadius: CGFloat = 18, compact: Bool = false) -> some View {
+        modifier(IexaToolbarGlassBackground(cornerRadius: cornerRadius, compact: compact))
     }
 }
 

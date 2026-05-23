@@ -44,7 +44,7 @@ final class TerminalBrowserViewModel {
 
     private var apiClient: APIClient?
     private var serverId: String = ""
-    private var usesLocalAlpine: Bool = false
+    private(set) var usesLocalAlpine: Bool = false
     private var pendingInteractiveEntryIndex: Int?
     private let logger = Logger(subsystem: "com.openui", category: "TerminalBrowser")
 

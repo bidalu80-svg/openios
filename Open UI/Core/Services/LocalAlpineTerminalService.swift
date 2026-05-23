@@ -43,6 +43,31 @@ actor LocalAlpineTerminalService {
     private let sharedFolderName = "shared"
     private let maximumInlineRuntimeCommandBytes = 3_072
 
+    static let environmentDiagnosticCommand = """
+    printf '== Local Alpine ==\\n'
+    printf 'runtime: iSH x86 usermode\\n'
+    printf 'rootfs:  '
+    cat /etc/alpine-release 2>/dev/null || printf 'unknown\\n'
+    printf 'kernel:  '
+    uname -a 2>/dev/null || true
+    printf 'user:    '
+    id 2>/dev/null || true
+    printf 'pwd:     '
+    pwd
+    printf '\\n== PATH ==\\n%s\\n' "$PATH"
+    printf '\\n== DNS ==\\n'
+    cat /etc/resolv.conf 2>/dev/null || true
+    printf '\\n== workspace /mnt/iexa ==\\n'
+    ls -la /mnt/iexa 2>/dev/null || true
+    printf '\\n== core tools ==\\n'
+    for x in sh ash busybox apk wget curl python3 pip3 node npm gcc g++ make git tar unzip zip sqlite3; do
+      printf '%-8s ' "$x"
+      command -v "$x" 2>/dev/null || printf 'missing\\n'
+    done
+    printf '\\n== package db ==\\n'
+    apk --version 2>/dev/null || true
+    """
+
     private init() {}
 
     func status() -> LocalAlpineStatus {
@@ -425,10 +450,20 @@ actor LocalAlpineTerminalService {
           case "$name" in .*) continue ;; esac
         """
         return """
-        target=\(shellSingleQuoted(path))
-        if [ ! -d "$target" ]; then
-          printf 'IEXA_ROOTFS_ERROR\\tNot a directory: %s\\n' "$target" >&2
+        requested_target=\(shellSingleQuoted(path))
+        target="$requested_target"
+        if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+          printf 'IEXA_ROOTFS_ERROR\\tPath does not exist: %s\\n' "$requested_target" >&2
           exit 20
+        fi
+        if [ ! -d "$target" ]; then
+          resolved_target=$(readlink -f "$target" 2>/dev/null || true)
+          if [ -n "$resolved_target" ] && [ -d "$resolved_target" ]; then
+            target="$resolved_target"
+          else
+            printf 'IEXA_ROOTFS_ERROR\\tNot a directory: %s\\n' "$requested_target" >&2
+            exit 20
+          fi
         fi
         printf 'IEXA_ROOTFS_LIST_BEGIN\\n'
         for entry in "$target"/* "$target"/.[!.]* "$target"/..?*; do
@@ -544,13 +579,23 @@ actor LocalAlpineTerminalService {
 
     private func rootFSReadableErrorLine(_ rawLine: String) -> String? {
         var line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        line = line.replacingOccurrences(
+            of: "\u{001B}\\[[0-9;?]*[ -/]*[@-~]",
+            with: "",
+            options: .regularExpression
+        )
         if line == "IEXA_ROOTFS_LIST_BEGIN"
             || line == "IEXA_ROOTFS_LIST_END"
             || line == "IEXA_ROOTFS_B64_BEGIN"
             || line == "IEXA_ROOTFS_B64_END" {
             return nil
         }
-        if line.contains("IEXA_ROOTFS_ENTRY\t") || line.contains("IEXA_ROOTFS_ENTRY\\t") {
+        if line.contains("IEXA_ROOTFS_ENTRY\t")
+            || line.contains("IEXA_ROOTFS_ENTRY\\t")
+            || line.contains("IEXA_ROOTFS_LIST_BEGIN")
+            || line.contains("IEXA_ROOTFS_LIST_END")
+            || line.contains("IEXA_ROOTFS_B64_BEGIN")
+            || line.contains("IEXA_ROOTFS_B64_END") {
             return nil
         }
         if let range = line.range(of: "IEXA_ROOTFS_ERROR\t") {
@@ -634,11 +679,13 @@ actor LocalAlpineTerminalService {
         let script = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !script.isEmpty else { return command }
         return """
-        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
+        export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
         if [ -f /etc/profile ]; then
           . /etc/profile >/dev/null 2>&1 || true
         fi
-        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
+        export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
         iexa_refresh_dns() {
           cat > /etc/resolv.conf <<'EOF'
         nameserver 1.1.1.1
@@ -646,6 +693,22 @@ actor LocalAlpineTerminalService {
         nameserver 223.5.5.5
         options timeout:2 attempts:3
         EOF
+        }
+        iexa_repair_toolchain_links() {
+          arch_bin=""
+          for candidate in /usr/i586-alpine-linux-musl/bin /usr/i686-alpine-linux-musl/bin /usr/x86_64-alpine-linux-musl/bin; do
+            if [ -d "$candidate" ]; then
+              arch_bin="$candidate"
+              break
+            fi
+          done
+          [ -n "$arch_bin" ] || return 0
+          for tool in as ld ar ranlib strip objcopy objdump readelf nm size strings; do
+            if [ ! -e "/usr/bin/$tool" ] && [ -x "$arch_bin/$tool" ]; then
+              ln -sf "$arch_bin/$tool" "/usr/bin/$tool" 2>/dev/null || true
+            fi
+          done
+          hash -r 2>/dev/null || true
         }
         apk() {
           case "${1:-}" in
@@ -676,11 +739,14 @@ actor LocalAlpineTerminalService {
           case "${1:-}" in
             add|fix|upgrade)
               hash -r 2>/dev/null || true
-              export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+              export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
+              export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
+              iexa_repair_toolchain_links
               ;;
           esac
           return "$status"
         }
+        iexa_repair_toolchain_links
         hash -r 2>/dev/null || true
         \(script)
         iexa_command_status=$?

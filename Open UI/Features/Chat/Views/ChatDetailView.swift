@@ -587,34 +587,38 @@ struct ChatDetailView: View {
             .id(viewModel.selectedModelId ?? "none")
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
-            Button {
-                Haptics.play(.light)
-                isShowingChatParams = true
-            } label: {
-                SettingsGearIcon()
-                    .scaledFont(size: 13, weight: .medium)
-                    .foregroundStyle((viewModel.conversation?.chatParams != nil || viewModel.pendingChatParams != nil) ? theme.brandPrimary : theme.textTertiary)
-                    .frame(width: 34, height: 34)
-                    .iexaToolbarGlass(cornerRadius: 17)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Chat parameters")
-            if viewModel.messages.isEmpty {
+            HStack(spacing: 2) {
                 Button {
-                    withAnimation(MicroAnimation.snappy) {
-                        viewModel.isTemporaryChat.toggle()
-                    }
                     Haptics.play(.light)
+                    isShowingChatParams = true
                 } label: {
-                    TemporaryChatIcon(isEnabled: viewModel.isTemporaryChat, size: 20)
-                        .frame(width: 34, height: 34)
-                        .iexaToolbarGlass(cornerRadius: 17)
+                    SettingsGearIcon()
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle((viewModel.conversation?.chatParams != nil || viewModel.pendingChatParams != nil) ? theme.brandPrimary : theme.textTertiary)
+                        .frame(width: 30, height: 30)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(viewModel.isTemporaryChat ? "Temporary chat on" : "Temporary chat off")
+                .accessibilityLabel("Chat parameters")
+                if viewModel.messages.isEmpty {
+                    Button {
+                        withAnimation(MicroAnimation.snappy) {
+                            viewModel.isTemporaryChat.toggle()
+                        }
+                        Haptics.play(.light)
+                    } label: {
+                        TemporaryChatIcon(isEnabled: viewModel.isTemporaryChat, size: 18)
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(viewModel.isTemporaryChat ? "Temporary chat on" : "Temporary chat off")
+                }
             }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 3)
+            .iexaToolbarGlass(cornerRadius: 19, compact: true)
+            .clipShape(Capsule(style: .continuous))
         }
     }
 
@@ -657,7 +661,7 @@ struct ChatDetailView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                     .frame(minHeight: 40)
-                    .iexaToolbarGlass(cornerRadius: 22)
+                    .iexaToolbarGlass(cornerRadius: 22, compact: true)
                     .clipShape(Capsule(style: .continuous))
                 }
                 .buttonStyle(.plain)
