@@ -274,7 +274,7 @@ final class DictationService {
             }
 
             do {
-                let audioData = try Data(contentsOf: url)
+                let audioData = try await Self.readAudioData(from: url)
                 defer { try? FileManager.default.removeItem(at: url) }
 
                 guard audioData.count > 512 else {
@@ -337,7 +337,7 @@ final class DictationService {
             }
 
             do {
-                let audioData = try Data(contentsOf: url)
+                let audioData = try await Self.readAudioData(from: url)
                 defer { try? FileManager.default.removeItem(at: url) }
 
                 guard audioData.count > 512 else {
@@ -372,6 +372,12 @@ final class DictationService {
                 }
             }
         }
+    }
+
+    private nonisolated static func readAudioData(from url: URL) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) {
+            try Data(contentsOf: url)
+        }.value
     }
 
     // MARK: - Timers

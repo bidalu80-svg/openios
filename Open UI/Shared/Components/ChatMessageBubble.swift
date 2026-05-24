@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - Chat Message Bubble
 
@@ -50,10 +51,11 @@ struct ChatMessageBubble<Content: View>: View {
 
     private var userBubble: some View {
         HStack(alignment: .bottom, spacing: 0) {
-            Spacer(minLength: 64)
+            Spacer(minLength: horizontalSizeClass == .compact ? 40 : 64)
 
             VStack(alignment: .trailing, spacing: 4) {
                 content()
+                    .frame(maxWidth: maxUserBubbleContentWidth, alignment: .trailing)
                     .foregroundStyle(theme.chatBubbleUserText)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -71,6 +73,17 @@ struct ChatMessageBubble<Content: View>: View {
         }
         .padding(.horizontal, Spacing.screenPadding)
         .padding(.vertical, 2)
+    }
+
+    private var maxUserBubbleContentWidth: CGFloat {
+        let screenWidth = UIScreen.main.bounds.width
+        let leadingGap: CGFloat = horizontalSizeClass == .compact ? 40 : 64
+        let bubbleHorizontalPadding: CGFloat = 28
+        let availableWidth = screenWidth - (Spacing.screenPadding * 2) - leadingGap - bubbleHorizontalPadding
+        if horizontalSizeClass == .compact {
+            return max(150, availableWidth)
+        }
+        return min(560, max(260, min(screenWidth * 0.62, availableWidth)))
     }
 
     // MARK: - Assistant Content (no bubble — clean full-width)

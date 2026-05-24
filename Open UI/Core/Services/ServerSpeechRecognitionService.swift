@@ -288,7 +288,7 @@ final class ServerSpeechRecognitionService {
             }
 
             do {
-                let audioData = try Data(contentsOf: url)
+                let audioData = try await Self.readAudioData(from: url)
                 guard audioData.count > 1024 else {
                     // Audio is too short / empty — ignore silently
                     logger.info("Audio too short, skipping transcription")
@@ -325,6 +325,12 @@ final class ServerSpeechRecognitionService {
                 onError?(error.localizedDescription)
             }
         }
+    }
+
+    private nonisolated static func readAudioData(from url: URL) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) {
+            try Data(contentsOf: url)
+        }.value
     }
 
     private func updateState(_ newState: RecognitionState) {

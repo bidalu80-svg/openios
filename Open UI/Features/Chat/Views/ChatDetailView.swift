@@ -314,10 +314,15 @@ struct ChatDetailView: View {
             messageListArea
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if editingMessageId != nil {
-                editInputBar
-            } else {
-                inputFieldArea(vm: vm)
+            VStack(spacing: 0) {
+                if let error = viewModel.errorMessage {
+                    errorBannerView(error)
+                }
+                if editingMessageId != nil {
+                    editInputBar
+                } else {
+                    inputFieldArea(vm: vm)
+                }
             }
         }
         .navigationBarTitleDisplayMode(.inline)
@@ -430,12 +435,6 @@ struct ChatDetailView: View {
         // Toasts & banners
         .overlay(alignment: .top) {
             if showCopiedToast { copiedToastView }
-        }
-        .overlay(alignment: .bottom) {
-            if let error = viewModel.errorMessage {
-                errorBannerView(error)
-                    .padding(.bottom, keyboard.height + 80)
-            }
         }
         // Sheets & alerts
         .sheet(isPresented: $showFilePicker) {
@@ -2439,15 +2438,18 @@ struct ChatDetailView: View {
         if !imageFiles.isEmpty || !nonImageFiles.isEmpty {
             VStack(alignment: .trailing, spacing: Spacing.xs) {
                 if !imageFiles.isEmpty {
-                    HStack(spacing: Spacing.sm) {
-                        Spacer(minLength: 64)
+                    let imageColumns = imageFiles.count == 1
+                        ? [GridItem(.fixed(220), spacing: Spacing.sm, alignment: .trailing)]
+                        : [
+                            GridItem(.fixed(104), spacing: Spacing.sm, alignment: .trailing),
+                            GridItem(.fixed(104), spacing: Spacing.sm, alignment: .trailing)
+                        ]
+                    LazyVGrid(columns: imageColumns, alignment: .trailing, spacing: Spacing.sm) {
                         ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
                             if let fileId = imageReference(for: file) {
                                 chatImageView(fileId: fileId, allowsEditing: false)
-                                    .frame(
-                                        maxWidth: imageFiles.count == 1 ? 220 : 104,
-                                        maxHeight: imageFiles.count == 1 ? 220 : 104
-                                    )
+                                    .frame(width: imageFiles.count == 1 ? 220 : 104,
+                                           height: imageFiles.count == 1 ? 220 : 104)
                                     .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
                             }
                         }
@@ -2504,7 +2506,7 @@ struct ChatDetailView: View {
                 prepareGeneratedImageForEditing(image)
             }
         } else {
-            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient, showsInlineActions: false)
         }
     }
 
@@ -2612,41 +2614,43 @@ struct ChatDetailView: View {
         }
     }
 
-    private func localFileURL(fromDataURL dataURL: String, fallbackName: String) throws -> URL? {
-        guard dataURL.hasPrefix("data:"),
-              let comma = dataURL.firstIndex(of: ",") else { return nil }
-        let header = String(dataURL[..<comma]).lowercased()
-        let base64 = String(dataURL[dataURL.index(after: comma)...])
-        guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else { return nil }
+    private static func localFileURL(fromDataURL dataURL: String, fallbackName: String) async throws -> URL? {
+        try await Task.detached(priority: .userInitiated) {
+            guard dataURL.hasPrefix("data:"),
+                  let comma = dataURL.firstIndex(of: ",") else { return nil }
+            let header = String(dataURL[..<comma]).lowercased()
+            let base64 = String(dataURL[dataURL.index(after: comma)...])
+            guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else { return nil }
 
-        let ext: String
-        if header.contains("video/webm") {
-            ext = "webm"
-        } else if header.contains("video/quicktime") || header.contains("video/mov") {
-            ext = "mov"
-        } else if header.contains("image/png") {
-            ext = "png"
-        } else if header.contains("image/jpeg") || header.contains("image/jpg") {
-            ext = "jpg"
-        } else if header.contains("application/pdf") {
-            ext = "pdf"
-        } else {
-            ext = (fallbackName as NSString).pathExtension.isEmpty
-                ? "mp4"
-                : (fallbackName as NSString).pathExtension
-        }
+            let ext: String
+            if header.contains("video/webm") {
+                ext = "webm"
+            } else if header.contains("video/quicktime") || header.contains("video/mov") {
+                ext = "mov"
+            } else if header.contains("image/png") {
+                ext = "png"
+            } else if header.contains("image/jpeg") || header.contains("image/jpg") {
+                ext = "jpg"
+            } else if header.contains("application/pdf") {
+                ext = "pdf"
+            } else {
+                ext = (fallbackName as NSString).pathExtension.isEmpty
+                    ? "mp4"
+                    : (fallbackName as NSString).pathExtension
+            }
 
-        let baseName = ((fallbackName as NSString).deletingPathExtension)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeName = baseName.isEmpty ? "generated-media" : baseName
-        let cacheDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("generated_media_cache", isDirectory: true)
-        try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        let url = cacheDir.appendingPathComponent("\(safeName)-\(abs(dataURL.hashValue)).\(ext)")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            try data.write(to: url)
-        }
-        return url
+            let baseName = ((fallbackName as NSString).deletingPathExtension)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let safeName = baseName.isEmpty ? "generated-media" : baseName
+            let cacheDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("generated_media_cache", isDirectory: true)
+            try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+            let url = cacheDir.appendingPathComponent("\(safeName)-\(abs(dataURL.hashValue)).\(ext)")
+            if !FileManager.default.fileExists(atPath: url.path) {
+                try data.write(to: url)
+            }
+            return url
+        }.value
     }
 
     // MARK: - Tool-Generated Images
@@ -3325,7 +3329,7 @@ struct ChatDetailView: View {
             if let data = Data(base64Encoded: rawB64), !data.isEmpty {
                 logger.info("✅ [Execute] Fast-path 2: base64 var → \(data.count, privacy: .public) bytes as \(fileName, privacy: .public)")
                 let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-                try? data.write(to: tempFile)
+                try? await Self.writeData(data, to: tempFile)
                 downloadedFileURL = tempFile
                 return .bool(true)
             }
@@ -3340,7 +3344,7 @@ struct ChatDetailView: View {
             if let data = Data(base64Encoded: b64), !data.isEmpty {
                 logger.info("✅ [Execute] Fast-path 3: atob → \(data.count, privacy: .public) bytes as \(fileName, privacy: .public)")
                 let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-                try? data.write(to: tempFile)
+                try? await Self.writeData(data, to: tempFile)
                 downloadedFileURL = tempFile
                 return .bool(true)
             }
@@ -3362,7 +3366,7 @@ struct ChatDetailView: View {
         if let download {
             logger.info("✅ [Execute] ActionJSExecutor captured: \(download.filename, privacy: .public) \(download.data.count, privacy: .public) bytes")
             let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent(download.filename)
-            try? download.data.write(to: tempFile)
+            try? await Self.writeData(download.data, to: tempFile)
             downloadedFileURL = tempFile
         } else {
             logger.warning("⚠️ [Execute] ActionJSExecutor returned nil (timeout or error)")
@@ -3420,14 +3424,13 @@ struct ChatDetailView: View {
 
     // MARK: - Attachment Processing
 
-private func processSelectedPhotos(_ items: [PhotosPickerItem]) async {
-for item in items {
+    private func processSelectedPhotos(_ items: [PhotosPickerItem]) async {
+        for item in items {
             do {
                 if let data = try await item.loadTransferable(type: Data.self) {
-                    let image = UIImage(data: data)
-                    let thumbnail = image.map { Image(uiImage: $0) }
                     // Downsample to ≤ 2 MP to stay under the API's 5 MB base64 limit
-                    let resized = FileAttachmentService.downsampleForUpload(data: data, image: image)
+                    let resized = await Self.downsampleDataForUpload(data)
+                    let thumbnail = UIImage(data: resized).map { Image(uiImage: $0) }
                     let attachment = ChatAttachment(
                         type: .image, name: "Photo_\(Int(Date.now.timeIntervalSince1970)).jpg",
                         thumbnail: thumbnail, data: resized
@@ -3445,14 +3448,16 @@ for item in items {
     private func processFileURL(_ url: URL) async {
         let hasAccess = url.startAccessingSecurityScopedResource()
         defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url) else {
+        guard let data = try? await Task.detached(priority: .userInitiated, operation: {
+            try Data(contentsOf: url)
+        }).value else {
             viewModel.errorMessage = "Failed to read file."
             return
         }
         let isImage = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
         if isImage {
             // Downsample to ≤ 2 MP to stay under the API's 5 MB base64 limit
-            let resized = FileAttachmentService.downsampleForUpload(data: data)
+            let resized = await Self.downsampleDataForUpload(data)
             let thumbnail: Image? = UIImage(data: resized).map { Image(uiImage: $0) }
             let attachment = ChatAttachment(
                 type: .image, name: url.lastPathComponent,
@@ -3504,10 +3509,18 @@ for item in items {
         }
     }
 
+    private static func downsampleDataForUpload(_ data: Data) async -> Data {
+        await Task.detached(priority: .userInitiated) {
+            FileAttachmentService.downsampleForUpload(data: data)
+        }.value
+    }
+
     private func processAudioFileURL(_ url: URL) async {
         let hasAccess = url.startAccessingSecurityScopedResource()
         defer { if hasAccess { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url) else {
+        guard let data = try? await Task.detached(priority: .userInitiated, operation: {
+            try Data(contentsOf: url)
+        }).value else {
             viewModel.errorMessage = "Failed to read audio file."
             return
         }
@@ -3553,7 +3566,7 @@ for item in items {
 
         do {
             let (data, _) = try await apiClient.getFileContent(id: fileId)
-            try data.write(to: cachedFile)
+            try await Self.writeData(data, to: cachedFile)
             withAnimation { isDownloadingFile = false }
             previewFileURL = cachedFile
         } catch {
@@ -3566,7 +3579,7 @@ for item in items {
     private func previewFileReference(fileId: String, fileName: String) async {
         if fileId.hasPrefix("data:") {
             do {
-                previewFileURL = try localFileURL(fromDataURL: fileId, fallbackName: fileName)
+                previewFileURL = try await Self.localFileURL(fromDataURL: fileId, fallbackName: fileName)
             } catch {
                 downloadErrorMessage = "媒体预览失败：\(error.localizedDescription)"
                 showDownloadError = true
@@ -3580,6 +3593,19 @@ for item in items {
         }
 
         await previewFileInApp(fileId: fileId, fileName: fileName)
+    }
+
+    private static func writeData(_ data: Data, to url: URL) async throws {
+        try await Task.detached(priority: .utility) {
+            try data.write(to: url)
+        }.value
+    }
+
+    private static func replaceFile(at sourceURL: URL, to destinationURL: URL) async throws {
+        try await Task.detached(priority: .utility) {
+            try? FileManager.default.removeItem(at: destinationURL)
+            try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
+        }.value
     }
 
     /// Downloads a file from the server using the authenticated API client,
@@ -3628,7 +3654,7 @@ for item in items {
             // Save to temp directory
             let tempDir = FileManager.default.temporaryDirectory
             let tempFile = tempDir.appendingPathComponent(fileName)
-            try data.write(to: tempFile)
+            try await Self.writeData(data, to: tempFile)
 
             withAnimation { isDownloadingFile = false }
 
@@ -3661,8 +3687,7 @@ for item in items {
                 url: url
             )
             let destination = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-            try? FileManager.default.removeItem(at: destination)
-            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+            try await Self.replaceFile(at: temporaryURL, to: destination)
 
             withAnimation { isDownloadingFile = false }
             downloadedFileURL = destination
@@ -5303,6 +5328,7 @@ struct UserMessageContentView: View {
         if !hasChips {
             Text(content)
                 .scaledFont(size: 15, context: .content)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
             SkillTaggedTextView(segments: segs)
         }
@@ -5324,6 +5350,7 @@ private struct MessageFilePreviewSheet: View {
     @State private var data: Data?
     @State private var contentType: String?
     @State private var textContent: String?
+    @State private var previewImage: UIImage?
     @State private var isLoading = false
     @State private var errorMessage: String?
 
@@ -5482,7 +5509,7 @@ private struct MessageFilePreviewSheet: View {
             ProgressView("正在加载预览…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .foregroundStyle(theme.textSecondary)
-        } else if let data, let image = UIImage(data: data), isImageLike {
+        } else if let image = previewImage, isImageLike {
             GeometryReader { geo in
                 ScrollView([.horizontal, .vertical], showsIndicators: false) {
                     Image(uiImage: image)
@@ -5514,9 +5541,13 @@ private struct MessageFilePreviewSheet: View {
     }
 
     private var isImageLike: Bool {
+        isImageType(contentType)
+    }
+
+    private func isImageType(_ loadedContentType: String?) -> Bool {
         file.type == "image"
             || file.contentType?.hasPrefix("image/") == true
-            || contentType?.hasPrefix("image/") == true
+            || loadedContentType?.hasPrefix("image/") == true
             || ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tiff"].contains(fileExtension)
     }
 
@@ -5549,9 +5580,15 @@ private struct MessageFilePreviewSheet: View {
             if let loaded = try await loadData() {
                 data = loaded.data
                 contentType = loaded.contentType
+                if isImageType(loaded.contentType) {
+                    previewImage = await Self.decodePreviewImage(from: loaded.data)
+                } else {
+                    previewImage = nil
+                }
                 textContent = extractedText ?? decodedText(from: loaded.data, contentType: loaded.contentType)
             } else {
                 textContent = extractedText
+                previewImage = nil
                 errorMessage = "缺少可读取的文件地址。"
             }
         } catch {
@@ -5573,17 +5610,31 @@ private struct MessageFilePreviewSheet: View {
         return nil
     }
 
+    private struct DecodedPreviewImage: @unchecked Sendable {
+        let image: UIImage
+    }
+
+    private static func decodePreviewImage(from data: Data) async -> UIImage? {
+        let decoded = await Task.detached(priority: .userInitiated) {
+            UIImage(data: data).map { DecodedPreviewImage(image: $0) }
+        }.value
+        return decoded?.image
+    }
+
     private func loadData() async throws -> (data: Data, contentType: String?)? {
         guard let ref = fileReferenceCandidates.first else {
             return nil
         }
 
         if ref.hasPrefix("data:") {
-            return try dataURLPayload(ref)
+            return try await dataURLPayload(ref)
         }
 
         if let url = URL(string: ref), url.isFileURL {
-            return (try Data(contentsOf: url), file.contentType)
+            let data = try await Task.detached(priority: .userInitiated, operation: {
+                try Data(contentsOf: url)
+            }).value
+            return (data, file.contentType)
         }
 
         if let apiClient, let fileId = serverFileId(from: ref) {
@@ -5628,28 +5679,30 @@ private struct MessageFilePreviewSheet: View {
         return ref
     }
 
-    private func dataURLPayload(_ value: String) throws -> (data: Data, contentType: String?) {
-        guard let comma = value.firstIndex(of: ",") else {
-            throw NSError(domain: "MessageFilePreview", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "文件 data URL 格式无效。"
-            ])
-        }
-        let header = String(value[..<comma])
-        let body = String(value[value.index(after: comma)...])
-        let mime = header
-            .replacingOccurrences(of: "data:", with: "")
-            .components(separatedBy: ";")
-            .first
-        if header.lowercased().contains(";base64") {
-            guard let data = Data(base64Encoded: body, options: .ignoreUnknownCharacters) else {
-                throw NSError(domain: "MessageFilePreview", code: 3, userInfo: [
-                    NSLocalizedDescriptionKey: "文件 base64 内容无法解码。"
+    private func dataURLPayload(_ value: String) async throws -> (data: Data, contentType: String?) {
+        try await Task.detached(priority: .userInitiated) {
+            guard let comma = value.firstIndex(of: ",") else {
+                throw NSError(domain: "MessageFilePreview", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "文件 data URL 格式无效。"
                 ])
             }
-            return (data, mime)
-        }
-        let decoded = body.removingPercentEncoding ?? body
-        return (Data(decoded.utf8), mime)
+            let header = String(value[..<comma])
+            let body = String(value[value.index(after: comma)...])
+            let mime = header
+                .replacingOccurrences(of: "data:", with: "")
+                .components(separatedBy: ";")
+                .first
+            if header.lowercased().contains(";base64") {
+                guard let data = Data(base64Encoded: body, options: .ignoreUnknownCharacters) else {
+                    throw NSError(domain: "MessageFilePreview", code: 3, userInfo: [
+                        NSLocalizedDescriptionKey: "文件 base64 内容无法解码。"
+                    ])
+                }
+                return (data, mime)
+            }
+            let decoded = body.removingPercentEncoding ?? body
+            return (Data(decoded.utf8), mime)
+        }.value
     }
 
     private func decodedText(from data: Data, contentType: String?) -> String? {
@@ -5741,10 +5794,7 @@ private struct FlowRow: View {
     let theme: AppTheme
 
     var body: some View {
-        // Concatenate text and chip views in an HStack that wraps.
-        // We use ViewThatFits + LazyHStack fallback for wrapping behavior.
-        // For simplicity, render as a single HStack (most messages are short).
-        HStack(alignment: .center, spacing: 4) {
+        UserMessageFlowLayout(horizontalSpacing: 4, verticalSpacing: 2) {
             ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
                 switch seg {
                 case .text(let str):
@@ -5756,6 +5806,81 @@ private struct FlowRow: View {
                 }
             }
         }
+    }
+}
+
+private struct UserMessageFlowLayout: Layout {
+    var horizontalSpacing: CGFloat = 4
+    var verticalSpacing: CGFloat = 2
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = resolvedWidth(proposal.width)
+        let sizes = measuredSizes(for: subviews, maxWidth: maxWidth)
+        let lines = makeLines(sizes: sizes, maxWidth: maxWidth)
+        let width = min(maxWidth, lines.map { $0.width }.max() ?? 0)
+        let height = lines.enumerated().reduce(CGFloat(0)) { total, entry in
+            total + entry.element.height + (entry.offset == lines.count - 1 ? 0 : verticalSpacing)
+        }
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let maxWidth = resolvedWidth(bounds.width)
+        let sizes = measuredSizes(for: subviews, maxWidth: maxWidth)
+        let lines = makeLines(sizes: sizes, maxWidth: maxWidth)
+        var y = bounds.minY
+        for line in lines {
+            var x = bounds.maxX - line.width
+            for index in line.indices {
+                let size = sizes[index]
+                subviews[index].place(
+                    at: CGPoint(x: x, y: y),
+                    proposal: ProposedViewSize(width: size.width, height: size.height)
+                )
+                x += size.width + horizontalSpacing
+            }
+            y += line.height + verticalSpacing
+        }
+    }
+
+    private func resolvedWidth(_ width: CGFloat?) -> CGFloat {
+        let fallback = max(1, UIScreen.main.bounds.width * 0.72)
+        guard let width, width.isFinite, width > 0 else { return fallback }
+        return width
+    }
+
+    private func measuredSizes(for subviews: Subviews, maxWidth: CGFloat) -> [CGSize] {
+        subviews.map {
+            let size = $0.sizeThatFits(ProposedViewSize(width: maxWidth, height: nil))
+            return CGSize(width: min(size.width, maxWidth), height: size.height)
+        }
+    }
+
+    private func makeLines(sizes: [CGSize], maxWidth: CGFloat) -> [(indices: [Int], width: CGFloat, height: CGFloat)] {
+        var lines: [(indices: [Int], width: CGFloat, height: CGFloat)] = []
+        var currentIndices: [Int] = []
+        var currentWidth: CGFloat = 0
+        var currentHeight: CGFloat = 0
+
+        for (index, size) in sizes.enumerated() {
+            let itemWidth = min(size.width, maxWidth)
+            let nextWidth = currentIndices.isEmpty ? itemWidth : currentWidth + horizontalSpacing + itemWidth
+            if nextWidth > maxWidth && !currentIndices.isEmpty {
+                lines.append((currentIndices, currentWidth, currentHeight))
+                currentIndices = [index]
+                currentWidth = itemWidth
+                currentHeight = size.height
+            } else {
+                currentIndices.append(index)
+                currentWidth = nextWidth
+                currentHeight = max(currentHeight, size.height)
+            }
+        }
+
+        if !currentIndices.isEmpty {
+            lines.append((currentIndices, currentWidth, currentHeight))
+        }
+        return lines
     }
 }
 
@@ -5771,6 +5896,9 @@ private struct SkillChipView: View {
                 .scaledFont(size: 12, weight: .bold)
             Text(slug)
                 .scaledFont(size: 12, weight: .semibold)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 160)
         }
         .foregroundStyle(theme.chatBubbleUserText)
         .padding(.horizontal, 7)

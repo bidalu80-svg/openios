@@ -49,7 +49,7 @@ final class FileAttachmentService {
         for item in items {
             do {
                 if let data = try await item.loadTransferable(type: Data.self) {
-                    let (convertedData, fileName) = convertToJPEGIfNeeded(
+                    let (convertedData, fileName) = await Self.convertToJPEGIfNeeded(
                         data: data,
                         originalName: "Photo_\(Date.now.timeIntervalSince1970).jpg"
                     )
@@ -88,7 +88,7 @@ final class FileAttachmentService {
         }
         defer { url.stopAccessingSecurityScopedResource() }
 
-        guard let data = try? Data(contentsOf: url) else {
+        guard let data = try? await Self.readFileData(from: url) else {
             logger.error("Failed to read file data: \(url.path)")
             return
         }
@@ -96,7 +96,7 @@ final class FileAttachmentService {
         let isImage = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
 
         if isImage {
-            let (convertedData, fileName) = convertToJPEGIfNeeded(
+            let (convertedData, fileName) = await Self.convertToJPEGIfNeeded(
                 data: data,
                 originalName: url.lastPathComponent
             )
@@ -152,7 +152,7 @@ final class FileAttachmentService {
             }
             defer { url.stopAccessingSecurityScopedResource() }
 
-            guard let data = try? Data(contentsOf: url) else {
+            guard let data = try? await Self.readFileData(from: url) else {
                 logger.error("Failed to read file data: \(url.path)")
                 continue
             }
@@ -161,7 +161,7 @@ final class FileAttachmentService {
             // ── 2. Add placeholder attachment and capture its UUID ────────────
             var attachment: ChatAttachment
             if isImage {
-                let (convertedData, fileName) = convertToJPEGIfNeeded(
+                let (convertedData, fileName) = await Self.convertToJPEGIfNeeded(
                     data: data,
                     originalName: url.lastPathComponent
                 )
@@ -466,38 +466,33 @@ final class FileAttachmentService {
 
     // MARK: - Image Conversion
 
+    private nonisolated static func readFileData(from url: URL) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) {
+            try Data(contentsOf: url)
+        }.value
+    }
+
     /// File extensions that need conversion to JPEG for vision model compatibility.
-    private static let convertibleExtensions: Set<String> = [
-        "heic", "heif", "dng", "raw", "arw", "cr2", "cr3", "nef", "orf", "raf", "rw2", "webp"
-    ]
+    private nonisolated static var convertibleExtensions: Set<String> {
+        ["heic", "heif", "dng", "raw", "arw", "cr2", "cr3", "nef", "orf", "raf", "rw2", "webp"]
+    }
 
     /// Converts HEIC/HEIF/DNG/RAW image data to JPEG if needed.
     /// Also enforces the 2 MP pixel cap so uploads always stay under the
     /// API's 5 MB image limit.
     /// Returns the (possibly converted) data and updated filename.
-    private func convertToJPEGIfNeeded(data: Data, originalName: String) -> (Data, String) {
-        let ext = (originalName as NSString).pathExtension.lowercased()
-
-        // Check if format conversion is needed
-        guard Self.convertibleExtensions.contains(ext) else {
-            // No format conversion, but still enforce pixel cap
-            let capped = Self.downsampleForUpload(data: data, logger: logger)
+    private nonisolated static func convertToJPEGIfNeeded(data: Data, originalName: String) async -> (Data, String) {
+        await Task.detached(priority: .userInitiated) {
+            let ext = (originalName as NSString).pathExtension.lowercased()
+            guard let capped = Self.downsampleJPEGData(from: data) else {
+                return (data, originalName)
+            }
+            if Self.convertibleExtensions.contains(ext) {
+                let baseName = (originalName as NSString).deletingPathExtension
+                return (capped, baseName + ".jpg")
+            }
             return (capped, originalName)
-        }
-
-        // Try to convert using UIImage → JPEG, then apply pixel cap
-        guard let uiImage = UIImage(data: data) else {
-            logger.warning("Failed to decode \(ext) image, using original")
-            return (data, originalName)
-        }
-
-        let baseName = (originalName as NSString).deletingPathExtension
-        let newName = baseName + ".jpg"
-
-        let capped = Self.downsampleForUpload(image: uiImage, logger: logger)
-
-        logger.info("Converted \(ext) image to JPEG (\(data.count) → \(capped.count) bytes)")
-        return (capped, newName)
+        }.value
     }
 
     // MARK: - Image Size Limit
@@ -505,18 +500,21 @@ final class FileAttachmentService {
     /// Maximum total pixels for uploaded images (2 megapixels).
     /// A 2 MP JPEG at 0.85 quality is typically 1-2 MB — well under the
     /// API's 5 MB limit — while retaining enough detail for vision models.
-    private static let maxPixels: CGFloat = 2_000_000
+    private nonisolated static var maxPixels: CGFloat { 2_000_000 }
 
     /// Downsamples an image to ≤ 2 MP and returns JPEG data at 0.85 quality.
     /// If the image is already within the pixel budget, it is only re-encoded
     /// to JPEG (no resize). Returns the original data unchanged if decoding fails.
-    static func downsampleForUpload(data: Data, image: UIImage? = nil, logger: Logger? = nil) -> Data {
-        guard let img = image ?? UIImage(data: data) else { return data }
+    nonisolated static func downsampleForUpload(data: Data, image: UIImage? = nil, logger: Logger? = nil) -> Data {
+        if let jpegData = downsampleJPEGData(from: data, logger: logger) {
+            return jpegData
+        }
+        guard let img = image else { return data }
         return downsampleForUpload(image: img, logger: logger)
     }
 
     /// Core implementation: downscale `UIImage` to ≤ 2 MP, encode as JPEG.
-    static func downsampleForUpload(image: UIImage, logger: Logger? = nil) -> Data {
+    nonisolated static func downsampleForUpload(image: UIImage, logger: Logger? = nil) -> Data {
         let w = image.size.width
         let h = image.size.height
         let totalPixels = w * h
@@ -538,5 +536,61 @@ final class FileAttachmentService {
         let result = resized.jpegData(compressionQuality: 0.85) ?? Data()
         logger?.info("Downsampled image from \(Int(w))×\(Int(h)) to \(Int(newSize.width))×\(Int(newSize.height)) (\(result.count) bytes)")
         return result
+    }
+
+    private nonisolated static func downsampleJPEGData(from data: Data, logger: Logger? = nil) -> Data? {
+        let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary) else {
+            return nil
+        }
+
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let width = pixelDimension(properties?[kCGImagePropertyPixelWidth])
+        let height = pixelDimension(properties?[kCGImagePropertyPixelHeight])
+        let maxPixelSize: Int
+        if let width, let height, width > 0, height > 0 {
+            let totalPixels = width * height
+            let scale = totalPixels > maxPixels ? sqrt(maxPixels / totalPixels) : 1
+            maxPixelSize = max(1, Int(ceil(max(width, height) * scale)))
+        } else {
+            maxPixelSize = Int(ceil(sqrt(maxPixels)))
+        }
+
+        let thumbnailOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary) else {
+            return nil
+        }
+
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            output,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else {
+            return nil
+        }
+        let destinationOptions: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: 0.85
+        ]
+        CGImageDestinationAddImage(destination, thumbnail, destinationOptions as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+
+        if let width, let height, width * height > maxPixels {
+            logger?.info("Downsampled image from \(Int(width))×\(Int(height)) to max \(maxPixelSize) px (\(output.length) bytes)")
+        }
+        return output as Data
+    }
+
+    private nonisolated static func pixelDimension(_ value: Any?) -> CGFloat? {
+        if let number = value as? NSNumber {
+            return CGFloat(number.doubleValue)
+        }
+        return nil
     }
 }

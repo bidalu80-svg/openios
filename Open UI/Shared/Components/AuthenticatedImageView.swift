@@ -9,6 +9,7 @@ struct AuthenticatedImageView: View {
     let fileId: String
     let apiClient: APIClient?
     let onEdit: ((UIImage) -> Void)?
+    let showsInlineActions: Bool
 
     @State private var loadedImage: UIImage?
     @State private var isLoading = true
@@ -31,9 +32,15 @@ struct AuthenticatedImageView: View {
         case failed
     }
 
-    init(fileId: String, apiClient: APIClient?, onEdit: ((UIImage) -> Void)? = nil) {
+    private struct LoadedLocalImage: @unchecked Sendable {
+        let image: UIImage
+        let cost: Int
+    }
+
+    init(fileId: String, apiClient: APIClient?, showsInlineActions: Bool = true, onEdit: ((UIImage) -> Void)? = nil) {
         self.fileId = fileId
         self.apiClient = apiClient
+        self.showsInlineActions = showsInlineActions
         self.onEdit = onEdit
     }
 
@@ -119,7 +126,7 @@ struct AuthenticatedImageView: View {
                 }
             }
 
-            if let image = loadedImage {
+            if showsInlineActions, let image = loadedImage {
                 HStack(spacing: 7) {
                     if let onEdit {
                         Button {
@@ -258,9 +265,9 @@ struct AuthenticatedImageView: View {
             return
         }
 
-        if let inlineImage = Self.inlineDataImage(from: fileId) {
-            Self.imageCache.setObject(inlineImage, forKey: fileId as NSString)
-            setLoadedImage(inlineImage)
+        if let inlineImage = await Self.inlineDataImage(from: fileId) {
+            Self.imageCache.setObject(inlineImage.image, forKey: fileId as NSString, cost: inlineImage.cost)
+            setLoadedImage(inlineImage.image)
             return
         }
 
@@ -270,12 +277,11 @@ struct AuthenticatedImageView: View {
                 return
             }
             do {
-                let data = try Data(contentsOf: localURL)
-                if let image = UIImage(data: data) {
-                    Self.imageCache.setObject(image, forKey: fileId as NSString, cost: data.count)
-                    setLoadedImage(image)
-                    return
-                }
+                let loaded = try await Self.loadLocalImage(from: localURL)
+                guard !Task.isCancelled else { return }
+                Self.imageCache.setObject(loaded.image, forKey: fileId as NSString, cost: loaded.cost)
+                setLoadedImage(loaded.image)
+                return
             } catch {
                 hasError = true
                 isLoading = false
@@ -336,13 +342,11 @@ struct AuthenticatedImageView: View {
 
             do {
                 let (data, _) = try await apiClient.getFileContent(id: fileId)
-                if let uiImage = UIImage(data: data) {
-                    // Cache for future scroll-backs
-                    let cost = data.count
-                    Self.imageCache.setObject(uiImage, forKey: fileId as NSString, cost: cost)
-                    setLoadedImage(uiImage)
-                    return
-                }
+                let loaded = try await Self.decodeImageData(data)
+                guard !Task.isCancelled else { return }
+                Self.imageCache.setObject(loaded.image, forKey: fileId as NSString, cost: loaded.cost)
+                setLoadedImage(loaded.image)
+                return
             } catch {
                 // On last attempt, fall through to error state.
                 // Otherwise wait with exponential backoff before retrying.
@@ -375,16 +379,38 @@ struct AuthenticatedImageView: View {
         }
     }
 
-    private static func inlineDataImage(from dataURL: String) -> UIImage? {
+    private static func inlineDataImage(from dataURL: String) async -> LoadedLocalImage? {
         guard dataURL.hasPrefix("data:image/"),
               dataURL.count <= 7_000_000,
               let comma = dataURL.firstIndex(of: ",") else { return nil }
         let base64 = String(dataURL[dataURL.index(after: comma)...])
-        guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters) else {
-            return nil
-        }
-        guard data.count <= 5_000_000 else { return nil }
-        return UIImage(data: data)
+        return await Task.detached(priority: .userInitiated) {
+            guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters),
+                  data.count <= 5_000_000,
+                  let image = UIImage(data: data) else {
+                return nil
+            }
+            return LoadedLocalImage(image: image, cost: data.count)
+        }.value
+    }
+
+    private static func loadLocalImage(from url: URL) async throws -> LoadedLocalImage {
+        try await Task.detached(priority: .userInitiated) {
+            let data = try Data(contentsOf: url)
+            guard let image = UIImage(data: data) else {
+                throw URLError(.cannotDecodeContentData)
+            }
+            return LoadedLocalImage(image: image, cost: data.count)
+        }.value
+    }
+
+    private static func decodeImageData(_ data: Data) async throws -> LoadedLocalImage {
+        try await Task.detached(priority: .userInitiated) {
+            guard let image = UIImage(data: data) else {
+                throw URLError(.cannotDecodeContentData)
+            }
+            return LoadedLocalImage(image: image, cost: data.count)
+        }.value
     }
 
     private static func localImageURL(from value: String) -> URL? {
