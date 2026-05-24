@@ -2438,18 +2438,15 @@ struct ChatDetailView: View {
         if !imageFiles.isEmpty || !nonImageFiles.isEmpty {
             VStack(alignment: .trailing, spacing: Spacing.xs) {
                 if !imageFiles.isEmpty {
-                    let imageColumns = imageFiles.count == 1
-                        ? [GridItem(.fixed(220), spacing: Spacing.sm, alignment: .trailing)]
-                        : [
-                            GridItem(.fixed(104), spacing: Spacing.sm, alignment: .trailing),
-                            GridItem(.fixed(104), spacing: Spacing.sm, alignment: .trailing)
-                        ]
-                    LazyVGrid(columns: imageColumns, alignment: .trailing, spacing: Spacing.sm) {
+                    HStack(spacing: Spacing.sm) {
+                        Spacer(minLength: 64)
                         ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
                             if let fileId = imageReference(for: file) {
                                 chatImageView(fileId: fileId, allowsEditing: false)
-                                    .frame(width: imageFiles.count == 1 ? 220 : 104,
-                                           height: imageFiles.count == 1 ? 220 : 104)
+                                    .frame(
+                                        maxWidth: imageFiles.count == 1 ? 220 : 104,
+                                        maxHeight: imageFiles.count == 1 ? 220 : 104
+                                    )
                                     .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
                             }
                         }
@@ -2506,7 +2503,7 @@ struct ChatDetailView: View {
                 prepareGeneratedImageForEditing(image)
             }
         } else {
-            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient, showsInlineActions: false)
+            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
         }
     }
 
@@ -5328,7 +5325,6 @@ struct UserMessageContentView: View {
         if !hasChips {
             Text(content)
                 .scaledFont(size: 15, context: .content)
-                .fixedSize(horizontal: false, vertical: true)
         } else {
             SkillTaggedTextView(segments: segs)
         }
@@ -5794,7 +5790,10 @@ private struct FlowRow: View {
     let theme: AppTheme
 
     var body: some View {
-        UserMessageFlowLayout(horizontalSpacing: 4, verticalSpacing: 2) {
+        // Concatenate text and chip views in an HStack that wraps.
+        // We use ViewThatFits + LazyHStack fallback for wrapping behavior.
+        // For simplicity, render as a single HStack (most messages are short).
+        HStack(alignment: .center, spacing: 4) {
             ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
                 switch seg {
                 case .text(let str):
@@ -5806,81 +5805,6 @@ private struct FlowRow: View {
                 }
             }
         }
-    }
-}
-
-private struct UserMessageFlowLayout: Layout {
-    var horizontalSpacing: CGFloat = 4
-    var verticalSpacing: CGFloat = 2
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = resolvedWidth(proposal.width)
-        let sizes = measuredSizes(for: subviews, maxWidth: maxWidth)
-        let lines = makeLines(sizes: sizes, maxWidth: maxWidth)
-        let width = min(maxWidth, lines.map { $0.width }.max() ?? 0)
-        let height = lines.enumerated().reduce(CGFloat(0)) { total, entry in
-            total + entry.element.height + (entry.offset == lines.count - 1 ? 0 : verticalSpacing)
-        }
-        return CGSize(width: width, height: height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let maxWidth = resolvedWidth(bounds.width)
-        let sizes = measuredSizes(for: subviews, maxWidth: maxWidth)
-        let lines = makeLines(sizes: sizes, maxWidth: maxWidth)
-        var y = bounds.minY
-        for line in lines {
-            var x = bounds.maxX - line.width
-            for index in line.indices {
-                let size = sizes[index]
-                subviews[index].place(
-                    at: CGPoint(x: x, y: y),
-                    proposal: ProposedViewSize(width: size.width, height: size.height)
-                )
-                x += size.width + horizontalSpacing
-            }
-            y += line.height + verticalSpacing
-        }
-    }
-
-    private func resolvedWidth(_ width: CGFloat?) -> CGFloat {
-        let fallback = max(1, UIScreen.main.bounds.width * 0.72)
-        guard let width, width.isFinite, width > 0 else { return fallback }
-        return width
-    }
-
-    private func measuredSizes(for subviews: Subviews, maxWidth: CGFloat) -> [CGSize] {
-        subviews.map {
-            let size = $0.sizeThatFits(ProposedViewSize(width: maxWidth, height: nil))
-            return CGSize(width: min(size.width, maxWidth), height: size.height)
-        }
-    }
-
-    private func makeLines(sizes: [CGSize], maxWidth: CGFloat) -> [(indices: [Int], width: CGFloat, height: CGFloat)] {
-        var lines: [(indices: [Int], width: CGFloat, height: CGFloat)] = []
-        var currentIndices: [Int] = []
-        var currentWidth: CGFloat = 0
-        var currentHeight: CGFloat = 0
-
-        for (index, size) in sizes.enumerated() {
-            let itemWidth = min(size.width, maxWidth)
-            let nextWidth = currentIndices.isEmpty ? itemWidth : currentWidth + horizontalSpacing + itemWidth
-            if nextWidth > maxWidth && !currentIndices.isEmpty {
-                lines.append((currentIndices, currentWidth, currentHeight))
-                currentIndices = [index]
-                currentWidth = itemWidth
-                currentHeight = size.height
-            } else {
-                currentIndices.append(index)
-                currentWidth = nextWidth
-                currentHeight = max(currentHeight, size.height)
-            }
-        }
-
-        if !currentIndices.isEmpty {
-            lines.append((currentIndices, currentWidth, currentHeight))
-        }
-        return lines
     }
 }
 
@@ -5896,9 +5820,6 @@ private struct SkillChipView: View {
                 .scaledFont(size: 12, weight: .bold)
             Text(slug)
                 .scaledFont(size: 12, weight: .semibold)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: 160)
         }
         .foregroundStyle(theme.chatBubbleUserText)
         .padding(.horizontal, 7)
