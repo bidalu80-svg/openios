@@ -13,7 +13,8 @@ struct LocalAlpineTerminalAgentToolResult: Sendable {
 enum LocalAlpineTerminalAgentRunner {
     static func run(
         _ toolUse: LocalAlpineTerminalAgentToolUse,
-        inputProvider: (@MainActor (LocalAlpineInteractiveRequest) async -> String?)? = nil
+        inputProvider: (@MainActor (LocalAlpineInteractiveRequest) async -> String?)? = nil,
+        eventHandler: LocalAlpineToolEventHandler? = nil
     ) async -> LocalAlpineTerminalAgentToolResult {
         let executableContent: String
         switch toolUse {
@@ -25,7 +26,8 @@ enum LocalAlpineTerminalAgentRunner {
 
         let result = await LocalAlpineAgentService.shared.executeBlocks(
             in: executableContent,
-            inputProvider: inputProvider
+            inputProvider: inputProvider,
+            eventHandler: eventHandler
         )
         return LocalAlpineTerminalAgentToolResult(toolUse: toolUse, result: result)
     }

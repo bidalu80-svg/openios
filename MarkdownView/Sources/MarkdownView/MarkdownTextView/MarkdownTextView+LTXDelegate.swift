@@ -85,7 +85,7 @@ import Foundation
         }
 
         func showSelectionLoupe(for label: LTXLabel, location: CGPoint) {
-            guard window != nil, bounds.width > 1, bounds.height > 1 else { return }
+            guard let window, bounds.width > 1, bounds.height > 1 else { return }
             guard let image = selectionLoupeImage(from: label, around: location) else { return }
 
             let loupe: MarkdownSelectionLoupeView
@@ -94,21 +94,27 @@ import Foundation
             } else {
                 loupe = MarkdownSelectionLoupeView()
                 selectionLoupeView = loupe
-                addSubview(loupe)
             }
 
             let anchor = label.convert(location, to: self)
+            let windowAnchor = convert(anchor, to: window)
             let size = CGSize(width: 132, height: 58)
-            let horizontalPadding: CGFloat = 8
-            var originX = anchor.x - size.width / 2
-            originX = min(max(horizontalPadding, originX), max(horizontalPadding, bounds.width - size.width - horizontalPadding))
+            let horizontalPadding: CGFloat = 10
+            let verticalPadding: CGFloat = 10
+            let placement = selectionLoupeFrame(
+                anchor: windowAnchor,
+                size: size,
+                in: window,
+                horizontalPadding: horizontalPadding,
+                verticalPadding: verticalPadding
+            )
 
-            var originY = anchor.y - size.height - 28
-            if originY < 8 {
-                originY = anchor.y + 28
+            if loupe.superview !== window {
+                loupe.removeFromSuperview()
+                window.addSubview(loupe)
             }
-
-            loupe.frame = CGRect(origin: CGPoint(x: originX, y: originY), size: size)
+            loupe.layer.zPosition = 10_000
+            loupe.frame = placement
             loupe.update(image: image)
             loupe.alpha = 1
 
@@ -124,6 +130,54 @@ import Foundation
             }
             selectionLoupeHideWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.85, execute: workItem)
+        }
+
+        func selectionLoupeFrame(
+            anchor: CGPoint,
+            size: CGSize,
+            in window: UIWindow,
+            horizontalPadding: CGFloat,
+            verticalPadding: CGFloat
+        ) -> CGRect {
+            let safeBounds = window.bounds
+                .inset(by: window.safeAreaInsets)
+                .insetBy(dx: horizontalPadding, dy: verticalPadding)
+            guard safeBounds.width > size.width, safeBounds.height > size.height else {
+                return CGRect(
+                    x: max(0, min(anchor.x - size.width / 2, window.bounds.width - size.width)),
+                    y: max(0, min(anchor.y + 34, window.bounds.height - size.height)),
+                    width: size.width,
+                    height: size.height
+                )
+            }
+
+            let topAvoidance = max(window.safeAreaInsets.top + 88, safeBounds.minY)
+            let bottomAvoidance = max(window.safeAreaInsets.bottom + 132, verticalPadding)
+            let usable = CGRect(
+                x: safeBounds.minX,
+                y: topAvoidance,
+                width: safeBounds.width,
+                height: max(size.height, window.bounds.height - topAvoidance - bottomAvoidance)
+            )
+
+            func clampedX(_ x: CGFloat, in rect: CGRect) -> CGFloat {
+                min(max(rect.minX, x), rect.maxX - size.width)
+            }
+
+            let centeredX = anchor.x - size.width / 2
+            let candidates = [
+                CGRect(x: clampedX(centeredX, in: usable), y: anchor.y + 42, width: size.width, height: size.height),
+                CGRect(x: clampedX(centeredX, in: usable), y: anchor.y - size.height - 54, width: size.width, height: size.height),
+                CGRect(x: anchor.x - size.width - 30, y: anchor.y - size.height / 2, width: size.width, height: size.height),
+                CGRect(x: anchor.x + 30, y: anchor.y - size.height / 2, width: size.width, height: size.height)
+            ]
+            if let preferred = candidates.first(where: { usable.contains($0) }) {
+                return preferred
+            }
+
+            let fallbackX = clampedX(centeredX, in: usable)
+            let fallbackY = min(max(usable.minY, anchor.y + 42), usable.maxY - size.height)
+            return CGRect(x: fallbackX, y: fallbackY, width: size.width, height: size.height)
         }
 
         func hideSelectionLoupe() {

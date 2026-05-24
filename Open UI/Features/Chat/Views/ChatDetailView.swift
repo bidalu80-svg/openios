@@ -23,6 +23,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
     let fileCount: Int
     let commandCount: Int
     let hasFailure: Bool
+    let toolCalls: [LocalAlpineToolCall]
 
     init?(message: ChatMessage) {
         guard message.metadata?["iexa_local_alpine_result"] == "true"
@@ -33,12 +34,18 @@ private struct AgentActivityItem: Identifiable, Hashable {
         let metadata = message.metadata
         let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata?["iexa_local_alpine_written_files"])
         let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata?["iexa_local_alpine_command_results"])
+        let toolCalls = LocalAlpineToolCall.decodeMetadata(metadata?["iexa_local_alpine_tool_calls"])
         let parsed = ParsedLocalAlpineResult(content: message.content, metadata: metadata)
         let visibleCommands = commandResults.filter {
             $0.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "write_files"
         }
-        let hasError = parsed.hasNonZeroExit || commandResults.contains { $0.failed }
+        let hasError = parsed.hasNonZeroExit || commandResults.contains { $0.failed } || toolCalls.contains { $0.failed }
         let visibleCommandCount = visibleCommands.count
+        let completedToolCalls = toolCalls.filter { !$0.isRunning }
+        let fileToolCount = completedToolCalls.filter { ["read_file", "edit_file", "patch_file", "write_files"].contains($0.name) }.count
+        let commandToolCount = completedToolCalls.filter { ["command", "diagnostic"].contains($0.name) }.count
+        let summaryFileCount = toolCalls.isEmpty ? writtenFiles.count : fileToolCount
+        let summaryCommandCount = toolCalls.isEmpty ? visibleCommandCount : commandToolCount
 
         self.id = message.id
         self.timestamp = message.timestamp
@@ -46,13 +53,14 @@ private struct AgentActivityItem: Identifiable, Hashable {
         self.summary = message.isStreaming
             ? "正在运行本地 Alpine"
             : parsed.activitySummary(
-                editedFileCount: writtenFiles.isEmpty ? nil : writtenFiles.count,
-                commandCount: visibleCommands.isEmpty ? nil : visibleCommandCount,
+                editedFileCount: summaryFileCount == 0 ? nil : summaryFileCount,
+                commandCount: summaryCommandCount == 0 ? nil : summaryCommandCount,
                 hasError: hasError
             )
-        self.fileCount = writtenFiles.count
-        self.commandCount = visibleCommandCount
+        self.fileCount = summaryFileCount
+        self.commandCount = summaryCommandCount
         self.hasFailure = hasError
+        self.toolCalls = toolCalls
     }
 }
 
@@ -1560,6 +1568,9 @@ struct ChatDetailView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text("\(message.role == .user ? "You" : "Assistant"): \(message.content.prefix(200))"))
+        .transaction { transaction in
+            transaction.animation = nil
+        }
     }
 
     // MARK: - Assistant Header
@@ -3990,7 +4001,7 @@ private struct ChatAmbientBackgroundView: View {
 private struct ImageGenerationPlaceholderView: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private let animationPeriod: TimeInterval = 8.5
+    private let animationPeriod: TimeInterval = 10.5
     private let fogPatches = ImageGenerationFogPatch.defaultPatches
 
     var body: some View {
@@ -4006,15 +4017,15 @@ private struct ImageGenerationPlaceholderView: View {
     private func placeholder(phase: CGFloat) -> some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
         return ZStack {
-            shape.fill(backgroundFill(phase: phase))
+            shape.fill(baseFill)
             colorOverlay(phase: phase)
-                .blendMode(theme.isDark ? .screen : .plusLighter)
-                .opacity(theme.isDark ? 0.92 : 0.86)
+                .blendMode(theme.isDark ? .screen : .normal)
+                .opacity(theme.isDark ? 0.86 : 0.94)
         }
             .clipShape(shape)
             .overlay {
                 shape
-                    .strokeBorder(Color.white.opacity(theme.isDark ? 0.08 : 0.18), lineWidth: 0.75)
+                    .strokeBorder(Color.white.opacity(theme.isDark ? 0.08 : 0.16), lineWidth: 0.75)
             }
             .aspectRatio(1, contentMode: .fit)
             .frame(maxWidth: 340)
@@ -4023,26 +4034,23 @@ private struct ImageGenerationPlaceholderView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func basePalette() -> [Color] {
-        return [
-            Color(red: 0.98, green: 0.92, blue: 0.68).opacity(theme.isDark ? 0.92 : 0.98),
-            Color(red: 0.79, green: 0.93, blue: 0.84).opacity(theme.isDark ? 0.88 : 0.96),
-            Color(red: 0.74, green: 0.88, blue: 1.00).opacity(theme.isDark ? 0.86 : 0.95),
-            Color(red: 0.92, green: 0.80, blue: 1.00).opacity(theme.isDark ? 0.90 : 0.97),
-            Color(red: 0.99, green: 0.83, blue: 0.91).opacity(theme.isDark ? 0.88 : 0.95)
-        ]
-    }
-
-    private func backgroundFill(phase: CGFloat) -> AngularGradient {
-        let angle = Double(phase) * .pi * 2
-        return AngularGradient(
-            colors: basePalette().map { $0.opacity(theme.isDark ? 0.78 : 0.90) },
-            center: UnitPoint(
-                x: CGFloat(0.50 + 0.18 * cos(angle * 0.72 + 0.35)),
-                y: CGFloat(0.50 + 0.16 * sin(angle * 0.64 - 0.20))
-            ),
-            startAngle: .degrees(Double(phase) * 360 - 18),
-            endAngle: .degrees(Double(phase) * 360 + 342)
+    private var baseFill: LinearGradient {
+        LinearGradient(
+            colors: theme.isDark
+                ? [
+                    Color(red: 0.12, green: 0.24, blue: 0.32),
+                    Color(red: 0.18, green: 0.28, blue: 0.48),
+                    Color(red: 0.34, green: 0.22, blue: 0.48),
+                    Color(red: 0.28, green: 0.34, blue: 0.20)
+                ]
+                : [
+                    Color(red: 0.50, green: 0.92, blue: 0.86),
+                    Color(red: 0.58, green: 0.78, blue: 1.00),
+                    Color(red: 0.84, green: 0.68, blue: 1.00),
+                    Color(red: 1.00, green: 0.78, blue: 0.64)
+                ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
         )
     }
 
@@ -4057,11 +4065,9 @@ private struct ImageGenerationPlaceholderView: View {
                     fogPatch(patch, phase: phase, shortEdge: shortEdge, in: geometry.size)
                 }
             }
-            .blur(radius: shortEdge * 0.09)
-            .saturation(theme.isDark ? 1.18 : 1.10)
-            .contrast(theme.isDark ? 1.06 : 1.03)
-            .opacity(theme.isDark ? 0.92 : 0.98)
-            .drawingGroup(opaque: false, colorMode: .extendedLinear)
+            .blur(radius: shortEdge * 0.105)
+            .saturation(theme.isDark ? 1.12 : 1.06)
+            .contrast(theme.isDark ? 1.04 : 1.01)
         }
     }
 
@@ -4078,23 +4084,24 @@ private struct ImageGenerationPlaceholderView: View {
     ) -> some View {
         let center = fogCenter(for: patch, phase: phase)
         let wobble = fogWobble(for: patch, phase: phase)
-        let rotation = Double(phase) * patch.rotationSpeed * 360 + patch.rotationOffset
+        let hueShift = patch.hueAmplitude * sin((Double(phase) * patch.speed + patch.secondaryOffset) * .pi * 2)
 
-        return RoundedRectangle(cornerRadius: shortEdge * patch.cornerRatio, style: .continuous)
+        return Ellipse()
             .fill(
-                LinearGradient(
+                RadialGradient(
                     colors: [
-                        patch.color.opacity((theme.isDark ? 0.82 : 0.74) * patch.opacity),
-                        patch.secondaryColor.opacity((theme.isDark ? 0.66 : 0.54) * patch.opacity),
+                        patch.color.opacity((theme.isDark ? 0.72 : 0.62) * patch.opacity),
+                        patch.secondaryColor.opacity((theme.isDark ? 0.50 : 0.42) * patch.opacity),
                         patch.color.opacity(0.0)
                     ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: shortEdge * max(patch.widthRatio, patch.heightRatio) * 0.55
                 )
             )
             .frame(width: shortEdge * patch.widthRatio, height: shortEdge * patch.heightRatio)
-            .rotationEffect(.degrees(rotation))
             .scaleEffect(x: 1 + wobble.x, y: 1 + wobble.y, anchor: .center)
+            .hueRotation(.degrees(hueShift))
             .position(x: containerSize.width * center.x, y: containerSize.height * center.y)
     }
 
@@ -4141,17 +4148,15 @@ private struct ImageGenerationFogPatch: Identifiable {
     let secondarySpeed: Double
     let offset: Double
     let secondaryOffset: Double
-    let rotationSpeed: Double
-    let rotationOffset: Double
+    let hueAmplitude: Double
     let opacity: Double
 
     static let defaultPatches: [ImageGenerationFogPatch] = [
-        ImageGenerationFogPatch(id: 0, color: Color(red: 1.00, green: 0.86, blue: 0.42), secondaryColor: Color(red: 0.82, green: 1.00, blue: 0.72), widthRatio: 1.12, heightRatio: 0.72, cornerRatio: 0.34, baseX: 0.16, baseY: 0.16, xAmplitude: 0.26, yAmplitude: 0.20, drift: 0.08, speed: 0.92, secondarySpeed: 0.57, offset: 0.03, secondaryOffset: 1.40, rotationSpeed: 0.28, rotationOffset: -16, opacity: 0.92),
-        ImageGenerationFogPatch(id: 1, color: Color(red: 0.42, green: 0.82, blue: 1.00), secondaryColor: Color(red: 0.72, green: 0.96, blue: 1.00), widthRatio: 1.08, heightRatio: 0.86, cornerRatio: 0.38, baseX: 0.82, baseY: 0.17, xAmplitude: 0.24, yAmplitude: 0.22, drift: 0.07, speed: 1.12, secondarySpeed: 0.62, offset: 0.24, secondaryOffset: 2.60, rotationSpeed: -0.34, rotationOffset: 24, opacity: 0.88),
-        ImageGenerationFogPatch(id: 2, color: Color(red: 0.86, green: 0.62, blue: 1.00), secondaryColor: Color(red: 0.62, green: 0.74, blue: 1.00), widthRatio: 1.26, heightRatio: 0.78, cornerRatio: 0.36, baseX: 0.26, baseY: 0.75, xAmplitude: 0.28, yAmplitude: 0.21, drift: 0.09, speed: 0.82, secondarySpeed: 0.71, offset: 0.53, secondaryOffset: 0.50, rotationSpeed: 0.42, rotationOffset: 34, opacity: 0.90),
-        ImageGenerationFogPatch(id: 3, color: Color(red: 0.55, green: 1.00, blue: 0.72), secondaryColor: Color(red: 0.88, green: 1.00, blue: 0.54), widthRatio: 0.94, heightRatio: 0.70, cornerRatio: 0.32, baseX: 0.88, baseY: 0.78, xAmplitude: 0.22, yAmplitude: 0.24, drift: 0.10, speed: 0.74, secondarySpeed: 0.66, offset: 0.79, secondaryOffset: 3.10, rotationSpeed: -0.24, rotationOffset: -38, opacity: 0.80),
-        ImageGenerationFogPatch(id: 4, color: Color(red: 1.00, green: 0.62, blue: 0.78), secondaryColor: Color(red: 1.00, green: 0.76, blue: 0.96), widthRatio: 0.82, heightRatio: 0.62, cornerRatio: 0.30, baseX: 0.54, baseY: 0.48, xAmplitude: 0.20, yAmplitude: 0.18, drift: 0.07, speed: 1.34, secondarySpeed: 0.53, offset: 0.41, secondaryOffset: 4.20, rotationSpeed: 0.46, rotationOffset: 8, opacity: 0.72),
-        ImageGenerationFogPatch(id: 5, color: Color(red: 0.94, green: 0.96, blue: 1.00), secondaryColor: Color(red: 0.70, green: 0.90, blue: 1.00), widthRatio: 1.18, heightRatio: 0.52, cornerRatio: 0.26, baseX: 0.50, baseY: 0.33, xAmplitude: 0.18, yAmplitude: 0.12, drift: 0.06, speed: 1.55, secondarySpeed: 0.78, offset: 0.66, secondaryOffset: 1.90, rotationSpeed: -0.18, rotationOffset: 64, opacity: 0.58)
+        ImageGenerationFogPatch(id: 0, color: Color(red: 1.00, green: 0.72, blue: 0.28), secondaryColor: Color(red: 0.94, green: 1.00, blue: 0.42), widthRatio: 1.06, heightRatio: 0.76, cornerRatio: 0.34, baseX: 0.18, baseY: 0.18, xAmplitude: 0.18, yAmplitude: 0.14, drift: 0.06, speed: 0.62, secondarySpeed: 0.48, offset: 0.03, secondaryOffset: 1.40, hueAmplitude: 16, opacity: 0.90),
+        ImageGenerationFogPatch(id: 1, color: Color(red: 0.24, green: 0.78, blue: 1.00), secondaryColor: Color(red: 0.34, green: 1.00, blue: 0.90), widthRatio: 1.12, heightRatio: 0.84, cornerRatio: 0.38, baseX: 0.78, baseY: 0.20, xAmplitude: 0.17, yAmplitude: 0.16, drift: 0.05, speed: 0.78, secondarySpeed: 0.55, offset: 0.24, secondaryOffset: 2.60, hueAmplitude: 18, opacity: 0.88),
+        ImageGenerationFogPatch(id: 2, color: Color(red: 0.78, green: 0.44, blue: 1.00), secondaryColor: Color(red: 0.40, green: 0.56, blue: 1.00), widthRatio: 1.18, heightRatio: 0.86, cornerRatio: 0.36, baseX: 0.28, baseY: 0.72, xAmplitude: 0.20, yAmplitude: 0.15, drift: 0.06, speed: 0.58, secondarySpeed: 0.64, offset: 0.53, secondaryOffset: 0.50, hueAmplitude: 14, opacity: 0.90),
+        ImageGenerationFogPatch(id: 3, color: Color(red: 0.20, green: 1.00, blue: 0.62), secondaryColor: Color(red: 0.82, green: 1.00, blue: 0.20), widthRatio: 0.98, heightRatio: 0.74, cornerRatio: 0.32, baseX: 0.84, baseY: 0.78, xAmplitude: 0.16, yAmplitude: 0.17, drift: 0.07, speed: 0.52, secondarySpeed: 0.58, offset: 0.79, secondaryOffset: 3.10, hueAmplitude: 16, opacity: 0.78),
+        ImageGenerationFogPatch(id: 4, color: Color(red: 1.00, green: 0.42, blue: 0.68), secondaryColor: Color(red: 1.00, green: 0.60, blue: 0.88), widthRatio: 0.88, heightRatio: 0.66, cornerRatio: 0.30, baseX: 0.54, baseY: 0.46, xAmplitude: 0.15, yAmplitude: 0.13, drift: 0.05, speed: 0.94, secondarySpeed: 0.50, offset: 0.41, secondaryOffset: 4.20, hueAmplitude: 12, opacity: 0.76)
     ]
 }
 
@@ -4567,6 +4572,7 @@ private struct LocalAlpineResultCard: View {
     @State private var isExpanded = false
     private let writtenFiles: [LocalAlpineWrittenFile]
     private let commandResults: [LocalAlpineAgentCommandResult]
+    private let toolCalls: [LocalAlpineToolCall]
 
     init(
         content: String,
@@ -4580,6 +4586,7 @@ private struct LocalAlpineResultCard: View {
         self.statusHistory = statusHistory
         self.writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata?["iexa_local_alpine_written_files"])
         self.commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata?["iexa_local_alpine_command_results"])
+        self.toolCalls = LocalAlpineToolCall.decodeMetadata(metadata?["iexa_local_alpine_tool_calls"])
     }
 
     private var parsed: ParsedLocalAlpineResult {
@@ -4590,8 +4597,8 @@ private struct LocalAlpineResultCard: View {
         if isStreaming { return parsed.streamingSummary(statusDetail: statusDetail) }
         return parsed.activitySummary(
             editedFileCount: writtenFiles.isEmpty ? nil : writtenFiles.count,
-            commandCount: executableCommandResults.isEmpty ? nil : executableCommandResults.count,
-            hasError: parsed.hasNonZeroExit || commandResults.contains { $0.failed }
+            commandCount: effectiveCommandCount == 0 ? nil : effectiveCommandCount,
+            hasError: parsed.hasNonZeroExit || commandResults.contains { $0.failed } || toolCalls.contains { $0.failed }
         )
     }
 
@@ -4612,7 +4619,15 @@ private struct LocalAlpineResultCard: View {
     }
 
     private var hiddenActivityCount: Int {
+        if !toolCalls.isEmpty {
+            return max(0, toolCalls.count - 6)
+        }
         max(0, writtenFiles.count - 4) + max(0, executableCommandResults.count - 5)
+    }
+
+    private var effectiveCommandCount: Int {
+        guard !toolCalls.isEmpty else { return executableCommandResults.count }
+        return toolCalls.filter { ["command", "diagnostic"].contains($0.name) && !$0.isRunning }.count
     }
 
     var body: some View {
@@ -4643,7 +4658,7 @@ private struct LocalAlpineResultCard: View {
             }
             .buttonStyle(.plain)
 
-            if !writtenFiles.isEmpty || !executableCommandResults.isEmpty {
+            if !toolCalls.isEmpty || !writtenFiles.isEmpty || !executableCommandResults.isEmpty {
                 activityLedger
             }
 
@@ -4663,24 +4678,37 @@ private struct LocalAlpineResultCard: View {
 
     private var activityLedger: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(writtenFiles.prefix(4).enumerated()), id: \.offset) { _, file in
-                activityRow(
-                    icon: "square.and.pencil",
-                    tint: theme.brandPrimary,
-                    label: "已编辑",
-                    value: file.path,
-                    detail: "\(file.lineCount) 行 · \(file.byteCount) B"
-                )
-            }
+            if !toolCalls.isEmpty {
+                ForEach(Array(toolCalls.prefix(6)), id: \.id) { call in
+                    let display = LocalAlpineToolDisplayRegistry.display(for: call.name)
+                    activityRow(
+                        icon: call.failed ? "exclamationmark.circle.fill" : display.icon,
+                        tint: call.failed ? .orange : (call.isRunning ? theme.brandPrimary : theme.textTertiary),
+                        label: call.isRunning ? "运行中" : (call.failed ? "有错误" : "已完成"),
+                        value: call.displayDetail,
+                        detail: call.exitCode.map { "退出码 \($0) · \(call.cwd)" } ?? call.cwd
+                    )
+                }
+            } else {
+                ForEach(Array(writtenFiles.prefix(4).enumerated()), id: \.offset) { _, file in
+                    activityRow(
+                        icon: "square.and.pencil",
+                        tint: theme.brandPrimary,
+                        label: "已编辑",
+                        value: file.path,
+                        detail: "\(file.lineCount) 行 · \(file.byteCount) B"
+                    )
+                }
 
-            ForEach(Array(executableCommandResults.prefix(5).enumerated()), id: \.offset) { _, result in
-                activityRow(
-                    icon: result.failed ? "exclamationmark.circle.fill" : "terminal.fill",
-                    tint: result.failed ? .orange : theme.textTertiary,
-                    label: result.failed ? "运行出错" : "已运行",
-                    value: oneLineCommand(result.command),
-                    detail: "退出码 \(result.exitCode.map(String.init) ?? "unknown") · \(result.cwd)"
-                )
+                ForEach(Array(executableCommandResults.prefix(5).enumerated()), id: \.offset) { _, result in
+                    activityRow(
+                        icon: result.failed ? "exclamationmark.circle.fill" : "terminal.fill",
+                        tint: result.failed ? .orange : theme.textTertiary,
+                        label: result.failed ? "运行出错" : "已运行",
+                        value: oneLineCommand(result.command),
+                        detail: "退出码 \(result.exitCode.map(String.init) ?? "unknown") · \(result.cwd)"
+                    )
+                }
             }
 
             if hiddenActivityCount > 0 {
@@ -4876,6 +4904,25 @@ private struct AgentTaskCard: View {
                 }
                 .scaledFont(size: 11, weight: .medium)
                 .foregroundStyle(theme.textTertiary)
+
+                if !item.toolCalls.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(item.toolCalls.prefix(4)), id: \.id) { call in
+                            let display = LocalAlpineToolDisplayRegistry.display(for: call.name)
+                            HStack(spacing: 5) {
+                                Image(systemName: call.failed ? "exclamationmark.circle.fill" : display.icon)
+                                    .scaledFont(size: 10, weight: .semibold)
+                                    .foregroundStyle(call.failed ? .orange : (call.isRunning ? theme.brandPrimary : theme.textTertiary))
+                                    .frame(width: 12, height: 12)
+                                Text(call.displayDetail)
+                                    .scaledFont(size: 11, weight: .medium, design: .monospaced)
+                                    .foregroundStyle(theme.textSecondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                    }
+                }
             }
 
             Spacer(minLength: 0)

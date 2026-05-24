@@ -6,6 +6,8 @@ struct LocalAlpineAgentResult: Sendable {
     let interactiveRequest: LocalAlpineInteractiveRequest?
     let commandResults: [LocalAlpineAgentCommandResult]
     let writtenFiles: [LocalAlpineWrittenFile]
+    let toolRunId: String?
+    let toolCalls: [LocalAlpineToolCall]
     let executedCommandCount: Int
     let editedFileCount: Int
     let hadFailure: Bool
@@ -16,6 +18,8 @@ struct LocalAlpineAgentResult: Sendable {
         interactiveRequest: LocalAlpineInteractiveRequest?,
         commandResults: [LocalAlpineAgentCommandResult] = [],
         writtenFiles: [LocalAlpineWrittenFile] = [],
+        toolRunId: String? = nil,
+        toolCalls: [LocalAlpineToolCall] = [],
         executedCommandCount: Int = 0,
         editedFileCount: Int = 0,
         hadFailure: Bool = false
@@ -25,6 +29,8 @@ struct LocalAlpineAgentResult: Sendable {
         self.interactiveRequest = interactiveRequest
         self.commandResults = commandResults
         self.writtenFiles = writtenFiles
+        self.toolRunId = toolRunId
+        self.toolCalls = toolCalls
         self.executedCommandCount = executedCommandCount
         self.editedFileCount = editedFileCount
         self.hadFailure = hadFailure
@@ -212,6 +218,120 @@ struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
     }
 }
 
+enum LocalAlpineToolCallPhase: String, Codable, Hashable, Sendable {
+    case start
+    case result
+}
+
+struct LocalAlpineToolDisplay: Hashable, Sendable {
+    let icon: String
+    let title: String
+}
+
+enum LocalAlpineToolDisplayRegistry {
+    static func display(for toolName: String) -> LocalAlpineToolDisplay {
+        switch toolName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "read_file", "read_files", "read":
+            return LocalAlpineToolDisplay(icon: "doc.text", title: "读取文件")
+        case "edit_file", "edit_files", "replace_file", "edit":
+            return LocalAlpineToolDisplay(icon: "square.and.pencil", title: "编辑文件")
+        case "patch_file", "patch_files", "apply_patch", "patch":
+            return LocalAlpineToolDisplay(icon: "doc.on.doc", title: "应用补丁")
+        case "write_files", "write_file", "write":
+            return LocalAlpineToolDisplay(icon: "doc.badge.plus", title: "写入文件")
+        case "command", "shell", "bash", "exec":
+            return LocalAlpineToolDisplay(icon: "terminal.fill", title: "运行命令")
+        case "diagnostic":
+            return LocalAlpineToolDisplay(icon: "magnifyingglass", title: "诊断")
+        default:
+            return LocalAlpineToolDisplay(icon: "wrench.and.screwdriver", title: toolName)
+        }
+    }
+}
+
+struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
+    let id: String
+    let runId: String
+    let name: String
+    let phase: LocalAlpineToolCallPhase
+    let title: String
+    let detail: String
+    let cwd: String
+    let command: String?
+    let exitCode: Int?
+    let outputPreview: String?
+    let filePaths: [String]
+    let startedAtMs: Int64
+    let completedAtMs: Int64?
+    let failed: Bool
+
+    var isRunning: Bool {
+        phase == .start
+    }
+
+    var displayDetail: String {
+        if !detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return detail
+        }
+        if let command, !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return command
+        }
+        return filePaths.joined(separator: ", ")
+    }
+
+    var statusDescription: String {
+        if isRunning {
+            return "正在\(title)"
+        }
+        if failed {
+            return "\(title)失败"
+        }
+        return "\(title)完成"
+    }
+
+    static func metadataString(for calls: [LocalAlpineToolCall]) -> String? {
+        let limitedCalls = calls.suffix(40).map { call in
+            LocalAlpineToolCall(
+                id: call.id,
+                runId: call.runId,
+                name: call.name,
+                phase: call.phase,
+                title: call.title,
+                detail: String(call.detail.prefix(500)),
+                cwd: call.cwd,
+                command: call.command.map { String($0.prefix(1_000)) },
+                exitCode: call.exitCode,
+                outputPreview: call.outputPreview.map { String($0.prefix(4_000)) },
+                filePaths: Array(call.filePaths.prefix(12)),
+                startedAtMs: call.startedAtMs,
+                completedAtMs: call.completedAtMs,
+                failed: call.failed
+            )
+        }
+        guard !limitedCalls.isEmpty,
+              let data = try? JSONEncoder().encode(Array(limitedCalls)) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func decodeMetadata(_ value: String?) -> [LocalAlpineToolCall] {
+        guard let value,
+              let data = value.data(using: .utf8),
+              let calls = try? JSONDecoder().decode([LocalAlpineToolCall].self, from: data) else {
+            return []
+        }
+        return calls
+    }
+}
+
+struct LocalAlpineToolEvent: Sendable {
+    let runId: String
+    let call: LocalAlpineToolCall
+}
+
+typealias LocalAlpineToolEventHandler = @MainActor @Sendable (LocalAlpineToolEvent) async -> Void
+
 actor LocalAlpineAgentService {
     static let shared = LocalAlpineAgentService()
 
@@ -325,7 +445,8 @@ actor LocalAlpineAgentService {
 
     func executeBlocks(
         in content: String,
-        inputProvider: (@MainActor (LocalAlpineInteractiveRequest) async -> String?)? = nil
+        inputProvider: (@MainActor (LocalAlpineInteractiveRequest) async -> String?)? = nil,
+        eventHandler: LocalAlpineToolEventHandler? = nil
     ) async -> LocalAlpineAgentResult {
         let blocks = extractInstructionBlocks(from: content)
         guard !blocks.isEmpty else {
@@ -352,13 +473,26 @@ actor LocalAlpineAgentService {
         let duplicateCount = max(0, commands.count - uniqueCommands.count)
         let trimmedCommands = Array(uniqueCommands.prefix(maxCommandsPerResponse))
         let skippedCount = max(0, uniqueCommands.count - trimmedCommands.count)
+        let toolRunId = UUID().uuidString
         var commandResults: [LocalAlpineAgentCommandResult] = []
         var writtenFiles: [LocalAlpineWrittenFile] = []
+        var toolCalls: [LocalAlpineToolCall] = []
         var editedFilePaths = Set<String>()
         var stopRemainingCommands = false
 
         lines.insert("Local Alpine 执行结果", at: 0)
         lines.append("环境：内置 Alpine Linux，工作目录默认 `/mnt/iexa`")
+
+        func emitTool(_ call: LocalAlpineToolCall) async {
+            if let index = toolCalls.firstIndex(where: { $0.id == call.id }) {
+                toolCalls[index] = call
+            } else {
+                toolCalls.append(call)
+            }
+            if let eventHandler {
+                await eventHandler(LocalAlpineToolEvent(runId: toolRunId, call: call))
+            }
+        }
 
         for command in trimmedCommands {
             guard !stopRemainingCommands else { break }
@@ -368,9 +502,23 @@ actor LocalAlpineAgentService {
             var stepLines: [String] = []
             var shouldRunShellCommand = true
             if !command.readFiles.isEmpty {
+                let context = Self.toolCallContext(
+                    runId: toolRunId,
+                    name: "read_file",
+                    detail: Self.toolDetail(forReadFiles: command.readFiles),
+                    cwd: effectiveCWD,
+                    filePaths: command.readFiles.map(\.path)
+                )
+                await emitTool(Self.toolCallStart(context))
                 let readResult = await readFiles(command.readFiles, cwd: effectiveCWD)
                 stepLines.append(readResult.summary)
                 commandResults.append(contentsOf: readResult.commandResults)
+                await emitTool(Self.toolCallResult(
+                    context,
+                    exitCode: readResult.hadFailure ? 1 : 0,
+                    outputPreview: readResult.summary,
+                    failed: readResult.hadFailure
+                ))
                 if readResult.hadFailure {
                     shouldRunShellCommand = false
                     stopRemainingCommands = true
@@ -378,11 +526,25 @@ actor LocalAlpineAgentService {
             }
 
             if !command.editFiles.isEmpty {
+                let context = Self.toolCallContext(
+                    runId: toolRunId,
+                    name: "edit_file",
+                    detail: Self.toolDetail(forEditFiles: command.editFiles),
+                    cwd: effectiveCWD,
+                    filePaths: command.editFiles.map(\.path)
+                )
+                await emitTool(Self.toolCallStart(context))
                 let editResult = await editFiles(command.editFiles, cwd: effectiveCWD)
                 stepLines.append(editResult.summary)
                 commandResults.append(contentsOf: editResult.commandResults)
                 editResult.editedPaths.forEach { editedFilePaths.insert($0) }
                 writtenFiles.append(contentsOf: editResult.writtenFiles)
+                await emitTool(Self.toolCallResult(
+                    context,
+                    exitCode: editResult.hadFailure ? 1 : 0,
+                    outputPreview: editResult.summary,
+                    failed: editResult.hadFailure
+                ))
                 if editResult.hadFailure {
                     shouldRunShellCommand = false
                     stopRemainingCommands = true
@@ -390,11 +552,25 @@ actor LocalAlpineAgentService {
             }
 
             if !command.patchFiles.isEmpty {
+                let context = Self.toolCallContext(
+                    runId: toolRunId,
+                    name: "patch_file",
+                    detail: Self.toolDetail(forPatchFiles: command.patchFiles),
+                    cwd: effectiveCWD,
+                    filePaths: command.patchFiles.compactMap(\.path)
+                )
+                await emitTool(Self.toolCallStart(context))
                 let patchResult = await patchFiles(command.patchFiles, cwd: effectiveCWD)
                 stepLines.append(patchResult.summary)
                 commandResults.append(contentsOf: patchResult.commandResults)
                 patchResult.editedPaths.forEach { editedFilePaths.insert($0) }
                 writtenFiles.append(contentsOf: patchResult.writtenFiles)
+                await emitTool(Self.toolCallResult(
+                    context,
+                    exitCode: patchResult.hadFailure ? 1 : 0,
+                    outputPreview: patchResult.summary,
+                    failed: patchResult.hadFailure
+                ))
                 if patchResult.hadFailure {
                     shouldRunShellCommand = false
                     stopRemainingCommands = true
@@ -402,10 +578,24 @@ actor LocalAlpineAgentService {
             }
 
             if !command.writeFiles.isEmpty {
+                let context = Self.toolCallContext(
+                    runId: toolRunId,
+                    name: "write_files",
+                    detail: Self.toolDetail(forWriteFiles: command.writeFiles),
+                    cwd: effectiveCWD,
+                    filePaths: command.writeFiles.map(\.path)
+                )
+                await emitTool(Self.toolCallStart(context))
                 let writeResult = await writeFiles(command.writeFiles, cwd: effectiveCWD)
                 stepLines.append(writeResult.summary)
                 writeResult.writtenPaths.forEach { editedFilePaths.insert($0) }
                 writtenFiles.append(contentsOf: writeResult.writtenFiles)
+                await emitTool(Self.toolCallResult(
+                    context,
+                    exitCode: writeResult.hadFailure ? 125 : 0,
+                    outputPreview: writeResult.summary,
+                    failed: writeResult.hadFailure
+                ))
                 if writeResult.hadFailure {
                     let result = LocalAlpineCommandResult(
                         command: "write_files",
@@ -452,6 +642,15 @@ actor LocalAlpineAgentService {
                     continue
                 }
 
+                let context = Self.toolCallContext(
+                    runId: toolRunId,
+                    name: "command",
+                    detail: Self.oneLine(commandToExecute),
+                    cwd: effectiveCWD,
+                    command: commandToExecute,
+                    filePaths: []
+                )
+                await emitTool(Self.toolCallStart(context))
                 var result = await LocalAlpineTerminalService.shared.execute(
                     command: commandToExecute,
                     cwd: effectiveCWD
@@ -471,6 +670,12 @@ actor LocalAlpineAgentService {
                             cwd: effectiveCWD,
                             result: result
                         ))
+                        await emitTool(Self.toolCallResult(
+                            context,
+                            exitCode: result.exitCode,
+                            outputPreview: result.output,
+                            failed: true
+                        ))
                         lines.append(stepLines.joined(separator: "\n\n"))
                         return LocalAlpineAgentResult(
                             didExecute: true,
@@ -478,6 +683,8 @@ actor LocalAlpineAgentService {
                             interactiveRequest: request,
                             commandResults: commandResults,
                             writtenFiles: writtenFiles,
+                            toolRunId: toolRunId,
+                            toolCalls: toolCalls,
                             executedCommandCount: Self.actualCommandCount(commandResults),
                             editedFileCount: editedFilePaths.count,
                             hadFailure: commandResults.contains { $0.failed }
@@ -490,16 +697,37 @@ actor LocalAlpineAgentService {
                     cwd: effectiveCWD,
                     result: result
                 ))
+                await emitTool(Self.toolCallResult(
+                    context,
+                    exitCode: result.exitCode,
+                    outputPreview: result.output,
+                    failed: result.exitCode != 0 || result.interactiveRequest != nil
+                ))
                 if let diagnostic = await pythonSyntaxDiagnostic(
                     command: commandToExecute,
                     output: result.output,
                     cwd: effectiveCWD
                 ) {
+                    let diagnosticContext = Self.toolCallContext(
+                        runId: toolRunId,
+                        name: "diagnostic",
+                        detail: Self.oneLine(diagnostic.command),
+                        cwd: effectiveCWD,
+                        command: diagnostic.command,
+                        filePaths: []
+                    )
+                    await emitTool(Self.toolCallStart(diagnosticContext))
                     stepLines.append(format(command: diagnostic.command, cwd: effectiveCWD, result: diagnostic.result))
                     commandResults.append(Self.commandResult(
                         command: diagnostic.command,
                         cwd: effectiveCWD,
                         result: diagnostic.result
+                    ))
+                    await emitTool(Self.toolCallResult(
+                        diagnosticContext,
+                        exitCode: diagnostic.result.exitCode,
+                        outputPreview: diagnostic.result.output,
+                        failed: diagnostic.result.exitCode != 0
                     ))
                 }
             }
@@ -522,6 +750,8 @@ actor LocalAlpineAgentService {
             interactiveRequest: nil,
             commandResults: commandResults,
             writtenFiles: writtenFiles,
+            toolRunId: toolRunId,
+            toolCalls: toolCalls,
             executedCommandCount: Self.actualCommandCount(commandResults),
             editedFileCount: editedFilePaths.count,
             hadFailure: commandResults.contains { $0.failed }
@@ -594,6 +824,97 @@ actor LocalAlpineAgentService {
             exitCode: result.exitCode,
             outputPreview: String(result.output.prefix(8_000))
         )
+    }
+
+    private nonisolated static func toolCallContext(
+        runId: String,
+        name: String,
+        detail: String,
+        cwd: String,
+        command: String? = nil,
+        filePaths: [String]
+    ) -> LocalAlpineToolCallContext {
+        let display = LocalAlpineToolDisplayRegistry.display(for: name)
+        return LocalAlpineToolCallContext(
+            id: UUID().uuidString,
+            runId: runId,
+            name: name,
+            title: display.title,
+            detail: String(detail.prefix(500)),
+            cwd: cwd,
+            command: command,
+            filePaths: filePaths.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+            startedAtMs: Self.nowMs()
+        )
+    }
+
+    private nonisolated static func toolCallStart(_ context: LocalAlpineToolCallContext) -> LocalAlpineToolCall {
+        LocalAlpineToolCall(
+            id: context.id,
+            runId: context.runId,
+            name: context.name,
+            phase: .start,
+            title: context.title,
+            detail: context.detail,
+            cwd: context.cwd,
+            command: context.command,
+            exitCode: nil,
+            outputPreview: nil,
+            filePaths: context.filePaths,
+            startedAtMs: context.startedAtMs,
+            completedAtMs: nil,
+            failed: false
+        )
+    }
+
+    private nonisolated static func toolCallResult(
+        _ context: LocalAlpineToolCallContext,
+        exitCode: Int?,
+        outputPreview: String?,
+        failed: Bool
+    ) -> LocalAlpineToolCall {
+        LocalAlpineToolCall(
+            id: context.id,
+            runId: context.runId,
+            name: context.name,
+            phase: .result,
+            title: context.title,
+            detail: context.detail,
+            cwd: context.cwd,
+            command: context.command,
+            exitCode: exitCode,
+            outputPreview: outputPreview.map { String($0.prefix(4_000)) },
+            filePaths: context.filePaths,
+            startedAtMs: context.startedAtMs,
+            completedAtMs: Self.nowMs(),
+            failed: failed
+        )
+    }
+
+    private nonisolated static func nowMs() -> Int64 {
+        Int64((Date().timeIntervalSince1970 * 1_000).rounded())
+    }
+
+    private nonisolated static func oneLine(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private nonisolated static func toolDetail(forReadFiles requests: [LocalAlpineReadFileRequest]) -> String {
+        requests.map(\.path).prefix(3).joined(separator: ", ")
+    }
+
+    private nonisolated static func toolDetail(forEditFiles requests: [LocalAlpineEditFileRequest]) -> String {
+        requests.map(\.path).prefix(3).joined(separator: ", ")
+    }
+
+    private nonisolated static func toolDetail(forPatchFiles requests: [LocalAlpinePatchFileRequest]) -> String {
+        requests.map { $0.path ?? "(diff header)" }.prefix(3).joined(separator: ", ")
+    }
+
+    private nonisolated static func toolDetail(forWriteFiles files: [LocalAlpineAgentFile]) -> String {
+        files.map(\.path).prefix(3).joined(separator: ", ")
     }
 
     private func extractInstructionBlocks(from content: String) -> [String] {
@@ -2206,6 +2527,18 @@ private struct LocalAlpineAgentCommand: Sendable {
         self.editFiles = editFiles
         self.patchFiles = patchFiles
     }
+}
+
+private struct LocalAlpineToolCallContext: Sendable {
+    let id: String
+    let runId: String
+    let name: String
+    let title: String
+    let detail: String
+    let cwd: String
+    let command: String?
+    let filePaths: [String]
+    let startedAtMs: Int64
 }
 
 private struct LocalAlpineAgentFile: Sendable {

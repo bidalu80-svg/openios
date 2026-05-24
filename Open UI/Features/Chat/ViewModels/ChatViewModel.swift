@@ -356,6 +356,7 @@ final class ChatViewModel {
     private var localAlpineFinalSummaryParentIds: Set<String> = []
     private var localAlpineContinuationParentIds: Set<String> = []
     private var localAlpineFinishedContinuationMessageIds: Set<String> = []
+    private var localAlpineActiveRunIdsByMessageId: [String: String] = [:]
     private let localAlpineAgentMaxSteps = 10
     private let localAlpineContinuationMaxNoCommandRetries = 2
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
@@ -5504,9 +5505,32 @@ final class ChatViewModel {
             exitCode: result.exitCode,
             outputPreview: String(result.output.prefix(8_000))
         )
+        let directToolRunId = UUID().uuidString
+        let directToolDisplay = LocalAlpineToolDisplayRegistry.display(for: "command")
+        let directNowMs = Int64((Date().timeIntervalSince1970 * 1_000).rounded())
+        let directToolCall = LocalAlpineToolCall(
+            id: UUID().uuidString,
+            runId: directToolRunId,
+            name: "command",
+            phase: .result,
+            title: directToolDisplay.title,
+            detail: Self.localAlpineCommandPreview(from: command),
+            cwd: "/mnt/iexa",
+            command: command,
+            exitCode: result.exitCode,
+            outputPreview: String(result.output.prefix(4_000)),
+            filePaths: [],
+            startedAtMs: directNowMs,
+            completedAtMs: directNowMs,
+            failed: result.exitCode != 0 || result.interactiveRequest != nil
+        )
         if let index = conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) {
             var metadata = conversation?.messages[index].metadata ?? [:]
             metadata["iexa_local_alpine_raw_result"] = result.output
+            metadata["iexa_local_alpine_tool_run_id"] = directToolRunId
+            if let toolCalls = LocalAlpineToolCall.metadataString(for: [directToolCall]) {
+                metadata["iexa_local_alpine_tool_calls"] = toolCalls
+            }
             if let commandResults = LocalAlpineAgentCommandResult.metadataString(for: [directCommandResult]) {
                 metadata["iexa_local_alpine_command_results"] = commandResults
             }
@@ -11526,10 +11550,16 @@ final class ChatViewModel {
             endBackgroundTask()
         }
 
-        let toolResult = await LocalAlpineTerminalAgentRunner.run(.executableContent(content)) { request in
-            guard !Task.isCancelled else { return nil }
-            return await self.requestLocalAlpineInput(request)
-        }
+        let toolResult = await LocalAlpineTerminalAgentRunner.run(
+            .executableContent(content),
+            inputProvider: { request in
+                guard !Task.isCancelled else { return nil }
+                return await self.requestLocalAlpineInput(request)
+            },
+            eventHandler: { [weak self] event in
+                self?.applyLocalAlpineToolEvent(event, messageId: resultMessageId)
+            }
+        )
         let result = toolResult.result
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
         guard !Task.isCancelled else {
@@ -11572,6 +11602,12 @@ final class ChatViewModel {
         if let index = conversation?.messages.firstIndex(where: { $0.id == resultMessageId }) {
             var metadata = conversation?.messages[index].metadata ?? [:]
             metadata["iexa_local_alpine_raw_result"] = result.summary
+            if let toolRunId = result.toolRunId {
+                metadata["iexa_local_alpine_tool_run_id"] = toolRunId
+            }
+            if let toolCalls = LocalAlpineToolCall.metadataString(for: result.toolCalls) {
+                metadata["iexa_local_alpine_tool_calls"] = toolCalls
+            }
             if let writtenFiles = LocalAlpineWrittenFile.metadataString(for: result.writtenFiles) {
                 metadata["iexa_local_alpine_written_files"] = writtenFiles
             }
@@ -11580,6 +11616,7 @@ final class ChatViewModel {
             }
             conversation?.messages[index].metadata = metadata
         }
+        localAlpineActiveRunIdsByMessageId.removeValue(forKey: resultMessageId)
         let resultMetadata = conversation?.messages.first(where: { $0.id == resultMessageId })?.metadata
         recordLocalAlpineFailures(from: result)
         conversation?.history.updateNode(id: resultMessageId) { node in
@@ -12697,6 +12734,46 @@ final class ChatViewModel {
         // "setting value during update" crashes if a navigation event (e.g.,
         // new chat) fires concurrently.
         conversation?.messages[index].followUps = followUps
+    }
+
+    private func applyLocalAlpineToolEvent(
+        _ event: LocalAlpineToolEvent,
+        messageId: String
+    ) {
+        guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
+
+        if let activeRunId = localAlpineActiveRunIdsByMessageId[messageId],
+           activeRunId != event.runId {
+            return
+        }
+        localAlpineActiveRunIdsByMessageId[messageId] = event.runId
+
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        var metadata = conversation?.messages[index].metadata ?? [:]
+        metadata["iexa_local_alpine_tool_run_id"] = event.runId
+
+        var calls = LocalAlpineToolCall.decodeMetadata(metadata["iexa_local_alpine_tool_calls"])
+        if let existingIndex = calls.firstIndex(where: { $0.id == event.call.id }) {
+            calls[existingIndex] = event.call
+        } else {
+            calls.append(event.call)
+        }
+        if let encoded = LocalAlpineToolCall.metadataString(for: calls) {
+            metadata["iexa_local_alpine_tool_calls"] = encoded
+        }
+        conversation?.messages[index].metadata = metadata
+
+        let status = ChatStatusUpdate(
+            action: "local_alpine_tool",
+            description: event.call.statusDescription,
+            done: event.call.phase == .result,
+            occurredAt: .now
+        )
+        conversation?.messages[index].statusHistory.append(status)
+        conversation?.history.updateNode(id: messageId) { node in
+            node.metadata = metadata
+            node.statusHistory = conversation?.messages[index].statusHistory ?? node.statusHistory
+        }
     }
 
     /// Refreshes conversation metadata (title, sources, follow-ups, files) from server.
