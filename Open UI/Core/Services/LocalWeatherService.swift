@@ -57,6 +57,7 @@ final class LocalWeatherService {
             let weather = try await weatherService.weather(for: location)
             let current = weather.currentWeather
             let chance = weather.hourlyForecast.first?.precipitationChance
+            let attribution = try weatherService.attribution
             return LocalWeatherSnapshot(
                 locationName: manager.cachedPlaceName,
                 latitude: location.coordinate.latitude,
@@ -69,8 +70,8 @@ final class LocalWeatherService {
                 humidity: current.humidity,
                 windSpeedKPH: current.wind.speed.converted(to: .kilometersPerHour).value,
                 precipitationChance: chance,
-                attributionServiceName: weatherService.attribution.serviceName,
-                attributionLegalURL: weatherService.attribution.legalPageURL
+                attributionServiceName: attribution.serviceName,
+                attributionLegalURL: attribution.legalPageURL
             )
         } catch {
             throw LocalWeatherError.weatherUnavailable(error.localizedDescription)
