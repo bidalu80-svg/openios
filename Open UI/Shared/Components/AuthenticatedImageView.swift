@@ -9,7 +9,6 @@ struct AuthenticatedImageView: View {
     let fileId: String
     let apiClient: APIClient?
     let onEdit: ((UIImage) -> Void)?
-    let showsInlineActions: Bool
 
     @State private var loadedImage: UIImage?
     @State private var isLoading = true
@@ -37,10 +36,9 @@ struct AuthenticatedImageView: View {
         let cost: Int
     }
 
-    init(fileId: String, apiClient: APIClient?, showsInlineActions: Bool = true, onEdit: ((UIImage) -> Void)? = nil) {
+    init(fileId: String, apiClient: APIClient?, onEdit: ((UIImage) -> Void)? = nil) {
         self.fileId = fileId
         self.apiClient = apiClient
-        self.showsInlineActions = showsInlineActions
         self.onEdit = onEdit
     }
 
@@ -126,7 +124,7 @@ struct AuthenticatedImageView: View {
                 }
             }
 
-            if showsInlineActions, let image = loadedImage {
+            if let image = loadedImage {
                 HStack(spacing: 7) {
                     if let onEdit {
                         Button {

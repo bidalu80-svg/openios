@@ -314,15 +314,10 @@ struct ChatDetailView: View {
             messageListArea
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                if let error = viewModel.errorMessage {
-                    errorBannerView(error)
-                }
-                if editingMessageId != nil {
-                    editInputBar
-                } else {
-                    inputFieldArea(vm: vm)
-                }
+            if editingMessageId != nil {
+                editInputBar
+            } else {
+                inputFieldArea(vm: vm)
             }
         }
         .navigationBarTitleDisplayMode(.inline)
@@ -435,6 +430,12 @@ struct ChatDetailView: View {
         // Toasts & banners
         .overlay(alignment: .top) {
             if showCopiedToast { copiedToastView }
+        }
+        .overlay(alignment: .bottom) {
+            if let error = viewModel.errorMessage {
+                errorBannerView(error)
+                    .padding(.bottom, keyboard.height + 80)
+            }
         }
         // Sheets & alerts
         .sheet(isPresented: $showFilePicker) {
