@@ -11993,14 +11993,16 @@ final class ChatViewModel {
         }
         await attachLocalAlpineGeneratedMediaIfNeeded(messageId: resultMessageId)
         localAlpineActiveRunIdsByMessageId.removeValue(forKey: resultMessageId)
-        let resultMetadata = conversation?.messages.first(where: { $0.id == resultMessageId })?.metadata
+        let resultMessageSnapshot = conversation?.messages.first(where: { $0.id == resultMessageId })
+        let resultMetadata = resultMessageSnapshot?.metadata
+        let resultFiles = resultMessageSnapshot?.files
         recordLocalAlpineFailures(from: result)
         conversation?.history.updateNode(id: resultMessageId) { node in
             node.content = result.summary
             node.done = true
             node.statusHistory = [doneStatus]
             node.metadata = resultMetadata
-            if let files = conversation?.messages.first(where: { $0.id == resultMessageId })?.files {
+            if let files = resultFiles {
                 node.files = files
             }
         }
