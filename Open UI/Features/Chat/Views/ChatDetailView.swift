@@ -1243,6 +1243,19 @@ struct ChatDetailView: View {
                 scrollPosition.scrollTo(edge: .bottom)
             }
         }
+        .onChange(of: keyboard.height) { _, height in
+            guard height > 1, !viewModel.messages.isEmpty else { return }
+            isScrolledUp = false
+            lastProgrammaticScrollTime = Date()
+            let animation = keyboard.matchedAnimation
+            let delay = keyboard.animationDuration + 0.05
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                lastProgrammaticScrollTime = Date()
+                withAnimation(animation) {
+                    scrollPosition.scrollTo(edge: .bottom)
+                }
+            }
+        }
     }
 
     private var scrollContent: some View {
@@ -1390,6 +1403,10 @@ struct ChatDetailView: View {
 
     // MARK: - Messages List
 
+    private var lastTurnMinHeight: CGFloat {
+        keyboard.height > 1 ? 0 : max(viewState_containerHeight, 0)
+    }
+
     /// Splits messages into two groups around the last conversation turn.
     ///
     /// The **last turn** is defined as the last user message plus any
@@ -1431,7 +1448,7 @@ struct ChatDetailView: View {
                             .id(message.id)
                     }
                 }
-                .frame(minHeight: max(viewState_containerHeight, 0), alignment: .top)
+                .frame(minHeight: lastTurnMinHeight, alignment: .top)
             }
         }
     }
