@@ -11751,6 +11751,10 @@ final class ChatViewModel {
         forceContinue: Bool = false,
         finalSummaryOnly: Bool = false
     ) async {
+        if finalSummaryOnly {
+            await appendLocalAlpineFinalSummary(parentId: parentId)
+            return
+        }
         if !finalSummaryOnly {
             guard !localAlpineAgentStopRequested else { return }
             guard forceContinue || isLocalAlpineAgentStillNeeded(after: parentId) else { return }
@@ -12087,6 +12091,130 @@ final class ChatViewModel {
             localAlpineContinuationTask = nil
         }
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func appendLocalAlpineFinalSummary(parentId: String) async {
+        guard let conversation,
+              let resultMessage = conversation.messages.first(where: { $0.id == parentId }) else {
+            return
+        }
+
+        let modelId = selectedModelId ?? conversation.model ?? "Local Alpine"
+        let content = Self.localAlpineFinalSummaryContent(for: resultMessage)
+        let doneStatus = ChatStatusUpdate(
+            action: "local_alpine_agent",
+            description: "已整理本地 Alpine 回答",
+            done: true,
+            occurredAt: .now
+        )
+        let metadata = [
+            "iexa_local_alpine_continuation": "true",
+            "iexa_local_alpine_final_summary": parentId,
+            "iexa_local_alpine_local_summary": "true"
+        ]
+        let message = ChatMessage(
+            role: .assistant,
+            content: content,
+            timestamp: .now,
+            model: modelId,
+            isStreaming: false,
+            statusHistory: [doneStatus],
+            metadata: metadata
+        )
+        let node = HistoryNode(
+            id: message.id,
+            parentId: parentId,
+            childrenIds: [],
+            role: .assistant,
+            content: content,
+            timestamp: message.timestamp,
+            model: modelId,
+            done: true,
+            statusHistory: [doneStatus],
+            metadata: metadata
+        )
+
+        self.conversation?.messages.append(message)
+        self.conversation?.history.addNode(node)
+        self.conversation?.history.appendChildId(message.id, to: parentId)
+        self.conversation?.history.currentId = message.id
+
+        hasFinishedStreaming = true
+        isStreaming = false
+        isExternallyStreaming = false
+        selfInitiatedStream = false
+        activeTaskId = nil
+        lastTaskExtractionLength = 0
+        localAlpineAgentStopRequested = true
+        localAlpineContinuationTask = nil
+        localAlpineNoCommandContinuationRetries = 0
+
+        await persistLocalConversationIfNeeded()
+        await sendCompletionNotificationIfNeeded(content: content)
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private static func localAlpineFinalSummaryContent(for message: ChatMessage) -> String {
+        let metadata = message.metadata ?? [:]
+        let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata["iexa_local_alpine_command_results"])
+        let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata["iexa_local_alpine_written_files"])
+        let rawResult = metadata["iexa_local_alpine_raw_result"] ?? message.content
+
+        var lines: [String] = ["已完成。"]
+        if !writtenFiles.isEmpty {
+            lines.append("已编辑 \(writtenFiles.count) 个文件：\(localAlpineSummaryFileList(writtenFiles))。")
+        }
+        if !commandResults.isEmpty {
+            lines.append(localAlpineSummaryCommandLine(commandResults))
+        }
+        if let output = localAlpineSummaryOutputPreview(commandResults: commandResults, rawResult: rawResult) {
+            lines.append("关键输出：\n\(output)")
+        }
+        return lines.joined(separator: "\n\n")
+    }
+
+    private static func localAlpineSummaryFileList(_ files: [LocalAlpineWrittenFile]) -> String {
+        let visible = files.prefix(4).map { "`\($0.path)`" }.joined(separator: "、")
+        let remaining = files.count - min(files.count, 4)
+        return remaining > 0 ? "\(visible) 等 \(files.count) 个" : visible
+    }
+
+    private static func localAlpineSummaryCommandLine(_ results: [LocalAlpineAgentCommandResult]) -> String {
+        let visibleCommands = results.suffix(3).map { result in
+            "`\(singleLineLocalAlpineSummaryText(result.command, limit: 96))`"
+        }.joined(separator: "、")
+        let failedCount = results.filter { $0.failed }.count
+        let status = failedCount == 0
+            ? "退出码均为 0"
+            : "\(failedCount) 条命令退出码非 0"
+        if visibleCommands.isEmpty {
+            return "已运行 \(results.count) 条命令，\(status)。"
+        }
+        return "已运行 \(results.count) 条命令：\(visibleCommands)，\(status)。"
+    }
+
+    private static func localAlpineSummaryOutputPreview(
+        commandResults: [LocalAlpineAgentCommandResult],
+        rawResult: String
+    ) -> String? {
+        let source = commandResults.reversed().first {
+            !$0.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }?.outputPreview ?? rawResult
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lines = trimmed.components(separatedBy: .newlines)
+        let clippedLines = lines.prefix(10).map { singleLineLocalAlpineSummaryText($0, limit: 180) }
+        let suffix = lines.count > clippedLines.count ? "\n..." : ""
+        return clippedLines.joined(separator: "\n") + suffix
+    }
+
+    private static func singleLineLocalAlpineSummaryText(_ text: String, limit: Int) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.count > limit else { return normalized }
+        return String(normalized.prefix(max(1, limit - 1))) + "..."
     }
 
     private func localAlpineResultNeedsFollowUp(after resultMessageId: String) -> Bool {

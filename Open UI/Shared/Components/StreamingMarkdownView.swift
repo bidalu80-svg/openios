@@ -1356,6 +1356,17 @@ private struct StandardCodeBlockView: View {
         code
     }
 
+    private var codeViewMaxHeight: CGFloat {
+        let lineCount = max(1, visibleCode.components(separatedBy: "\n").count)
+        if lineCount <= 8 {
+            return min(220, max(96, CGFloat(lineCount) * 22 + 48))
+        }
+        if lineCount <= 18 {
+            return min(360, CGFloat(lineCount) * 22 + 52)
+        }
+        return 480
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -1406,7 +1417,7 @@ private struct StandardCodeBlockView: View {
             SourceCodeTextView(
                 code: visibleCode,
                 language: displayLanguage,
-                maxHeight: 480,
+                maxHeight: codeViewMaxHeight,
                 autoFollowTail: isStreaming,
                 wrapLines: true
             )
@@ -1547,6 +1558,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         let coordinator = context.coordinator
         let renderedText = text.isEmpty ? " " : text
         let normalizedMaximumHeight = maximumHeight.isFinite ? maximumHeight : -1
+        let shouldResetScrollToTop = !autoFollowTail && coordinator.lastAutoFollowTail
         let shouldRebuild =
             coordinator.lastText != renderedText
             || coordinator.lastLanguage != language
@@ -1627,7 +1639,21 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         coordinator.lastWrapLines = wrapLines
         coordinator.lastTextColor = textColor
 
-        if autoFollowTail {
+        if shouldResetScrollToTop {
+            DispatchQueue.main.async {
+                guard uiView.isScrollEnabled else { return }
+                UIView.performWithoutAnimation {
+                    uiView.layoutIfNeeded()
+                    uiView.setContentOffset(
+                        CGPoint(
+                            x: -uiView.adjustedContentInset.left,
+                            y: -uiView.adjustedContentInset.top
+                        ),
+                        animated: false
+                    )
+                }
+            }
+        } else if autoFollowTail {
             DispatchQueue.main.async {
                 guard uiView.isScrollEnabled else { return }
                 UIView.performWithoutAnimation {
@@ -1678,9 +1704,17 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         let width = wrapLines
             ? max(1, uiView.bounds.width)
             : max(uiView.textContainer.size.width, uiView.bounds.width)
-        let fittingSize = uiView.sizeThatFits(
-            CGSize(width: width, height: UIView.layoutFittingExpandedSize.height)
+        uiView.layoutIfNeeded()
+        uiView.layoutManager.ensureLayout(for: uiView.textContainer)
+        let usedHeight = ceil(
+            uiView.layoutManager.usedRect(for: uiView.textContainer).height
+            + uiView.textContainerInset.top
+            + uiView.textContainerInset.bottom
         )
+        if usedHeight > 1 {
+            return maximumHeight.isFinite ? min(usedHeight, maximumHeight) : usedHeight
+        }
+        let fittingSize = uiView.sizeThatFits(CGSize(width: width, height: UIView.layoutFittingExpandedSize.height))
         if maximumHeight.isFinite {
             return min(fittingSize.height, maximumHeight)
         }
