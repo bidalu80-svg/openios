@@ -57,7 +57,7 @@ final class LocalWeatherService {
             let weather = try await weatherService.weather(for: location)
             let current = weather.currentWeather
             let chance = weather.hourlyForecast.first?.precipitationChance
-            let attribution = try weatherService.attribution
+            let attribution = try await weatherService.attribution
             return LocalWeatherSnapshot(
                 locationName: manager.cachedPlaceName,
                 latitude: location.coordinate.latitude,
