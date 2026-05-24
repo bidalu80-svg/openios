@@ -20,8 +20,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
     let timestamp: Date
     let isStreaming: Bool
     let summary: String
-    let writtenFiles: [LocalAlpineWrittenFile]
-    let commandResults: [LocalAlpineAgentCommandResult]
+    let fileCount: Int
+    let commandCount: Int
+    let hasFailure: Bool
 
     init?(message: ChatMessage) {
         guard message.metadata?["iexa_local_alpine_result"] == "true"
@@ -37,6 +38,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             $0.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "write_files"
         }
         let hasError = parsed.hasNonZeroExit || commandResults.contains { $0.failed }
+        let visibleCommandCount = visibleCommands.count
 
         self.id = message.id
         self.timestamp = message.timestamp
@@ -45,15 +47,12 @@ private struct AgentActivityItem: Identifiable, Hashable {
             ? "正在运行本地 Alpine"
             : parsed.activitySummary(
                 editedFileCount: writtenFiles.isEmpty ? nil : writtenFiles.count,
-                commandCount: visibleCommands.isEmpty ? nil : visibleCommands.count,
+                commandCount: visibleCommands.isEmpty ? nil : visibleCommandCount,
                 hasError: hasError
             )
-        self.writtenFiles = writtenFiles
-        self.commandResults = visibleCommands
-    }
-
-    var hasFailure: Bool {
-        commandResults.contains { $0.failed }
+        self.fileCount = writtenFiles.count
+        self.commandCount = visibleCommandCount
+        self.hasFailure = hasError
     }
 }
 
@@ -101,17 +100,6 @@ struct ChatDetailView: View {
     /// and as a suppressor to prevent the offset-change handler from falsely
     /// interpreting a programmatic scroll animation as a manual upward drag.
     @State private var lastProgrammaticScrollTime: Date = .distantPast
-
-    // MARK: Message pagination (sliding window — memory optimization)
-    /// The ending index (exclusive) of the visible message window.
-    /// `nil` means "pinned to latest" — the window always includes the newest messages.
-    @State private var windowEnd: Int? = nil
-    /// Number of messages currently in the window. Starts small, grows to `maxWindowSize`.
-    @State private var windowSize: Int = 5
-    /// Guard to prevent rapid-fire pagination triggers.
-    @State private var isLoadingMoreMessages = false
-    /// Maximum messages rendered at once (the sliding-window cap).
-    private let maxWindowSize = 10
 
     private static func canPreviewInApp(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased() else { return false }
@@ -346,14 +334,12 @@ struct ChatDetailView: View {
             NotificationService.shared.activeConversationId =
                 viewModel.conversationId ?? viewModel.conversation?.id
         await viewModel.load()
-        // After messages load, ensure we're pinned to the latest window and
+        // After messages load, ensure we're pinned to the latest message and
         // scroll to the bottom. The 60ms delay lets the ScrollView finish
         // laying out the newly-populated content before we issue the scroll.
         let loadedCount = viewModel.messages.count
         if loadedCount > 0 {
             isScrolledUp = false
-            windowEnd = nil
-            windowSize = min(maxWindowSize, loadedCount)
             try? await Task.sleep(nanoseconds: 60_000_000) // 60ms layout settle
             scrollPosition.scrollTo(edge: .bottom)
         }
@@ -1197,17 +1183,6 @@ struct ChatDetailView: View {
         // scrolling to bottom naturally places the user's sent message
         // near the top of the viewport (ChatGPT-style).
         .onChange(of: viewModel.messages.count) { old, new in
-            // ── Keep pagination window pinned to latest on new messages ──
-            // When new messages arrive (user sent or assistant appended),
-            // reset the window to show the latest messages so they're visible.
-            // Skip bulk loads (old == 0) — those start paginated at 5.
-            if new > old && old > 0 {
-                // Pin window to the end (latest messages)
-                windowEnd = nil
-                // Grow the window to include the new messages, capped at maxWindowSize
-                windowSize = min(max(windowSize, maxWindowSize), new)
-            }
-
             guard new > old else { return }
 
             // ── ALWAYS scroll to bottom when a new message is added ──
@@ -1264,7 +1239,7 @@ struct ChatDetailView: View {
 
     private var scrollContent: some View {
         ScrollView {
-            VStack(spacing: 0) {
+            LazyVStack(spacing: 0) {
                 if viewModel.isLoadingConversation {
                     loadingPlaceholders
                 } else {
@@ -1322,52 +1297,6 @@ struct ChatDetailView: View {
             if abs(newOffset.y - lastScrollOffset) > 2 {
                 lastScrollOffset = newOffset.y
             }
-
-            // ── Sliding window: load older messages when near the top ──
-            let total = viewModel.messages.count
-            let effectiveEnd = windowEnd ?? total
-            let effectiveStart = max(0, effectiveEnd - windowSize)
-
-            if newOffset.y < 200,
-               !isLoadingMoreMessages,
-               effectiveStart > 0,
-               !viewModel.isLoadingConversation {
-                isLoadingMoreMessages = true
-                let anchorId = viewModel.messages[effectiveStart].id
-                let slideBy = min(5, effectiveStart)
-
-                // Detach from "pinned to latest" on first upward scroll
-                if windowEnd == nil { windowEnd = total }
-
-                // Slide window backwards: keep size capped, shift windowEnd so start moves up
-                windowSize = min(windowSize + slideBy, maxWindowSize)
-                let newStart = max(0, effectiveStart - slideBy)
-                windowEnd = min(newStart + windowSize, total)
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    scrollPosition.scrollTo(id: anchorId, anchor: .top)
-                    isLoadingMoreMessages = false
-                }
-            }
-
-            // ── Sliding window: load newer messages when near the bottom ──
-            if let wEnd = windowEnd, wEnd < total,
-               distanceFromBottom < 200,
-               !isLoadingMoreMessages,
-               !viewModel.isLoadingConversation {
-                isLoadingMoreMessages = true
-                let anchorId = viewModel.messages[min(wEnd - 1, total - 1)].id
-                let slideBy = min(5, total - wEnd)
-                windowEnd = wEnd + slideBy
-
-                // Re-pin to latest when we've scrolled all the way back down
-                if windowEnd! >= total { windowEnd = nil }
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    scrollPosition.scrollTo(id: anchorId, anchor: .bottom)
-                    isLoadingMoreMessages = false
-                }
-            }
         }
         .onScrollGeometryChange(for: CGSize.self) { geo in
             CGSize(width: geo.contentSize.height, height: geo.containerSize.height)
@@ -1419,9 +1348,6 @@ struct ChatDetailView: View {
                     // Disengage auto-scroll lock first so the streaming pump
                     // doesn't fight the scroll animation we're about to start.
                     isScrolledUp = false
-                    // Reset sliding window to latest messages
-                    windowEnd = nil
-                    windowSize = min(maxWindowSize, viewModel.messages.count)
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
                         scrollPosition.scrollTo(edge: .bottom)
                     }
@@ -1468,38 +1394,19 @@ struct ChatDetailView: View {
     /// All earlier messages render at their natural height.
     private var messagesList: some View {
         let allMessages = viewModel.messages.filter { !isLocalNativeResultMessage($0) }
-        let total = allMessages.count
 
-        // ── Sliding window: compute the visible slice ──
-        let effectiveEnd = windowEnd ?? total
-        let effectiveStart = max(0, effectiveEnd - windowSize)
-        let clampedEnd = min(effectiveEnd, total)
-        let messages = Array(allMessages[effectiveStart..<clampedEnd])
-        let hasMoreAbove = effectiveStart > 0
-        let hasMoreBelow = clampedEnd < total
+        let messages = allMessages
 
         let indexMap = Dictionary(allMessages.enumerated().map { ($1.id, $0) },
                                   uniquingKeysWith: { first, _ in first })
 
-        // Split point: index of the last user message *within the visible slice*.
+        // Split point: index of the last user message within the rendered list.
         // Everything from here to the end is the "last turn".
         // If there are no user messages, splitAt == count → no split, all normal.
         let lastUserIdx = messages.lastIndex(where: { $0.role == .user })
         let splitAt = lastUserIdx ?? messages.count
 
-        // Only apply minHeight trick when the window includes the actual last message
-        let windowIncludesEnd = (windowEnd == nil || clampedEnd >= total)
-
         return Group {
-            // ── "Loading more" indicator at the top ──
-            if hasMoreAbove {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, Spacing.md)
-                    .id("pagination-spinner-top")
-            }
-
             // ── Messages before the last turn (natural height) ──
             ForEach(Array(messages.prefix(splitAt))) { message in
                 let index = indexMap[message.id] ?? 0
@@ -1516,17 +1423,7 @@ struct ChatDetailView: View {
                             .id(message.id)
                     }
                 }
-                .frame(minHeight: windowIncludesEnd ? max(viewState_containerHeight, 0) : nil,
-                       alignment: .top)
-            }
-
-            // ── "Loading newer" indicator at the bottom ──
-            if hasMoreBelow {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, Spacing.md)
-                    .id("pagination-spinner-bottom")
+                .frame(minHeight: max(viewState_containerHeight, 0), alignment: .top)
             }
         }
     }
@@ -4093,7 +3990,8 @@ private struct ChatAmbientBackgroundView: View {
 private struct ImageGenerationPlaceholderView: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private let animationPeriod: TimeInterval = 18
+    private let animationPeriod: TimeInterval = 8.5
+    private let fogPatches = ImageGenerationFogPatch.defaultPatches
 
     var body: some View {
         if reduceMotion {
@@ -4107,11 +4005,13 @@ private struct ImageGenerationPlaceholderView: View {
 
     private func placeholder(phase: CGFloat) -> some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        return shape
-            .fill(backgroundFill(phase: phase))
-            .overlay {
-                colorOverlay(phase: phase)
-            }
+        return ZStack {
+            shape.fill(backgroundFill(phase: phase))
+            colorOverlay(phase: phase)
+                .blendMode(theme.isDark ? .screen : .plusLighter)
+                .opacity(theme.isDark ? 0.92 : 0.86)
+        }
+            .clipShape(shape)
             .overlay {
                 shape
                     .strokeBorder(Color.white.opacity(theme.isDark ? 0.08 : 0.18), lineWidth: 0.75)
@@ -4123,7 +4023,7 @@ private struct ImageGenerationPlaceholderView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func basePalette(phase: CGFloat) -> [Color] {
+    private func basePalette() -> [Color] {
         return [
             Color(red: 0.98, green: 0.92, blue: 0.68).opacity(theme.isDark ? 0.92 : 0.98),
             Color(red: 0.79, green: 0.93, blue: 0.84).opacity(theme.isDark ? 0.88 : 0.96),
@@ -4133,18 +4033,16 @@ private struct ImageGenerationPlaceholderView: View {
         ]
     }
 
-    private func backgroundFill(phase: CGFloat) -> LinearGradient {
+    private func backgroundFill(phase: CGFloat) -> AngularGradient {
         let angle = Double(phase) * .pi * 2
-        return LinearGradient(
-            colors: basePalette(phase: phase).map { $0.opacity(theme.isDark ? 0.78 : 0.90) },
-            startPoint: UnitPoint(
-                x: CGFloat(0.10 + 0.12 * cos(angle - 0.45)),
-                y: CGFloat(0.12 + 0.10 * sin(angle - 0.25))
+        return AngularGradient(
+            colors: basePalette().map { $0.opacity(theme.isDark ? 0.78 : 0.90) },
+            center: UnitPoint(
+                x: CGFloat(0.50 + 0.18 * cos(angle * 0.72 + 0.35)),
+                y: CGFloat(0.50 + 0.16 * sin(angle * 0.64 - 0.20))
             ),
-            endPoint: UnitPoint(
-                x: CGFloat(0.92 - 0.10 * cos(angle + .pi * 0.65)),
-                y: CGFloat(0.90 - 0.12 * sin(angle + .pi * 0.50))
-            )
+            startAngle: .degrees(Double(phase) * 360 - 18),
+            endAngle: .degrees(Double(phase) * 360 + 342)
         )
     }
 
@@ -4155,74 +4053,15 @@ private struct ImageGenerationPlaceholderView: View {
             let shortEdge = min(width, height)
 
             ZStack {
-                cloudBlob(
-                    color: Color(red: 0.98, green: 0.89, blue: 0.62),
-                    phase: phase,
-                    size: shortEdge * 1.05,
-                    baseX: 0.15,
-                    baseY: 0.18,
-                    xAmplitude: 0.10,
-                    yAmplitude: 0.07,
-                    speed: 0.82,
-                    offset: 0.10,
-                    in: geometry.size
-                )
-
-                cloudBlob(
-                    color: Color(red: 0.72, green: 0.87, blue: 1.00),
-                    phase: phase,
-                    size: shortEdge * 0.98,
-                    baseX: 0.73,
-                    baseY: 0.20,
-                    xAmplitude: 0.11,
-                    yAmplitude: 0.08,
-                    speed: 0.96,
-                    offset: 0.55,
-                    in: geometry.size
-                )
-
-                cloudBlob(
-                    color: Color(red: 0.90, green: 0.76, blue: 1.00),
-                    phase: phase,
-                    size: shortEdge * 1.08,
-                    baseX: 0.32,
-                    baseY: 0.72,
-                    xAmplitude: 0.13,
-                    yAmplitude: 0.11,
-                    speed: 0.88,
-                    offset: 0.82,
-                    in: geometry.size
-                )
-
-                cloudBlob(
-                    color: Color(red: 0.78, green: 0.97, blue: 0.86),
-                    phase: phase,
-                    size: shortEdge * 0.82,
-                    baseX: 0.82,
-                    baseY: 0.76,
-                    xAmplitude: 0.09,
-                    yAmplitude: 0.08,
-                    speed: 0.72,
-                    offset: 1.20,
-                    in: geometry.size
-                )
-
-                cloudBlob(
-                    color: Color(red: 0.99, green: 0.80, blue: 0.89),
-                    phase: phase,
-                    size: shortEdge * 0.72,
-                    baseX: 0.50,
-                    baseY: 0.48,
-                    xAmplitude: 0.06,
-                    yAmplitude: 0.05,
-                    speed: 0.66,
-                    offset: 0.42,
-                    in: geometry.size
-                )
+                ForEach(fogPatches) { patch in
+                    fogPatch(patch, phase: phase, shortEdge: shortEdge, in: geometry.size)
+                }
             }
-            .blur(radius: shortEdge * 0.065)
-            .saturation(theme.isDark ? 1.10 : 1.02)
+            .blur(radius: shortEdge * 0.09)
+            .saturation(theme.isDark ? 1.18 : 1.10)
+            .contrast(theme.isDark ? 1.06 : 1.03)
             .opacity(theme.isDark ? 0.92 : 0.98)
+            .drawingGroup(opaque: false, colorMode: .extendedLinear)
         }
     }
 
@@ -4231,62 +4070,89 @@ private struct ImageGenerationPlaceholderView: View {
         return CGFloat(progress - floor(progress))
     }
 
-    private func cloudBlob(
-        color: Color,
+    private func fogPatch(
+        _ patch: ImageGenerationFogPatch,
         phase: CGFloat,
-        size: CGFloat,
-        baseX: CGFloat,
-        baseY: CGFloat,
-        xAmplitude: CGFloat,
-        yAmplitude: CGFloat,
-        speed: CGFloat,
-        offset: CGFloat,
+        shortEdge: CGFloat,
         in containerSize: CGSize
     ) -> some View {
-        let center = cloudCenter(
-            phase: phase,
-            baseX: baseX,
-            baseY: baseY,
-            xAmplitude: xAmplitude,
-            yAmplitude: yAmplitude,
-            speed: speed,
-            offset: offset
-        )
+        let center = fogCenter(for: patch, phase: phase)
+        let wobble = fogWobble(for: patch, phase: phase)
+        let rotation = Double(phase) * patch.rotationSpeed * 360 + patch.rotationOffset
 
-        return Circle()
+        return RoundedRectangle(cornerRadius: shortEdge * patch.cornerRatio, style: .continuous)
             .fill(
-                RadialGradient(
+                LinearGradient(
                     colors: [
-                        color.opacity(theme.isDark ? 0.86 : 0.76),
-                        color.opacity(theme.isDark ? 0.30 : 0.20),
-                        color.opacity(0.0)
+                        patch.color.opacity((theme.isDark ? 0.82 : 0.74) * patch.opacity),
+                        patch.secondaryColor.opacity((theme.isDark ? 0.66 : 0.54) * patch.opacity),
+                        patch.color.opacity(0.0)
                     ],
-                    center: .center,
-                    startRadius: 0,
-                    endRadius: size * 0.52
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
                 )
             )
-            .frame(width: size, height: size)
+            .frame(width: shortEdge * patch.widthRatio, height: shortEdge * patch.heightRatio)
+            .rotationEffect(.degrees(rotation))
+            .scaleEffect(x: 1 + wobble.x, y: 1 + wobble.y, anchor: .center)
             .position(x: containerSize.width * center.x, y: containerSize.height * center.y)
     }
 
-    private func cloudCenter(
-        phase: CGFloat,
-        baseX: CGFloat,
-        baseY: CGFloat,
-        xAmplitude: CGFloat,
-        yAmplitude: CGFloat,
-        speed: CGFloat,
-        offset: CGFloat
+    private func fogCenter(
+        for patch: ImageGenerationFogPatch,
+        phase: CGFloat
     ) -> CGPoint {
-        let angle = Double(phase * speed + offset) * .pi * 2
-        let x = baseX + xAmplitude * CGFloat(sin(angle))
-        let y = baseY + yAmplitude * CGFloat(cos(angle * 0.82 + 0.35))
+        let angle = (Double(phase) * patch.speed + patch.offset) * .pi * 2
+        let secondary = angle * patch.secondarySpeed + patch.secondaryOffset
+        let x = patch.baseX
+            + patch.xAmplitude * CGFloat(sin(angle))
+            + patch.drift * CGFloat(cos(secondary))
+        let y = patch.baseY
+            + patch.yAmplitude * CGFloat(cos(angle * 0.82 + 0.35))
+            + patch.drift * CGFloat(sin(secondary * 1.17))
         return CGPoint(
-            x: min(0.94, max(0.06, x)),
-            y: min(0.94, max(0.06, y))
+            x: min(1.12, max(-0.12, x)),
+            y: min(1.12, max(-0.12, y))
         )
     }
+
+    private func fogWobble(for patch: ImageGenerationFogPatch, phase: CGFloat) -> CGPoint {
+        let angle = (Double(phase) * patch.speed + patch.offset) * .pi * 2
+        return CGPoint(
+            x: CGFloat(0.10 * sin(angle * 1.31 + patch.secondaryOffset)),
+            y: CGFloat(0.08 * cos(angle * 1.09 - patch.secondaryOffset))
+        )
+    }
+}
+
+private struct ImageGenerationFogPatch: Identifiable {
+    let id: Int
+    let color: Color
+    let secondaryColor: Color
+    let widthRatio: CGFloat
+    let heightRatio: CGFloat
+    let cornerRatio: CGFloat
+    let baseX: CGFloat
+    let baseY: CGFloat
+    let xAmplitude: CGFloat
+    let yAmplitude: CGFloat
+    let drift: CGFloat
+    let speed: Double
+    let secondarySpeed: Double
+    let offset: Double
+    let secondaryOffset: Double
+    let rotationSpeed: Double
+    let rotationOffset: Double
+    let opacity: Double
+
+    static let defaultPatches: [ImageGenerationFogPatch] = [
+        ImageGenerationFogPatch(id: 0, color: Color(red: 1.00, green: 0.86, blue: 0.42), secondaryColor: Color(red: 0.82, green: 1.00, blue: 0.72), widthRatio: 1.12, heightRatio: 0.72, cornerRatio: 0.34, baseX: 0.16, baseY: 0.16, xAmplitude: 0.26, yAmplitude: 0.20, drift: 0.08, speed: 0.92, secondarySpeed: 0.57, offset: 0.03, secondaryOffset: 1.40, rotationSpeed: 0.28, rotationOffset: -16, opacity: 0.92),
+        ImageGenerationFogPatch(id: 1, color: Color(red: 0.42, green: 0.82, blue: 1.00), secondaryColor: Color(red: 0.72, green: 0.96, blue: 1.00), widthRatio: 1.08, heightRatio: 0.86, cornerRatio: 0.38, baseX: 0.82, baseY: 0.17, xAmplitude: 0.24, yAmplitude: 0.22, drift: 0.07, speed: 1.12, secondarySpeed: 0.62, offset: 0.24, secondaryOffset: 2.60, rotationSpeed: -0.34, rotationOffset: 24, opacity: 0.88),
+        ImageGenerationFogPatch(id: 2, color: Color(red: 0.86, green: 0.62, blue: 1.00), secondaryColor: Color(red: 0.62, green: 0.74, blue: 1.00), widthRatio: 1.26, heightRatio: 0.78, cornerRatio: 0.36, baseX: 0.26, baseY: 0.75, xAmplitude: 0.28, yAmplitude: 0.21, drift: 0.09, speed: 0.82, secondarySpeed: 0.71, offset: 0.53, secondaryOffset: 0.50, rotationSpeed: 0.42, rotationOffset: 34, opacity: 0.90),
+        ImageGenerationFogPatch(id: 3, color: Color(red: 0.55, green: 1.00, blue: 0.72), secondaryColor: Color(red: 0.88, green: 1.00, blue: 0.54), widthRatio: 0.94, heightRatio: 0.70, cornerRatio: 0.32, baseX: 0.88, baseY: 0.78, xAmplitude: 0.22, yAmplitude: 0.24, drift: 0.10, speed: 0.74, secondarySpeed: 0.66, offset: 0.79, secondaryOffset: 3.10, rotationSpeed: -0.24, rotationOffset: -38, opacity: 0.80),
+        ImageGenerationFogPatch(id: 4, color: Color(red: 1.00, green: 0.62, blue: 0.78), secondaryColor: Color(red: 1.00, green: 0.76, blue: 0.96), widthRatio: 0.82, heightRatio: 0.62, cornerRatio: 0.30, baseX: 0.54, baseY: 0.48, xAmplitude: 0.20, yAmplitude: 0.18, drift: 0.07, speed: 1.34, secondarySpeed: 0.53, offset: 0.41, secondaryOffset: 4.20, rotationSpeed: 0.46, rotationOffset: 8, opacity: 0.72),
+        ImageGenerationFogPatch(id: 5, color: Color(red: 0.94, green: 0.96, blue: 1.00), secondaryColor: Color(red: 0.70, green: 0.90, blue: 1.00), widthRatio: 1.18, heightRatio: 0.52, cornerRatio: 0.26, baseX: 0.50, baseY: 0.33, xAmplitude: 0.18, yAmplitude: 0.12, drift: 0.06, speed: 1.55, secondarySpeed: 0.78, offset: 0.66, secondaryOffset: 1.90, rotationSpeed: -0.18, rotationOffset: 64, opacity: 0.58)
+    ]
 }
 
 private struct ImageGenerationTitleShimmer: View {
@@ -4920,11 +4786,11 @@ private struct AgentTaskPanelSummary: View {
     @Environment(\.theme) private var theme
 
     private var commandCount: Int {
-        items.reduce(0) { $0 + $1.commandResults.count }
+        items.reduce(0) { $0 + $1.commandCount }
     }
 
     private var fileCount: Int {
-        items.reduce(0) { $0 + $1.writtenFiles.count }
+        items.reduce(0) { $0 + $1.fileCount }
     }
 
     private var failedCount: Int {
@@ -4975,7 +4841,6 @@ private struct AgentTaskCard: View {
     let item: AgentActivityItem
 
     @Environment(\.theme) private var theme
-    @State private var isExpanded = false
 
     private var statusIcon: String {
         if item.isStreaming { return "progress.indicator" }
@@ -4988,57 +4853,34 @@ private struct AgentTaskCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button {
-                withAnimation(MicroAnimation.snappy) { isExpanded.toggle() }
-            } label: {
-                HStack(alignment: .top, spacing: 9) {
-                    Image(systemName: statusIcon)
-                        .scaledFont(size: 14, weight: .semibold)
-                        .foregroundStyle(statusColor)
-                        .frame(width: 20, height: 20)
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: statusIcon)
+                .scaledFont(size: 14, weight: .semibold)
+                .foregroundStyle(statusColor)
+                .frame(width: 20, height: 20)
 
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(item.summary)
-                            .scaledFont(size: 14, weight: .semibold)
-                            .foregroundStyle(theme.textPrimary)
-                            .lineLimit(2)
-                        Text(item.timestamp.formatted(date: .omitted, time: .shortened))
-                            .scaledFont(size: 11, weight: .medium)
-                            .foregroundStyle(theme.textTertiary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(item.summary)
+                    .scaledFont(size: 14, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(2)
+
+                HStack(spacing: 8) {
+                    Text(item.timestamp.formatted(date: .omitted, time: .shortened))
+                    if item.commandCount > 0 {
+                        Label("\(item.commandCount)", systemImage: "terminal.fill")
                     }
-
-                    Spacer(minLength: 0)
-
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .scaledFont(size: 11, weight: .semibold)
-                        .foregroundStyle(theme.textTertiary)
-                        .frame(width: 22, height: 22)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if !item.writtenFiles.isEmpty {
-                compactSection(title: "文件") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(item.writtenFiles.prefix(isExpanded ? item.writtenFiles.count : 3), id: \.path) { file in
-                            AgentTaskFileRow(file: file)
-                        }
+                    if item.fileCount > 0 {
+                        Label("\(item.fileCount)", systemImage: "square.and.pencil")
                     }
                 }
+                .scaledFont(size: 11, weight: .medium)
+                .foregroundStyle(theme.textTertiary)
             }
 
-            if !item.commandResults.isEmpty {
-                compactSection(title: "命令") {
-                    VStack(alignment: .leading, spacing: 7) {
-                        ForEach(Array(item.commandResults.prefix(isExpanded ? item.commandResults.count : 3).enumerated()), id: \.offset) { _, result in
-                            AgentTaskCommandRow(result: result, isExpanded: isExpanded)
-                        }
-                    }
-                }
-            }
+            Spacer(minLength: 0)
         }
+        .contentShape(Rectangle())
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.surfaceContainer.opacity(theme.isDark ? 0.72 : 0.96))
@@ -5047,88 +4889,6 @@ private struct AgentTaskCard: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.45 : 0.62), lineWidth: 0.8)
         )
-    }
-
-    @ViewBuilder
-    private func compactSection<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .scaledFont(size: 11, weight: .semibold)
-                .foregroundStyle(theme.textTertiary)
-            content()
-        }
-    }
-}
-
-private struct AgentTaskFileRow: View {
-    let file: LocalAlpineWrittenFile
-
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "square.and.pencil")
-                .scaledFont(size: 12, weight: .semibold)
-                .foregroundStyle(theme.brandPrimary)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(file.path)
-                    .scaledFont(size: 12, weight: .semibold, design: .monospaced)
-                    .foregroundStyle(theme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text("\(file.lineCount) 行 · \(file.byteCount) B")
-                    .scaledFont(size: 10, weight: .medium)
-                    .foregroundStyle(theme.textTertiary)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.26 : 0.58))
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-    }
-}
-
-private struct AgentTaskCommandRow: View {
-    let result: LocalAlpineAgentCommandResult
-    let isExpanded: Bool
-
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: result.failed ? "exclamationmark.circle.fill" : "terminal.fill")
-                    .scaledFont(size: 12, weight: .semibold)
-                    .foregroundStyle(result.failed ? .orange : theme.textSecondary)
-                    .frame(width: 18)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(oneLineCommand(result.command))
-                        .scaledFont(size: 12, weight: .semibold, design: .monospaced)
-                        .foregroundStyle(theme.textPrimary)
-                        .lineLimit(isExpanded ? 3 : 1)
-                        .truncationMode(.middle)
-                    Text("退出码 \(result.exitCode.map(String.init) ?? "unknown") · \(result.cwd)")
-                        .scaledFont(size: 10, weight: .medium)
-                        .foregroundStyle(theme.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer(minLength: 0)
-            }
-
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.26 : 0.58))
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-    }
-
-    private func oneLineCommand(_ command: String) -> String {
-        command
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

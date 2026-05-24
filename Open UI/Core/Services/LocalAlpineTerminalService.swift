@@ -409,6 +409,110 @@ actor LocalAlpineTerminalService {
         return LocalAlpineCommandResult(command: trimmed, output: result.output, exitCode: result.exitCode, interactiveRequest: nil)
     }
 
+    func executeStreaming(
+        command: String,
+        cwd: String,
+        cwdIsRuntimePath: Bool = false,
+        onSessionStart: (@MainActor @Sendable (Int?) -> Void)? = nil,
+        onOutput: @escaping @MainActor @Sendable (String) -> Void
+    ) async -> LocalAlpineCommandResult {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return LocalAlpineCommandResult(command: command, output: "", exitCode: 0, interactiveRequest: nil)
+        }
+        if let interactiveWarning = interactiveInputWarning(for: trimmed) {
+            return LocalAlpineCommandResult(
+                command: trimmed,
+                output: interactiveWarning,
+                exitCode: 124,
+                interactiveRequest: LocalAlpineInteractiveRequest(
+                    kind: .command,
+                    title: "需要输入",
+                    message: "这个命令需要交互式输入。我已经帮你弹出一个小窗口，填完会自动继续跑。",
+                    placeholder: "把要输入的内容按顺序粘贴到这里，一行一个也可以",
+                    defaultValue: "",
+                    command: trimmed,
+                    cwd: cwd
+                )
+            )
+        }
+
+        let status = status()
+        guard let rootArchiveURL = bundledRootFSURL() else {
+            return LocalAlpineCommandResult(
+                command: trimmed,
+                output: "Local Alpine rootfs is missing from the app bundle: \(rootArchiveName)",
+                exitCode: 127,
+                interactiveRequest: nil
+            )
+        }
+
+        let workspaceURL: URL
+        do {
+            workspaceURL = try ensureWorkspaceDirectory()
+            _ = try ensureSharedWorkspaceDirectory()
+        } catch {
+            return LocalAlpineCommandResult(
+                command: trimmed,
+                output: "Local Alpine workspace is unavailable: \(error.localizedDescription)",
+                exitCode: 127,
+                interactiveRequest: nil
+            )
+        }
+
+        guard status.isRuntimeLinked else {
+            let result = await execute(command: trimmed, cwd: cwd, cwdIsRuntimePath: cwdIsRuntimePath)
+            await onOutput(result.output)
+            return result
+        }
+
+        let runtimeRootFSURL: URL
+        do {
+            runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
+            try ensureResolverConfiguration(in: runtimeRootFSURL)
+        } catch {
+            return LocalAlpineCommandResult(
+                command: trimmed,
+                output: "Local Alpine rootfs could not be prepared for writable local execution: \(error.localizedDescription)",
+                exitCode: 127,
+                interactiveRequest: nil
+            )
+        }
+
+        let runtimeCWD = cwdIsRuntimePath
+            ? normalizedAbsoluteRuntimePath(cwd)
+            : normalizedRuntimePath(cwd)
+        let compatibleCommand = compatibilityCommand(for: trimmed)
+        let bootstrappedCommand = bootstrappedShellCommand(for: compatibleCommand)
+        let materialized = await materializedRuntimeCommandIfNeeded(bootstrappedCommand)
+
+        let streamedResult = await executeMaterializedCommandStreaming(
+            originalCommand: trimmed,
+            materializedCommand: materialized.command,
+            runtimeCWD: runtimeCWD,
+            rootArchiveURL: runtimeRootFSURL,
+            workspaceURL: workspaceURL,
+            onSessionStart: onSessionStart,
+            onOutput: onOutput
+        )
+        await MainActor.run {
+            onSessionStart?(nil)
+        }
+        if let cleanupPath = materialized.cleanupPath {
+            try? await deleteItem(path: cleanupPath)
+        }
+        if let streamedResult {
+            if runtimeLikelyStarted(from: streamedResult) {
+                nativeRuntimeStarted = true
+            }
+            return streamedResult
+        }
+
+        let result = await execute(command: trimmed, cwd: cwd, cwdIsRuntimePath: cwdIsRuntimePath)
+        await onOutput(result.output)
+        return result
+    }
+
     private func bundledRootFSURL() -> URL? {
         Bundle.main.url(forResource: "iexa-alpine-rootfs", withExtension: "fakefs")
             ?? Bundle.main.url(forResource: "iexa-alpine-rootfs.fakefs", withExtension: "tar.gz")
@@ -592,6 +696,160 @@ actor LocalAlpineTerminalService {
             "runtime is staged but the ish native core is not linked"
         ]
         return !bootFailureMarkers.contains { output.contains($0) }
+    }
+
+    private func executeMaterializedCommandStreaming(
+        originalCommand: String,
+        materializedCommand: String,
+        runtimeCWD: String,
+        rootArchiveURL: URL,
+        workspaceURL: URL,
+        onSessionStart: (@MainActor @Sendable (Int?) -> Void)?,
+        onOutput: @escaping @MainActor @Sendable (String) -> Void
+    ) async -> LocalAlpineCommandResult? {
+        let sessionID = await LocalAlpineNativeRuntime.shared.startSession(
+            LocalAlpineNativeCommand(
+                command: "",
+                cwd: runtimeCWD,
+                rootArchiveURL: rootArchiveURL,
+                workspaceURL: workspaceURL
+            )
+        )
+        guard let sessionID else { return nil }
+
+        nativeRuntimeStarted = true
+        await MainActor.run {
+            onSessionStart?(sessionID)
+        }
+        defer {
+            _ = LocalAlpineNativeRuntime.shared.closeSession(sessionID: sessionID)
+        }
+
+        _ = LocalAlpineNativeRuntime.shared.resizeSession(sessionID: sessionID, columns: 120, rows: 40)
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        _ = LocalAlpineNativeRuntime.shared.readSessionOutput(sessionID: sessionID)
+        _ = LocalAlpineNativeRuntime.shared.writeSessionInput(sessionID: sessionID, input: "stty -echo 2>/dev/null || true\n")
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        _ = LocalAlpineNativeRuntime.shared.readSessionOutput(sessionID: sessionID)
+
+        let marker = "__IEXA_STREAM_DONE_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))__"
+        let markerPrefix = "\(marker):"
+        let envelope = """
+        /bin/sh -lc \(shellSingleQuoted(materializedCommand))
+        __iexa_stream_status=$?
+        printf '\\n\(markerPrefix)%s\\n' "$__iexa_stream_status"
+        exit
+        """
+        guard LocalAlpineNativeRuntime.shared.writeSessionInput(sessionID: sessionID, input: envelope + "\n") else {
+            return nil
+        }
+
+        var rawOutput = ""
+        var lastVisibleOutput = ""
+        var emptyPollsAfterExit = 0
+
+        while !Task.isCancelled {
+            let chunk = LocalAlpineNativeRuntime.shared.readSessionOutput(sessionID: sessionID)
+            if !chunk.isEmpty {
+                rawOutput += chunk
+                emptyPollsAfterExit = 0
+                let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
+                if parsed.visibleOutput != lastVisibleOutput {
+                    lastVisibleOutput = parsed.visibleOutput
+                    await onOutput(parsed.visibleOutput)
+                }
+                if parsed.finished {
+                    return LocalAlpineCommandResult(
+                        command: originalCommand,
+                        output: parsed.rawOutput,
+                        exitCode: parsed.exitCode ?? 0,
+                        interactiveRequest: nil
+                    )
+                }
+            } else if !LocalAlpineNativeRuntime.shared.writeSessionInput(sessionID: sessionID, input: "") {
+                let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
+                return LocalAlpineCommandResult(
+                    command: originalCommand,
+                    output: parsed.rawOutput,
+                    exitCode: parsed.exitCode ?? 130,
+                    interactiveRequest: nil
+                )
+            } else if rawOutput.contains("[process exited]") {
+                emptyPollsAfterExit += 1
+                if emptyPollsAfterExit >= 3 {
+                    let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
+                    return LocalAlpineCommandResult(
+                        command: originalCommand,
+                        output: parsed.rawOutput,
+                        exitCode: parsed.exitCode ?? 130,
+                        interactiveRequest: nil
+                    )
+                }
+            }
+            try? await Task.sleep(nanoseconds: 80_000_000)
+        }
+
+        _ = LocalAlpineNativeRuntime.shared.interruptSession(sessionID: sessionID)
+        let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
+        return LocalAlpineCommandResult(
+            command: originalCommand,
+            output: parsed.rawOutput,
+            exitCode: parsed.exitCode ?? 130,
+            interactiveRequest: nil
+        )
+    }
+
+    private func parseStreamingCommandOutput(
+        _ output: String,
+        markerPrefix: String
+    ) -> (rawOutput: String, visibleOutput: String, exitCode: Int?, finished: Bool) {
+        let normalized = output
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        var rawLines: [String] = []
+        var visibleLines: [String] = []
+        var exitCode: Int?
+        var finished = false
+
+        for rawLine in normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            let line = sanitizedTerminalLine(rawLine)
+            if line.hasPrefix(markerPrefix) {
+                finished = true
+                exitCode = Int(String(line.dropFirst(markerPrefix.count)).trimmingCharacters(in: .whitespacesAndNewlines))
+                continue
+            }
+            if line == "[process exited]" {
+                continue
+            }
+            if line.hasPrefix("__IEXA_SHELL_STATE__") {
+                rawLines.append(line)
+                continue
+            }
+            rawLines.append(line)
+            visibleLines.append(line)
+        }
+
+        return (
+            rawOutput: rawLines.joined(separator: "\n"),
+            visibleOutput: trimTrailingNewlines(visibleLines.joined(separator: "\n")),
+            exitCode: exitCode,
+            finished: finished
+        )
+    }
+
+    private func sanitizedTerminalLine(_ line: String) -> String {
+        line
+            .replacingOccurrences(of: "\u{001B}\\[[0-9;?]*[ -/]*[@-~]", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\u{0007}", with: "")
+            .replacingOccurrences(of: "\u{0008}", with: "")
+    }
+
+    private func trimTrailingNewlines(_ text: String) -> String {
+        var result = text
+        while result.hasSuffix("\n") {
+            result.removeLast()
+        }
+        return result
     }
 
     private func normalizedRootFSPath(_ rawPath: String) throws -> String {

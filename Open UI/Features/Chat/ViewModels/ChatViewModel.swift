@@ -37,9 +37,10 @@ private struct ParsedLocalAlpineCommand {
     let writeFilePaths: [String]
 }
 
-private struct RunnableCodeBlock {
-    let language: String
-    let code: String
+private struct LocalAlpineToolCapability {
+    let name: String
+    let description: String
+    let arguments: [String]
 }
 
 struct ChatContextBudgetStatus: Sendable, Equatable {
@@ -1299,6 +1300,10 @@ final class ChatViewModel {
             || message.statusHistory.contains { $0.action?.lowercased() == "local_alpine" }
     }
 
+    private static func isLocalAlpineProtocolCorrectionMessage(_ message: ChatMessage) -> Bool {
+        message.metadata?["iexa_local_alpine_protocol_correction"] == "true"
+    }
+
     private static func isLocalNativeToolResult(_ message: ChatMessage) -> Bool {
         message.metadata?["iexa_local_native_result"] == "true"
             || message.model == "Local Native"
@@ -1329,8 +1334,57 @@ final class ChatViewModel {
         - Never execute a bare domain or prose as a shell command. Use `curl`/`wget` for URLs and `command -v`/`apk info` only as focused diagnostics.
         """
 
+    private static let localAlpineToolCapabilities: [LocalAlpineToolCapability] = [
+        LocalAlpineToolCapability(
+            name: "read_file",
+            description: "Read workspace/rootfs files without shell text parsing.",
+            arguments: ["path", "start_line?", "line_count?", "max_bytes?"]
+        ),
+        LocalAlpineToolCapability(
+            name: "edit_file",
+            description: "Modify an existing file by exact same-path replacements.",
+            arguments: ["path", "old_text/new_text", "replacements?", "replace_all?", "expected_count?"]
+        ),
+        LocalAlpineToolCapability(
+            name: "patch_file",
+            description: "Modify an existing file by a unified diff.",
+            arguments: ["path", "patch or patch_lines"]
+        ),
+        LocalAlpineToolCapability(
+            name: "write_files",
+            description: "Create files or perform complete same-path rewrites.",
+            arguments: ["path/file_path", "code_lines/content_lines/content_base64"]
+        ),
+        LocalAlpineToolCapability(
+            name: "command",
+            description: "Run one bounded shell command for list/search/run/install/build/test/verify.",
+            arguments: ["command", "cwd?"]
+        )
+    ]
+
+    private static var localAlpineToolManifest: String {
+        let capabilities = localAlpineToolCapabilities
+            .map { capability in
+                "  - `\(capability.name)`: \(capability.description) Args: \(capability.arguments.joined(separator: ", "))."
+            }
+            .joined(separator: "\n")
+        return """
+        Local Alpine tool manifest:
+        - Transport: emit exactly one fenced Markdown block with language `iexa_alpine`. The app parses that block, runs it locally, and appends the real result as a later Local Alpine observation.
+        - This is a client-side tool bridge, not a provider/native function. Never call `iexa_alpine` through function-call syntax and never say the provider tool does not exist.
+        - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
+        - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands.
+        - JSON tool capabilities:
+        \(capabilities)
+        - Python writes: `.py`/`.pyw` must use `write_files.code_lines` or `content_base64`; localized Python repairs should prefer `read_file` then same-path `edit_file`/`patch_file`.
+        - Tool loop: one assistant turn emits at most one `iexa_alpine` block; the next turn must read the returned stdout/stderr/exit code before deciding whether to continue.
+        """
+    }
+
     private static func localAlpineExecutionStateSystemContext(from messages: [ChatMessage]) -> String? {
-        let alpineMessages = messages.filter { isLocalAlpineAgentResult($0) }
+        let alpineMessages = messages.filter {
+            isLocalAlpineAgentResult($0) && !isLocalAlpineProtocolCorrectionMessage($0)
+        }
         let latestUserGoal = messages.last(where: {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1345,6 +1399,8 @@ final class ChatViewModel {
             \(localAlpineEnvironmentProfile)
 
             \(localAlpineLanguageDependencyPlaybook)
+
+            \(localAlpineToolManifest)
 
             First-turn bootstrap policy:
             - Do not spend a turn only restating that you will inspect the environment. If inspection is needed, emit the actual `iexa_alpine` block immediately.
@@ -1559,7 +1615,7 @@ final class ChatViewModel {
         }
 
         guard let dict = object as? [String: Any] else { return nil }
-        if let nested = dict["iexa_alpine"] ?? dict["local_alpine_exec"] ?? dict["commands"] {
+        if let nested = dict["iexa_alpine"] ?? dict["commands"] {
             return localAlpineInstructionPreview(from: nested)
         }
 
@@ -1666,9 +1722,7 @@ final class ChatViewModel {
     }
 
     private static func contentContainsLocalAlpineInstruction(_ content: String) -> Bool {
-        content.localizedCaseInsensitiveContains("iexa_alpine")
-            || content.localizedCaseInsensitiveContains("local_alpine_exec")
-            || !localAlpineInstructionBlocks(from: content).isEmpty
+        !localAlpineInstructionBlocks(from: content).isEmpty
     }
 
     private static func firstLocalAlpineCommand(from object: Any) -> ParsedLocalAlpineCommand? {
@@ -1691,7 +1745,7 @@ final class ChatViewModel {
         }
 
         guard let dict = object as? [String: Any] else { return [] }
-        if let nested = dict["iexa_alpine"] ?? dict["local_alpine_exec"] ?? dict["commands"] {
+        if let nested = dict["iexa_alpine"] ?? dict["commands"] {
             return localAlpineCommands(from: nested)
         }
 
@@ -4129,34 +4183,6 @@ final class ChatViewModel {
         if !shouldKeepMediaRoute,
            !shouldKeepNativeLinkRoute,
            processedAttachments.isEmpty,
-           localAlpineModeForThisTurn,
-           let recentCodeBlock = fallbackLocalAlpineBlockForRecentCodeRun(
-               userText: currentText,
-               messages: conversation?.messages ?? []
-           ) {
-            await sendDirectLocalAlpineAgentBlock(
-                userText: currentText,
-                executableContent: recentCodeBlock,
-                modelId: modelId
-            )
-            return
-        }
-        if !shouldKeepMediaRoute,
-           !shouldKeepNativeLinkRoute,
-           processedAttachments.isEmpty,
-           localAlpineModeForThisTurn,
-           let command = Self.localAlpineNaturalLanguageCommand(for: currentText),
-           let executableBlock = Self.localAlpineFenceBlock(command) {
-            await sendDirectLocalAlpineAgentBlock(
-                userText: currentText,
-                executableContent: executableBlock,
-                modelId: modelId
-            )
-            return
-        }
-        if !shouldKeepMediaRoute,
-           !shouldKeepNativeLinkRoute,
-           processedAttachments.isEmpty,
            shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText),
            localAlpineModeForThisTurn {
             await sendDirectLocalAlpineCommand(currentText, modelId: modelId)
@@ -5040,53 +5066,6 @@ final class ChatViewModel {
         Self.shouldSendRawTextDirectlyToLocalAlpine(text)
     }
 
-    private func shouldAutoRouteExplicitLocalAlpineCommand(_ text: String) -> Bool {
-        let lowercased = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !lowercased.isEmpty else { return false }
-        if Self.shouldAutoRouteRawShellTextToLocalAlpine(lowercased) { return true }
-        if Self.embeddedLocalAlpinePackageManagerCommand(in: lowercased) != nil { return true }
-        guard Self.hasExplicitLocalAlpineRouteIntent(lowercased) else { return false }
-        return Self.shouldSendRawTextDirectlyToLocalAlpine(Self.normalizedLocalAlpineCommand(text))
-    }
-
-    private func shouldUseLocalAlpineAgentForRequest(_ text: String, modelId: String? = nil) -> Bool {
-        let effectiveModelId = modelId ?? selectedModelId ?? conversation?.model ?? ""
-        if shouldKeepMediaGenerationRequestOffLocalAlpine(text, modelId: effectiveModelId) {
-            return false
-        }
-        if Self.shouldKeepNativeLinkResolverOffLocalAlpine(text) {
-            return false
-        }
-        if Self.isExplicitLocalAlpineRequest(text) || Self.isExplicitLocalAlpineResumeRequest(text) {
-            return true
-        }
-        if Self.isLocalAlpineWebOrScriptTask(text) {
-            return true
-        }
-        if Self.isLocalAlpineFileWorkRequest(text) {
-            return true
-        }
-        if Self.isLocalAlpineEnvironmentInspectionRequest(text) {
-            return true
-        }
-        if Self.isLocalAlpineDependencyActionRequest(text) {
-            return true
-        }
-        if Self.isRunRecentCodeBlockRequest(text),
-           Self.latestRunnableCodeBlock(in: conversation?.messages ?? []) != nil {
-            return true
-        }
-        return Self.isLocalAlpineFollowUpFileOperation(text, messages: conversation?.messages ?? [])
-    }
-
-    private func latestUserRequestsLocalAlpineAgent(modelId: String? = nil) -> Bool {
-        guard terminalEnabled && selectedTerminalIsLocalAlpine else { return false }
-        guard let latestUserText = conversation?.messages.last(where: {
-            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
-        })?.content else { return false }
-        return shouldUseLocalAlpineAgentForRequest(latestUserText, modelId: modelId)
-    }
-
     private static func shouldKeepNativeLinkResolverOffLocalAlpine(_ text: String) -> Bool {
         isDouyinLinkRequest(text) && !hasExplicitLocalAlpineRouteIntent(text.lowercased())
     }
@@ -5159,763 +5138,6 @@ final class ChatViewModel {
             "terminal", "command line", "run command", "execute command"
         ]
         return explicitTerms.contains { text.contains($0) }
-    }
-
-    private static func hasExplicitLocalAlpineActionIntent(_ normalized: String) -> Bool {
-        let actionTerms = [
-            "执行", "运行", "跑", "测试", "验证", "检查", "查看", "读取", "列出",
-            "安装", "装", "编译", "构建", "创建", "新建", "生成", "写入", "保存",
-            "修改", "删除", "修复", "调试", "搜索", "查找", "重命名", "移动", "复制", "整理", "总结", "汇报",
-            "execute", "run", "test", "verify", "check", "inspect", "read", "list",
-            "install", "build", "compile", "create", "write", "save", "modify",
-            "delete", "fix", "debug", "search", "find", "rename", "move", "copy", "summarize", "report"
-        ]
-        return containsAny(normalized, actionTerms)
-    }
-
-    private static func isExplicitLocalAlpineRequest(_ text: String) -> Bool {
-        let normalized = text
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        guard !normalized.isEmpty else { return false }
-        if isLocalAlpineNaturalLanguageExecutionRequest(normalized) {
-            return true
-        }
-        if isLocalAlpineWebOrScriptTask(normalized) {
-            return true
-        }
-        if isLocalAlpineFileWorkRequest(normalized) {
-            return true
-        }
-        if isLocalAlpineEnvironmentInspectionRequest(normalized) {
-            return true
-        }
-        if (normalized.contains("脚本") || normalized.contains("script"))
-            && (normalized.contains("运行") || normalized.contains("执行") || normalized.contains("跑") || normalized.contains("run")) {
-            return true
-        }
-        if (normalized.contains("项目") || normalized.contains("project"))
-            && (normalized.contains("运行") || normalized.contains("执行") || normalized.contains("跑") || normalized.contains("run")) {
-            return true
-        }
-        if (normalized.contains("命令") || normalized.contains("终端") || normalized.contains("shell") || normalized.contains("bash"))
-            && (normalized.contains("查看") || normalized.contains("检查") || normalized.contains("查询") || normalized.contains("查一下") || normalized.contains("查下")) {
-            return true
-        }
-        if (normalized.contains("ip") || normalized.contains("公网") || normalized.contains("本机地址") || normalized.contains("网络地址"))
-            && (normalized.contains("查看") || normalized.contains("查询") || normalized.contains("检查") || normalized.contains("查一下") || normalized.contains("查下"))
-            && (normalized.contains("命令") || normalized.contains("终端") || normalized.contains("shell") || normalized.contains("bash")) {
-            return true
-        }
-        let terms = [
-            "在终端执行", "在终端运行", "用终端执行", "用终端运行",
-            "执行命令", "运行命令", "用命令查看", "命令查看", "命令查询",
-            "帮我执行", "帮我运行",
-            "写个脚本运行", "写一个脚本运行", "写个项目运行", "写一个项目运行",
-            "创建项目并运行", "创建脚本并运行", "测试项目", "运行项目",
-            "运行这段代码", "执行这段代码", "跑这段代码", "测试这段代码",
-            "运行上面的代码", "执行上面的代码", "跑上面的代码", "测试上面的代码",
-            "运行刚刚的代码", "执行刚刚的代码", "跑刚刚的代码",
-            "安装依赖", "装依赖", "装一下依赖", "安装包", "装包", "安装模块", "安装库",
-            "创建文件", "新建文件", "生成文件", "写入文件", "保存文件", "修改文件",
-            "删除文件", "重命名文件", "移动文件", "复制文件", "搜索文件", "查找文件",
-            "创建脚本", "生成脚本", "写脚本", "创建项目", "生成项目",
-            "编译项目", "构建项目", "测试代码", "检查项目", "查看目录", "列出目录",
-            "总结输出", "总结结果", "汇报结果", "根据输出", "根据结果",
-            "跑一下", "跑下", "执行一下", "运行一下", "查一下命令", "用 bash", "用 shell",
-            "local alpine", "alpine 执行", "alpine运行",
-            "run command", "execute command", "run script", "run project",
-            "run this code", "execute this code", "run the code above", "execute the code above",
-            "install dependencies", "install deps", "install package", "build project", "compile project",
-            "create file", "write file", "save file", "generate file", "modify file",
-            "delete file", "rename file", "move file", "copy file", "search files",
-            "summarize output", "summarize result", "report result"
-        ]
-        return terms.contains { normalized.contains($0) }
-    }
-
-    private static func isLocalAlpineFileWorkRequest(_ text: String) -> Bool {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return false }
-        let actionTerms = [
-            "创建", "新建", "生成", "写入", "保存", "落地", "修改", "改",
-            "删除", "删掉", "删了", "移除", "清理", "重命名", "移动", "复制",
-            "读取", "查看", "打开", "列出", "搜索", "查找", "整理", "总结", "汇报",
-            "create", "new file", "generate", "write", "save", "modify", "edit",
-            "delete", "remove", "rm ", "rename", "move", "copy", "read", "open", "list", "search", "find",
-            "summarize", "report"
-        ]
-        let targetTerms = [
-            "文件", "脚本", "代码", "项目", "目录", "file", "script", "code", "project", "folder",
-            "directory",
-            "python", "javascript", "typescript", "node", "lua", "golang", "go语言", "rust",
-            "java", "c语言", "c++", "cpp", "ruby", "php", "shell", "bash",
-            ".py", ".js", ".ts", ".html", ".css", ".json", ".md", ".sh", ".lua", ".c", ".cpp",
-            ".go", ".rs", ".java", ".rb", ".php"
-        ]
-        return containsAny(normalized, actionTerms) && containsAny(normalized, targetTerms)
-    }
-
-    private static func isLocalAlpineWebOrScriptTask(_ text: String) -> Bool {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return false }
-        let hasURL = normalized.range(of: #"https?://"#, options: .regularExpression) != nil
-        let actionTerms = [
-            "爬虫", "爬取", "爬一下", "爬这个", "抓取", "采集", "抓网页", "抓页面",
-            "解析网页", "解析页面", "下载页面", "获取页面", "读取网页", "读取页面",
-            "web scraper", "scrape", "crawler", "crawl", "fetch page", "parse page"
-        ]
-        if actionTerms.contains(where: { normalized.contains($0) }) {
-            return true
-        }
-        if hasURL,
-           (normalized.contains("脚本")
-            || normalized.contains("python")
-            || normalized.contains("代码")
-            || normalized.contains("写一个")
-            || normalized.contains("写个")
-            || normalized.contains("抓")
-            || normalized.contains("爬")
-            || normalized.contains("获取")
-            || normalized.contains("解析")) {
-            return true
-        }
-        return false
-    }
-
-    private static func isLocalAlpineEnvironmentInspectionRequest(_ text: String) -> Bool {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return false }
-        let actionTerms = [
-            "看", "查看", "检查", "检测", "扫", "扫描", "列出", "有什么", "有哪些", "确认",
-            "check", "inspect", "detect", "scan", "list", "show", "what"
-        ]
-        let environmentTerms = [
-            "环境", "依赖", "工具", "版本", "运行时", "系统", "沙盒", "本地",
-            "environment", "dependency", "dependencies", "tool", "tools", "version",
-            "runtime", "system", "sandbox"
-        ]
-        let localTerms = [
-            "alpine", "local alpine", "/mnt/iexa", "终端", "沙盒", "本地", "命令",
-            "terminal", "shell"
-        ]
-        if containsAny(normalized, actionTerms)
-            && containsAny(normalized, environmentTerms)
-            && (containsAny(normalized, localTerms) || terminalEnvironmentHintIsEnough(normalized)) {
-            return true
-        }
-        return containsAny(normalized, ["当前环境", "沙盒环境", "alpine环境", "alpine 环境", "环境依赖", "依赖环境"])
-    }
-
-    private static func isLocalAlpineDependencyActionRequest(_ text: String) -> Bool {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return false }
-        let actionTerms = [
-            "安装", "装", "配置", "修复", "升级", "检查", "检测",
-            "install", "setup", "configure", "fix", "upgrade", "check"
-        ]
-        let dependencyTerms = [
-            "依赖", "包", "模块", "库", "python", "pip", "requirements", "pyproject",
-            "node", "npm", "package.json", "apk", "gcc", "g++", "make",
-            "dependency", "dependencies", "package", "module", "library"
-        ]
-        return containsAny(normalized, actionTerms) && containsAny(normalized, dependencyTerms)
-    }
-
-    private static func terminalEnvironmentHintIsEnough(_ normalized: String) -> Bool {
-        normalized.contains("当前") || normalized.contains("现在") || normalized.contains("this") || normalized.contains("current")
-    }
-
-    private static func isLocalAlpineFollowUpFileOperation(_ text: String, messages: [ChatMessage]) -> Bool {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return false }
-        guard messages.contains(where: { Self.isLocalAlpineAgentResult($0) }) else { return false }
-
-        let operationTerms = [
-            "创建", "新建", "写入", "生成", "保存", "create", "write", "save",
-            "删", "删除", "移除", "清理", "删掉", "删了", "delete", "remove", "rm ",
-            "读", "读取", "打开", "查看", "看一下", "看看", "cat ", "read",
-            "列出", "列表", "目录", "搜索", "查找", "grep", "find",
-            "改", "修改", "重命名", "移动", "复制", "rename", "move", "copy",
-            "执行", "运行", "跑", "测试", "安装", "依赖", "编译", "构建",
-            "修", "修复", "修好", "重试", "重新", "调试", "验证", "爬虫", "爬取", "抓取",
-            "execute", "run", "test", "install", "dependency", "dependencies", "build", "compile"
-        ]
-        guard operationTerms.contains(where: { normalized.contains($0) }) else { return false }
-
-        if normalized.contains("/mnt/iexa") || normalized.contains("本地") || normalized.contains("alpine") {
-            return true
-        }
-        let localReferenceTerms = [
-            "这个", "这个文件", "那个", "它", "该文件", "刚才", "刚刚", "刚写的", "刚创建的", "刚生成的",
-            "上面", "上一", "生成的", "创建的", "报错", "错误", "问题", "结果",
-            "脚本", "文件", "项目", "目录", "lua", "python", "py", "js", "ts",
-            "html", "css", "json", "md", "sh", "go", "golang", "rust", "rs",
-            "java", "c语言", "c++", "cpp", "ruby", "php"
-        ]
-        if localReferenceTerms.contains(where: { normalized.contains($0) }) {
-            return true
-        }
-        let fileReferencePattern = #"[a-z0-9_\-./]+\.(lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|swift|c|cpp|h|rs|go|java|kt|rb|php)"#
-        return normalized.range(of: fileReferencePattern, options: .regularExpression) != nil
-    }
-
-    private static func fallbackLocalAlpineBlockForAssistantShellCode(content: String) -> String? {
-        guard let shell = firstRunnableShellCodeBlock(in: content) else { return nil }
-        let command = normalizedShellCodeBlock(shell)
-        guard shouldSendRawTextDirectlyToLocalAlpine(command) else { return nil }
-        return """
-        ```iexa_alpine
-        \(command)
-        ```
-        """
-    }
-
-    private func fallbackLocalAlpineBlockForFollowUpOperation(userText: String) -> String? {
-        guard let messages = conversation?.messages else { return nil }
-        if let block = fallbackLocalAlpineBlockForRecentCodeRun(userText: userText, messages: messages) {
-            return block
-        }
-        guard let command = Self.localAlpineFollowUpCommand(for: userText, messages: messages) else { return nil }
-        return """
-        ```iexa_alpine
-        \(command)
-        ```
-        """
-    }
-
-    private func fallbackLocalAlpineBlockForRecentCodeRun(userText: String, messages: [ChatMessage]) -> String? {
-        guard Self.isRunRecentCodeBlockRequest(userText),
-              let runnable = Self.preferredRunnableCodeBlock(from: Self.runnableCodeBlocks(in: userText))
-                ?? Self.latestRunnableCodeBlock(in: messages),
-              let object = Self.localAlpineRunObject(for: runnable),
-              let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
-              let json = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        return """
-        ```iexa_alpine
-        \(json)
-        ```
-        """
-    }
-
-    private static func localAlpineFollowUpCommand(for text: String, messages: [ChatMessage]) -> String? {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard isLocalAlpineFollowUpFileOperation(text, messages: messages) else { return nil }
-
-        let explicitPath = extractLocalAlpinePath(from: text)
-        let targetPath = explicitPath ?? latestLocalAlpineTouchedPath(
-            in: messages,
-            extensionHint: localAlpineExtensionHint(in: normalized)
-        )
-        let target = targetPath ?? "/mnt/iexa"
-        guard isSafeLocalAlpineTarget(target) else { return nil }
-        let quotedTarget = shellQuoted(target)
-
-        if containsAny(normalized, ["删", "删除", "移除", "清理", "删掉", "删了", "delete", "remove", "rm "]) {
-            guard targetPath != nil else { return nil }
-            return """
-            target=\(quotedTarget)
-            case "$target" in
-              /mnt/iexa/*) ;;
-              *) printf 'refusing unsafe delete target: %s\\n' "$target"; exit 2 ;;
-            esac
-            if [ -e "$target" ]; then
-              rm -rf -- "$target" && printf 'deleted: %s\\n' "$target"
-            else
-              printf 'missing: %s\\n' "$target"
-            fi
-            printf '\\n== /mnt/iexa ==\\n'
-            ls -la /mnt/iexa
-            """
-        }
-
-        if containsAny(normalized, ["重命名", "rename"]) {
-            guard let targetPath,
-                  let destination = localAlpineDestinationPath(in: text, fallbackDirectoryOf: targetPath),
-                  isSafeLocalAlpineTarget(destination) else { return nil }
-            let quotedDestination = shellQuoted(destination)
-            return """
-            src=\(quotedTarget)
-            dst=\(quotedDestination)
-            case "$src:$dst" in
-              /mnt/iexa/*:/mnt/iexa/*) ;;
-              *) printf 'refusing unsafe rename: %s -> %s\\n' "$src" "$dst"; exit 2 ;;
-            esac
-            if [ ! -e "$src" ]; then
-              printf 'missing: %s\\n' "$src"
-              exit 1
-            fi
-            mv -- "$src" "$dst"
-            printf 'renamed: %s -> %s\\n\\n' "$src" "$dst"
-            ls -la "$(dirname "$dst")"
-            """
-        }
-
-        if containsAny(normalized, ["移动", "move"]) {
-            guard let targetPath,
-                  let destination = localAlpineDestinationPath(in: text, fallbackDirectoryOf: targetPath),
-                  isSafeLocalAlpineTarget(destination) else { return nil }
-            let quotedDestination = shellQuoted(destination)
-            return """
-            src=\(quotedTarget)
-            dst=\(quotedDestination)
-            case "$src:$dst" in
-              /mnt/iexa/*:/mnt/iexa/*) ;;
-              *) printf 'refusing unsafe move: %s -> %s\\n' "$src" "$dst"; exit 2 ;;
-            esac
-            if [ ! -e "$src" ]; then
-              printf 'missing: %s\\n' "$src"
-              exit 1
-            fi
-            mv -- "$src" "$dst"
-            printf 'moved: %s -> %s\\n\\n' "$src" "$dst"
-            ls -la "$(dirname "$dst")"
-            """
-        }
-
-        if containsAny(normalized, ["复制", "copy"]) {
-            guard let targetPath,
-                  let destination = localAlpineDestinationPath(in: text, fallbackDirectoryOf: targetPath),
-                  isSafeLocalAlpineTarget(destination) else { return nil }
-            let quotedDestination = shellQuoted(destination)
-            return """
-            src=\(quotedTarget)
-            dst=\(quotedDestination)
-            case "$src:$dst" in
-              /mnt/iexa/*:/mnt/iexa/*) ;;
-              *) printf 'refusing unsafe copy: %s -> %s\\n' "$src" "$dst"; exit 2 ;;
-            esac
-            if [ ! -e "$src" ]; then
-              printf 'missing: %s\\n' "$src"
-              exit 1
-            fi
-            cp -R -- "$src" "$dst"
-            printf 'copied: %s -> %s\\n\\n' "$src" "$dst"
-            ls -la "$(dirname "$dst")"
-            """
-        }
-
-        if containsAny(normalized, ["读", "读取", "打开", "查看", "看一下", "看看", "cat ", "read"]) {
-            return """
-            target=\(quotedTarget)
-            if [ -f "$target" ]; then
-              sed -n '1,240p' "$target"
-            elif [ -d "$target" ]; then
-              ls -la "$target"
-            else
-              printf 'missing: %s\\n' "$target"
-            fi
-            """
-        }
-
-        if containsAny(normalized, ["列出", "列表", "目录", "ls ", "list"]) {
-            return """
-            target=\(quotedTarget)
-            if [ -d "$target" ]; then
-              ls -la "$target"
-            else
-              ls -la /mnt/iexa
-            fi
-            """
-        }
-
-        if containsAny(normalized, ["修", "修复", "修好", "改", "修改", "调试", "重试", "重新", "验证"]) {
-            guard let targetPath else { return localAlpineRepairContextCommand(in: messages) }
-            return localAlpineRepairContextCommand(targetPath: targetPath)
-        }
-
-        if containsAny(normalized, ["执行", "运行", "跑", "测试", "execute", "run", "test"]) {
-            guard let targetPath else { return nil }
-            let runCommand = localAlpineRunCommand(for: targetPath)
-                ?? localAlpineExecutableFallbackCommand()
-            return """
-            target=\(quotedTarget)
-            \(runCommand)
-            """
-        }
-
-        return nil
-    }
-
-    private static func localAlpineDestinationPath(in text: String, fallbackDirectoryOf source: String) -> String? {
-        let nsText = text as NSString
-        let sourceDir = (source as NSString).deletingLastPathComponent
-        let baseDir = sourceDir.hasPrefix("/mnt/iexa") ? sourceDir : "/mnt/iexa"
-
-        func normalizedDestination(from raw: String) -> String? {
-            let candidate = cleanLocalAlpinePathCandidate(raw)
-            guard !candidate.isEmpty else { return nil }
-            if candidate.hasPrefix("/mnt/iexa/") {
-                return candidate
-            }
-            if candidate.hasPrefix("/") || candidate.contains("..") {
-                return nil
-            }
-            return "\(baseDir)/\(candidate)"
-        }
-
-        let explicitDestinationPatterns = [
-            #"(?:重命名|改名|命名|移动|复制|拷贝)[^，。；;\n]{0,40}?(?:到|为|成)\s*[`\"'“”‘’]?([^`\"'“”‘’\s，。；;]+)"#,
-            #"(?:rename|move|copy)[^;\n]{0,40}?\b(?:to|as)\s*[`\"'“”‘’]?([^`\"'“”‘’\s，。；;]+)"#,
-            #"(?:->|=>)\s*[`\"'“”‘’]?([^`\"'“”‘’\s，。；;]+)"#
-        ]
-        for pattern in explicitDestinationPatterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
-            let range = NSRange(location: 0, length: nsText.length)
-            guard let match = regex.firstMatch(in: text, range: range),
-                  match.numberOfRanges >= 2 else { continue }
-            let raw = nsText.substring(with: match.range(at: 1))
-            if let destination = normalizedDestination(from: raw) {
-                return destination
-            }
-        }
-
-        guard let quotedRegex = try? NSRegularExpression(pattern: #"[`\"'“”‘’]([^`\"'“”‘’]+)[`\"'“”‘’]"#) else {
-            return nil
-        }
-        let quotedMatches = quotedRegex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
-        guard quotedMatches.count >= 2,
-              let last = quotedMatches.last,
-              last.numberOfRanges >= 2 else {
-            return nil
-        }
-        let raw = nsText.substring(with: last.range(at: 1))
-        return normalizedDestination(from: raw)
-    }
-
-    private static func localAlpineRunCommand(for targetPath: String) -> String? {
-        let ext = (targetPath as NSString).pathExtension.lowercased()
-        switch ext {
-        case "lua":
-            return """
-            command -v lua >/dev/null 2>&1 || command -v lua5.4 >/dev/null 2>&1 || { apk update && apk add --no-cache lua5.4; }
-            if command -v lua >/dev/null 2>&1; then lua "$target"; else lua5.4 "$target"; fi
-            """
-        case "py", "pyw":
-            return """
-            command -v python3 >/dev/null 2>&1 || { apk update && apk add --no-cache python3; }
-            python3 -m py_compile "$target" && python3 "$target"
-            """
-        case "js", "mjs", "cjs":
-            return """
-            command -v node >/dev/null 2>&1 || { apk update && apk add --no-cache nodejs; }
-            node "$target"
-            """
-        case "ts", "tsx":
-            return """
-            command -v npx >/dev/null 2>&1 || { apk update && apk add --no-cache nodejs npm; }
-            npx --yes tsx "$target"
-            """
-        case "sh":
-            return "sh \"$target\""
-        case "bash":
-            return """
-            command -v bash >/dev/null 2>&1 || { apk update && apk add --no-cache bash; }
-            bash "$target"
-            """
-        case "zsh":
-            return """
-            command -v zsh >/dev/null 2>&1 || { apk update && apk add --no-cache zsh; }
-            zsh "$target"
-            """
-        case "rb":
-            return """
-            command -v ruby >/dev/null 2>&1 || { apk update && apk add --no-cache ruby; }
-            ruby "$target"
-            """
-        case "php":
-            return """
-            command -v php >/dev/null 2>&1 || { apk update && apk add --no-cache php; }
-            php "$target"
-            """
-        case "pl":
-            return """
-            command -v perl >/dev/null 2>&1 || { apk update && apk add --no-cache perl; }
-            perl "$target"
-            """
-        case "r":
-            return """
-            command -v Rscript >/dev/null 2>&1 || { apk update && apk add --no-cache R; }
-            Rscript "$target"
-            """
-        case "go":
-            return """
-            command -v go >/dev/null 2>&1 || { apk update && apk add --no-cache go; }
-            go run "$target"
-            """
-        case "rs":
-            return """
-            command -v rustc >/dev/null 2>&1 || { apk update && apk add --no-cache rust cargo; }
-            out="/tmp/iexa-rust-$(date +%s)"
-            rustc "$target" -o "$out" && "$out"
-            """
-        case "c":
-            return """
-            command -v gcc >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
-            out="/tmp/iexa-c-$(date +%s)"
-            gcc -O2 -Wall "$target" -o "$out" && "$out"
-            """
-        case "cc", "cpp", "cxx":
-            return """
-            command -v g++ >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
-            out="/tmp/iexa-cpp-$(date +%s)"
-            g++ -std=c++17 -O2 -Wall "$target" -o "$out" && "$out"
-            """
-        case "java":
-            return """
-            command -v javac >/dev/null 2>&1 || { apk update && apk add --no-cache openjdk17; }
-            dir=$(dirname "$target")
-            base=$(basename "$target" .java)
-            (cd "$dir" && javac "$base.java" && java "$base")
-            """
-        case "kt":
-            return """
-            command -v kotlinc >/dev/null 2>&1 || { apk update && apk add --no-cache kotlin; }
-            out="/tmp/iexa-kt-$(date +%s).jar"
-            kotlinc "$target" -include-runtime -d "$out" && java -jar "$out"
-            """
-        case "kts":
-            return """
-            command -v kotlinc >/dev/null 2>&1 || { apk update && apk add --no-cache kotlin; }
-            kotlinc -script "$target"
-            """
-        case "swift":
-            return """
-            command -v swift >/dev/null 2>&1 || { printf 'swift runtime is not installed in this Alpine image\\n'; exit 127; }
-            swift "$target"
-            """
-        case "dart":
-            return """
-            command -v dart >/dev/null 2>&1 || { apk update && apk add --no-cache dart; }
-            dart "$target"
-            """
-        case "exs":
-            return """
-            command -v elixir >/dev/null 2>&1 || { apk update && apk add --no-cache elixir; }
-            elixir "$target"
-            """
-        case "html", "htm":
-            return """
-            printf 'HTML file exists; showing the first 120 lines for verification.\\n'
-            sed -n '1,120p' "$target"
-            """
-        default:
-            return nil
-        }
-    }
-
-    private static func localAlpineExecutableFallbackCommand() -> String {
-        """
-        if [ -x "$target" ]; then
-          "$target"
-        else
-          printf 'not executable and no runner is known for: %s\\n' "$target"
-          exit 2
-        fi
-        """
-    }
-
-    private static func localAlpineRepairContextCommand(in messages: [ChatMessage]) -> String? {
-        guard let targetPath = latestLocalAlpineTouchedPath(in: messages, extensionHint: nil) else {
-            return """
-            printf '== /mnt/iexa ==\\n'
-            ls -la /mnt/iexa
-            printf '\\n== recent python files ==\\n'
-            find /mnt/iexa -maxdepth 2 -type f \\( -name '*.py' -o -name '*.js' -o -name '*.lua' -o -name '*.sh' \\) -print | sort | tail -n 20
-            """
-        }
-        return localAlpineRepairContextCommand(targetPath: targetPath)
-    }
-
-    private static func localAlpineRepairContextCommand(targetPath: String) -> String {
-        let quotedTarget = shellQuoted(targetPath)
-        return """
-        target=\(quotedTarget)
-        printf '== target ==\\n%s\\n\\n' "$target"
-        if [ -f "$target" ]; then
-          printf '== file with line numbers ==\\n'
-          nl -ba "$target" | sed -n '1,260p'
-          case "$target" in
-            *.py)
-              printf '\\n== python compile ==\\n'
-              python3 -m py_compile "$target"
-              ;;
-            *.js|*.mjs|*.cjs)
-              printf '\\n== node syntax check ==\\n'
-              node --check "$target"
-              ;;
-            *.lua)
-              printf '\\n== lua syntax check ==\\n'
-              luac -p "$target" 2>/dev/null || lua "$target"
-              ;;
-            *.sh|*.bash)
-              printf '\\n== shell syntax check ==\\n'
-              sh -n "$target"
-              ;;
-          esac
-        else
-          printf 'missing: %s\\n' "$target"
-          printf '\\n== /mnt/iexa ==\\n'
-          ls -la /mnt/iexa
-        fi
-        """
-    }
-
-    private static func isRunRecentCodeBlockRequest(_ text: String) -> Bool {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return false }
-        let actionTerms = [
-            "运行", "执行", "跑", "测试", "验证",
-            "run", "execute", "test", "verify"
-        ]
-        let referenceTerms = [
-            "这段代码", "这个代码", "上面的代码", "刚刚的代码", "刚才的代码",
-            "这段脚本", "这个脚本", "上面的脚本", "刚刚的脚本",
-            "the code", "this code", "above code", "previous code",
-            "the script", "this script", "above script", "previous script"
-        ]
-        return containsAny(normalized, actionTerms) && containsAny(normalized, referenceTerms)
-    }
-
-    private static func latestRunnableCodeBlock(in messages: [ChatMessage]) -> RunnableCodeBlock? {
-        for message in messages.reversed() where message.role == .assistant && !isLocalAlpineAgentResult(message) {
-            if let preferred = preferredRunnableCodeBlock(from: runnableCodeBlocks(in: message.content)) {
-                return preferred
-            }
-        }
-        return nil
-    }
-
-    private static func preferredRunnableCodeBlock(from blocks: [RunnableCodeBlock]) -> RunnableCodeBlock? {
-        let ignoredLanguages: Set<String> = [
-            "iexa_alpine", "local_alpine_exec", "iexa_workspace", "iexa_native",
-            "text", "txt", "plain", "plaintext", "markdown", "md", "json", "yaml", "yml",
-            "diff", "patch"
-        ]
-        if let preferred = blocks.reversed().first(where: {
-            !ignoredLanguages.contains($0.language) && languageFileExtension($0.language) != nil
-        }) {
-            return preferred
-        }
-        return blocks.reversed().first(where: { !ignoredLanguages.contains($0.language) })
-    }
-
-    private static func runnableCodeBlocks(in content: String) -> [RunnableCodeBlock] {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"```([^\n`]*)\n([\s\S]*?)```"#,
-            options: [.caseInsensitive]
-        ) else { return [] }
-        let nsContent = content as NSString
-        return regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
-            .compactMap { match -> RunnableCodeBlock? in
-                guard match.numberOfRanges >= 3 else { return nil }
-                let rawLanguage = nsContent.substring(with: match.range(at: 1))
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .split(whereSeparator: { $0 == " " || $0 == "\t" })
-                    .first
-                    .map(String.init) ?? ""
-                let language = normalizedCodeBlockLanguage(rawLanguage)
-                let body = nsContent.substring(with: match.range(at: 2))
-                    .replacingOccurrences(of: "\r\n", with: "\n")
-                    .replacingOccurrences(of: "\r", with: "\n")
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "\n"))
-                guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-                return RunnableCodeBlock(language: language, code: body)
-            }
-    }
-
-    private static func localAlpineRunObject(for block: RunnableCodeBlock) -> [String: Any]? {
-        let language = block.language.isEmpty ? inferCodeLanguage(from: block.code) : block.language
-        let ext = languageFileExtension(language) ?? "txt"
-        let path = "iexa_recent_code.\(ext)"
-        let command = localAlpineRecentCodeRunCommand(language: language, path: path)
-        return [
-            "cwd": "/mnt/iexa",
-            "write_files": [[
-                "path": path,
-                "code_lines": block.code.components(separatedBy: "\n")
-            ]],
-            "command": command
-        ]
-    }
-
-    private static func localAlpineRecentCodeRunCommand(language: String, path: String) -> String {
-        let quotedPath = shellQuoted(path)
-        let runtimePath = "/mnt/iexa/\(path)"
-        let run = localAlpineRunCommand(for: runtimePath) ?? localAlpineExecutableFallbackCommand()
-        if language == "sh" || language == "bash" || language == "shell" {
-            return """
-            set -u
-            target=\(quotedPath)
-            printf '== running recent code: %s ==\\n' "$target"
-            \(run)
-            """
-        }
-        return """
-        set -u
-        target=\(quotedPath)
-        printf '== running recent code: %s ==\\n' "$target"
-        \(run)
-        """
-    }
-
-    private static func normalizedCodeBlockLanguage(_ language: String) -> String {
-        let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        switch normalized {
-        case "python", "py", "python3":
-            return "python"
-        case "javascript", "js", "node", "nodejs":
-            return "javascript"
-        case "typescript", "ts":
-            return "typescript"
-        case "shell", "bash", "sh", "zsh", "terminal", "console":
-            return "sh"
-        case "c++", "cpp", "cc", "cxx":
-            return "cpp"
-        case "c":
-            return "c"
-        default:
-            return normalized
-        }
-    }
-
-    private static func languageFileExtension(_ language: String) -> String? {
-        switch normalizedCodeBlockLanguage(language) {
-        case "python": return "py"
-        case "javascript": return "js"
-        case "typescript": return "ts"
-        case "sh": return "sh"
-        case "lua": return "lua"
-        case "go", "golang": return "go"
-        case "rust", "rs": return "rs"
-        case "java": return "java"
-        case "cpp": return "cpp"
-        case "c": return "c"
-        case "ruby", "rb": return "rb"
-        case "php": return "php"
-        case "perl", "pl": return "pl"
-        case "html": return "html"
-        default: return nil
-        }
-    }
-
-    private static func inferCodeLanguage(from code: String) -> String {
-        let lower = code.lowercased()
-        if lower.contains("def ") || lower.contains("import ") || lower.contains("print(") {
-            return "python"
-        }
-        if lower.contains("#include") || lower.contains("std::") {
-            return "cpp"
-        }
-        if lower.contains("console.log") || lower.contains("function ") || lower.contains("const ") {
-            return "javascript"
-        }
-        if lower.contains("#!/bin/sh") || lower.contains("#!/usr/bin/env sh") || lower.contains("echo ") {
-            return "sh"
-        }
-        return "python"
     }
 
     private static func isLocalAlpineManualRunOrRefusalResponse(_ content: String) -> Bool {
@@ -5995,7 +5217,7 @@ final class ChatViewModel {
 
     private static func localAlpineCommandObjects(fromNormalized object: Any) -> [Any] {
         if let dict = object as? [String: Any],
-           let nested = dict["iexa_alpine"] ?? dict["local_alpine_exec"] ?? dict["commands"] {
+           let nested = dict["iexa_alpine"] ?? dict["commands"] {
             return localAlpineCommandObjects(fromNormalized: nested)
         }
         if let array = object as? [Any] {
@@ -6075,722 +5297,59 @@ final class ChatViewModel {
         return nsText.substring(with: match.range)
     }
 
-    private static func firstRunnableShellCodeBlock(in content: String) -> String? {
-        let nsContent = content as NSString
-        guard let regex = try? NSRegularExpression(
-            pattern: #"```([^\n`]*)\n([\s\S]*?)```"#,
-            options: [.caseInsensitive]
-        ) else { return nil }
-        let shellLanguages: Set<String> = ["bash", "sh", "shell", "zsh", "terminal", "console"]
-        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
-        for match in matches where match.numberOfRanges >= 3 {
-            let info = nsContent.substring(with: match.range(at: 1))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-            guard shellLanguages.contains(info) else { continue }
-            let body = nsContent.substring(with: match.range(at: 2))
-                .replacingOccurrences(of: "\r\n", with: "\n")
-                .replacingOccurrences(of: "\r", with: "\n")
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\n"))
-            if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return body
-            }
-        }
-        return nil
-    }
-
-    private static func normalizedShellCodeBlock(_ code: String) -> String {
-        code
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .components(separatedBy: "\n")
-            .map { line in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.hasPrefix("$ ") {
-                    return String(trimmed.dropFirst(2))
-                }
-                return line
-            }
-            .joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func containsAny(_ text: String, _ terms: [String]) -> Bool {
-        terms.contains { text.contains($0) }
-    }
-
-    private static func extractLocalAlpinePath(from text: String) -> String? {
-        let patterns = [
-            #"`([^`]+)`"#,
-            #""([^"]+)""#,
-            #"['“”‘’]([^'“”‘’]+)['“”‘’]"#,
-            #"(/mnt/iexa/[^\s`"'“”‘’\]\)）>，。；;]+)"#,
-            #"((?:[\w.-]+/)+[\w.-]+\.(?:lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|swift|c|cpp|h|rs|go|java|kt|rb|php))"#,
-            #"([\w.-]+\.(?:lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|swift|c|cpp|h|rs|go|java|kt|rb|php))"#
-        ]
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
-            let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
-            guard let match = regex.firstMatch(in: text, range: nsRange),
-                  match.numberOfRanges >= 2,
-                  let range = Range(match.range(at: 1), in: text) else {
-                continue
-            }
-            let candidate = cleanLocalAlpinePathCandidate(String(text[range]))
-            let runtimePath = localAlpineRuntimePath(for: candidate, cwd: "/mnt/iexa")
-            if isSafeLocalAlpineTarget(runtimePath) {
-                return runtimePath
-            }
-        }
-        return nil
-    }
-
-    private static func latestLocalAlpineTouchedPath(
-        in messages: [ChatMessage],
-        extensionHint: String?
-    ) -> String? {
-        for message in messages.reversed() where Self.isLocalAlpineAgentResult(message) {
-            let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(message.metadata?["iexa_local_alpine_written_files"])
-            let writtenPaths = writtenFiles.map(\.path)
-            if let match = preferredLocalAlpinePath(from: writtenPaths, extensionHint: extensionHint) {
-                return match
-            }
-
-            let text = [
-                message.metadata?["iexa_local_alpine_raw_result"],
-                message.metadata?["iexa_local_alpine_display_command"],
-                message.content
-            ]
-                .compactMap { $0 }
-                .joined(separator: "\n")
-            let paths = localAlpinePaths(in: text)
-            if let match = preferredLocalAlpinePath(from: paths, extensionHint: extensionHint) {
-                return match
-            }
-        }
-        return nil
-    }
-
-    private static func preferredLocalAlpinePath(from paths: [String], extensionHint: String?) -> String? {
-        let safePaths = paths
-            .map(cleanLocalAlpinePathCandidate)
-            .map { localAlpineRuntimePath(for: $0, cwd: "/mnt/iexa") }
-            .filter { isSafeLocalAlpineTarget($0) }
-        guard !safePaths.isEmpty else { return nil }
-        if let extensionHint,
-           let preferred = safePaths.reversed().first(where: {
-            ($0 as NSString).pathExtension.lowercased() == extensionHint
-           }) {
-            return preferred
-        }
-        return safePaths.last
-    }
-
-    private static func localAlpinePaths(in text: String) -> [String] {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"(/mnt/iexa/[^\s`"'“”‘’\]\)）>，。；;]+)"#,
-            options: [.caseInsensitive]
-        ) else { return [] }
-        let nsText = text as NSString
-        return regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
-            .compactMap { match in
-                guard match.numberOfRanges >= 2 else { return nil }
-                return cleanLocalAlpinePathCandidate(nsText.substring(with: match.range(at: 1)))
-            }
-    }
-
-    private static func cleanLocalAlpinePathCandidate(_ path: String) -> String {
-        path.trimmingCharacters(
-            in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "`\"'“”‘’.,，。:：;；)]）"))
-        )
-    }
-
-    private static func localAlpineExtensionHint(in text: String) -> String? {
-        let hints: [(String, String)] = [
-            ("lua", "lua"), ("python", "py"), ("py", "py"), ("javascript", "js"),
-            ("node", "js"), ("js", "js"), ("typescript", "ts"), ("ts", "ts"),
-            ("html", "html"), ("css", "css"), ("json", "json"), ("markdown", "md"),
-            ("md", "md"), ("shell", "sh"), ("bash", "sh"), ("sh", "sh"),
-            ("golang", "go"), ("go语言", "go"), ("go", "go"), ("rust", "rs"),
-            ("rs", "rs"), ("java", "java"), ("c++", "cpp"), ("cpp", "cpp"),
-            ("c语言", "c"), ("ruby", "rb"), ("rb", "rb"), ("php", "php")
-        ]
-        return hints.first(where: { text.contains($0.0) })?.1
-    }
-
-    private static func isSafeLocalAlpineTarget(_ path: String) -> Bool {
-        let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\\", with: "/")
-        guard normalized == "/mnt/iexa" || normalized.hasPrefix("/mnt/iexa/") else { return false }
-        return !normalized.split(separator: "/").contains("..")
-    }
-
-    private static func shellQuoted(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    private struct LocalAlpinePackageSpec: Hashable {
-        let command: String
-        let package: String
-    }
-
-    private static func isLocalAlpineNaturalLanguageExecutionRequest(_ text: String) -> Bool {
-        if localAlpineNaturalLanguageCommand(for: text) != nil {
-            return true
-        }
-
-        let actionTerms = [
-            "执行", "运行", "跑", "测试", "验证", "检查", "查看", "读取", "列出",
-            "删除", "删掉", "删了", "移除", "清理",
-            "安装", "装", "依赖", "编译", "构建", "修复", "搜索",
-            "execute", "run", "test", "verify", "check", "inspect", "read", "list",
-            "delete", "remove", "install", "dependency", "dependencies", "build", "compile", "fix", "search"
-        ]
-        let targetTerms = [
-            "命令", "终端", "shell", "bash", "alpine", "版本", "目录",
-            "/mnt/iexa", "python", "python3", "pip", "node", "npm", "g++", "gcc", "c++",
-            "lua", "go", "golang", "rust", "java", "ruby", "php", "文件", "脚本",
-            "make", "cmake", "curl", "wget", "git", "package.json", "requirements.txt",
-            "pyproject.toml", "makefile"
-        ]
-        if containsAny(text, actionTerms), targetTerms.contains(where: { localAlpineTextContains(text, $0) }) {
-            return true
-        }
-
-        let runnableObjectTerms = ["文件", "项目", "脚本", "代码", "file", "project", "script", "code"]
-        let localContextTerms = [
-            "本地", "当前目录", "这个目录", "/mnt/iexa", "刚才", "刚刚", "刚写", "刚创建", "刚生成",
-            "local", "current directory", "workspace"
-        ]
-        let runnableActionTerms = [
-            "运行", "执行", "跑", "测试", "验证", "编译", "构建", "安装", "依赖", "修复",
-            "run", "execute", "test", "verify", "compile", "build", "install", "fix"
-        ]
-        return containsAny(text, runnableObjectTerms)
-            && containsAny(text, runnableActionTerms)
-            && containsAny(text, localContextTerms)
-    }
-
-    private static func localAlpineNaturalLanguageCommand(for text: String) -> String? {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return nil }
-
-        if let command = embeddedLocalAlpinePackageManagerCommand(in: normalized) {
-            return command
-        }
-
-        if isFileDeleteRequest(normalized),
-           let target = extractLocalAlpinePath(from: normalized) {
-            return fileDeleteCommand(for: target)
-        }
-
-        if isFileRunRequest(normalized),
-           let target = extractLocalAlpinePath(from: normalized) {
-            return fileRunCommand(for: target)
-        }
-
-        if isDirectoryListingRequest(normalized) {
-            let target = extractLocalAlpinePath(from: normalized) ?? "/mnt/iexa"
-            return directoryListingCommand(for: target)
-        }
-
-        if isFileReadRequest(normalized),
-           let target = extractLocalAlpinePath(from: normalized) {
-            return fileReadCommand(for: target)
-        }
-
-        if isFileSearchRequest(normalized) {
-            let target = extractLocalAlpinePath(from: normalized) ?? "/mnt/iexa"
-            if let query = localAlpineSearchQuery(from: normalized) {
-                return fileSearchCommand(query: query, target: target)
-            }
-        }
-
-        if isVersionInspectionRequest(normalized) {
-            let tools = mentionedLocalAlpineCommands(in: normalized)
-            if !tools.isEmpty {
-                return versionCheckCommand(for: tools)
-            }
-        }
-
-        if isPackageInstallRequest(normalized) {
-            let specs = mentionedLocalAlpinePackageSpecs(in: normalized)
-            if !specs.isEmpty {
-                return installLocalAlpinePackagesCommand(specs)
-            }
-            if isDependencyInstallRequest(normalized) {
-                return installProjectDependenciesCommand()
-            }
-        }
-
-        return nil
-    }
-
-    private static func embeddedLocalAlpinePackageManagerCommand(in text: String) -> String? {
-        let patterns = [
-            #"((?:sudo\s+)?apk\s+(?:update|add|upgrade|fix)\b[^\n，。；;]*)"#,
-            #"((?:python3?\s+-m\s+pip|pip3?|npm|npx)\s+(?:install|i|add)\b[^\n，。；;]*)"#
-        ]
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
-            let nsText = text as NSString
-            let range = NSRange(location: 0, length: nsText.length)
-            guard let match = regex.firstMatch(in: text, range: range),
-                  match.numberOfRanges >= 2 else { continue }
-            let command = nsText.substring(with: match.range(at: 1))
-                .replacingOccurrences(of: #"^sudo\s+"#, with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !command.isEmpty {
-                return command
-            }
-        }
-        return nil
-    }
-
-    private static func isPackageInstallRequest(_ text: String) -> Bool {
-        containsAny(text, [
-            "安装", "装一下", "装上", "装包", "安装包", "安装依赖", "装依赖", "安装模块", "安装库",
-            "install", "install package", "install dependency", "install dependencies", "install deps"
-        ])
-    }
-
-    private static func isDependencyInstallRequest(_ text: String) -> Bool {
-        containsAny(text, ["依赖", "deps", "dependency", "dependencies", "requirements", "package.json", "pyproject"])
-    }
-
-    private static func isDirectoryListingRequest(_ text: String) -> Bool {
-        let listTerms = [
-            "读取目录", "查看目录", "列出目录", "看目录", "目录有什么", "有什么文件",
-            "当前目录", "这个目录", "工作区目录", "文件列表", "列文件", "列一下",
-            "list directory", "list files", "show directory", "show files", "ls"
-        ]
-        if containsAny(text, listTerms) {
-            return true
-        }
-        return containsAny(text, ["读取", "查看", "检查", "列出", "看看", "read", "show", "list", "inspect"])
-            && containsAny(text, ["目录", "文件", "/mnt/iexa", "directory", "files", "workspace"])
-            && !isFileReadRequest(text)
-    }
-
-    private static func isFileReadRequest(_ text: String) -> Bool {
-        let readTerms = ["读取", "打开", "查看", "cat ", "read", "open", "show"]
-        guard containsAny(text, readTerms) else { return false }
-        return extractLocalAlpinePath(from: text) != nil
-            || text.range(of: #"[a-z0-9_\-./]+\.(lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|swift|c|cpp|h|rs|go|java|kt|rb|php)"#, options: [.regularExpression, .caseInsensitive]) != nil
-    }
-
-    private static func isFileDeleteRequest(_ text: String) -> Bool {
-        let deleteTerms = ["删", "删除", "移除", "清理", "删掉", "删了", "delete", "remove", "rm "]
-        guard containsAny(text, deleteTerms) else { return false }
-        return extractLocalAlpinePath(from: text) != nil
-            || text.range(of: #"[a-z0-9_\-./]+\.(lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|swift|c|cpp|h|rs|go|java|kt|rb|php)"#, options: [.regularExpression, .caseInsensitive]) != nil
-    }
-
-    private static func isFileRunRequest(_ text: String) -> Bool {
-        let runTerms = [
-            "运行", "执行", "跑", "测试", "验证", "编译", "构建",
-            "run", "execute", "test", "verify", "compile", "build"
-        ]
-        guard containsAny(text, runTerms) else { return false }
-        return extractLocalAlpinePath(from: text) != nil
-            || text.range(of: #"[a-z0-9_\-./]+\.(lua|py|js|ts|tsx|jsx|html|css|json|md|txt|sh|bash|c|cpp|rs|go|java|rb|php)"#, options: [.regularExpression, .caseInsensitive]) != nil
-    }
-
-    private static func isFileSearchRequest(_ text: String) -> Bool {
-        containsAny(text, [
-            "搜索", "查找", "找一下", "搜一下", "grep", "find in files",
-            "search", "find"
-        ])
-    }
-
-    private static func localAlpineSearchQuery(from text: String) -> String? {
-        let patterns = [
-            #"`([^`]+)`"#,
-            #""([^"]+)""#,
-            #"['“”‘’]([^'“”‘’]+)['“”‘’]"#,
-            #"(?:搜索|查找|找一下|搜一下)\s*([^\s，。；;]+)"#,
-            #"(?:search|find)\s+(?:for\s+)?([^\s,.;]+)"#
-        ]
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
-            let nsText = text as NSString
-            guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: nsText.length)),
-                  match.numberOfRanges >= 2 else { continue }
-            let query = nsText.substring(with: match.range(at: 1))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !query.isEmpty,
-               query != "/mnt/iexa" {
-                return query
-            }
-        }
-        return nil
-    }
-
-    private static func isVersionInspectionRequest(_ text: String) -> Bool {
-        if text.contains("--version") {
-            return true
-        }
-        let inspectTerms = ["验证", "检查", "查看", "查询", "看一下", "verify", "check", "inspect", "show"]
-        let versionTerms = ["版本", "version"]
-        return containsAny(text, inspectTerms) && containsAny(text, versionTerms)
-    }
-
-    private static func mentionedLocalAlpineCommands(in text: String) -> [String] {
-        Array(Set(mentionedLocalAlpinePackageSpecs(in: text).map(\.command))).sorted()
-    }
-
-    private static func mentionedLocalAlpinePackageSpecs(in text: String) -> [LocalAlpinePackageSpec] {
-        let candidates: [(terms: [String], specs: [LocalAlpinePackageSpec])] = [
-            (["build-base", "编译环境", "构建环境", "build tools"], [
-                LocalAlpinePackageSpec(command: "gcc", package: "build-base"),
-                LocalAlpinePackageSpec(command: "g++", package: "build-base"),
-                LocalAlpinePackageSpec(command: "make", package: "build-base")
-            ]),
-            (["g++", "c++", "cpp", "c++依赖", "c++ 依赖", "c++项目", "c++ 项目"], [
-                LocalAlpinePackageSpec(command: "g++", package: "build-base"),
-                LocalAlpinePackageSpec(command: "make", package: "build-base")
-            ]),
-            (["gcc", "c语言", "c 语言"], [
-                LocalAlpinePackageSpec(command: "gcc", package: "build-base"),
-                LocalAlpinePackageSpec(command: "make", package: "build-base")
-            ]),
-            (["make"], [LocalAlpinePackageSpec(command: "make", package: "build-base")]),
-            (["cmake"], [LocalAlpinePackageSpec(command: "cmake", package: "cmake")]),
-            (["pkgconf", "pkg-config"], [LocalAlpinePackageSpec(command: "pkgconf", package: "pkgconf")]),
-            (["linux-headers"], [LocalAlpinePackageSpec(command: "linux-headers", package: "linux-headers")]),
-            (["python3", "python"], [LocalAlpinePackageSpec(command: "python3", package: "python3")]),
-            (["pip3", "pip"], [LocalAlpinePackageSpec(command: "pip3", package: "py3-pip")]),
-            (["node", "nodejs"], [LocalAlpinePackageSpec(command: "node", package: "nodejs")]),
-            (["npm"], [LocalAlpinePackageSpec(command: "npm", package: "npm")]),
-            (["lua", "lua5.4"], [LocalAlpinePackageSpec(command: "lua5.4", package: "lua5.4")]),
-            (["go", "golang"], [LocalAlpinePackageSpec(command: "go", package: "go")]),
-            (["rust", "rustc"], [
-                LocalAlpinePackageSpec(command: "rustc", package: "rust"),
-                LocalAlpinePackageSpec(command: "cargo", package: "cargo")
-            ]),
-            (["cargo"], [LocalAlpinePackageSpec(command: "cargo", package: "cargo")]),
-            (["java", "javac"], [LocalAlpinePackageSpec(command: "javac", package: "openjdk17")]),
-            (["maven", "mvn"], [LocalAlpinePackageSpec(command: "mvn", package: "maven")]),
-            (["gradle"], [LocalAlpinePackageSpec(command: "gradle", package: "gradle")]),
-            (["ruby"], [LocalAlpinePackageSpec(command: "ruby", package: "ruby")]),
-            (["bundler", "bundle"], [LocalAlpinePackageSpec(command: "bundle", package: "ruby-bundler")]),
-            (["php"], [LocalAlpinePackageSpec(command: "php", package: "php")]),
-            (["composer"], [LocalAlpinePackageSpec(command: "composer", package: "composer")]),
-            (["perl"], [LocalAlpinePackageSpec(command: "perl", package: "perl")]),
-            (["bash"], [LocalAlpinePackageSpec(command: "bash", package: "bash")]),
-            (["curl"], [LocalAlpinePackageSpec(command: "curl", package: "curl")]),
-            (["wget"], [LocalAlpinePackageSpec(command: "wget", package: "wget")]),
-            (["git"], [LocalAlpinePackageSpec(command: "git", package: "git")]),
-            (["zip"], [LocalAlpinePackageSpec(command: "zip", package: "zip")]),
-            (["unzip"], [LocalAlpinePackageSpec(command: "unzip", package: "unzip")])
-        ]
-
-        var specs: [LocalAlpinePackageSpec] = []
-        var seen = Set<LocalAlpinePackageSpec>()
-        for candidate in candidates where candidate.terms.contains(where: { localAlpineTextContains(text, $0) }) {
-            for spec in candidate.specs where !seen.contains(spec) {
-                specs.append(spec)
-                seen.insert(spec)
-            }
-        }
-        return specs
-    }
-
-    private static func localAlpineTextContains(_ text: String, _ term: String) -> Bool {
-        let needle = term.lowercased()
-        if needle.range(of: #"^[a-z0-9_-]+$"#, options: .regularExpression) == nil {
-            return text.contains(needle)
-        }
-        let escaped = NSRegularExpression.escapedPattern(for: needle)
-        return text.range(of: #"(?<![a-z0-9_])\#(escaped)(?![a-z0-9_])"#, options: .regularExpression) != nil
-    }
-
-    private static func installLocalAlpinePackagesCommand(_ specs: [LocalAlpinePackageSpec]) -> String {
-        let packages = Array(Set(specs.map(\.package))).sorted().joined(separator: " ")
-        let commands = Array(Set(specs.map(\.command))).sorted().joined(separator: " ")
-        return """
-        set -u
-        printf '== before ==\\n'
-        for x in \(commands); do
-          printf '%-8s: ' "$x"
-          command -v "$x" 2>/dev/null || printf 'missing\\n'
-        done
-        printf '\\n== install ==\\n'
-        apk update && apk add --no-cache \(packages)
-        printf '\\n== after ==\\n'
-        for x in \(commands); do
-          printf '%-8s: ' "$x"
-          command -v "$x" || true
-          "$x" --version 2>/dev/null | head -n 1 || true
-        done
-        """
-    }
-
-    private static func installProjectDependenciesCommand() -> String {
-        """
-        set -u
-        cd /mnt/iexa
-        did_install=0
-        printf '== workspace ==\\n'
-        pwd
-        ls -la
-        if [ -f package.json ]; then
-          did_install=1
-          command -v npm >/dev/null 2>&1 || { apk update && apk add --no-cache nodejs npm; }
-          printf '\\n== npm install ==\\n'
-          npm install
-        fi
-        if [ -f requirements.txt ]; then
-          did_install=1
-          command -v pip3 >/dev/null 2>&1 || { apk update && apk add --no-cache py3-pip; }
-          printf '\\n== pip install -r requirements.txt ==\\n'
-          pip3 install -r requirements.txt
-        fi
-        if [ -f pyproject.toml ] && [ ! -f requirements.txt ]; then
-          did_install=1
-          command -v pip3 >/dev/null 2>&1 || { apk update && apk add --no-cache py3-pip; }
-          printf '\\n== pip install . ==\\n'
-          pip3 install .
-        fi
-        if [ -f go.mod ]; then
-          did_install=1
-          command -v go >/dev/null 2>&1 || { apk update && apk add --no-cache go; }
-          printf '\\n== go mod download ==\\n'
-          go mod download
-        fi
-        if [ -f Cargo.toml ]; then
-          did_install=1
-          command -v cargo >/dev/null 2>&1 || { apk update && apk add --no-cache rust cargo; }
-          printf '\\n== cargo fetch ==\\n'
-          cargo fetch
-        fi
-        if [ -f CMakeLists.txt ]; then
-          did_install=1
-          command -v cmake >/dev/null 2>&1 || { apk update && apk add --no-cache cmake; }
-          command -v make >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
-          command -v pkgconf >/dev/null 2>&1 || { apk update && apk add --no-cache pkgconf; }
-          printf '\\n== cmake deps ready ==\\n'
-          cmake --version | head -n 1 || true
-        fi
-        if [ -f Makefile ] || [ -f makefile ]; then
-          did_install=1
-          command -v make >/dev/null 2>&1 || { apk update && apk add --no-cache make; }
-          command -v gcc >/dev/null 2>&1 || { apk update && apk add --no-cache build-base; }
-        fi
-        if [ -f pom.xml ]; then
-          did_install=1
-          command -v javac >/dev/null 2>&1 || { apk update && apk add --no-cache openjdk17; }
-          command -v mvn >/dev/null 2>&1 || { apk update && apk add --no-cache maven; }
-          printf '\\n== maven dependency resolve ==\\n'
-          mvn -q -DskipTests dependency:resolve
-        fi
-        if [ -f build.gradle ] || [ -f build.gradle.kts ] || [ -f gradlew ]; then
-          did_install=1
-          command -v javac >/dev/null 2>&1 || { apk update && apk add --no-cache openjdk17; }
-          if [ -x ./gradlew ]; then
-            printf '\\n== gradle wrapper dependencies ==\\n'
-            ./gradlew --no-daemon dependencies
-          else
-            command -v gradle >/dev/null 2>&1 || { apk update && apk add --no-cache gradle; }
-            printf '\\n== gradle dependencies ==\\n'
-            gradle --no-daemon dependencies
-          fi
-        fi
-        if [ -f composer.json ]; then
-          did_install=1
-          command -v php >/dev/null 2>&1 || { apk update && apk add --no-cache php; }
-          command -v composer >/dev/null 2>&1 || { apk update && apk add --no-cache composer; }
-          printf '\\n== composer install ==\\n'
-          composer install --no-interaction
-        fi
-        if [ -f Gemfile ]; then
-          did_install=1
-          command -v ruby >/dev/null 2>&1 || { apk update && apk add --no-cache ruby; }
-          command -v bundle >/dev/null 2>&1 || { apk update && apk add --no-cache ruby-bundler; }
-          printf '\\n== bundle install ==\\n'
-          bundle install
-        fi
-        if [ "$did_install" -eq 0 ]; then
-          printf '\\n未找到已支持的依赖文件：package.json、requirements.txt、pyproject.toml、go.mod、Cargo.toml、CMakeLists.txt、Makefile、pom.xml、build.gradle、composer.json 或 Gemfile。请先告诉我要安装哪个包，或把依赖文件放到 /mnt/iexa。\\n'
-          exit 2
-        fi
-        printf '\\nIEXA_DEPENDENCIES_INSTALL_DONE\\n'
-        """
-    }
-
-    private static func directoryListingCommand(for target: String) -> String {
-        let quoted = shellQuoted(target)
-        return """
-        target=\(quoted)
-        if [ -z "$target" ] || [ "$target" = "." ]; then
-          target=/mnt/iexa
-        fi
-        if [ -d "$target" ]; then
-          printf '== pwd ==\\n'
-          pwd
-          printf '\\n== files: %s ==\\n' "$target"
-          ls -la "$target"
-        elif [ -f "$target" ]; then
-          printf '== file: %s ==\\n' "$target"
-          sed -n '1,240p' "$target"
-        else
-          printf 'missing: %s\\n' "$target"
-          exit 1
-        fi
-        """
-    }
-
-    private static func fileReadCommand(for target: String) -> String {
-        let quoted = shellQuoted(target)
-        return """
-        target=\(quoted)
-        if [ -f "$target" ]; then
-          printf '== file ==\\n%s\\n\\n' "$target"
-          printf '== content with line numbers ==\\n'
-          nl -ba "$target" | sed -n '1,240p'
-        elif [ -d "$target" ]; then
-          printf '== directory ==\\n%s\\n\\n' "$target"
-          ls -la "$target"
-        else
-          printf 'missing: %s\\n' "$target"
-          exit 1
-        fi
-        """
-    }
-
-    private static func fileDeleteCommand(for target: String) -> String {
-        let quoted = shellQuoted(target)
-        return """
-        target=\(quoted)
-        case "$target" in
-          /mnt/iexa/*) ;;
-          *)
-            printf 'refusing unsafe delete target: %s\\n' "$target"
-            exit 2
-            ;;
-        esac
-        if [ "$target" = "/mnt/iexa" ]; then
-          printf 'refusing to delete workspace root: %s\\n' "$target"
-          exit 2
-        fi
-        if [ -e "$target" ]; then
-          rm -rf -- "$target" && printf 'deleted: %s\\n' "$target"
-        else
-          printf 'missing: %s\\n' "$target"
-        fi
-        printf '\\n== /mnt/iexa ==\\n'
-        ls -la /mnt/iexa
-        """
-    }
-
-    private static func fileRunCommand(for target: String) -> String {
-        let quoted = shellQuoted(target)
-        let run = localAlpineRunCommand(for: target)
-            ?? localAlpineExecutableFallbackCommand()
-        return """
-        set -u
-        target=\(quoted)
-        if [ ! -f "$target" ]; then
-          printf 'missing: %s\\n' "$target"
-          exit 1
-        fi
-        printf '== target ==\\n%s\\n\\n' "$target"
-        \(run)
-        """
-    }
-
-    private static func fileSearchCommand(query: String, target: String) -> String {
-        let quotedQuery = shellQuoted(query)
-        let quotedTarget = shellQuoted(target)
-        return """
-        set -u
-        query=\(quotedQuery)
-        target=\(quotedTarget)
-        if [ -z "$target" ] || [ "$target" = "." ]; then
-          target=/mnt/iexa
-        fi
-        if [ ! -e "$target" ]; then
-          printf 'missing: %s\\n' "$target"
-          exit 1
-        fi
-        printf '== search ==\\n%s\\n\\n' "$query"
-        if command -v rg >/dev/null 2>&1; then
-          rg -n --hidden --glob '!node_modules' --glob '!.git' -- "$query" "$target" | head -n 80
-        else
-          grep -RIn --exclude-dir=node_modules --exclude-dir=.git -- "$query" "$target" | head -n 80
-        fi
-        """
-    }
-
-    private static func versionCheckCommand(for tools: [String]) -> String {
-        let commands = tools.sorted().joined(separator: " ")
-        return """
-        for x in \(commands); do
-          printf '== %s ==\\n' "$x"
-          if command -v "$x" >/dev/null 2>&1; then
-            command -v "$x"
-            "$x" --version 2>/dev/null | head -n 1 || "$x" -v 2>/dev/null | head -n 1 || true
-          else
-            printf 'missing: %s\\n' "$x"
-          fi
-          printf '\\n'
-        done
-        """
-    }
-
-    private static func fallbackLocalAlpineBlock(for text: String) -> String? {
-        let command = normalizedLocalAlpineCommand(text)
-        guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        guard shouldSendRawTextDirectlyToLocalAlpine(command) else { return nil }
-        return localAlpineFenceBlock(command)
-    }
-
-    private static func localAlpineFenceBlock(_ command: String) -> String? {
-        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return """
-        ```iexa_alpine
-        \(trimmed)
-        ```
-        """
-    }
-
     private static func shouldSendRawTextDirectlyToLocalAlpine(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        if trimmed.contains("\n") { return true }
-        if trimmed.hasPrefix("$ ") { return true }
-        if trimmed.hasPrefix("./") || trimmed.hasPrefix("/") { return true }
-        if trimmed.range(of: #"[;&|`$<>]"#, options: .regularExpression) != nil { return true }
-
-        let command = trimmed.split(separator: " ", maxSplits: 1).first.map(String.init) ?? trimmed
-        return isKnownLocalAlpineShellCommand(command)
+        if trimmed.contains("\n") {
+            return shouldAutoRouteRawShellTextToLocalAlpine(trimmed)
+        }
+        return isShellLikeCommandLine(trimmed)
     }
 
     private static func shouldAutoRouteRawShellTextToLocalAlpine(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        if trimmed.hasPrefix("$ ") { return true }
-        if trimmed.hasPrefix("./") || trimmed.hasPrefix("/") { return true }
-        if trimmed.range(of: #"[;&|`$<>]"#, options: .regularExpression) != nil { return true }
         let nonEmptyLines = trimmed
             .split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && !$0.hasPrefix("#") }
         guard !nonEmptyLines.isEmpty else { return false }
-        return nonEmptyLines.allSatisfy { line in
-            let command = line.split(separator: " ", maxSplits: 1).first.map(String.init) ?? line
-            return isKnownLocalAlpineShellCommand(command)
+        return nonEmptyLines.allSatisfy { Self.isShellLikeCommandLine($0) }
+    }
+
+    private static func isShellLikeCommandLine(_ line: String) -> Bool {
+        var trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.hasPrefix("$ ") {
+            trimmed = String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        if trimmed.hasPrefix("sudo ") {
+            trimmed = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if trimmed.hasPrefix("./") || trimmed.hasPrefix("/") { return true }
+        if ["then", "else", "do", "done", "fi", "esac", "}", "{"].contains(trimmed) { return true }
+
+        let words = trimmed.split(separator: " ").map(String.init)
+        guard let firstCommand = words.first(where: { word in
+            word.range(of: #"^[A-Za-z_][A-Za-z0-9_]*=.*"#, options: .regularExpression) == nil
+        }) else {
+            return false
+        }
+        let command = firstCommand.trimmingCharacters(in: CharacterSet(charactersIn: "(){}"))
+        let shellControlCommands: Set<String> = [
+            "if", "elif", "else", "then", "fi", "for", "while", "until", "do", "done", "case", "esac"
+        ]
+        return shellControlCommands.contains(command) || isKnownLocalAlpineShellCommand(command)
     }
 
     private static func isKnownLocalAlpineShellCommand(_ command: String) -> Bool {
         let knownCommands: Set<String> = [
-            "apk", "ash", "sh", "bash", "cat", "cd", "chmod", "chown", "cp", "date",
+            "apk", "ash", "sh", "bash", "cat", "cd", "chmod", "chown", "command", "cp", "date",
             "curl", "df", "du", "echo", "env", "find", "free", "gcc", "g++", "git", "grep", "head",
-            "id", "ls", "lua", "make", "cmake", "mkdir", "mv", "node", "npm", "npx", "pip", "pip3",
-            "ps", "pwd", "python", "python3", "rm", "rmdir", "sed", "sleep", "tail", "tar", "top",
-            "touch", "uname", "vi", "vim", "wget", "which", "whoami"
+            "id", "java", "javac", "go", "cargo", "rustc", "ls", "lua", "make", "cmake", "mkdir",
+            "mv", "node", "npm", "npx", "perl", "php", "pip", "pip3", "printf", "ps", "pwd",
+            "python", "python3", "rm", "rmdir", "ruby", "sed", "sleep", "tail", "tar", "test",
+            "top", "touch", "type", "uname", "unset", "vi", "vim", "wget", "which", "whoami"
         ]
         return knownCommands.contains(command)
     }
@@ -10676,90 +9235,27 @@ final class ChatViewModel {
 
     private static func localAlpineAgentSystemContext() -> String {
         """
-        Iexa has an on-device Local Alpine Linux terminal. You can really operate that local Alpine environment for the user by emitting `iexa_alpine` blocks; do not tell the user that this chat lacks terminal/file-system execution when this instruction is present.
+        [Local Alpine client tool registry]
+        Iexa has an on-device Alpine Linux workspace tool. The app executes this tool locally and then returns the real result as a later observation.
 
-        Important protocol boundary:
-        - `iexa_alpine` is NOT an OpenAI/native/function tool registered on the server.
-        - Never call a tool named `iexa_alpine` through provider tool-call syntax. Never write "Tool iexa_alpine does not exist".
-        - The host app only detects and executes a literal fenced Markdown block whose language is `iexa_alpine`. If you need local execution, print that fenced block as normal assistant text.
-        - Treat this as a local Codex CLI harness: assistant text containing one fenced `iexa_alpine` block is the tool_use; the host app execution result appended afterward is the tool_result/observation; your next assistant turn must observe that result and either issue exactly one next tool_use or produce the final summary.
-
-        Environment facts:
-        - Shell: Alpine Linux ash/busybox style shell. Prefer POSIX sh syntax.
-        - Default working directory: `/mnt/iexa`.
-        - `/mnt/iexa` is the shared writable project directory. Create project files there.
-        - Tool protocol: the only correct execution trigger is a fenced `iexa_alpine` block. Do not use OpenAI/ChatGPT tool-call syntax such as `to=local_alpine_exec code` or native tool calls; those are legacy/provider artifacts and should never be shown to the user.
-        - Package manager: `apk`. Do not install packages on every run. First check with `command -v ...` or version commands; only use `apk update && apk add --no-cache ...` when the output proves a dependency is missing.
-        - Alpine version: bundled rootfs is Alpine 3.19.x x86/iSH-style Linux. It is lightweight but current app builds may bundle common developer tools. Treat prior Local Alpine command output as cached facts; do not repeat broad probes or reinstall tools already shown as present.
-        - Common apk packages to install on demand: `python3`, `py3-pip`, `nodejs`, `npm`, `git`, `build-base`, `linux-headers`, `cmake`, `pkgconf`, `zip`, `unzip`, `openssl-dev`, `go`, `rust`, `cargo`, `openjdk17`, `maven`, `lua5.4`, `ruby`, `php`, and `perl`.
-        - The execution is non-interactive. Do not rely on prompts, REPLs, `input()`, `read`, `scanf`, `cin`, `npm init` prompts, editors waiting for input, or long-running servers that never exit.
+        \(localAlpineToolManifest)
 
         \(localAlpineLanguageDependencyPlaybook)
 
-        Iexa local environment contract:
-        - Treat `/mnt/iexa` as the user's current local workspace. Relative paths resolve there unless the user names an absolute rootfs path.
-        - Treat rootfs paths such as `/bin`, `/etc`, `/usr`, `/lib`, and `/var` as system areas. Inspect them when debugging environment issues, but only modify rootfs through package-manager operations or explicit user requests.
-        - Available local operations are: read, list, search, create, write, edit, delete, rename, move, copy, install, run, test, build, compile, diagnose, fix, verify, summarize.
-        - If the user requests one of those operations, perform it with `iexa_alpine`; do not replace the action with advice, simulated output, or instructions for the user to run manually.
-        - If you are unsure what is installed or where files are, run a small real preflight/listing first, then continue from the observation. Environment uncertainty is solved by tool use, not by asking the user to inspect the app for you.
-        - A successful preflight or install is not the same as completing the user's original goal. Continue to the requested run/test/build/fix step unless the user only asked for the preflight/install.
-        - When blocked, report the exact blocker from real output: missing file, missing package, DNS/network failure, permission issue, non-interactive input need, or unsupported platform behavior.
+        Environment:
+        - Workspace: `/mnt/iexa`. Relative paths resolve there.
+        - Shell: Alpine Linux ash/busybox style shell. Prefer POSIX sh.
+        - Package manager: `apk`. Check first; install only packages proven missing.
+        - Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, and `/var` are system paths. Inspect them when useful; do not edit them except through package-manager operations or explicit user requests.
 
-        Operational rules:
-        - Act like a Codex CLI style agent loop: understand the user's goal, choose one bounded next step, execute it, read the real output, then either continue with the next step or stop with a concise summary.
-        - Treat a fenced `iexa_alpine` block as the app's local execution request: emit one block as text, wait for the app's real result, then decide the next action from that result.
-        - Maintain this loop invariant: Goal -> one tool_use -> real tool_result -> observation summary -> one next tool_use or final answer. Never skip the observation step and never invent command output.
-        - Resolve intent before acting. File-management requests such as delete/read/list/search/rename are not code-generation requests. If the user says "删除 hello.lua", delete exactly `/mnt/iexa/hello.lua` and verify the directory; do not create or run a demo Lua script.
-        - For relative paths, treat them as inside `/mnt/iexa`. For destructive operations, stay inside `/mnt/iexa`, refuse the workspace root itself, act only on the explicit target, then list or read back enough output to prove the result.
-        - For project/code-generation requests in any language, create the needed files under `/mnt/iexa`, include entrypoints and config/dependency files, check the relevant runtime/compiler/package manager, install only missing dependencies with `apk`/`npm`/`pip` as appropriate, then run a bounded verification command.
-        - Keep an internal step ledger: what has already been inspected, what command/file write was just attempted, what the output proved, and what the next smallest useful step is. Do not rely on memory guesses when the Local Alpine result is available.
-        - For multi-step tasks, include one short visible step note before the `iexa_alpine` block, such as "先检查文件" or "现在修复并验证". Keep detailed reasoning internal.
-        - Intent to tool mapping: read -> JSON `read_file`; modify existing files -> JSON `edit_file` or `patch_file` on the same original path; create/replace complete files -> structured `write_files` plus verification; list/search -> scoped shell command; delete/rename/move/copy -> scoped file operation plus `ls` verification; install -> check then install only missing packages; run/test/build -> dependency check then execute; fix/debug -> reproduce, read_file, edit_file/patch_file or write_files, verify; summarize/report -> use the latest real observation and stop tool use unless more execution is required.
-        - Local Alpine terminal mode owns local project operations. If the user asks to list/read/search/create/modify/delete project files, inspect a directory, run a script, or "read the mnt directory", use `/mnt/iexa` via `iexa_alpine`; do not use the Documents/Iexa Workspace tool.
-        - If the user asks you to run, execute, test, verify, inspect the environment, install packages, write or modify code, fix an error, rerun after a fix, write a runnable script/project, crawl/fetch/scrape a website, or diagnose command output, use `iexa_alpine`.
-        - If the user says "运行这段代码", "执行这段代码", "跑一下上面的代码", "运行刚刚的代码", "run this code", or "run the code above", use the most recent runnable fenced code block from the conversation. Do not simulate the result. Write it to `/mnt/iexa/iexa_recent_code.<ext>` with JSON `write_files`, install/check the needed runtime only if missing, run it, and summarize the real output.
-        - Dependency installs are an action, not a consultation. For "安装 Python 依赖" or similar, search `/mnt/iexa` for `requirements.txt`, `pyproject.toml`, `setup.py`, or obvious project folders; if one exists, install from it. If none exists, report the concrete search result and stop. Do not ask the user for a path before searching the workspace yourself.
-        - If the user asks for a crawler/scraper for a URL, do not stop at a code sample. Write the script into `/mnt/iexa`, install/check dependencies if needed, run it against the URL, and summarize the real output.
-        - If the user says "修好", "修改代码", "重新运行", "怎么不是直接执行", or similar after a Local Alpine result, treat it as a request to continue operating. Inspect the target file/output, fix the same file with `edit_file`/`patch_file` when possible or `write_files` when a complete replacement is safer, then verify.
-        - Do not merely explain commands when the user wants action. Emit the block so the app executes it.
-        - Do not claim that a command was executed, tested, installed, fixed, or that a file exists unless you emit the `iexa_alpine` block and then use the real output appended by the app as the source of truth.
-        - Before writing code that depends on Python modules, Node packages, compilers, network tools, or archive tools, follow the language/dependency playbook above. Use a focused preflight only for unknown dependencies, install only missing packages, and do not repeat install commands after a successful install.
-        - A preflight command is not the final answer for install/run/fix requests. If it succeeds, continue with the install/run/fix step. If it shows missing dependencies, install them. If it shows missing project files, search `/mnt/iexa` before asking the user.
-        - Interpret user intent as an operation plan, not advice. Read requests require `read_file`; list/search requests require file-system inspection; create/write requests require structured writes; modify/fix requests require reproduce -> `read_file` -> same-path `edit_file`/`patch_file` or complete same-path `write_files` -> verify; delete requests require scoped deletion plus verification; run/test/build requests require dependency check -> execute -> summarize real output.
-        - If an install command succeeds and the user asked to run/test/build/fix something, continue to the run/test/build/fix step. Do not stop with "installed successfully" unless the user's only goal was installation.
-        - If a command exits 0 but the output only lists versions, paths, files, package metadata, or dependency status, treat it as observation, not task completion. Continue to the next operation needed by the user's original goal.
-        - If output says a command/package/file is missing, choose the smallest safe next step: install the package, search the workspace, or create the missing file. Do not ask the user to do that work manually.
-        - If the user asks to check a website/API URL, do not execute the bare domain as a shell command. Use `curl -I`, `curl -w`, `wget --spider`, `ping`, or `nc` when available.
-        - For scripts/projects, use JSON file tools inside `iexa_alpine`, then run a bounded verification command. Use `read_file` before modifying existing files. Use `edit_file` for exact old_text/new_text replacements and `patch_file` for unified diffs. Use `write_files` for new files or complete same-path replacement. For code files, use `code_lines`, `content_lines`, or `content_base64`; never use plain `content`/`text`/`code` for source files because display text can corrupt indentation.
-        - Python write protocol is mandatory: for new or complete `.py` replacements, send the complete intended file through `iexa_alpine` JSON `write_files` using `code_lines` or `content_base64`; for existing `.py` repairs, prefer same-path `edit_file`/`patch_file` after `read_file` when the change is localized. Do not write Python through visible Markdown, partial snippets, shell heredocs, `echo`, or `cat > file.py` unless explicitly debugging the writer itself.
-        - When showing copyable shell/Python examples to the user, make the fenced block itself directly runnable: no line numbers, no prompts like `$` or `>>>`, no explanatory text inside the fence, and keep indentation exactly as source code. For command-line Python heredocs, use one complete `bash`/`sh` block with the closing `EOF` included.
-        - Python `write_files` accepts only `code_lines` or `content_base64` for `.py`/`.pyw` targets. `edit_file` and `patch_file` write the same original path and then validate Python; if validation still fails, continue repairing the same file instead of creating a replacement file. Plain `content`/`text`/`code` and `content_lines` are rejected for Python because they can come from display text.
-        - The app treats Python AST/compile validation as the strict write gate only for new or complete `write_files` Python writes. For localized `edit_file`/`patch_file`, a still-failing AST result means the patch was written but more same-path repair is required.
-        - When fixing an existing Python file after a syntax/indentation error, inspect the user project file named by the traceback, then patch or rewrite that same target path. Do not inspect Python standard-library traceback files such as `/usr/lib/python.../ast.py`; those are validators, not files to repair.
-        - Prefer `edit_file`/`patch_file` for localized fixes and complete structured Python writes for large class/function rewrites, then run the requested script or a bounded verification command.
-        - After writing Python, run the requested script or a bounded verification command. If syntax or indentation fails, repair the same target file; do not create replacement files.
-        - Use normal UTF-8 text in generated files. If visible Chinese text is needed, write the real Chinese characters, never mojibake such as `æå` or `é¡µé¢`.
-        - Format Python with VS Code/Python defaults: 4 spaces per block level, no tabs, and aligned continuation indentation inside dictionaries, function calls, lists, and multi-line arguments.
-        - When generating runnable Python examples for a code block, include a small `main()` call or explicit `print()` statements so the Run button can show a real result; code that only defines variables/functions/classes will execute successfully but produce no output.
-        - For Python `HTMLParser`/web spider examples, keep independent tag handlers as sibling branches. For example, `if tag == "title": ...` and `if tag == "a": ...` must be at the same indentation level; do not nest anchor-link extraction inside the title branch. Collect page text outside title-only conditions unless the user asked for title only.
-        - Avoid interactive Python menu loops unless the user explicitly asks for input-driven behavior. If multiple `input()` calls are necessary, tell the user to provide one stdin line per prompt when the app asks for input.
-        - If the user wants to test Python `input()` / shell `read` with their own text, do not invent sample stdin and do not pipe a fixed `printf` value. Leave the input/read command unpiped; the app will pause, ask the user for stdin, feed that exact text to the program, and append the real output.
-        - For unattended tests where the user did not ask to type input themselves, avoid interactive prompts by using constants, command-line args, environment variables, or an explicit `printf 'value\n' | python3 script.py`.
-        - For Node/Python dependency installs, use bounded commands and print versions/errors. Avoid background daemons unless the user explicitly asks.
-        - Keep commands safe and scoped to `/mnt/iexa`; do not use destructive commands outside that workspace.
-        - After the app appends a Local Alpine execution result, continue from that real output: if the task is not done, emit the next bounded `iexa_alpine` block; if an error appears, fix and rerun; if the task is done, give a concise final summary of what you changed, what command verified it, and any remaining limitation. Do not stop after one command unless the output proves the task is complete.
-        - If the user asks an interruption/meta question such as "为什么不修复", "怎么还报错", "你不会修复吗", "什么问题", or asks to stop, do not emit `iexa_alpine`; explain the latest result and wait for an explicit continue/fix/run request.
-
-        Tool request schema:
-        - To execute commands, include exactly one fenced block with language `iexa_alpine`. The block may contain POSIX shell, or JSON with one object or an `iexa_alpine` array.
-        - JSON objects support `cwd`, `read_file`, `edit_file`, `patch_file`, `write_files`, and `command`.
-        - `read_file` accepts a string path or objects with `path`, optional `start_line`, `line_count`, and `max_bytes`. Use it for file reading instead of `cat` unless rootfs inspection requires shell.
-        - `edit_file` accepts `path` plus `old_text`/`new_text`, or `replacements` entries. By default `old_text` must match exactly once; set `replace_all` or `expected_count` only when intentional.
-        - `patch_file` accepts `path` plus a unified diff in `patch`/`patch_lines`; use one file per patch. The app applies it to the same path; Python targets are validated after write and may require another same-path repair step.
-        - `write_files` entries support `path` or `file_path`, plus `code_lines`, `content_lines`, `content`, or `content_base64`. For code files use `code_lines`, `content_lines`, or `content_base64`; for Python targets use only `code_lines` or `content_base64`. Plain `content` is only for non-code text files.
-        - For create project tasks, prefer JSON `write_files` plus a verification `command` in the same object. For modify/fix project tasks, prefer `read_file` first, then same-path `edit_file`/`patch_file`, then verification.
-        - For list/delete/search tasks, use a minimal shell command scoped to `/mnt/iexa`.
-        - The app will run the request locally on the device and append the real output. Do not output this block unless command execution is actually needed.
+        Tool-selection policy:
+        - Use the tool for requests that require current local state or mutation: read/list/search files, create/edit/delete/rename/move/copy files, install dependencies, run/test/build/compile/debug/fix code, inspect the Alpine environment, fetch/scrape a URL from the local shell, or verify real output.
+        - Do not use the tool for ordinary conversation, explanations, design discussion, code samples the user did not ask you to write/run, or questions about what the previous error means. Answer normally in those cases.
+        - If the user asks you to write/run/fix/check a project or script, operate under `/mnt/iexa`, verify with a bounded command, and then summarize the real result.
+        - For existing source files, read the target first and prefer same-path `edit_file`/`patch_file`; use `write_files` for new files or large same-path rewrites.
+        - If the user asks to run recent code from the conversation, save the latest runnable code block under `/mnt/iexa`, run it with the right interpreter/compiler, and summarize the real output.
+        - If a tool result shows failure, choose one different bounded fix/diagnostic step or stop with the concrete blocker. Never repeat the exact same failed command.
+        - If a tool result shows success and the user goal is complete, stop tool use and answer normally.
 
         Example:
         ```iexa_alpine
@@ -11655,23 +10151,16 @@ final class ChatViewModel {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content
         let localAlpineModelId = selectedModelId ?? conversation.model ?? ""
-        let localAlpineTerminalIsEnabled = terminalEnabled && selectedTerminalIsLocalAlpine
-        let latestUserNeedsLocalAlpine = localAlpineTerminalIsEnabled && (latestUserTextForLocalAlpine.map {
-            shouldUseLocalAlpineAgentForRequest($0, modelId: localAlpineModelId)
-        } ?? false)
-        let localAlpineTerminalApplies = localAlpineTerminalIsEnabled
+        let localAlpineTerminalApplies = terminalEnabled && selectedTerminalIsLocalAlpine
             && !(latestUserTextForLocalAlpine.map {
                 shouldKeepMediaGenerationRequestOffLocalAlpine($0, modelId: localAlpineModelId)
             } ?? false)
+            && !(latestUserTextForLocalAlpine.map(Self.shouldKeepNativeLinkResolverOffLocalAlpine) ?? false)
         let shouldIncludeLocalAlpineContext: Bool = {
             if let includeLocalAlpineExecutionContext {
                 return includeLocalAlpineExecutionContext
             }
-            guard localAlpineTerminalApplies else { return false }
-            guard let latestUserText = latestUserTextForLocalAlpine else {
-                return false
-            }
-            return latestUserNeedsLocalAlpine || shouldUseLocalAlpineAgentForRequest(latestUserText)
+            return localAlpineTerminalApplies
         }()
         let memoryContext = await localMemorySystemContext()
         let workspaceContext: String? = {
@@ -11710,6 +10199,9 @@ final class ChatViewModel {
                     includeImageCanvasInstruction: false
                 )
                 apiMessages.append(["role": "system", "content": modelContent])
+                continue
+            }
+            if isLocalAlpineResult && Self.isLocalAlpineProtocolCorrectionMessage(message) {
                 continue
             }
             if isLocalAlpineResult && !shouldIncludeLocalAlpineContext {
@@ -12148,30 +10640,17 @@ final class ChatViewModel {
            shouldKeepMediaGenerationRequestOffLocalAlpine(latestUserText, modelId: effectiveModelId) {
             return
         }
-        let executableContent: String
-        if Self.contentContainsLocalAlpineInstruction(content),
-           let normalized = Self.normalizedLocalAlpineExecutableContent(from: content) {
-            executableContent = normalized
-        } else if message.metadata?["iexa_local_alpine_continuation"] == "true" {
-            return
-        } else if let latestUserText,
-                  shouldUseLocalAlpineAgentForRequest(latestUserText, modelId: effectiveModelId),
-                  !Self.isLocalAlpineInterjection(latestUserText) {
-            let correctionId = appendLocalAlpineProtocolCorrectionResult(
-                parentId: messageId,
-                reason: "The assistant answered a Local Alpine task without an executable iexa_alpine block."
-            )
-            localAlpineNoCommandContinuationRetries += 1
-            localAlpineAgentExecutedMessageIds.insert(messageId)
-            localAlpineAgentStopRequested = false
-            scheduleLocalAlpineContinuationIfNeeded(after: correctionId, forceContinue: true)
-            return
-        } else {
+        guard let executableContent = Self.normalizedLocalAlpineExecutableContent(from: content) else {
             return
         }
 
         localAlpineAgentExecutedMessageIds.insert(messageId)
         localAlpineAgentTask = Task { [weak self] in
+            let hasExecutableBlocks = await LocalAlpineAgentService.shared.hasExecutableBlocks(in: executableContent)
+            guard hasExecutableBlocks else {
+                self?.localAlpineAgentExecutedMessageIds.remove(messageId)
+                return
+            }
             await self?.executeLocalAlpineAgent(messageId: messageId, content: executableContent)
         }
     }
@@ -12582,7 +11061,9 @@ final class ChatViewModel {
               }) else { return 0 }
         let startIndex = messages.index(after: lastUserIndex)
         guard startIndex < messages.endIndex else { return 0 }
-        return messages[startIndex...].filter(Self.isLocalAlpineAgentResult).count
+        return messages[startIndex...].filter {
+            Self.isLocalAlpineAgentResult($0) && !Self.isLocalAlpineProtocolCorrectionMessage($0)
+        }.count
     }
 
     private func appendLocalAlpineAgentLimitMessage(parentId: String) {
@@ -12635,35 +11116,6 @@ final class ChatViewModel {
                 "iexa_local_alpine_no_tool_call_stop": "true"
             ]
         )
-    }
-
-    @discardableResult
-    private func appendLocalAlpineProtocolCorrectionResult(parentId: String, reason: String) -> String {
-        let content = """
-        Local Alpine 执行结果
-
-        命令
-
-        ```text
-        IEXA_AGENT_KICKOFF
-        ```
-
-        退出码：`125`
-
-        输出
-
-        ```text
-        IEXA_AGENT_KICKOFF
-        \(reason)
-        NEXT_ACTION_REQUIRED: You must emit exactly one fenced iexa_alpine block now. Do not answer with only a plan such as "I will inspect" or "I will start". Do not explain commands for the user to run manually. Use prior Local Alpine observations as cached environment facts; do not repeat the same generic environment probe if tools were already found. For focused environment/dependency inspection, execute one bounded command such as command -v python3 node npm gcc g++ make cmake pkgconf git curl wget; apk info build-base gcc g++ musl-dev cmake make pkgconf; ls -la /mnt/iexa. For action requests, follow the user's verb: read/list/search/create/write/delete/fix/run/test/build/install, then verify from real output.
-        If the user asked to run this/above/recent code, extract the most recent runnable fenced code block from the conversation, write it into /mnt/iexa with JSON write_files, then execute it. Never simulate code output.
-        ```
-        """
-        return appendAssistantResult(parentId: parentId, model: "Local Alpine", content: content, metadata: [
-            "iexa_local_alpine_result": "true",
-            "iexa_local_alpine_raw_result": content,
-            "iexa_local_alpine_protocol_correction": "true"
-        ])
     }
 
     private func repeatedLocalAlpineFailure(for content: String) -> LocalAlpineAgentCommandFailure? {
@@ -13519,38 +11971,6 @@ final class ChatViewModel {
         localAlpineFinishedContinuationMessageIds.insert(assistantMessageId)
 
         let rawContent = content
-        if !isFinalSummary,
-           parentNeedsFollowUp,
-           let parentResultId,
-           !Self.contentContainsLocalAlpineInstruction(rawContent),
-           localAlpineNoCommandContinuationRetries < localAlpineContinuationMaxNoCommandRetries {
-            localAlpineNoCommandContinuationRetries += 1
-            localAlpineAgentStopRequested = false
-            localAlpineContinuationTask = nil
-            localAlpineContinuationParentIds.remove(parentResultId)
-            let correctionId = appendLocalAlpineProtocolCorrectionResult(
-                parentId: assistantMessageId,
-                reason: Self.isLocalAlpineManualRunOrRefusalResponse(rawContent)
-                    ? "The assistant told the user to run commands manually instead of using the Local Alpine executor."
-                    : "The assistant described a plan for Local Alpine work but did not emit an executable iexa_alpine block."
-            )
-            updateAssistantMessage(
-                id: assistantMessageId,
-                content: "Local Alpine 协议已纠正，正在重新要求模型输出可执行围栏块...",
-                isStreaming: false,
-                statusHistory: [
-                    ChatStatusUpdate(
-                        action: "local_alpine_agent",
-                        description: "已纠正 Local Alpine 协议",
-                        done: true,
-                        occurredAt: .now
-                    )
-                ]
-            )
-            cleanupStreaming()
-            scheduleLocalAlpineContinuationIfNeeded(after: correctionId, forceContinue: true)
-            return
-        }
         let doneDescription: String
         if isFinalSummary {
             doneDescription = "已整理本地 Alpine 回答"
@@ -13609,16 +12029,8 @@ final class ChatViewModel {
         } else if Self.contentContainsLocalAlpineInstruction(rawContent) {
             localAlpineNoCommandContinuationRetries = 0
             localAlpineContinuationTask = nil
-        } else if parentNeedsFollowUp, let parentResultId,
-                  localAlpineNoCommandContinuationRetries < localAlpineContinuationMaxNoCommandRetries {
-            localAlpineNoCommandContinuationRetries += 1
-            localAlpineAgentStopRequested = false
-            localAlpineContinuationTask = nil
-            scheduleLocalAlpineContinuationIfNeeded(after: parentResultId, forceContinue: true)
         } else {
-            if parentNeedsFollowUp, let parentResultId {
-                appendLocalAlpineNoToolCallStopMessage(parentId: parentResultId)
-            }
+            localAlpineNoCommandContinuationRetries = 0
             localAlpineAgentStopRequested = true
             localAlpineContinuationTask = nil
         }
@@ -13804,8 +12216,7 @@ final class ChatViewModel {
         let markers = [
             "traceback", "syntaxerror", "indentationerror", "modulenotfounderror",
             "写入已拒绝", "写入失败", "缩进预检失败", "语法校验失败",
-            "python 写入已拒绝", "语法/缩进校验未通过", "目标文件未被覆盖",
-            "iexa_agent_kickoff", "next_action_required"
+            "python 写入已拒绝", "语法/缩进校验未通过", "目标文件未被覆盖"
         ]
         return markers.contains { normalized.contains($0) }
     }
@@ -13817,8 +12228,7 @@ final class ChatViewModel {
             "command not found", "permission denied", "syntaxerror", "indentationerror",
             "module not found", "no module named", "输入已取消", "存在错误输出",
             "写入已拒绝", "写入失败", "缩进预检失败", "语法校验失败",
-            "python 写入已拒绝", "语法/缩进校验未通过", "目标文件未被覆盖",
-            "iexa_agent_kickoff", "next_action_required"
+            "python 写入已拒绝", "语法/缩进校验未通过", "目标文件未被覆盖"
         ]
         if markers.contains(where: { normalized.contains($0.lowercased()) }) {
             return true
@@ -13911,6 +12321,8 @@ final class ChatViewModel {
 
         \(localAlpineLanguageDependencyPlaybook)
 
+        \(localAlpineToolManifest)
+
         Loop Runtime:
         - Operate like Codex CLI: plan internally, execute exactly one bounded next step, observe the real result, repair if needed, verify, then summarize only when the user goal is actually done.
         - The previous `iexa_alpine` block is the tool_use and the latest Local Alpine result is the tool_result. Continue exactly like a tool-driven coding agent: observe, choose the next smallest useful tool call, execute, observe again.
@@ -13947,7 +12359,7 @@ final class ChatViewModel {
         - If the last command failed, inspect the exit code/output first, then emit a different bounded diagnostic or fix command before rerunning verification.
         - Retry only after changing something meaningful: edited file, installed a dependency that was proven missing, changed cwd, changed command arguments, or gathered new diagnostics.
         - Do not emit the same command twice in one `iexa_alpine` response.
-        - If the last output contains `IEXA_AGENT_KICKOFF` or `NEXT_ACTION_REQUIRED`, it means the app routed an explicit local task to you but your previous answer did not include an executable block. Your next response must emit one concrete `iexa_alpine` block with `read_file`, `edit_file`, `patch_file`, `write_files`, and/or `command` for the user's request.
+        - Ignore legacy controller-retry artifacts from older context. They are not real shell output.
         - For "运行这段代码" / "run this code" follow-ups, do not answer with simulated output. Find the latest runnable fenced code block in conversation context, save it under `/mnt/iexa`, run it with the right interpreter/compiler, then continue from the real output.
         Stuck Detection:
         - Never repeat the exact same failed command. If the app says a repeat was blocked, switch strategy immediately.
@@ -14004,8 +12416,7 @@ final class ChatViewModel {
         error: ChatMessageError? = nil
     ) {
         let displayContent = Self.cleanedProviderCitationArtifacts(content)
-        let shouldHandleLocalAlpineDisplay = (terminalEnabled && selectedTerminalIsLocalAlpine)
-            || latestUserRequestsLocalAlpineAgent(modelId: selectedModelId ?? conversation?.model)
+        let shouldHandleLocalAlpineDisplay = terminalEnabled && selectedTerminalIsLocalAlpine
         let visibleAlpineDisplayContent: String? = {
             guard shouldHandleLocalAlpineDisplay else { return nil }
             var visible = LocalAlpineAgentService.visibleContent(from: displayContent)

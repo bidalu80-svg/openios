@@ -626,7 +626,7 @@ actor LocalAlpineAgentService {
             return []
         }
 
-        if let nested = dict["iexa_alpine"] ?? dict["local_alpine_exec"] ?? dict["commands"] {
+        if let nested = dict["iexa_alpine"] ?? dict["commands"] {
             return parseCommands(from: nested)
         }
 
@@ -1507,7 +1507,7 @@ actor LocalAlpineAgentService {
         if !snippet.isEmpty {
             lines.append("  - 当前失败片段：\n\(snippet)")
         }
-        lines.append("  - NEXT_ACTION_REQUIRED: continue repairing this same Python file with read_file/edit_file/patch_file, then run validation again.")
+        lines.append("  - 下一步：继续读取并修复这个同一路径的 Python 文件，优先使用 read_file/edit_file/patch_file，然后重新验证。")
 
         return LocalAlpineProtectedWriteOutcome(
             lines: lines,
@@ -1553,7 +1553,7 @@ actor LocalAlpineAgentService {
             if !snippet.isEmpty {
                 lines.append("  - 失败草稿片段：\n\(snippet)")
             }
-            lines.append("  - NEXT_ACTION_REQUIRED: inspect/read the target, then repair the same Python file with edit_file, patch_file, or same-path write_files/code_lines or content_base64, then verify again.")
+            lines.append("  - 下一步：先读取目标文件，再用 edit_file、patch_file 或同路径 write_files/code_lines/content_base64 修复同一个 Python 文件，然后重新验证。")
             return LocalAlpineProtectedWriteOutcome(
                 lines: lines,
                 writtenPath: nil,
@@ -1875,6 +1875,19 @@ actor LocalAlpineAgentService {
         "xargs", "xz", "zip"
     ]
 
+    private nonisolated static func isInstructionFence(info: String, body: String) -> Bool {
+        let token = info
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .first
+            .map { String($0).lowercased() } ?? ""
+        if token == "iexa_alpine" {
+            return true
+        }
+        guard token == "json" else { return false }
+        return body.contains("\"iexa_alpine\"")
+    }
+
     private nonisolated static func commandTargetsCodeOrIndentationSensitiveFile(_ normalizedCommand: String) -> Bool {
         let filePatterns = [
             #"\.(py|pyw|js|jsx|ts|tsx|mjs|cjs|html|htm|css|scss|sass|swift|kt|kts|java|c|cc|cpp|cxx|h|hpp|cs|go|rs|rb|php|sh|bash|zsh|fish|pl|lua|r|sql|json|jsonl|yaml|yml|toml|xml|md|dockerfile|makefile)(?:['"\s;|&>]|$)"#,
@@ -1967,12 +1980,9 @@ actor LocalAlpineAgentService {
         if let regex = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)```"#, options: [.caseInsensitive]) {
             let matches = regex.matches(in: content, range: fullRange)
             for match in matches where match.numberOfRanges >= 3 {
-                let info = nsContent.substring(with: match.range(at: 1)).lowercased()
+                let info = nsContent.substring(with: match.range(at: 1))
                 let body = nsContent.substring(with: match.range(at: 2))
-                if info.contains("iexa_alpine")
-                    || info.contains("local_alpine_exec")
-                    || (info.trimmingCharacters(in: .whitespacesAndNewlines) == "json"
-                        && (body.contains("\"iexa_alpine\"") || body.contains("\"local_alpine_exec\""))) {
+                if isInstructionFence(info: info, body: body) {
                     removalRanges.append(match.range)
                 }
             }
@@ -2018,12 +2028,9 @@ actor LocalAlpineAgentService {
         if let regex = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)```"#, options: [.caseInsensitive]) {
             let matches = regex.matches(in: content, range: fullRange)
             for match in matches where match.numberOfRanges >= 3 {
-                let info = nsContent.substring(with: match.range(at: 1)).lowercased()
+                let info = nsContent.substring(with: match.range(at: 1))
                 let body = nsContent.substring(with: match.range(at: 2)).trimmingCharacters(in: .newlines)
-                if info.contains("iexa_alpine")
-                    || info.contains("local_alpine_exec")
-                    || (info.trimmingCharacters(in: .whitespacesAndNewlines) == "json"
-                        && (body.contains("\"iexa_alpine\"") || body.contains("\"local_alpine_exec\""))) {
+                if isInstructionFence(info: info, body: body) {
                     blocks.append(body)
                 }
             }
@@ -2035,26 +2042,11 @@ actor LocalAlpineAgentService {
                 blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .newlines))
             }
         }
-        if let tagRegex = try? NSRegularExpression(pattern: #"<local_alpine_exec>([\s\S]*?)</local_alpine_exec>"#, options: [.caseInsensitive]) {
-            let matches = tagRegex.matches(in: content, range: fullRange)
-            for match in matches where match.numberOfRanges >= 2 {
-                blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .newlines))
-            }
-        }
-
-        for range in pseudoToolCallPayloadRanges(in: content) {
-            blocks.append(nsContent.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-
         return blocks
     }
 
     nonisolated private static func pseudoToolCallRanges(in content: String, includeIncomplete: Bool) -> [NSRange] {
         pseudoToolCallRangesWithPayload(in: content, includeIncomplete: includeIncomplete).map(\.full)
-    }
-
-    nonisolated private static func pseudoToolCallPayloadRanges(in content: String) -> [NSRange] {
-        pseudoToolCallRangesWithPayload(in: content, includeIncomplete: false).map(\.payload)
     }
 
     nonisolated private static func pseudoToolCallRangesWithPayload(

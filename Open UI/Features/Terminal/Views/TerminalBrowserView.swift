@@ -28,6 +28,8 @@ struct LocalAlpineTerminalConsoleView: View {
     @State private var sessionStartupMessage: String?
     @State private var pollSessionOutput = false
     @State private var isPollingSessionOutput = false
+    @State private var streamingCommandSessionID: Int?
+    @State private var consoleOutputRevision = 0
 
     private let terminalGreen = Color(red: 0.24, green: 0.82, blue: 0.36)
     private let terminalCommandFontSize: CGFloat = 13
@@ -133,6 +135,12 @@ struct LocalAlpineTerminalConsoleView: View {
                                 proxy.scrollTo("commandLine", anchor: .bottom)
                             }
                         }
+                        .onChange(of: consoleOutputRevision) { _, _ in
+                            guard !entries.isEmpty else { return }
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                proxy.scrollTo("commandLine", anchor: .bottom)
+                            }
+                        }
                         .onChange(of: interactiveOutput) { _, _ in
                             guard usesInteractiveSession,
                                   shouldAutoScrollInteractiveOutput(availableHeight: geometry.size.height) else { return }
@@ -158,9 +166,13 @@ struct LocalAlpineTerminalConsoleView: View {
         }
         .onDisappear {
             pollSessionOutput = false
+            if let streamingCommandSessionID {
+                _ = LocalAlpineTerminalService.shared.closeSession(sessionID: streamingCommandSessionID)
+            }
             if let interactiveSessionID {
                 _ = LocalAlpineTerminalService.shared.closeSession(sessionID: interactiveSessionID)
             }
+            streamingCommandSessionID = nil
             interactiveSessionID = nil
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -231,6 +243,10 @@ struct LocalAlpineTerminalConsoleView: View {
             interactiveOutput = ""
             sessionStartupMessage = nil
         } else {
+            if let streamingCommandSessionID {
+                _ = LocalAlpineTerminalService.shared.closeSession(sessionID: streamingCommandSessionID)
+                self.streamingCommandSessionID = nil
+            }
             entries.removeAll()
         }
         commandInput = ""
@@ -616,10 +632,16 @@ struct LocalAlpineTerminalConsoleView: View {
         Haptics.play(.light)
 
         entries.append(LocalAlpineConsoleEntry(prompt: prompt, command: command, output: "", exitCode: nil, isRunning: true))
-        let result = await LocalAlpineTerminalService.shared.execute(
+        let result = await LocalAlpineTerminalService.shared.executeStreaming(
             command: stateTrackingCommand(for: command),
             cwd: cwd,
-            cwdIsRuntimePath: true
+            cwdIsRuntimePath: true,
+            onSessionStart: { sessionID in
+                streamingCommandSessionID = sessionID
+            },
+            onOutput: { output in
+                updateRunningEntryOutput(output)
+            }
         )
         applyResult(result)
         updateShellState(from: result)
@@ -646,6 +668,8 @@ struct LocalAlpineTerminalConsoleView: View {
             entries[index].exitCode = result.exitCode
             entries[index].isRunning = result.interactiveRequest != nil
         }
+        consoleOutputRevision += 1
+        streamingCommandSessionID = nil
 
         if let request = result.interactiveRequest {
             pendingInteractiveInput = request.defaultValue
@@ -664,6 +688,7 @@ struct LocalAlpineTerminalConsoleView: View {
             entries[index].exitCode = exitCode
             entries[index].isRunning = false
         }
+        consoleOutputRevision += 1
         isRunning = false
         refocusCommandLine()
     }
@@ -672,6 +697,15 @@ struct LocalAlpineTerminalConsoleView: View {
         if let index = entries.indices.last {
             entries[index].output += entries[index].output.isEmpty ? output : "\n\(output)"
         }
+        consoleOutputRevision += 1
+    }
+
+    private func updateRunningEntryOutput(_ output: String) {
+        if let index = entries.indices.last {
+            entries[index].output = output
+            entries[index].isRunning = true
+        }
+        consoleOutputRevision += 1
     }
 
     private func visibleOutput(for result: LocalAlpineCommandResult) -> String {
@@ -808,6 +842,9 @@ struct LocalAlpineTerminalConsoleView: View {
             }
             commandInput = ""
             refocusCommandLine()
+        } else if let streamingCommandSessionID {
+            let sent = LocalAlpineTerminalService.shared.interruptSession(sessionID: streamingCommandSessionID)
+            appendRunningNotice(sent ? "^C" : "[Ctrl-C 发送失败；当前命令会在返回或超时后结束]")
         } else if isRunning {
             let sent = LocalAlpineTerminalService.shared.interruptRunningCommand()
             appendRunningNotice(sent ? "^C" : "[Ctrl-C 发送失败；当前命令会在返回或超时后结束]")
