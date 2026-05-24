@@ -1,4 +1,6 @@
 import Foundation
+import UIKit
+import UserNotifications
 
 struct LocalNativeToolRunResult: Sendable {
     let didExecute: Bool
@@ -46,21 +48,163 @@ final class LocalNativeToolService {
         let action = (call["action"] as? String ?? call["name"] as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         switch action {
-        case "get_location":
+        case "get_location", "location.get":
             return executeGetLocation()
-        case "get_weather":
+        case "get_weather", "weather.get":
             return await executeGetWeather()
-        case "list_calendar_events":
+        case "list_calendar_events", "calendar.list_events":
             return await executeListCalendarEvents(call)
-        case "create_calendar_event":
+        case "create_calendar_event", "calendar.create_event":
             return await executeCreateCalendarEvent(call)
-        case "delete_calendar_event":
+        case "delete_calendar_event", "calendar.delete_event":
             return await executeDeleteCalendarEvent(call)
+        case "device.status", "device_status", "get_device_status":
+            return executeDeviceStatus()
+        case "device.info", "device_info", "get_device_info":
+            return executeDeviceInfo()
+        case "clipboard.read", "clipboard_read", "read_clipboard":
+            return executeClipboardRead()
+        case "clipboard.write", "clipboard_write", "write_clipboard":
+            return executeClipboardWrite(call)
+        case "system.notify", "system_notify", "notify", "show_notification":
+            return await executeSystemNotify(call)
         default:
             return [
                 "action": action.isEmpty ? "unknown" : action,
                 "ok": false,
                 "error": "Unsupported local native action"
+            ]
+        }
+    }
+
+    private func executeDeviceStatus() -> [String: Any] {
+        let device = UIDevice.current
+        device.isBatteryMonitoringEnabled = true
+        var payload: [String: Any] = [
+            "action": "device.status",
+            "ok": true,
+            "system_name": device.systemName,
+            "system_version": device.systemVersion,
+            "model": device.model,
+            "localized_model": device.localizedModel,
+            "app_state": applicationStateString(UIApplication.shared.applicationState),
+            "low_power_mode": ProcessInfo.processInfo.isLowPowerModeEnabled,
+            "thermal_state": thermalStateString(ProcessInfo.processInfo.thermalState),
+            "timezone": TimeZone.current.identifier,
+            "locale": Locale.current.identifier
+        ]
+        if device.batteryLevel >= 0 {
+            payload["battery_percent"] = Int((device.batteryLevel * 100).rounded())
+            payload["battery_state"] = batteryStateString(device.batteryState)
+        }
+        return payload
+    }
+
+    private func executeDeviceInfo() -> [String: Any] {
+        var payload = executeDeviceStatus()
+        let screen = UIScreen.main
+        payload["action"] = "device.info"
+        payload["screen_bounds"] = [
+            "width": Double(screen.bounds.width),
+            "height": Double(screen.bounds.height),
+            "scale": Double(screen.scale)
+        ]
+        payload["processor_count"] = ProcessInfo.processInfo.processorCount
+        payload["active_processor_count"] = ProcessInfo.processInfo.activeProcessorCount
+        payload["physical_memory_bytes"] = Int64(ProcessInfo.processInfo.physicalMemory)
+        payload["os_version_string"] = ProcessInfo.processInfo.operatingSystemVersionString
+        return payload
+    }
+
+    private func executeClipboardRead() -> [String: Any] {
+        let text = UIPasteboard.general.string ?? ""
+        return [
+            "action": "clipboard.read",
+            "ok": true,
+            "has_text": !text.isEmpty,
+            "text": String(text.prefix(8_000)),
+            "truncated": text.count > 8_000
+        ]
+    }
+
+    private func executeClipboardWrite(_ call: [String: Any]) -> [String: Any] {
+        let text = ((call["text"] as? String)
+                    ?? (call["content"] as? String)
+                    ?? (call["value"] as? String)
+                    ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            return [
+                "action": "clipboard.write",
+                "ok": false,
+                "error": "Missing required field: text"
+            ]
+        }
+        UIPasteboard.general.string = text
+        return [
+            "action": "clipboard.write",
+            "ok": true,
+            "character_count": text.count
+        ]
+    }
+
+    private func executeSystemNotify(_ call: [String: Any]) async -> [String: Any] {
+        let title = ((call["title"] as? String) ?? "Iexa")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = ((call["body"] as? String)
+                    ?? (call["message"] as? String)
+                    ?? (call["text"] as? String)
+                    ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else {
+            return [
+                "action": "system.notify",
+                "ok": false,
+                "error": "Missing required field: body"
+            ]
+        }
+
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        switch settings.authorizationStatus {
+        case .notDetermined:
+            let granted = await NotificationService.shared.requestPermission()
+            guard granted else {
+                return [
+                    "action": "system.notify",
+                    "ok": false,
+                    "error": "Notification permission was not granted"
+                ]
+            }
+        case .authorized, .provisional, .ephemeral:
+            break
+        default:
+            return [
+                "action": "system.notify",
+                "ok": false,
+                "error": "Notification permission is disabled"
+            ]
+        }
+
+        let content = UNMutableNotificationContent()
+        content.title = title.isEmpty ? "Iexa" : String(title.prefix(80))
+        content.body = String(body.prefix(240))
+        content.sound = .default
+
+        let identifier = "native-tool-\(UUID().uuidString)"
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        do {
+            try await center.add(request)
+            return [
+                "action": "system.notify",
+                "ok": true,
+                "id": identifier
+            ]
+        } catch {
+            return [
+                "action": "system.notify",
+                "ok": false,
+                "error": error.localizedDescription
             ]
         }
     }
@@ -323,6 +467,49 @@ final class LocalNativeToolService {
 
     private func roundOne(_ value: Double) -> Double {
         (value * 10).rounded() / 10
+    }
+
+    private func applicationStateString(_ state: UIApplication.State) -> String {
+        switch state {
+        case .active:
+            return "active"
+        case .inactive:
+            return "inactive"
+        case .background:
+            return "background"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    private func batteryStateString(_ state: UIDevice.BatteryState) -> String {
+        switch state {
+        case .unknown:
+            return "unknown"
+        case .unplugged:
+            return "unplugged"
+        case .charging:
+            return "charging"
+        case .full:
+            return "full"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    private func thermalStateString(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal:
+            return "nominal"
+        case .fair:
+            return "fair"
+        case .serious:
+            return "serious"
+        case .critical:
+            return "critical"
+        @unknown default:
+            return "unknown"
+        }
     }
 
     private static let isoFormatter: ISO8601DateFormatter = {

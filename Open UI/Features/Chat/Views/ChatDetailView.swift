@@ -3925,148 +3925,151 @@ private struct ChatAmbientBackgroundView: View {
 private struct ImageGenerationPlaceholderView: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isActive = false
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        return ZStack {
-            shape.fill(baseFill)
-            if reduceMotion {
-                staticColorOverlay
-            } else {
-                DynamicImageGenerationGradient(isDark: theme.isDark)
-            }
-        }
+        return DynamicImageGenerationGradient(
+            isDark: theme.isDark,
+            isActive: isActive && !reduceMotion
+        )
+        .allowsHitTesting(false)
         .clipShape(shape)
         .overlay {
             shape
                 .strokeBorder(Color.white.opacity(theme.isDark ? 0.08 : 0.16), lineWidth: 0.75)
         }
+        .background {
+            shape
+                .fill(Color.black.opacity(theme.isDark ? 0.16 : 0.05))
+                .offset(y: 6)
+                .blur(radius: 10)
+        }
         .aspectRatio(1, contentMode: .fit)
         .frame(maxWidth: 340)
-        .shadow(color: Color.black.opacity(theme.isDark ? 0.18 : 0.06), radius: 16, y: 8)
         .padding(.top, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var baseFill: LinearGradient {
-        LinearGradient(
-            colors: theme.isDark
-                ? [
-                    Color(red: 0.12, green: 0.24, blue: 0.32),
-                    Color(red: 0.18, green: 0.28, blue: 0.48),
-                    Color(red: 0.34, green: 0.22, blue: 0.48),
-                    Color(red: 0.28, green: 0.34, blue: 0.20)
-                ]
-                : [
-                    Color(red: 0.50, green: 0.92, blue: 0.86),
-                    Color(red: 0.58, green: 0.78, blue: 1.00),
-                    Color(red: 0.84, green: 0.68, blue: 1.00),
-                    Color(red: 1.00, green: 0.78, blue: 0.64)
-                ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-
-    private var staticColorOverlay: some View {
-        ZStack {
-            Circle()
-                .fill(Color(red: 1.00, green: 0.72, blue: 0.28).opacity(theme.isDark ? 0.42 : 0.36))
-                .frame(width: 230, height: 230)
-                .offset(x: -86, y: -88)
-                .blur(radius: 38)
-            Circle()
-                .fill(Color(red: 0.24, green: 0.78, blue: 1.00).opacity(theme.isDark ? 0.45 : 0.38))
-                .frame(width: 260, height: 260)
-                .offset(x: 96, y: -74)
-                .blur(radius: 42)
-            Circle()
-                .fill(Color(red: 0.78, green: 0.44, blue: 1.00).opacity(theme.isDark ? 0.44 : 0.40))
-                .frame(width: 270, height: 270)
-                .offset(x: -62, y: 86)
-                .blur(radius: 44)
-            Circle()
-                .fill(Color(red: 0.20, green: 1.00, blue: 0.62).opacity(theme.isDark ? 0.36 : 0.34))
-                .frame(width: 220, height: 220)
-                .offset(x: 110, y: 102)
-                .blur(radius: 38)
-        }
+        .onAppear { isActive = true }
+        .onDisappear { isActive = false }
     }
 }
 
 private struct DynamicImageGenerationGradient: View {
     let isDark: Bool
+    let isActive: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
-            Canvas(rendersAsynchronously: true) { context, size in
-                let phase = Self.phase(for: timeline.date)
-                let shortEdge = min(size.width, size.height)
-                drawPatch(
-                    in: &context,
-                    size: size,
-                    base: CGPoint(x: 0.20, y: 0.20),
-                    radius: shortEdge * 0.64,
-                    color: Color(red: 1.00, green: 0.72, blue: 0.28),
-                    phase: phase,
-                    speed: 0.52,
-                    offset: 0.03,
-                    opacity: isDark ? 0.44 : 0.38
-                )
-                drawPatch(
-                    in: &context,
-                    size: size,
-                    base: CGPoint(x: 0.76, y: 0.22),
-                    radius: shortEdge * 0.72,
-                    color: Color(red: 0.24, green: 0.78, blue: 1.00),
-                    phase: phase,
-                    speed: 0.64,
-                    offset: 0.24,
-                    opacity: isDark ? 0.48 : 0.40
-                )
-                drawPatch(
-                    in: &context,
-                    size: size,
-                    base: CGPoint(x: 0.30, y: 0.74),
-                    radius: shortEdge * 0.76,
-                    color: Color(red: 0.78, green: 0.44, blue: 1.00),
-                    phase: phase,
-                    speed: 0.48,
-                    offset: 0.53,
-                    opacity: isDark ? 0.48 : 0.42
-                )
-                drawPatch(
-                    in: &context,
-                    size: size,
-                    base: CGPoint(x: 0.84, y: 0.78),
-                    radius: shortEdge * 0.62,
-                    color: Color(red: 0.20, green: 1.00, blue: 0.62),
-                    phase: phase,
-                    speed: 0.56,
-                    offset: 0.79,
-                    opacity: isDark ? 0.40 : 0.36
-                )
-                drawPatch(
-                    in: &context,
-                    size: size,
-                    base: CGPoint(x: 0.54, y: 0.48),
-                    radius: shortEdge * 0.58,
-                    color: Color(red: 1.00, green: 0.42, blue: 0.68),
-                    phase: phase,
-                    speed: 0.76,
-                    offset: 0.41,
-                    opacity: isDark ? 0.36 : 0.32
-                )
+        Group {
+            if isActive {
+                TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+                    ImageGenerationGradientCanvas(
+                        isDark: isDark,
+                        phase: Self.phase(for: timeline.date)
+                    )
+                }
+            } else {
+                ImageGenerationGradientCanvas(isDark: isDark, phase: 0.18)
             }
-            .saturation(isDark ? 1.12 : 1.06)
-            .contrast(isDark ? 1.04 : 1.01)
-            .opacity(isDark ? 0.92 : 0.96)
         }
     }
 
     private static func phase(for date: Date) -> Double {
         let progress = date.timeIntervalSinceReferenceDate / 10.5
         return progress - floor(progress)
+    }
+}
+
+private struct ImageGenerationGradientCanvas: View {
+    let isDark: Bool
+    let phase: Double
+
+    var body: some View {
+        Canvas(opaque: true, colorMode: .linear, rendersAsynchronously: true) { context, size in
+            guard size.width > 1, size.height > 1 else { return }
+
+            let rect = CGRect(origin: .zero, size: size)
+            var rectPath = Path()
+            rectPath.addRect(rect)
+            context.fill(
+                rectPath,
+                with: .linearGradient(
+                    Gradient(colors: baseColors),
+                    startPoint: .zero,
+                    endPoint: CGPoint(x: size.width, y: size.height)
+                )
+            )
+
+            let shortEdge = min(size.width, size.height)
+            drawPatch(
+                in: &context,
+                size: size,
+                base: CGPoint(x: 0.20, y: 0.20),
+                radius: shortEdge * 0.64,
+                color: Color(red: 1.00, green: 0.72, blue: 0.28),
+                speed: 0.52,
+                offset: 0.03,
+                opacity: isDark ? 0.44 : 0.38
+            )
+            drawPatch(
+                in: &context,
+                size: size,
+                base: CGPoint(x: 0.76, y: 0.22),
+                radius: shortEdge * 0.72,
+                color: Color(red: 0.24, green: 0.78, blue: 1.00),
+                speed: 0.64,
+                offset: 0.24,
+                opacity: isDark ? 0.48 : 0.40
+            )
+            drawPatch(
+                in: &context,
+                size: size,
+                base: CGPoint(x: 0.30, y: 0.74),
+                radius: shortEdge * 0.76,
+                color: Color(red: 0.78, green: 0.44, blue: 1.00),
+                speed: 0.48,
+                offset: 0.53,
+                opacity: isDark ? 0.48 : 0.42
+            )
+            drawPatch(
+                in: &context,
+                size: size,
+                base: CGPoint(x: 0.84, y: 0.78),
+                radius: shortEdge * 0.62,
+                color: Color(red: 0.20, green: 1.00, blue: 0.62),
+                speed: 0.56,
+                offset: 0.79,
+                opacity: isDark ? 0.40 : 0.36
+            )
+            drawPatch(
+                in: &context,
+                size: size,
+                base: CGPoint(x: 0.54, y: 0.48),
+                radius: shortEdge * 0.58,
+                color: Color(red: 1.00, green: 0.42, blue: 0.68),
+                speed: 0.76,
+                offset: 0.41,
+                opacity: isDark ? 0.36 : 0.32
+            )
+        }
+        .saturation(isDark ? 1.12 : 1.06)
+        .contrast(isDark ? 1.04 : 1.01)
+        .opacity(isDark ? 0.92 : 0.96)
+    }
+
+    private var baseColors: [Color] {
+        isDark
+            ? [
+                Color(red: 0.12, green: 0.24, blue: 0.32),
+                Color(red: 0.18, green: 0.28, blue: 0.48),
+                Color(red: 0.34, green: 0.22, blue: 0.48),
+                Color(red: 0.28, green: 0.34, blue: 0.20)
+            ]
+            : [
+                Color(red: 0.50, green: 0.92, blue: 0.86),
+                Color(red: 0.58, green: 0.78, blue: 1.00),
+                Color(red: 0.84, green: 0.68, blue: 1.00),
+                Color(red: 1.00, green: 0.78, blue: 0.64)
+            ]
     }
 
     private func drawPatch(
@@ -4075,7 +4078,6 @@ private struct DynamicImageGenerationGradient: View {
         base: CGPoint,
         radius: CGFloat,
         color: Color,
-        phase: Double,
         speed: Double,
         offset: Double,
         opacity: Double

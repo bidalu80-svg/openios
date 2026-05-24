@@ -1355,12 +1355,12 @@ final class ChatViewModel {
         LocalAlpineToolCapability(
             name: "write_files",
             description: "Create files or perform complete same-path rewrites.",
-            arguments: ["path/file_path", "code_lines/content_lines/content_base64"]
+            arguments: ["path/file_path", "code_lines/content_lines/content_base64", "aliases: write_file/create_file/create_files"]
         ),
         LocalAlpineToolCapability(
             name: "command",
             description: "Run one bounded shell command for list/search/run/install/build/test/verify.",
-            arguments: ["command", "cwd?"]
+            arguments: ["command/cmd/shell/bash/exec/run", "cwd/workdir/working_dir/directory/dir?"]
         )
     ]
 
@@ -1375,7 +1375,7 @@ final class ChatViewModel {
         - Transport: emit exactly one fenced Markdown block with language `iexa_alpine`. The app parses that block, runs it locally, and appends the real result as a later Local Alpine observation.
         - This is a client-side tool bridge, not a provider/native function. Never call `iexa_alpine` through function-call syntax and never say the provider tool does not exist.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
-        - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands.
+        - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, or `run`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`.
         - JSON tool capabilities:
         \(capabilities)
         - Python writes: `.py`/`.pyw` must use `write_files.code_lines` or `content_base64`; localized Python repairs should prefer `read_file` then same-path `edit_file`/`patch_file`.
@@ -4628,6 +4628,7 @@ final class ChatViewModel {
                                 )
                             }
                             let imagePrompt = modelPromptText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let requestedImageCount = Self.requestedImageCount(from: imagePrompt)
                             let requestedCanvasSize = Self.requestedImageCanvasSize(from: imagePrompt)
                             let requestedImageSize = Self.imageEndpointSize(for: requestedCanvasSize)
                             let editImages = self.editableImages(from: currentAttachments)
@@ -4638,24 +4639,37 @@ final class ChatViewModel {
                                 canvasSize: requestedCanvasSize,
                                 endpointSize: requestedImageSize
                             )
+                            let imagePrompts = Self.imageVariantPrompts(
+                                basePrompt: imagePromptForAPI,
+                                requestedCount: requestedImageCount
+                            )
                             await RunLiveActivityService.shared.update(
                                 id: assistantMessageId,
                                 title: "正在创建图片",
-                                detail: imagePrompt.isEmpty ? "正在编辑图片" : imagePrompt,
+                                detail: requestedImageCount > 1
+                                    ? "正在生成 \(requestedImageCount) 张不同图片"
+                                    : (imagePrompt.isEmpty ? "正在编辑图片" : imagePrompt),
                                 phase: "生成",
                                 progress: 0.35,
                                 isIndeterminate: true,
                                 force: true
                             )
-                            let imageReference: String
+                            var generatedImages: [(imageReference: String, displayReference: String)] = []
                             if !editImages.isEmpty {
-                                imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                    try await manager.editImage(
-                                        prompt: imagePromptForAPI,
-                                        model: modelId,
-                                        images: editImages,
-                                        size: requestedImageSize
-                                    )
+                                for prompt in imagePrompts {
+                                    let imageReference = try await self.runImageRequestWithRateLimitRetry {
+                                        try await manager.editImage(
+                                            prompt: prompt,
+                                            model: modelId,
+                                            images: editImages,
+                                            size: requestedImageSize
+                                        )
+                                    }
+                                    let displayReference = await self.localDisplayImageReference(
+                                        from: imageReference,
+                                        canvasSize: requestedCanvasSize
+                                    ) ?? imageReference
+                                    generatedImages.append((imageReference: imageReference, displayReference: displayReference))
                                 }
                             } else {
                                 guard !imagePrompt.isEmpty else {
@@ -4667,35 +4681,40 @@ final class ChatViewModel {
                                         )
                                     )
                                 }
-                                imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                    try await manager.generateImage(
-                                        prompt: imagePromptForAPI,
-                                        model: modelId,
-                                        size: requestedImageSize
-                                    )
+                                for prompt in imagePrompts {
+                                    let imageReference = try await self.runImageRequestWithRateLimitRetry {
+                                        try await manager.generateImage(
+                                            prompt: prompt,
+                                            model: modelId,
+                                            size: requestedImageSize
+                                        )
+                                    }
+                                    let displayReference = await self.localDisplayImageReference(
+                                        from: imageReference,
+                                        canvasSize: requestedCanvasSize
+                                    ) ?? imageReference
+                                    generatedImages.append((imageReference: imageReference, displayReference: displayReference))
                                 }
                             }
-                            let displayReference = await self.localDisplayImageReference(
-                                from: imageReference,
-                                canvasSize: requestedCanvasSize
-                            ) ?? imageReference
                             self.updateAssistantMessage(
                                 id: assistantMessageId,
                                 content: "",
                                 isStreaming: false
                             )
-                            self.attachGeneratedImageFile(
-                                messageId: assistantMessageId,
-                                imageReference: imageReference,
-                                displayReference: displayReference
-                            )
+                            for image in generatedImages {
+                                self.attachGeneratedImageFile(
+                                    messageId: assistantMessageId,
+                                    imageReference: image.imageReference,
+                                    displayReference: image.displayReference
+                                )
+                            }
                             self.recordTokenUsageForCompletedTurn(
                                 assistantMessageId: assistantMessageId,
                                 userText: messageText,
                                 assistantText: "已生成图片",
                                 userAttachments: currentAttachments,
                                 mediaKind: .image,
-                                mediaCount: 1
+                                mediaCount: max(generatedImages.count, 1)
                             )
                             self.hasFinishedStreaming = true
                             self.isStreaming = false
@@ -8649,6 +8668,52 @@ final class ChatViewModel {
         """
     }
 
+    private static func requestedImageCount(from prompt: String) -> Int {
+        let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return 1 }
+        let patterns = [
+            #"(?<!\d)(\d{1,2})\s*(?:张|幅|个|款|版|images?|pictures?|pics?|photos?|variants?|versions?)(?!\w)"#,
+            #"(?:生成|画|绘制|做|create|generate|make|draw)\s*(\d{1,2})(?:\s*)(?:张|幅|个|款|版|images?|pictures?|pics?|photos?|variants?|versions?)?"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+            if let match = regex.firstMatch(in: text, range: nsRange),
+               match.numberOfRanges >= 2,
+               let range = Range(match.range(at: 1), in: text),
+               let count = Int(String(text[range])) {
+                return min(max(count, 1), 4)
+            }
+        }
+
+        let chineseNumbers: [(String, Int)] = [
+            ("十", 10), ("九", 9), ("八", 8), ("七", 7), ("六", 6),
+            ("五", 5), ("四", 4), ("三", 3), ("两", 2), ("二", 2), ("一", 1)
+        ]
+        for (token, value) in chineseNumbers where containsChineseImageCountToken(text, token: token) {
+            return min(max(value, 1), 4)
+        }
+        return 1
+    }
+
+    private static func containsChineseImageCountToken(_ text: String, token: String) -> Bool {
+        ["张", "幅", "个", "款", "版"].contains { suffix in
+            text.contains("\(token)\(suffix)")
+        }
+    }
+
+    private static func imageVariantPrompts(basePrompt: String, requestedCount: Int) -> [String] {
+        let count = min(max(requestedCount, 1), 4)
+        guard count > 1 else { return [basePrompt] }
+        return (1...count).map { index in
+            """
+            \(basePrompt)
+
+            Variant \(index) of \(count): create a distinct image, not a duplicate. Keep the user's core subject and requirements, but vary composition, camera angle, lighting, background details, color accents, and small visual details from the other variants.
+            """
+        }
+    }
+
     private static func looksLikeImageGenerationRequest(_ text: String) -> Bool {
         let lowercased = text.lowercased()
         let keywords = [
@@ -8841,6 +8906,17 @@ final class ChatViewModel {
         case "image/avif": return "generated-image.avif"
         case "image/svg+xml": return "generated-image.svg"
         default: return "generated-image.jpg"
+        }
+    }
+
+    private static func fileExtension(forImageContentType contentType: String) -> String {
+        switch contentType {
+        case "image/png": return "png"
+        case "image/webp": return "webp"
+        case "image/gif": return "gif"
+        case "image/avif": return "avif"
+        case "image/svg+xml": return "svg"
+        default: return "jpg"
         }
     }
 
@@ -9350,14 +9426,29 @@ final class ChatViewModel {
         let exampleEndText = formatter.string(from: exampleEventEnd)
         let timezoneName = TimeZone.current.identifier
         return """
-        Iexa has on-device native iOS tools for location, weather, and calendar. These run locally on the user's device and do not require the remote server.
+        Iexa has on-device native iOS tools for device info, clipboard, local notifications, location, weather, and calendar. These run locally on the user's device and do not require the remote server.
 
         Current device time: \(nowText), timezone: \(timezoneName). For relative requests such as "今天", "现在", "明天", or "查看日历", calculate the date range from this current device time. Do not reuse stale sample dates.
 
-        Use them only when the user asks to get/use their current location, query current local weather, query local calendar events, create a calendar event, or delete a calendar event. Do not emit this tool for ordinary conversation.
+        Use them only when the user asks to read device status/info, read/write clipboard text, show a local notification, get/use their current location, query current local weather, query local calendar events, create a calendar event, or delete a calendar event. Do not emit this tool for ordinary conversation.
         To call a local native tool, output exactly one fenced `iexa_native` JSON block and no fake tool-call syntax.
 
         Supported actions:
+        ```iexa_native
+        {"action":"device.status"}
+        ```
+        ```iexa_native
+        {"action":"device.info"}
+        ```
+        ```iexa_native
+        {"action":"clipboard.read"}
+        ```
+        ```iexa_native
+        {"action":"clipboard.write","text":"要复制的文本"}
+        ```
+        ```iexa_native
+        {"action":"system.notify","title":"Iexa","body":"提醒内容"}
+        ```
         ```iexa_native
         {"action":"get_location"}
         ```
@@ -9374,14 +9465,16 @@ final class ChatViewModel {
         {"action":"delete_calendar_event","id":"event-id-from-list"}
         ```
 
-        Dates must be ISO-8601 with timezone whenever possible. After Iexa appends the native tool result, continue from that real result and answer normally. If permissions are denied, location is not ready, or WeatherKit entitlement is unavailable, explain the exact local permission/state issue.
+        Dates must be ISO-8601 with timezone whenever possible. After Iexa appends the native tool result, continue from that real result and answer normally. If permissions are denied, location is not ready, notification permission is disabled, or WeatherKit entitlement is unavailable, explain the exact local permission/state issue.
         """
     }
 
     private static func localAlpineAgentSystemContext() -> String {
         """
         [Local Alpine client tool registry]
-        Iexa has an on-device Alpine Linux workspace tool. The app executes this tool locally and then returns the real result as a later observation.
+        Iexa has an on-device Alpine Linux workspace tool named `iexa_alpine`. It is available in this chat when this registry is present.
+        To call it, emit one fenced Markdown block with language `iexa_alpine`. The iOS host app executes that block locally and then returns the real result as a later observation.
+        This is not a provider/native function-call tool and it is not plain text. Never say `iexa_alpine` does not exist; use the fenced block form below.
 
         \(localAlpineToolManifest)
 
@@ -9399,6 +9492,7 @@ final class ChatViewModel {
         - If the user asks you to write/run/fix/check a project or script, operate under `/mnt/iexa`, verify with a bounded command, and then summarize the real result.
         - For existing source files, read the target first and prefer same-path `edit_file`/`patch_file`; use `write_files` for new files or large same-path rewrites.
         - If the user asks to run recent code from the conversation, save the latest runnable code block under `/mnt/iexa`, run it with the right interpreter/compiler, and summarize the real output.
+        - If the user asks to generate, save, show, display, or send images, write each final image under `/mnt/iexa` and print every final path, preferably one `READY: /mnt/iexa/<name>.png` line per image. If the user requests multiple images, create distinct variants rather than duplicating one file: vary composition, angle, lighting, background details, colors, or small visual details while preserving the user's core prompt. The host app will read PNG/JPEG/WebP/GIF/BMP/AVIF files from `/mnt/iexa` and attach them to the chat bubble automatically. Do not claim you cannot send or display images after creating them.
         - If a tool result shows failure, choose one different bounded fix/diagnostic step or stop with the concrete blocker. Never repeat the exact same failed command.
         - If a tool result shows success and the user goal is complete, stop tool use and answer normally.
 
@@ -10332,8 +10426,11 @@ final class ChatViewModel {
         }
 
         let contentType = Self.imageContentType(for: normalizedPath)
-        let encoded = data.base64EncodedString()
-        let displayURL = "data:\(contentType);base64,\(encoded)"
+        let displayURL = Self.writeLocalAlpineImageToDisplayCache(
+            data: data,
+            sourcePath: normalizedPath,
+            contentType: contentType
+        ) ?? "data:\(contentType);base64,\(data.base64EncodedString())"
         let fileName = (normalizedPath as NSString).lastPathComponent
         return ChatMessageFile(
             type: "image",
@@ -10342,6 +10439,26 @@ final class ChatViewModel {
             contentType: contentType,
             displayURL: displayURL
         )
+    }
+
+    private static func writeLocalAlpineImageToDisplayCache(
+        data: Data,
+        sourcePath: String,
+        contentType: String
+    ) -> String? {
+        let baseDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let directory = baseDirectory.appendingPathComponent("iexa-local-alpine-images", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let ext = (sourcePath as NSString).pathExtension
+            let fallbackExt = Self.fileExtension(forImageContentType: contentType)
+            let fileURL = directory.appendingPathComponent("\(UUID().uuidString).\(ext.isEmpty ? fallbackExt : ext)")
+            try data.write(to: fileURL, options: [.atomic])
+            return fileURL.absoluteString
+        } catch {
+            return nil
+        }
     }
 
     private static func localAlpineGeneratedMediaPaths(from message: ChatMessage) -> [String] {
@@ -11303,7 +11420,7 @@ final class ChatViewModel {
     private static func appendLocalNativeResultInstruction(to messages: inout [[String: Any]]) {
         let instruction = """
         [Local native tool result]
-        The latest Local Native message above is a real on-device iOS tool result for location/weather/calendar. Do not emit another `iexa_native` block in this turn.
+        The latest Local Native message above is a real on-device iOS tool result for device info, clipboard, local notification, location, weather, or calendar. Do not emit another `iexa_native` block in this turn.
         Reply to the user in normal language only. If the local tool succeeded, summarize the concrete result. If it failed, explain the permission/state problem and the next user action.
         [/Local native tool result]
         """
@@ -11322,9 +11439,14 @@ final class ChatViewModel {
     private static func shouldExposeLocalNativeTools(_ text: String) -> Bool {
         let lower = text.lowercased()
         let markers = [
+            "设备状态", "设备信息", "电量", "电池", "系统信息", "手机信息",
+            "剪贴板", "复制到剪贴板", "读取剪贴板", "粘贴板",
+            "通知", "提醒我", "发个通知", "本地通知",
             "定位", "位置", "我在哪", "附近", "坐标", "经纬度",
             "天气", "气温", "温度", "下雨", "降雨", "风速", "湿度", "冷不冷", "热不热",
             "日历", "日程", "行程", "事件", "提醒", "会议", "预约", "安排",
+            "device status", "device info", "battery", "clipboard", "pasteboard",
+            "copy to clipboard", "read clipboard", "notification", "notify me",
             "calendar", "event", "schedule", "reminder", "location", "where am i",
             "weather", "temperature", "rain", "wind", "humidity"
         ]
@@ -12711,6 +12833,7 @@ final class ChatViewModel {
         Tool System:
         - Use exactly one next tool action per assistant turn. For local shell/files, emit one `iexa_alpine` block. For current web facts, rely on the web-search context already injected by the app; if more current info is needed, ask for/perform a more precise search before guessing.
         - Never emit `to=local_alpine_exec code` or any other pseudo tool-call text. This app executes only `iexa_alpine`; use that exact fenced block.
+        - For generated images, write every final PNG/JPEG/WebP/GIF/BMP/AVIF under `/mnt/iexa` and print `READY: /mnt/iexa/<name>` for each one. If multiple images are requested, make distinct variants rather than repeated copies. The host app attaches those files to the chat automatically; do not tell the user you cannot display or send them after creation.
         - Before the block, write at most one short visible sentence naming the current step. Do not reveal detailed hidden reasoning.
         - Prefer JSON file tools for workspace files: `read_file` for reading, `edit_file` for exact same-path replacements, `patch_file` for unified diffs, `write_files` for new files or complete same-path replacement.
         Iexa Environment:

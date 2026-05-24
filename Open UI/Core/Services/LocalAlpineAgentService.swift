@@ -951,21 +951,10 @@ actor LocalAlpineAgentService {
             return parseCommands(from: nested)
         }
 
-        if let command = dict["command"] as? String {
+        if let command = Self.shellCommandString(from: dict) {
             return [LocalAlpineAgentCommand(
                 command: command,
-                cwd: dict["cwd"] as? String,
-                writeFiles: parseWriteFilesForCommand(from: dict),
-                readFiles: parseReadFilesForCommand(from: dict),
-                editFiles: parseEditFilesForCommand(from: dict),
-                patchFiles: parsePatchFilesForCommand(from: dict)
-            )]
-        }
-
-        if let command = dict["cmd"] as? String {
-            return [LocalAlpineAgentCommand(
-                command: command,
-                cwd: dict["cwd"] as? String,
+                cwd: Self.cwdString(from: dict),
                 writeFiles: parseWriteFilesForCommand(from: dict),
                 readFiles: parseReadFilesForCommand(from: dict),
                 editFiles: parseEditFilesForCommand(from: dict),
@@ -980,7 +969,7 @@ actor LocalAlpineAgentService {
         if !files.isEmpty || !readFiles.isEmpty || !editFiles.isEmpty || !patchFiles.isEmpty {
             return [LocalAlpineAgentCommand(
                 command: nil,
-                cwd: dict["cwd"] as? String,
+                cwd: Self.cwdString(from: dict),
                 writeFiles: files,
                 readFiles: readFiles,
                 editFiles: editFiles,
@@ -989,6 +978,26 @@ actor LocalAlpineAgentService {
         }
 
         return []
+    }
+
+    private nonisolated static func shellCommandString(from dict: [String: Any]) -> String? {
+        for key in ["command", "cmd", "shell", "bash", "exec", "run"] {
+            if let value = dict[key] as? String,
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func cwdString(from dict: [String: Any]) -> String? {
+        for key in ["cwd", "workdir", "working_dir", "directory", "dir"] {
+            if let value = dict[key] as? String,
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return value
+            }
+        }
+        return nil
     }
 
     private func parseReadFilesForCommand(from dict: [String: Any]) -> [LocalAlpineReadFileRequest] {
@@ -1155,7 +1164,7 @@ actor LocalAlpineAgentService {
     }
 
     private nonisolated static func writeFilesObject(from dict: [String: Any]) -> Any? {
-        dict["write_files"] ?? dict["write_file"] ?? dict["files"]
+        dict["write_files"] ?? dict["write_file"] ?? dict["create_file"] ?? dict["create_files"] ?? dict["files"]
     }
 
     private func parseWriteFiles(from object: Any?) -> [LocalAlpineAgentFile] {
