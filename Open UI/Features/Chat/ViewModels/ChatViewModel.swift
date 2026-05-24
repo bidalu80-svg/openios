@@ -7363,9 +7363,10 @@ final class ChatViewModel {
             return
         }
 
-        conversation?.messages.removeAll { $0.id == assistantMessageId }
-        conversation?.history.removeSubtree(rootId: assistantMessageId)
-        localAlpineAgentExecutedMessageIds.remove(assistantMessageId)
+        discardLocalAlpineControlMessage(
+            assistantMessageId: assistantMessageId,
+            restoreCurrentIdTo: parentId
+        )
         localAlpineContinuationParentIds.remove(parentId)
         localAlpineFinalSummaryParentIds.remove(parentId)
         localAlpineNoCommandContinuationRetries = 0
@@ -7391,6 +7392,23 @@ final class ChatViewModel {
 
         localAlpineAgentStopRequested = false
         scheduleLocalAlpineContinuationIfNeeded(after: parentId, forceContinue: true)
+    }
+
+    private func discardLocalAlpineControlMessage(
+        assistantMessageId: String,
+        restoreCurrentIdTo parentId: String
+    ) {
+        if streamingStore.streamingMessageId == assistantMessageId {
+            streamingStore.abortStreaming()
+        }
+        conversation?.messages.removeAll { $0.id == assistantMessageId }
+        conversation?.history.removeSubtree(rootId: assistantMessageId)
+        if conversation?.history.nodes[parentId] != nil {
+            conversation?.history.currentId = parentId
+        }
+        localAlpineAgentExecutedMessageIds.remove(assistantMessageId)
+        localNativeToolExecutedMessageIds.remove(assistantMessageId)
+        localWorkspaceAgentExecutedMessageIds.remove(assistantMessageId)
     }
 
     /// Generates a suggested emoji for the assistant's response via the server's
@@ -12392,8 +12410,6 @@ final class ChatViewModel {
             doneDescription = "已整理本地 Alpine 回答"
         } else if emittedLocalAlpineInstruction {
             doneDescription = "已决定继续执行下一步"
-        } else if shouldRetryMissingTool {
-            doneDescription = "模型未发出工具调用，正在重新要求下一步"
         } else {
             doneDescription = "已整理本地 Alpine 输出"
         }
@@ -12403,25 +12419,34 @@ final class ChatViewModel {
             done: true,
             occurredAt: .now
         )
-        updateAssistantMessage(
-            id: assistantMessageId,
-            content: shouldRetryMissingTool ? "" : rawContent,
-            isStreaming: false,
-            statusHistory: [doneStatus]
-        )
-        normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
-        let finalContent = conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? (shouldRetryMissingTool ? "" : rawContent)
-        applyUsage(usage, toMessageId: assistantMessageId)
-        let lastUser = conversation?.messages.last(where: {
-            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
-        })
-        recordTokenUsageForCompletedTurn(
-            assistantMessageId: assistantMessageId,
-            userText: lastUser?.content ?? "",
-            assistantText: finalContent,
-            userAttachments: [],
-            usage: usage
-        )
+        let finalContent: String
+        if shouldRetryMissingTool, let parentResultId {
+            discardLocalAlpineControlMessage(
+                assistantMessageId: assistantMessageId,
+                restoreCurrentIdTo: parentResultId
+            )
+            finalContent = ""
+        } else {
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: rawContent,
+                isStreaming: false,
+                statusHistory: [doneStatus]
+            )
+            normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+            finalContent = conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? rawContent
+            applyUsage(usage, toMessageId: assistantMessageId)
+            let lastUser = conversation?.messages.last(where: {
+                $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+            })
+            recordTokenUsageForCompletedTurn(
+                assistantMessageId: assistantMessageId,
+                userText: lastUser?.content ?? "",
+                assistantText: finalContent,
+                userAttachments: [],
+                usage: usage
+            )
+        }
         hasFinishedStreaming = true
         isStreaming = false
         isExternallyStreaming = false
@@ -12829,6 +12854,7 @@ final class ChatViewModel {
         - Treat every Local Alpine result as an observation. Read its stdout/stderr/exit code before deciding the next step; exit code 0 does not automatically mean the user's task is complete.
         - Continue until the task is verified complete, blocked by missing external information, or the user stops it. Do not stop after a single command if the output shows an error or incomplete state.
         - If the user's task is complete, answer normally and do not emit `iexa_alpine`. Include a concise Codex-style summary: what you did, what command/output verified it, files changed/created, and any remaining caveat.
+        - Do not ask "whether to read/execute the file" for ordinary agent tasks. If the next useful action is to inspect, read, run, or verify a local file under `/mnt/iexa`, emit `iexa_alpine` and do it. Ask the user only for destructive confirmation, missing credentials, or external information.
         Intent:
         - Keep file operations separate from code generation. Delete/read/list/search requests should operate on the exact target under `/mnt/iexa`; never replace them with a sample script or project.
         - For language/project requests, create the real files, check/install missing runtime dependencies, run the project or a bounded test, and continue from the output until it works or a concrete blocker remains.
