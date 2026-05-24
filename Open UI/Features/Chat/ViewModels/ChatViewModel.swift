@@ -8673,7 +8673,7 @@ final class ChatViewModel {
         guard !text.isEmpty else { return 1 }
         let patterns = [
             #"(?<!\d)(\d{1,2})\s*(?:张|幅|个|款|版|images?|pictures?|pics?|photos?|variants?|versions?)(?!\w)"#,
-            #"(?:生成|画|绘制|做|create|generate|make|draw)\s*(\d{1,2})(?:\s*)(?:张|幅|个|款|版|images?|pictures?|pics?|photos?|variants?|versions?)?"#
+            #"(?:生成|画|绘制|做|create|generate|make|draw)\s*(\d{1,2})\s*(?:张|幅|个|款|版|images?|pictures?|pics?|photos?|variants?|versions?)(?!\w)"#
         ]
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
