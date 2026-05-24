@@ -4629,8 +4629,11 @@ final class ChatViewModel {
                             let imagePrompt = modelPromptText.trimmingCharacters(in: .whitespacesAndNewlines)
                             let requestedCanvasSize = Self.requestedImageCanvasSize(from: imagePrompt)
                             let requestedImageSize = Self.imageEndpointSize(for: requestedCanvasSize)
+                            let editImages = self.editableImages(from: currentAttachments)
                             let imagePromptForAPI = Self.promptWithImageSizeInstruction(
-                                imagePrompt.isEmpty ? "Edit this image." : imagePrompt,
+                                imagePrompt.isEmpty
+                                    ? (editImages.count > 1 ? "Use all attached images as references and combine or edit them according to the user's request." : "Edit this image.")
+                                    : imagePrompt,
                                 canvasSize: requestedCanvasSize,
                                 endpointSize: requestedImageSize
                             )
@@ -4644,13 +4647,12 @@ final class ChatViewModel {
                                 force: true
                             )
                             let imageReference: String
-                            if let editImage = self.firstEditableImage(from: currentAttachments) {
+                            if !editImages.isEmpty {
                                 imageReference = try await self.runImageRequestWithRateLimitRetry {
                                     try await manager.editImage(
                                         prompt: imagePromptForAPI,
                                         model: modelId,
-                                        imageData: editImage.data,
-                                        fileName: editImage.fileName,
+                                        images: editImages,
                                         size: requestedImageSize
                                     )
                                 }
@@ -8377,19 +8379,27 @@ final class ChatViewModel {
     }
 
     private func firstEditableImage(from attachments: [ChatAttachment]) -> (data: Data, fileName: String)? {
+        guard let image = editableImages(from: attachments, limit: 1).first else { return nil }
+        return (image.data, image.fileName)
+    }
+
+    private func editableImages(from attachments: [ChatAttachment], limit: Int = 16) -> [ImageEditSource] {
+        var images: [ImageEditSource] = []
         for attachment in attachments where attachment.type == .image {
             let outputFileName = Self.jpegFileName(for: attachment.name)
             if let data = attachment.data {
                 let jpegData = FileAttachmentService.downsampleForUpload(data: data)
-                return (jpegData.isEmpty ? data : jpegData, outputFileName)
-            }
-            if let dataURL = attachment.displayDataURL,
-               let data = Self.imageData(fromDataURL: dataURL) {
+                images.append(ImageEditSource(data: jpegData.isEmpty ? data : jpegData, fileName: outputFileName))
+            } else if let dataURL = attachment.displayDataURL,
+                      let data = Self.imageData(fromDataURL: dataURL) {
                 let jpegData = FileAttachmentService.downsampleForUpload(data: data)
-                return (jpegData.isEmpty ? data : jpegData, outputFileName)
+                images.append(ImageEditSource(data: jpegData.isEmpty ? data : jpegData, fileName: outputFileName))
+            }
+            if images.count >= limit {
+                break
             }
         }
-        return nil
+        return images
     }
 
     private static func jpegFileName(for originalName: String) -> String {
@@ -9232,16 +9242,19 @@ final class ChatViewModel {
         let exampleEndText = formatter.string(from: exampleEventEnd)
         let timezoneName = TimeZone.current.identifier
         return """
-        Iexa has on-device native iOS tools for location and calendar. These run locally on the user's device and do not require the remote server.
+        Iexa has on-device native iOS tools for location, weather, and calendar. These run locally on the user's device and do not require the remote server.
 
         Current device time: \(nowText), timezone: \(timezoneName). For relative requests such as "今天", "现在", "明天", or "查看日历", calculate the date range from this current device time. Do not reuse stale sample dates.
 
-        Use them only when the user asks to get/use their current location, query local calendar events, create a calendar event, or delete a calendar event. Do not emit this tool for ordinary conversation.
+        Use them only when the user asks to get/use their current location, query current local weather, query local calendar events, create a calendar event, or delete a calendar event. Do not emit this tool for ordinary conversation.
         To call a local native tool, output exactly one fenced `iexa_native` JSON block and no fake tool-call syntax.
 
         Supported actions:
         ```iexa_native
         {"action":"get_location"}
+        ```
+        ```iexa_native
+        {"action":"get_weather"}
         ```
         ```iexa_native
         {"action":"list_calendar_events","start":"\(todayStartText)","end":"\(todayEndText)"}
@@ -9253,7 +9266,7 @@ final class ChatViewModel {
         {"action":"delete_calendar_event","id":"event-id-from-list"}
         ```
 
-        Dates must be ISO-8601 with timezone whenever possible. After Iexa appends the native tool result, continue from that real result and answer normally. If permissions are denied or location is not ready, explain the exact local permission/state issue.
+        Dates must be ISO-8601 with timezone whenever possible. After Iexa appends the native tool result, continue from that real result and answer normally. If permissions are denied, location is not ready, or WeatherKit entitlement is unavailable, explain the exact local permission/state issue.
         """
     }
 
@@ -11052,7 +11065,7 @@ final class ChatViewModel {
     private static func appendLocalNativeResultInstruction(to messages: inout [[String: Any]]) {
         let instruction = """
         [Local native tool result]
-        The latest Local Native message above is a real on-device iOS tool result for location/calendar. Do not emit another `iexa_native` block in this turn.
+        The latest Local Native message above is a real on-device iOS tool result for location/weather/calendar. Do not emit another `iexa_native` block in this turn.
         Reply to the user in normal language only. If the local tool succeeded, summarize the concrete result. If it failed, explain the permission/state problem and the next user action.
         [/Local native tool result]
         """
@@ -11072,8 +11085,10 @@ final class ChatViewModel {
         let lower = text.lowercased()
         let markers = [
             "定位", "位置", "我在哪", "附近", "坐标", "经纬度",
+            "天气", "气温", "温度", "下雨", "降雨", "风速", "湿度", "冷不冷", "热不热",
             "日历", "日程", "行程", "事件", "提醒", "会议", "预约", "安排",
-            "calendar", "event", "schedule", "reminder", "location", "where am i"
+            "calendar", "event", "schedule", "reminder", "location", "where am i",
+            "weather", "temperature", "rain", "wind", "humidity"
         ]
         return markers.contains { lower.contains($0) }
     }

@@ -4,6 +4,8 @@
 <dict>
 	<key>com.apple.developer.kernel.increased-memory-limit</key>
 	<true/>
+	<key>com.apple.developer.weatherkit</key>
+	<true/>
 	<!-- Allows BGContinuedProcessingTask to use the GPU while the app is backgrounded.
 	     Requires iOS 26+ and the Background GPU Access capability in Xcode.
 	     Used for on-device ASR (Parakeet/MLX) so transcription continues uninterrupted

@@ -528,6 +528,13 @@ final class NetworkManager: NSObject, Sendable {
 
     // MARK: - Multipart Form Data Upload
 
+    struct MultipartUploadFile: Sendable {
+        let fieldName: String
+        let fileData: Data
+        let fileName: String
+        let mimeType: String
+    }
+
     func uploadMultipart(
         path: String,
         queryItems: [URLQueryItem]? = nil,
@@ -535,6 +542,33 @@ final class NetworkManager: NSObject, Sendable {
         fileName: String,
         mimeType: String,
         fieldName: String = "file",
+        additionalFields: [String: String]? = nil,
+        authenticated: Bool = true,
+        timeout: TimeInterval? = nil,
+        onProgress: (@Sendable (Int64, Int64) -> Void)? = nil
+    ) async throws -> [String: Any] {
+        try await uploadMultipart(
+            path: path,
+            queryItems: queryItems,
+            files: [
+                MultipartUploadFile(
+                    fieldName: fieldName,
+                    fileData: fileData,
+                    fileName: fileName,
+                    mimeType: mimeType
+                )
+            ],
+            additionalFields: additionalFields,
+            authenticated: authenticated,
+            timeout: timeout,
+            onProgress: onProgress
+        )
+    }
+
+    func uploadMultipart(
+        path: String,
+        queryItems: [URLQueryItem]? = nil,
+        files: [MultipartUploadFile],
         additionalFields: [String: String]? = nil,
         authenticated: Bool = true,
         timeout: TimeInterval? = nil,
@@ -551,13 +585,15 @@ final class NetworkManager: NSObject, Sendable {
             }
         }
 
-        body.append(Data("--\(boundary)\r\n".utf8))
-        body.append(Data(
-            "Content-Disposition: form-data; name=\"\(fieldName)\"; filename=\"\(fileName)\"\r\n".utf8
-        ))
-        body.append(Data("Content-Type: \(mimeType)\r\n\r\n".utf8))
-        body.append(fileData)
-        body.append(Data("\r\n".utf8))
+        for file in files {
+            body.append(Data("--\(boundary)\r\n".utf8))
+            body.append(Data(
+                "Content-Disposition: form-data; name=\"\(file.fieldName)\"; filename=\"\(file.fileName)\"\r\n".utf8
+            ))
+            body.append(Data("Content-Type: \(file.mimeType)\r\n\r\n".utf8))
+            body.append(file.fileData)
+            body.append(Data("\r\n".utf8))
+        }
         body.append(Data("--\(boundary)--\r\n".utf8))
 
         let urlRequest = try buildRequest(

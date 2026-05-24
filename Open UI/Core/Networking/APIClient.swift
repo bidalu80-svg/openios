@@ -1,6 +1,11 @@
 import Foundation
 import os.log
 
+struct ImageEditSource: Sendable {
+    let data: Data
+    let fileName: String
+}
+
 /// High-level client for the Iexa native server REST API, built on top of `NetworkManager`.
 final class APIClient: @unchecked Sendable {
     let network: NetworkManager
@@ -857,6 +862,21 @@ final class APIClient: @unchecked Sendable {
         imageData: Data? = nil,
         fileName: String = "image.png"
     ) -> [[String: Any]] {
+        let images = imageData.map { [ImageEditSource(data: $0, fileName: fileName)] } ?? []
+        return responsesImageGenerationBodyVariants(
+            prompt: prompt,
+            model: model,
+            size: size,
+            images: images
+        )
+    }
+
+    private func responsesImageGenerationBodyVariants(
+        prompt: String,
+        model: String,
+        size: String,
+        images: [ImageEditSource]
+    ) -> [[String: Any]] {
         var tool: [String: Any] = [
             "type": "image_generation",
             "action": "auto"
@@ -869,8 +889,8 @@ final class APIClient: @unchecked Sendable {
         var content: [[String: Any]] = [
             ["type": "input_text", "text": prompt]
         ]
-        if let imageData {
-            let dataURL = "data:\(mimeType(for: fileName));base64,\(imageData.base64EncodedString())"
+        for image in images {
+            let dataURL = "data:\(mimeType(for: image.fileName));base64,\(image.data.base64EncodedString())"
             content.append(["type": "input_image", "image_url": dataURL])
         }
 
@@ -882,7 +902,7 @@ final class APIClient: @unchecked Sendable {
             ]
         ]
 
-        if imageData == nil {
+        if images.isEmpty {
             variants.append([
                 "model": model,
                 "input": prompt,
@@ -900,12 +920,26 @@ final class APIClient: @unchecked Sendable {
         imageData: Data? = nil,
         fileName: String = "image.png"
     ) async throws -> String {
+        let images = imageData.map { [ImageEditSource(data: $0, fileName: fileName)] } ?? []
+        return try await generateImageViaResponses(
+            prompt: prompt,
+            model: model,
+            size: size,
+            images: images
+        )
+    }
+
+    private func generateImageViaResponses(
+        prompt: String,
+        model: String,
+        size: String,
+        images: [ImageEditSource]
+    ) async throws -> String {
         let variants = responsesImageGenerationBodyVariants(
             prompt: prompt,
             model: model,
             size: size,
-            imageData: imageData,
-            fileName: fileName
+            images: images
         )
         var lastError: Error?
         for requestBody in variants {
@@ -1036,39 +1070,84 @@ final class APIClient: @unchecked Sendable {
         fileName: String = "image.png",
         size: String = "1024x1024"
     ) async throws -> String {
-        var lastError: Error?
-        do {
-            let json = try await network.uploadMultipart(
-                path: "/images/edits",
-                fileData: imageData,
-                fileName: fileName,
-                mimeType: mimeType(for: fileName),
-                fieldName: "image",
-                additionalFields: [
-                    "model": model,
-                    "prompt": prompt,
-                    "n": "1",
-                    "size": size
-                ],
-                timeout: 300
-            )
+        try await editImage(
+            prompt: prompt,
+            model: model,
+            images: [ImageEditSource(data: imageData, fileName: fileName)],
+            size: size
+        )
+    }
 
-            if let imageReference = firstImageReference(in: json) {
-                return imageReference
+    func editImage(
+        prompt: String,
+        model: String,
+        images: [ImageEditSource],
+        size: String = "1024x1024"
+    ) async throws -> String {
+        let editImages = Array(images.prefix(16))
+        guard let firstImage = editImages.first else {
+            return try await generateImage(prompt: prompt, model: model, size: size)
+        }
+
+        var lastError: Error?
+        let multipartVariants: [[NetworkManager.MultipartUploadFile]] = [
+            editImages.map {
+                NetworkManager.MultipartUploadFile(
+                    fieldName: "image[]",
+                    fileData: $0.data,
+                    fileName: $0.fileName,
+                    mimeType: mimeType(for: $0.fileName)
+                )
+            },
+            editImages.map {
+                NetworkManager.MultipartUploadFile(
+                    fieldName: "image",
+                    fileData: $0.data,
+                    fileName: $0.fileName,
+                    mimeType: mimeType(for: $0.fileName)
+                )
+            },
+            [
+                NetworkManager.MultipartUploadFile(
+                    fieldName: "image",
+                    fileData: firstImage.data,
+                    fileName: firstImage.fileName,
+                    mimeType: mimeType(for: firstImage.fileName)
+                )
+            ]
+        ]
+
+        for files in multipartVariants {
+            do {
+                let json = try await network.uploadMultipart(
+                    path: "/images/edits",
+                    files: files,
+                    additionalFields: [
+                        "model": model,
+                        "prompt": prompt,
+                        "n": "1",
+                        "size": size
+                    ],
+                    timeout: 300
+                )
+
+                if let imageReference = firstImageReference(in: json) {
+                    return imageReference
+                }
+                lastError = APIError.responseDecoding(
+                    underlying: NSError(
+                        domain: "APIClient",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
+                    ),
+                    data: nil
+                )
+            } catch {
+                guard shouldTryNextImageEndpoint(after: error) else {
+                    throw error
+                }
+                lastError = error
             }
-            lastError = APIError.responseDecoding(
-                underlying: NSError(
-                    domain: "APIClient",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
-                ),
-                data: nil
-            )
-        } catch {
-            guard shouldTryNextImageEndpoint(after: error) else {
-                throw error
-            }
-            lastError = error
         }
 
         do {
@@ -1076,10 +1155,23 @@ final class APIClient: @unchecked Sendable {
                 prompt: prompt,
                 model: model,
                 size: size,
-                imageData: imageData,
-                fileName: fileName
+                images: editImages
             )
         } catch {
+            if editImages.count > 1, shouldTryNextImageEndpoint(after: error) {
+                do {
+                    return try await generateImageViaResponses(
+                        prompt: prompt,
+                        model: model,
+                        size: size,
+                        images: [firstImage]
+                    )
+                } catch {
+                    lastError = error
+                }
+            } else {
+                lastError = error
+            }
             throw APIError.responseDecoding(
                 underlying: NSError(
                     domain: "APIClient",

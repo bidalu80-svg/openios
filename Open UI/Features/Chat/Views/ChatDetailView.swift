@@ -4622,7 +4622,7 @@ private struct LocalAlpineResultCard: View {
         if !toolCalls.isEmpty {
             return max(0, toolCalls.count - 6)
         }
-        max(0, writtenFiles.count - 4) + max(0, executableCommandResults.count - 5)
+        return max(0, writtenFiles.count - 4) + max(0, executableCommandResults.count - 5)
     }
 
     private var effectiveCommandCount: Int {

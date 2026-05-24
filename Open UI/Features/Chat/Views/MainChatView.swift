@@ -32,6 +32,9 @@ struct MainChatView: View {
     /// Controls the calendar sheet presentation.
     @State private var showCalendar = false
 
+    /// Controls the weather sheet presentation.
+    @State private var showWeather = false
+
     /// Controls the local Alpine terminal presentation.
     @State private var showLocalAlpineTerminal = false
 
@@ -515,6 +518,7 @@ struct MainChatView: View {
         case sharedChats
         case workspace
         case calendar
+        case weather
         case localWorkspaceBrowser
         case automations
         case memories
@@ -535,6 +539,7 @@ struct MainChatView: View {
             case .sharedChats: return "sharedChats"
             case .workspace: return "workspace"
             case .calendar: return "calendar"
+            case .weather: return "weather"
             case .localWorkspaceBrowser: return "localWorkspaceBrowser"
             case .automations: return "automations"
             case .memories: return "memories"
@@ -569,6 +574,7 @@ struct MainChatView: View {
         if showSharedChats { return .sharedChats }
         if showWorkspace { return .workspace }
         if showCalendar { return .calendar }
+        if showWeather { return .weather }
         if showLocalWorkspaceBrowser { return .localWorkspaceBrowser }
         if showAutomations { return .automations }
         if showMemories { return .memories }
@@ -762,6 +768,11 @@ struct MainChatView: View {
                 .environment(dependencies)
                 .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
 
+        case .weather:
+            WeatherView()
+                .environment(dependencies)
+                .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+
         case .localWorkspaceBrowser:
             LocalWorkspaceFileBrowserView()
                 .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
@@ -873,6 +884,8 @@ struct MainChatView: View {
             showWorkspace = false
         case .calendar:
             showCalendar = false
+        case .weather:
+            showWeather = false
         case .localWorkspaceBrowser:
             showLocalWorkspaceBrowser = false
         case .automations:
@@ -2807,6 +2820,13 @@ struct MainChatView: View {
                         } label: {
                             Label("Notes", systemImage: "note.text")
                         }
+                    }
+
+                    Button {
+                        closeDrawer()
+                        showWeather = true
+                    } label: {
+                        Label("天气", systemImage: "cloud.sun")
                     }
 
                     if usesDirectProvider || dependencies.authViewModel.featurePermissions.calendar {

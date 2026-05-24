@@ -48,6 +48,8 @@ final class LocalNativeToolService {
         switch action {
         case "get_location":
             return executeGetLocation()
+        case "get_weather":
+            return await executeGetWeather()
         case "list_calendar_events":
             return await executeListCalendarEvents(call)
         case "create_calendar_event":
@@ -85,6 +87,40 @@ final class LocalNativeToolService {
             "ok": false,
             "error": "Location is not available yet. The user may need to grant permission or wait for a GPS fix."
         ]
+    }
+
+    private func executeGetWeather() async -> [String: Any] {
+        do {
+            let snapshot = try await LocalWeatherService.shared.currentWeather()
+            var payload: [String: Any] = [
+                "action": "get_weather",
+                "ok": true,
+                "date": isoString(snapshot.date),
+                "condition": snapshot.condition,
+                "symbol": snapshot.symbolName,
+                "temperature_celsius": roundOne(snapshot.temperatureCelsius),
+                "apparent_temperature_celsius": roundOne(snapshot.apparentTemperatureCelsius),
+                "humidity_percent": Int((snapshot.humidity * 100).rounded()),
+                "wind_speed_kph": roundOne(snapshot.windSpeedKPH),
+                "latitude": snapshot.latitude,
+                "longitude": snapshot.longitude,
+                "attribution": snapshot.attributionServiceName,
+                "attribution_legal_url": snapshot.attributionLegalURL.absoluteString
+            ]
+            if let locationName = snapshot.locationName {
+                payload["location"] = locationName
+            }
+            if let precipitationChance = snapshot.precipitationChance {
+                payload["precipitation_chance_percent"] = Int((precipitationChance * 100).rounded())
+            }
+            return payload
+        } catch {
+            return [
+                "action": "get_weather",
+                "ok": false,
+                "error": error.localizedDescription
+            ]
+        }
     }
 
     private func executeListCalendarEvents(_ call: [String: Any]) async -> [String: Any] {
@@ -283,6 +319,10 @@ final class LocalNativeToolService {
             return "\(object)"
         }
         return string
+    }
+
+    private func roundOne(_ value: Double) -> Double {
+        (value * 10).rounded() / 10
     }
 
     private static let isoFormatter: ISO8601DateFormatter = {

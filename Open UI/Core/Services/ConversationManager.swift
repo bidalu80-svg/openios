@@ -247,6 +247,20 @@ final class ConversationManager: @unchecked Sendable {
         )
     }
 
+    func editImage(
+        prompt: String,
+        model: String,
+        images: [ImageEditSource],
+        size: String = "1024x1024"
+    ) async throws -> String {
+        try await apiClient.editImage(
+            prompt: prompt,
+            model: model,
+            images: images,
+            size: size
+        )
+    }
+
     func fetchDefaultModel() async -> String? {
         await apiClient.getDefaultModel()
     }
