@@ -3841,7 +3841,6 @@ private struct ChatAmbientBackgroundView: View {
     let mode: ChatAmbientBackgroundMode
 
     @Environment(\.theme) private var theme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -3854,14 +3853,8 @@ private struct ChatAmbientBackgroundView: View {
                 idleGradient
                     .transition(.opacity)
             case .activeFirstTurn:
-                if reduceMotion {
-                    activeGradient(phase: 0.22)
-                } else {
-                    TimelineView(.periodic(from: Date(), by: 1.0 / 18.0)) { timeline in
-                        activeGradient(phase: phase(for: timeline.date))
-                    }
+                activeGradient
                     .transition(.opacity)
-                }
             }
         }
         .ignoresSafeArea()
@@ -3891,66 +3884,24 @@ private struct ChatAmbientBackgroundView: View {
         }
     }
 
-    private func activeGradient(phase: CGFloat) -> some View {
-        let angle = Double(phase) * .pi * 2
-        let colorAngle = Double(phase) * .pi * 2
-        let topColor = animatedColor(
-            red: 0.38, green: 0.88, blue: 0.76,
-            amplitude: (0.08, 0.06, 0.10),
-            angle: colorAngle,
-            offset: 0.0
-        )
-        let midColor = animatedColor(
-            red: 0.58, green: 0.83, blue: 1.00,
-            amplitude: (0.08, 0.07, 0.00),
-            angle: colorAngle,
-            offset: 1.8
-        )
-        let glowColor = animatedColor(
-            red: 0.88, green: 1.00, blue: 0.82,
-            amplitude: (0.08, 0.00, 0.08),
-            angle: colorAngle,
-            offset: 3.2
-        )
-        let mintGlow = animatedColor(
-            red: 0.46, green: 0.95, blue: 0.74,
-            amplitude: (0.09, 0.03, 0.09),
-            angle: colorAngle,
-            offset: 1.1
-        )
-        let blueGlow = animatedColor(
-            red: 0.46, green: 0.75, blue: 1.00,
-            amplitude: (0.06, 0.08, 0.00),
-            angle: colorAngle,
-            offset: 4.0
-        )
-
-        return LinearGradient(
+    private var activeGradient: some View {
+        LinearGradient(
             colors: [
-                topColor.opacity(theme.isDark ? 0.22 : 0.76),
-                midColor.opacity(theme.isDark ? 0.20 : 0.70),
-                glowColor.opacity(theme.isDark ? 0.12 : 0.50),
+                Color(red: 0.38, green: 0.88, blue: 0.76).opacity(theme.isDark ? 0.22 : 0.76),
+                Color(red: 0.58, green: 0.83, blue: 1.00).opacity(theme.isDark ? 0.20 : 0.70),
+                Color(red: 0.88, green: 1.00, blue: 0.82).opacity(theme.isDark ? 0.12 : 0.50),
                 Color.white.opacity(theme.isDark ? 0.00 : 0.72)
             ],
-            startPoint: UnitPoint(
-                x: CGFloat(0.12 + 0.08 * cos(angle)),
-                y: CGFloat(0.02 + 0.06 * sin(angle * 0.75))
-            ),
-            endPoint: UnitPoint(
-                x: CGFloat(0.82 + 0.07 * sin(angle * 0.68)),
-                y: CGFloat(0.92 - 0.05 * cos(angle))
-            )
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
         )
         .overlay {
             RadialGradient(
                 colors: [
-                    mintGlow.opacity(theme.isDark ? 0.18 : 0.35),
+                    Color(red: 0.46, green: 0.95, blue: 0.74).opacity(theme.isDark ? 0.18 : 0.35),
                     Color.clear
                 ],
-                center: UnitPoint(
-                    x: CGFloat(0.12 + 0.07 * sin(angle * 0.7)),
-                    y: CGFloat(0.05 + 0.05 * cos(angle * 0.9))
-                ),
+                center: .topLeading,
                 startRadius: 8,
                 endRadius: 360
             )
@@ -3958,41 +3909,14 @@ private struct ChatAmbientBackgroundView: View {
         .overlay {
             RadialGradient(
                 colors: [
-                    blueGlow.opacity(theme.isDark ? 0.14 : 0.30),
+                    Color(red: 0.46, green: 0.75, blue: 1.00).opacity(theme.isDark ? 0.14 : 0.30),
                     Color.clear
                 ],
-                center: UnitPoint(
-                    x: CGFloat(0.82 + 0.05 * cos(angle * 0.8)),
-                    y: CGFloat(0.10 + 0.05 * sin(angle))
-                ),
+                center: .topTrailing,
                 startRadius: 10,
                 endRadius: 420
             )
         }
-    }
-
-    private func animatedColor(
-        red: Double,
-        green: Double,
-        blue: Double,
-        amplitude: (Double, Double, Double),
-        angle: Double,
-        offset: Double
-    ) -> Color {
-        Color(
-            red: clampColor(red + amplitude.0 * sin(angle + offset)),
-            green: clampColor(green + amplitude.1 * sin(angle + offset + 1.7)),
-            blue: clampColor(blue + amplitude.2 * sin(angle + offset + 3.1))
-        )
-    }
-
-    private func clampColor(_ value: Double) -> Double {
-        min(1, max(0, value))
-    }
-
-    private func phase(for date: Date) -> CGFloat {
-        let progress = date.timeIntervalSinceReferenceDate / 15
-        return CGFloat(progress - floor(progress))
     }
 }
 
@@ -4001,37 +3925,27 @@ private struct ChatAmbientBackgroundView: View {
 private struct ImageGenerationPlaceholderView: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private let animationPeriod: TimeInterval = 10.5
-    private let fogPatches = ImageGenerationFogPatch.defaultPatches
 
     var body: some View {
-        if reduceMotion {
-            placeholder(phase: 0.18)
-        } else {
-            TimelineView(.animation) { timeline in
-                placeholder(phase: phase(for: timeline.date))
-            }
-        }
-    }
-
-    private func placeholder(phase: CGFloat) -> some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
         return ZStack {
             shape.fill(baseFill)
-            colorOverlay(phase: phase)
-                .blendMode(theme.isDark ? .screen : .normal)
-                .opacity(theme.isDark ? 0.86 : 0.94)
-        }
-            .clipShape(shape)
-            .overlay {
-                shape
-                    .strokeBorder(Color.white.opacity(theme.isDark ? 0.08 : 0.16), lineWidth: 0.75)
+            if reduceMotion {
+                staticColorOverlay
+            } else {
+                DynamicImageGenerationGradient(isDark: theme.isDark)
             }
-            .aspectRatio(1, contentMode: .fit)
-            .frame(maxWidth: 340)
-            .shadow(color: Color.black.opacity(theme.isDark ? 0.18 : 0.06), radius: 16, y: 8)
-            .padding(.top, 2)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .clipShape(shape)
+        .overlay {
+            shape
+                .strokeBorder(Color.white.opacity(theme.isDark ? 0.08 : 0.16), lineWidth: 0.75)
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .frame(maxWidth: 340)
+        .shadow(color: Color.black.opacity(theme.isDark ? 0.18 : 0.06), radius: 16, y: 8)
+        .padding(.top, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var baseFill: LinearGradient {
@@ -4054,110 +3968,145 @@ private struct ImageGenerationPlaceholderView: View {
         )
     }
 
-    private func colorOverlay(phase: CGFloat) -> some View {
-        GeometryReader { geometry in
-            let width = geometry.size.width
-            let height = geometry.size.height
-            let shortEdge = min(width, height)
-
-            ZStack {
-                ForEach(fogPatches) { patch in
-                    fogPatch(patch, phase: phase, shortEdge: shortEdge, in: geometry.size)
-                }
-            }
-            .blur(radius: shortEdge * 0.105)
-            .saturation(theme.isDark ? 1.12 : 1.06)
-            .contrast(theme.isDark ? 1.04 : 1.01)
+    private var staticColorOverlay: some View {
+        ZStack {
+            Circle()
+                .fill(Color(red: 1.00, green: 0.72, blue: 0.28).opacity(theme.isDark ? 0.42 : 0.36))
+                .frame(width: 230, height: 230)
+                .offset(x: -86, y: -88)
+                .blur(radius: 38)
+            Circle()
+                .fill(Color(red: 0.24, green: 0.78, blue: 1.00).opacity(theme.isDark ? 0.45 : 0.38))
+                .frame(width: 260, height: 260)
+                .offset(x: 96, y: -74)
+                .blur(radius: 42)
+            Circle()
+                .fill(Color(red: 0.78, green: 0.44, blue: 1.00).opacity(theme.isDark ? 0.44 : 0.40))
+                .frame(width: 270, height: 270)
+                .offset(x: -62, y: 86)
+                .blur(radius: 44)
+            Circle()
+                .fill(Color(red: 0.20, green: 1.00, blue: 0.62).opacity(theme.isDark ? 0.36 : 0.34))
+                .frame(width: 220, height: 220)
+                .offset(x: 110, y: 102)
+                .blur(radius: 38)
         }
-    }
-
-    private func phase(for date: Date) -> CGFloat {
-        let progress = date.timeIntervalSinceReferenceDate / animationPeriod
-        return CGFloat(progress - floor(progress))
-    }
-
-    private func fogPatch(
-        _ patch: ImageGenerationFogPatch,
-        phase: CGFloat,
-        shortEdge: CGFloat,
-        in containerSize: CGSize
-    ) -> some View {
-        let center = fogCenter(for: patch, phase: phase)
-        let wobble = fogWobble(for: patch, phase: phase)
-        let hueShift = patch.hueAmplitude * sin((Double(phase) * patch.speed + patch.secondaryOffset) * .pi * 2)
-
-        return Ellipse()
-            .fill(
-                RadialGradient(
-                    colors: [
-                        patch.color.opacity((theme.isDark ? 0.72 : 0.62) * patch.opacity),
-                        patch.secondaryColor.opacity((theme.isDark ? 0.50 : 0.42) * patch.opacity),
-                        patch.color.opacity(0.0)
-                    ],
-                    center: .center,
-                    startRadius: 0,
-                    endRadius: shortEdge * max(patch.widthRatio, patch.heightRatio) * 0.55
-                )
-            )
-            .frame(width: shortEdge * patch.widthRatio, height: shortEdge * patch.heightRatio)
-            .scaleEffect(x: 1 + wobble.x, y: 1 + wobble.y, anchor: .center)
-            .hueRotation(.degrees(hueShift))
-            .position(x: containerSize.width * center.x, y: containerSize.height * center.y)
-    }
-
-    private func fogCenter(
-        for patch: ImageGenerationFogPatch,
-        phase: CGFloat
-    ) -> CGPoint {
-        let angle = (Double(phase) * patch.speed + patch.offset) * .pi * 2
-        let secondary = angle * patch.secondarySpeed + patch.secondaryOffset
-        let x = patch.baseX
-            + patch.xAmplitude * CGFloat(sin(angle))
-            + patch.drift * CGFloat(cos(secondary))
-        let y = patch.baseY
-            + patch.yAmplitude * CGFloat(cos(angle * 0.82 + 0.35))
-            + patch.drift * CGFloat(sin(secondary * 1.17))
-        return CGPoint(
-            x: min(1.12, max(-0.12, x)),
-            y: min(1.12, max(-0.12, y))
-        )
-    }
-
-    private func fogWobble(for patch: ImageGenerationFogPatch, phase: CGFloat) -> CGPoint {
-        let angle = (Double(phase) * patch.speed + patch.offset) * .pi * 2
-        return CGPoint(
-            x: CGFloat(0.10 * sin(angle * 1.31 + patch.secondaryOffset)),
-            y: CGFloat(0.08 * cos(angle * 1.09 - patch.secondaryOffset))
-        )
     }
 }
 
-private struct ImageGenerationFogPatch: Identifiable {
-    let id: Int
-    let color: Color
-    let secondaryColor: Color
-    let widthRatio: CGFloat
-    let heightRatio: CGFloat
-    let cornerRatio: CGFloat
-    let baseX: CGFloat
-    let baseY: CGFloat
-    let xAmplitude: CGFloat
-    let yAmplitude: CGFloat
-    let drift: CGFloat
-    let speed: Double
-    let secondarySpeed: Double
-    let offset: Double
-    let secondaryOffset: Double
-    let hueAmplitude: Double
-    let opacity: Double
+private struct DynamicImageGenerationGradient: View {
+    let isDark: Bool
 
-    static let defaultPatches: [ImageGenerationFogPatch] = [
-        ImageGenerationFogPatch(id: 0, color: Color(red: 1.00, green: 0.72, blue: 0.28), secondaryColor: Color(red: 0.94, green: 1.00, blue: 0.42), widthRatio: 1.06, heightRatio: 0.76, cornerRatio: 0.34, baseX: 0.18, baseY: 0.18, xAmplitude: 0.18, yAmplitude: 0.14, drift: 0.06, speed: 0.62, secondarySpeed: 0.48, offset: 0.03, secondaryOffset: 1.40, hueAmplitude: 16, opacity: 0.90),
-        ImageGenerationFogPatch(id: 1, color: Color(red: 0.24, green: 0.78, blue: 1.00), secondaryColor: Color(red: 0.34, green: 1.00, blue: 0.90), widthRatio: 1.12, heightRatio: 0.84, cornerRatio: 0.38, baseX: 0.78, baseY: 0.20, xAmplitude: 0.17, yAmplitude: 0.16, drift: 0.05, speed: 0.78, secondarySpeed: 0.55, offset: 0.24, secondaryOffset: 2.60, hueAmplitude: 18, opacity: 0.88),
-        ImageGenerationFogPatch(id: 2, color: Color(red: 0.78, green: 0.44, blue: 1.00), secondaryColor: Color(red: 0.40, green: 0.56, blue: 1.00), widthRatio: 1.18, heightRatio: 0.86, cornerRatio: 0.36, baseX: 0.28, baseY: 0.72, xAmplitude: 0.20, yAmplitude: 0.15, drift: 0.06, speed: 0.58, secondarySpeed: 0.64, offset: 0.53, secondaryOffset: 0.50, hueAmplitude: 14, opacity: 0.90),
-        ImageGenerationFogPatch(id: 3, color: Color(red: 0.20, green: 1.00, blue: 0.62), secondaryColor: Color(red: 0.82, green: 1.00, blue: 0.20), widthRatio: 0.98, heightRatio: 0.74, cornerRatio: 0.32, baseX: 0.84, baseY: 0.78, xAmplitude: 0.16, yAmplitude: 0.17, drift: 0.07, speed: 0.52, secondarySpeed: 0.58, offset: 0.79, secondaryOffset: 3.10, hueAmplitude: 16, opacity: 0.78),
-        ImageGenerationFogPatch(id: 4, color: Color(red: 1.00, green: 0.42, blue: 0.68), secondaryColor: Color(red: 1.00, green: 0.60, blue: 0.88), widthRatio: 0.88, heightRatio: 0.66, cornerRatio: 0.30, baseX: 0.54, baseY: 0.46, xAmplitude: 0.15, yAmplitude: 0.13, drift: 0.05, speed: 0.94, secondarySpeed: 0.50, offset: 0.41, secondaryOffset: 4.20, hueAmplitude: 12, opacity: 0.76)
-    ]
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+            Canvas(rendersAsynchronously: true) { context, size in
+                let phase = Self.phase(for: timeline.date)
+                let shortEdge = min(size.width, size.height)
+                drawPatch(
+                    in: &context,
+                    size: size,
+                    base: CGPoint(x: 0.20, y: 0.20),
+                    radius: shortEdge * 0.64,
+                    color: Color(red: 1.00, green: 0.72, blue: 0.28),
+                    phase: phase,
+                    speed: 0.52,
+                    offset: 0.03,
+                    opacity: isDark ? 0.44 : 0.38
+                )
+                drawPatch(
+                    in: &context,
+                    size: size,
+                    base: CGPoint(x: 0.76, y: 0.22),
+                    radius: shortEdge * 0.72,
+                    color: Color(red: 0.24, green: 0.78, blue: 1.00),
+                    phase: phase,
+                    speed: 0.64,
+                    offset: 0.24,
+                    opacity: isDark ? 0.48 : 0.40
+                )
+                drawPatch(
+                    in: &context,
+                    size: size,
+                    base: CGPoint(x: 0.30, y: 0.74),
+                    radius: shortEdge * 0.76,
+                    color: Color(red: 0.78, green: 0.44, blue: 1.00),
+                    phase: phase,
+                    speed: 0.48,
+                    offset: 0.53,
+                    opacity: isDark ? 0.48 : 0.42
+                )
+                drawPatch(
+                    in: &context,
+                    size: size,
+                    base: CGPoint(x: 0.84, y: 0.78),
+                    radius: shortEdge * 0.62,
+                    color: Color(red: 0.20, green: 1.00, blue: 0.62),
+                    phase: phase,
+                    speed: 0.56,
+                    offset: 0.79,
+                    opacity: isDark ? 0.40 : 0.36
+                )
+                drawPatch(
+                    in: &context,
+                    size: size,
+                    base: CGPoint(x: 0.54, y: 0.48),
+                    radius: shortEdge * 0.58,
+                    color: Color(red: 1.00, green: 0.42, blue: 0.68),
+                    phase: phase,
+                    speed: 0.76,
+                    offset: 0.41,
+                    opacity: isDark ? 0.36 : 0.32
+                )
+            }
+            .saturation(isDark ? 1.12 : 1.06)
+            .contrast(isDark ? 1.04 : 1.01)
+            .opacity(isDark ? 0.92 : 0.96)
+        }
+    }
+
+    private static func phase(for date: Date) -> Double {
+        let progress = date.timeIntervalSinceReferenceDate / 10.5
+        return progress - floor(progress)
+    }
+
+    private func drawPatch(
+        in context: inout GraphicsContext,
+        size: CGSize,
+        base: CGPoint,
+        radius: CGFloat,
+        color: Color,
+        phase: Double,
+        speed: Double,
+        offset: Double,
+        opacity: Double
+    ) {
+        let angle = (phase * speed + offset) * .pi * 2
+        let driftX = 0.12 * sin(angle) + 0.04 * cos(angle * 0.73)
+        let driftY = 0.10 * cos(angle * 0.82 + 0.35) + 0.04 * sin(angle * 1.17)
+        let center = CGPoint(
+            x: size.width * min(1.12, max(-0.12, base.x + CGFloat(driftX))),
+            y: size.height * min(1.12, max(-0.12, base.y + CGFloat(driftY)))
+        )
+        let rect = CGRect(
+            x: center.x - radius,
+            y: center.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        )
+        let path = Path(ellipseIn: rect)
+        let secondary = color.opacity(opacity * 0.62)
+        let resolved = GraphicsContext.Shading.radialGradient(
+            Gradient(colors: [
+                color.opacity(opacity),
+                secondary,
+                color.opacity(0.0)
+            ]),
+            center: center,
+            startRadius: 0,
+            endRadius: radius
+        )
+        context.fill(path, with: resolved)
+    }
 }
 
 private struct ImageGenerationTitleShimmer: View {

@@ -12776,7 +12776,6 @@ final class ChatViewModel {
         if let encoded = LocalAlpineToolCall.metadataString(for: calls) {
             metadata["iexa_local_alpine_tool_calls"] = encoded
         }
-        conversation?.messages[index].metadata = metadata
 
         let status = ChatStatusUpdate(
             action: "local_alpine_tool",
@@ -12784,10 +12783,14 @@ final class ChatViewModel {
             done: event.call.phase == .result,
             occurredAt: .now
         )
-        conversation?.messages[index].statusHistory.append(status)
+        var statusHistory = conversation?.messages[index].statusHistory ?? []
+        statusHistory.append(status)
+
+        conversation?.messages[index].metadata = metadata
+        conversation?.messages[index].statusHistory = statusHistory
         conversation?.history.updateNode(id: messageId) { node in
             node.metadata = metadata
-            node.statusHistory = conversation?.messages[index].statusHistory ?? node.statusHistory
+            node.statusHistory = statusHistory
         }
     }
 
