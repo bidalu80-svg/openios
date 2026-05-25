@@ -469,8 +469,13 @@ actor LocalAlpineAgentService {
             return LocalAlpineAgentResult(didExecute: false, summary: lines.joined(separator: "\n"), interactiveRequest: nil)
         }
 
-        let uniqueCommands = Self.deduplicatedCommands(commands, defaultCWD: defaultCWD)
-        let duplicateCount = max(0, commands.count - uniqueCommands.count)
+        let (preparedCommands, skippedUnsafeShellWriteCount) = Self.commandsBySkippingSupersededUnsafeShellWrites(commands)
+        guard !preparedCommands.isEmpty else {
+            return LocalAlpineAgentResult(didExecute: false, summary: lines.joined(separator: "\n"), interactiveRequest: nil)
+        }
+
+        let uniqueCommands = Self.deduplicatedCommands(preparedCommands, defaultCWD: defaultCWD)
+        let duplicateCount = max(0, preparedCommands.count - uniqueCommands.count)
         let trimmedCommands = Array(uniqueCommands.prefix(maxCommandsPerResponse))
         let skippedCount = max(0, uniqueCommands.count - trimmedCommands.count)
         let toolRunId = UUID().uuidString
@@ -740,6 +745,9 @@ actor LocalAlpineAgentService {
         if skippedCount > 0 {
             lines.append("- 已跳过 \(skippedCount) 条多余命令，避免一次执行过多。")
         }
+        if skippedUnsafeShellWriteCount > 0 {
+            lines.append("- 已跳过 \(skippedUnsafeShellWriteCount) 条被结构化写入覆盖的 shell 文本写代码命令，避免 heredoc/重定向破坏源码缩进。")
+        }
         if duplicateCount > 0 {
             lines.append("- 已跳过 \(duplicateCount) 条重复命令，避免同一批工具调用重复执行。")
         }
@@ -763,6 +771,32 @@ actor LocalAlpineAgentService {
             let command = result.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return command != "write_files"
         }.count
+    }
+
+    private nonisolated static func commandsBySkippingSupersededUnsafeShellWrites(
+        _ commands: [LocalAlpineAgentCommand]
+    ) -> ([LocalAlpineAgentCommand], Int) {
+        let hasStructuredWrite = commands.contains {
+            !$0.writeFiles.isEmpty || !$0.editFiles.isEmpty || !$0.patchFiles.isEmpty
+        }
+        guard hasStructuredWrite else { return (commands, 0) }
+
+        var skippedCount = 0
+        let filtered = commands.filter { command in
+            let hasStructuredOperation = !command.writeFiles.isEmpty
+                || !command.readFiles.isEmpty
+                || !command.editFiles.isEmpty
+                || !command.patchFiles.isEmpty
+            guard !hasStructuredOperation,
+                  let shell = command.command?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !shell.isEmpty,
+                  commandWritesCodeThroughShellText(shell) else {
+                return true
+            }
+            skippedCount += 1
+            return false
+        }
+        return (filtered, skippedCount)
     }
 
     private nonisolated static func deduplicatedCommands(
@@ -951,21 +985,47 @@ actor LocalAlpineAgentService {
             return parseCommands(from: nested)
         }
 
+        var files = parseWriteFilesForCommand(from: dict)
+        var readFiles = parseReadFilesForCommand(from: dict)
+        var editFiles = parseEditFilesForCommand(from: dict)
+        var patchFiles = parsePatchFilesForCommand(from: dict)
+
         if let command = Self.shellCommandString(from: dict) {
+            if let selector = Self.structuredToolSelector(command) {
+                switch selector {
+                case "read":
+                    if readFiles.isEmpty { readFiles = parseReadFiles(from: dict) }
+                case "edit":
+                    if editFiles.isEmpty { editFiles = parseEditFiles(from: dict) }
+                case "patch":
+                    if patchFiles.isEmpty { patchFiles = parsePatchFiles(from: dict) }
+                case "write":
+                    if files.isEmpty { files = parseWriteFiles(from: dict) }
+                default:
+                    break
+                }
+                guard !files.isEmpty || !readFiles.isEmpty || !editFiles.isEmpty || !patchFiles.isEmpty else {
+                    return []
+                }
+                return [LocalAlpineAgentCommand(
+                    command: nil,
+                    cwd: Self.cwdString(from: dict),
+                    writeFiles: files,
+                    readFiles: readFiles,
+                    editFiles: editFiles,
+                    patchFiles: patchFiles
+                )]
+            }
             return [LocalAlpineAgentCommand(
                 command: command,
                 cwd: Self.cwdString(from: dict),
-                writeFiles: parseWriteFilesForCommand(from: dict),
-                readFiles: parseReadFilesForCommand(from: dict),
-                editFiles: parseEditFilesForCommand(from: dict),
-                patchFiles: parsePatchFilesForCommand(from: dict)
+                writeFiles: files,
+                readFiles: readFiles,
+                editFiles: editFiles,
+                patchFiles: patchFiles
             )]
         }
 
-        let files = parseWriteFilesForCommand(from: dict)
-        let readFiles = parseReadFilesForCommand(from: dict)
-        let editFiles = parseEditFilesForCommand(from: dict)
-        let patchFiles = parsePatchFilesForCommand(from: dict)
         if !files.isEmpty || !readFiles.isEmpty || !editFiles.isEmpty || !patchFiles.isEmpty {
             return [LocalAlpineAgentCommand(
                 command: nil,
@@ -988,6 +1048,22 @@ actor LocalAlpineAgentService {
             }
         }
         return nil
+    }
+
+    private nonisolated static func structuredToolSelector(_ command: String) -> String? {
+        let normalized = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "read_file", "read_files", "read":
+            return "read"
+        case "edit_file", "edit_files", "replace_file", "edit":
+            return "edit"
+        case "patch_file", "patch_files", "apply_patch", "patch":
+            return "patch"
+        case "write_files", "write_file", "write":
+            return "write"
+        default:
+            return nil
+        }
     }
 
     private nonisolated static func cwdString(from dict: [String: Any]) -> String? {

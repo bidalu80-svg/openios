@@ -775,9 +775,39 @@ struct StreamingMarkdownView: View {
                suffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return fence
             }
+            if prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               isLikelyDirtyClosingFenceSuffix(suffix) {
+                return fence
+            }
             cursor = fence.upperBound
         }
         return nil
+    }
+
+    private static func isLikelyDirtyClosingFenceSuffix(_ suffix: Substring) -> Bool {
+        let trimmed = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let markdownBlockStarters = [
+            #"^#{1,6}(?:\s|$)"#,
+            #"^(?:[-*+])\s+"#,
+            #"^\d+[.)]\s+"#,
+            #"^>\s+"#,
+            #"^(?:---|\*\*\*|___)\s*$"#,
+            #"^</?(?:details|summary|table|ul|ol|li|p|div|section)\b"#
+        ]
+        if markdownBlockStarters.contains(where: {
+            trimmed.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil
+        }) {
+            return true
+        }
+
+        let proseLeadWords = [
+            "关键", "说明", "建议", "注意", "总结", "备注", "解析", "修复", "执行", "结果", "下一步",
+            "key", "notes", "note", "summary", "explanation", "recommendation", "next"
+        ]
+        let lowered = trimmed.lowercased()
+        return proseLeadWords.contains { lowered.hasPrefix($0) }
     }
 
     private static func startOfLine(in text: String, before index: String.Index) -> String.Index {
@@ -1009,6 +1039,9 @@ struct StreamingMarkdownView: View {
             let suffixBeforeNewline = afterFence.prefix { $0 != "\n" && $0 != "\r" }
             let isFenceOnlyLine = suffixBeforeNewline.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if isAtFenceLineStart && isFenceOnlyLine {
+                return lineStart..<fence.upperBound
+            }
+            if isAtFenceLineStart && Self.isLikelyDirtyClosingFenceSuffix(suffixBeforeNewline) {
                 return lineStart..<fence.upperBound
             }
             cursor = fence.upperBound

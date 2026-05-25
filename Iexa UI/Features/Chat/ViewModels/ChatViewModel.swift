@@ -1364,9 +1364,15 @@ final class ChatViewModel {
         - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
         - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, or `run`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`.
+        - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
+        - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, or macOS-only utilities.
+        - Service/process commands: prefer foreground commands and bounded verification. Do not assume OpenRC/system services are available unless a prior command proves it.
+        - `command` is shell text only. For structured tools, use top-level keys such as `read_file`, `write_files`, `edit_file`, or `patch_file`; do not put the tool name itself in `command` unless it is an actual shell executable.
         - JSON tool capabilities:
         \(capabilities)
+        - Source file writes: never write code through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files.code_lines`, `content_lines`, `content_base64`, same-path `edit_file`, or `patch_file`.
         - Python writes: `.py`/`.pyw` must use `write_files.code_lines` or `content_base64`; localized Python repairs should prefer `read_file` then same-path `edit_file`/`patch_file`.
+        - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
         - Tool loop: one assistant turn emits at most one `iexa_alpine` block; the next turn must read the returned stdout/stderr/exit code before deciding whether to continue.
         - Visible preface: prefer no prose before the block. If needed, write one short progress sentence only. Never ask the user to send back local execution results; the host app returns results automatically.
         """
@@ -9769,8 +9775,9 @@ final class ChatViewModel {
 
         Environment:
         - Workspace: `/mnt/iexa`. Relative paths resolve there.
-        - Shell: Alpine Linux ash/busybox style shell. Prefer POSIX sh.
-        - Package manager: `apk`. Check first; install only packages proven missing.
+        - Shell: Alpine Linux BusyBox/ash. Prefer portable POSIX `sh` syntax; avoid Bash-only arrays, process substitution, and Debian/macOS assumptions unless the needed tool is first proven installed.
+        - Package manager: `apk`. Check first with `apk info -e <pkg>` or `command -v <tool>`; install only packages proven missing with `apk add --no-cache <pkg>`.
+        - Unsupported command families here: `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, and macOS-only utilities. Translate those intentions to Alpine/BusyBox equivalents.
         - Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, and `/var` are system paths. Inspect them when useful; do not edit them except through package-manager operations or explicit user requests.
 
         Tool-selection policy:

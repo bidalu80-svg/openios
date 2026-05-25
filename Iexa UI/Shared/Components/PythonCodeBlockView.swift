@@ -525,7 +525,21 @@ struct PythonCodeBlockView: View {
     }
 
     private static func displayablePythonCode(_ code: String) -> String {
-        code
+        codeByDroppingTrailingMarkdownAfterDirtyFence(code)
+    }
+
+    private static func codeByDroppingTrailingMarkdownAfterDirtyFence(_ code: String) -> String {
+        let lines = code.components(separatedBy: .newlines)
+        guard let dirtyFenceIndex = lines.firstIndex(where: { line in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.hasPrefix("```")
+                || trimmed.hasPrefix("~~~")
+        }) else {
+            return code
+        }
+
+        let kept = lines[..<dirtyFenceIndex].joined(separator: "\n")
+        return code.hasSuffix("\n") && !kept.hasSuffix("\n") ? kept + "\n" : kept
     }
 
 }
