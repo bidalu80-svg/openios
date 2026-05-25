@@ -939,7 +939,7 @@ struct StreamingMarkdownView: View {
         var units: [EitherContent] = []
         var remaining = text[text.startIndex...]
 
-        while let openRange = findOpeningFence(in: remaining) {
+        while let openRange = remaining.range(of: "```") {
             let afterOpen = remaining[openRange.upperBound...]
             guard let newlineIdx = afterOpen.firstIndex(of: "\n") else {
                 let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
