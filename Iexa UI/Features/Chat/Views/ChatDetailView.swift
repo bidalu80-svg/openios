@@ -1627,7 +1627,8 @@ struct ChatDetailView: View {
                 content: message.content,
                 metadata: message.metadata,
                 isStreaming: message.isStreaming,
-                statusHistory: message.statusHistory
+                statusHistory: message.statusHistory,
+                liveToolCalls: viewModel.localAlpineLiveToolCalls(for: message.id)
             )
             .padding(.horizontal, Spacing.screenPadding)
             .padding(.vertical, Spacing.xs)
@@ -4617,6 +4618,7 @@ private struct LocalAlpineResultCard: View {
     let metadata: [String: String]?
     let isStreaming: Bool
     let statusHistory: [ChatStatusUpdate]
+    let liveToolCalls: [LocalAlpineToolCall]
 
     @Environment(\.theme) private var theme
     @State private var isExpanded = false
@@ -4628,15 +4630,18 @@ private struct LocalAlpineResultCard: View {
         content: String,
         metadata: [String: String]?,
         isStreaming: Bool,
-        statusHistory: [ChatStatusUpdate]
+        statusHistory: [ChatStatusUpdate],
+        liveToolCalls: [LocalAlpineToolCall] = []
     ) {
         self.content = content
         self.metadata = metadata
         self.isStreaming = isStreaming
         self.statusHistory = statusHistory
+        self.liveToolCalls = liveToolCalls
         self.writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata?["iexa_local_alpine_written_files"])
         self.commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata?["iexa_local_alpine_command_results"])
-        self.toolCalls = LocalAlpineToolCall.decodeMetadata(metadata?["iexa_local_alpine_tool_calls"])
+        let persistedToolCalls = LocalAlpineToolCall.decodeMetadata(metadata?["iexa_local_alpine_tool_calls"])
+        self.toolCalls = liveToolCalls.isEmpty ? persistedToolCalls : liveToolCalls
     }
 
     private var parsed: ParsedLocalAlpineResult {
@@ -4644,7 +4649,29 @@ private struct LocalAlpineResultCard: View {
     }
 
     private var statusText: String {
-        if isStreaming { return parsed.streamingSummary(statusDetail: statusDetail) }
+        if isStreaming {
+            if let running = toolCalls.last(where: { $0.isRunning }) {
+                return running.statusDescription
+            }
+            return parsed.streamingSummary(statusDetail: statusDetail)
+        }
+        if !toolCalls.isEmpty {
+            var parts: [String] = []
+            let completedToolCount = toolCalls.filter { !$0.isRunning }.count
+            if completedToolCount > 0 {
+                parts.append("已执行 \(completedToolCount) 个工具步骤")
+            }
+            if effectiveCommandCount > 0 {
+                parts.append("已运行 \(effectiveCommandCount) 条命令")
+            }
+            if parts.isEmpty {
+                parts.append("本地 Alpine 已完成")
+            }
+            if parsed.hasNonZeroExit || commandResults.contains(where: { $0.failed }) || toolCalls.contains(where: { $0.failed }) {
+                parts.append("有错误")
+            }
+            return parts.joined(separator: "  ")
+        }
         return parsed.activitySummary(
             editedFileCount: writtenFiles.isEmpty ? nil : writtenFiles.count,
             commandCount: effectiveCommandCount == 0 ? nil : effectiveCommandCount,

@@ -222,11 +222,18 @@ actor LocalAlpineTerminalService {
         try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
     }
 
-    func deleteItem(path: String) async throws {
+    @discardableResult
+    func deleteItem(path: String, recursive: Bool = true) async throws -> Bool {
         let root = try ensureSharedWorkspaceDirectory()
         let url = try resolve(path: path, root: root, allowRoot: false)
-        guard fileManager.fileExists(atPath: url.path) else { return }
+        guard fileManager.fileExists(atPath: url.path) else { return false }
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        let isDirectory = values?.isDirectory == true && values?.isSymbolicLink != true
+        if isDirectory && !recursive {
+            throw LocalAlpineError.commandFailed("`\(path)` is a directory. Set recursive:true to delete directories.")
+        }
         try fileManager.removeItem(at: url)
+        return true
     }
 
     func readFile(path: String) async throws -> Data {

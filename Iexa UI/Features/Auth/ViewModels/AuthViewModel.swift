@@ -937,7 +937,7 @@ final class AuthViewModel {
                 let apiError = APIError.from(error)
 
                 // If the token is genuinely invalid (401/403), don't retry
-                if apiError.requiresReauth {
+                if apiError.isHTTPAuthFailure {
                     logger.warning("Session restore: token invalid (401), clearing credentials")
                     client.updateAuthToken(nil)
                     currentUser = nil
@@ -1086,7 +1086,7 @@ final class AuthViewModel {
             logger.debug("Token refresh: session still valid")
         } catch {
             let apiError = APIError.from(error)
-            if apiError.requiresReauth {
+            if apiError.isHTTPAuthFailure {
                 logger.warning("Token expired during refresh; user must re-authenticate")
                 await MainActor.run {
                     self.currentUser = nil
@@ -2027,7 +2027,7 @@ final class AuthViewModel {
         } catch {
             let apiError = APIError.from(error)
 
-            if apiError.requiresReauth {
+            if apiError.isHTTPAuthFailure {
                 // Token is truly dead — kick to login
                 logger.warning("⚠️ Background validation: token invalid, signing out")
                 client.updateAuthToken(nil)

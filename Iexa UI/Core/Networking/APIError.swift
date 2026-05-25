@@ -115,9 +115,9 @@ enum APIError: LocalizedError, Sendable {
             // Server 400 "detail" messages are typically user-facing (e.g. "Email already registered")
             return serverMessage ?? "请求无效，请检查输入后重试。"
         case 401:
-            return "登录已过期，请重新登录。"
+            return serverMessage ?? "上游鉴权失败（401）。请检查当前站点的 API Key、模型权限或令牌是否有效。"
         case 403:
-            return serverMessage ?? "你没有权限执行此操作。"
+            return serverMessage ?? "上游拒绝访问（403）。请检查当前站点的 API Key、模型权限、额度或访问策略。"
         case 404:
             return "找不到请求的内容。"
         case 405:
@@ -179,8 +179,17 @@ enum APIError: LocalizedError, Sendable {
         switch self {
         case .unauthorized, .tokenExpired:
             return true
+        default:
+            return false
+        }
+    }
+
+    var isHTTPAuthFailure: Bool {
+        switch self {
+        case .unauthorized, .tokenExpired:
+            return true
         case .httpError(let statusCode, _, _):
-            return statusCode == 401
+            return statusCode == 401 || statusCode == 403
         default:
             return false
         }

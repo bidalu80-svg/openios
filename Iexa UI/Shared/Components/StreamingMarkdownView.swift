@@ -220,7 +220,7 @@ struct StreamingMarkdownView: View {
     private func findUnclosedOpeningFence(in text: String) -> Range<String.Index>? {
         var cursor = text.startIndex
 
-        while let openRange = text.range(of: "```", range: cursor..<text.endIndex) {
+        while let openRange = findOpeningFence(in: text[cursor..<text.endIndex]) {
             let afterOpen = text[openRange.upperBound...]
             guard let newlineIdx = afterOpen.firstIndex(of: "\n") else {
                 return openRange
@@ -939,7 +939,7 @@ struct StreamingMarkdownView: View {
         var units: [EitherContent] = []
         var remaining = text[text.startIndex...]
 
-        while let openRange = remaining.range(of: "```") {
+        while let openRange = findOpeningFence(in: remaining) {
             let afterOpen = remaining[openRange.upperBound...]
             guard let newlineIdx = afterOpen.firstIndex(of: "\n") else {
                 let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
@@ -1024,6 +1024,19 @@ struct StreamingMarkdownView: View {
         }
 
         return collapseParsedUnits(units, fallback: text)
+    }
+
+    private func findOpeningFence(in text: Substring) -> Range<String.Index>? {
+        var cursor = text.startIndex
+        while let candidate = text.range(of: "```", range: cursor..<text.endIndex) {
+            let lineStart = startOfFenceLine(in: text, before: candidate.lowerBound, fallback: text.startIndex)
+            let prefix = text[lineStart..<candidate.lowerBound]
+            if prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return candidate
+            }
+            cursor = candidate.upperBound
+        }
+        return nil
     }
 
     private func findClosingFence(

@@ -201,7 +201,7 @@ final class NetworkManager: NSObject, Sendable {
         )
 
         let (data, response) = try await performRequest(urlRequest)
-        try validateHTTPResponse(response, data: data)
+        try validateHTTPResponse(response, data: data, path: path, authenticated: authenticated)
 
         do {
             let decoder = JSONDecoder()
@@ -233,7 +233,7 @@ final class NetworkManager: NSObject, Sendable {
         )
 
         let (data, response) = try await performRequest(urlRequest)
-        try validateHTTPResponse(response, data: data)
+        try validateHTTPResponse(response, data: data, path: path, authenticated: authenticated)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.responseDecoding(
                 underlying: NSError(
@@ -270,7 +270,7 @@ final class NetworkManager: NSObject, Sendable {
         )
 
         let (data, response) = try await performRequest(urlRequest)
-        try validateHTTPResponse(response, data: data)
+        try validateHTTPResponse(response, data: data, path: path, authenticated: authenticated)
     }
 
     func requestVoidJSON(
@@ -296,7 +296,7 @@ final class NetworkManager: NSObject, Sendable {
         )
 
         let (data, response) = try await performRequest(urlRequest)
-        try validateHTTPResponse(response, data: data)
+        try validateHTTPResponse(response, data: data, path: path, authenticated: authenticated)
     }
 
     func requestJSON(
@@ -324,7 +324,7 @@ final class NetworkManager: NSObject, Sendable {
         )
 
         let (data, response) = try await performRequest(urlRequest)
-        try validateHTTPResponse(response, data: data)
+        try validateHTTPResponse(response, data: data, path: path, authenticated: authenticated)
 
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw APIError.responseDecoding(
@@ -368,7 +368,7 @@ final class NetworkManager: NSObject, Sendable {
         )
 
         let (data, response) = try await performRequest(urlRequest)
-        try validateHTTPResponse(response, data: data)
+        try validateHTTPResponse(response, data: data, path: path, authenticated: authenticated)
 
         // Tolerate null / array / empty body — return empty dict rather than throwing.
         guard !data.isEmpty,
@@ -402,7 +402,7 @@ final class NetworkManager: NSObject, Sendable {
         )
 
         let (data, response) = try await performRequest(urlRequest)
-        try validateHTTPResponse(response, data: data)
+        try validateHTTPResponse(response, data: data, path: path, authenticated: authenticated)
 
         guard let arr = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             throw APIError.responseDecoding(
@@ -459,7 +459,12 @@ final class NetworkManager: NSObject, Sendable {
                         errorBody.append(byte)
                         if errorBody.count > 4096 { break }
                     }
-                    let apiError = parseHTTPError(statusCode: httpResponse.statusCode, data: errorBody)
+                    let apiError = parseHTTPError(
+                        statusCode: httpResponse.statusCode,
+                        data: errorBody,
+                        path: path,
+                        authenticated: authenticated
+                    )
                     lastError = apiError
                     guard apiError.isRetryable, attempt < maxRetries else {
                         throw apiError
@@ -607,7 +612,7 @@ final class NetworkManager: NSObject, Sendable {
         )
 
         let (data, response) = try await performRequest(urlRequest)
-        try validateHTTPResponse(response, data: data)
+        try validateHTTPResponse(response, data: data, path: path, authenticated: authenticated)
 
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw APIError.responseDecoding(
@@ -662,7 +667,12 @@ final class NetworkManager: NSObject, Sendable {
                     let delay = baseDelay * pow(2.0, Double(attempt))
                     logger.warning("Server error \(httpResponse.statusCode) on attempt \(attempt + 1)/\(maxRetries + 1), retrying in \(delay)s")
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                    lastError = parseHTTPError(statusCode: httpResponse.statusCode, data: data)
+                    lastError = parseHTTPError(
+                        statusCode: httpResponse.statusCode,
+                        data: data,
+                        path: request.url?.path,
+                        authenticated: request.value(forHTTPHeaderField: "Authorization") != nil
+                    )
                     continue
                 }
 
@@ -684,7 +694,12 @@ final class NetworkManager: NSObject, Sendable {
         throw lastError ?? APIError.unknown(underlying: nil)
     }
 
-    private func validateHTTPResponse(_ response: URLResponse, data: Data) throws {
+    private func validateHTTPResponse(
+        _ response: URLResponse,
+        data: Data,
+        path: String? = nil,
+        authenticated: Bool = true
+    ) throws {
         guard let httpResponse = response as? HTTPURLResponse else {
             return
         }
@@ -697,26 +712,68 @@ final class NetworkManager: NSObject, Sendable {
         }
 
         guard (200..<400).contains(statusCode) else {
-            throw parseHTTPError(statusCode: statusCode, data: data)
+            throw parseHTTPError(statusCode: statusCode, data: data, path: path, authenticated: authenticated)
         }
     }
 
-    private func parseHTTPError(statusCode: Int, data: Data) -> APIError {
-        if statusCode == 401 {
+    private func parseHTTPError(
+        statusCode: Int,
+        data: Data,
+        path: String? = nil,
+        authenticated: Bool = true
+    ) -> APIError {
+        if statusCode == 401,
+           authenticated,
+           serverConfig.providerType == .iexa {
             return .tokenExpired
         }
 
-        var message: String?
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            message = json["detail"] as? String
-                ?? json["error"] as? String
-                ?? json["message"] as? String
-        }
-        if message == nil {
-            message = String(data: data, encoding: .utf8)
-        }
+        let message = Self.providerErrorMessage(from: data)
 
         return .httpError(statusCode: statusCode, message: message, data: data)
+    }
+
+    private static func providerErrorMessage(from data: Data) -> String? {
+        if let json = try? JSONSerialization.jsonObject(with: data) {
+            return providerErrorMessage(from: json)
+        }
+        let text = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let text, !text.isEmpty else { return nil }
+        if text.count > 1_000 {
+            return String(text.prefix(1_000)) + "\n...（上游错误内容过长，已截断）"
+        }
+        return text
+    }
+
+    private static func providerErrorMessage(from value: Any) -> String? {
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let dict = value as? [String: Any] {
+            for key in ["message", "detail", "error_description", "error", "reason", "code"] {
+                if let value = dict[key],
+                   let message = providerErrorMessage(from: value) {
+                    return message
+                }
+            }
+            if let details = dict["details"] as? [Any] {
+                return details.compactMap { providerErrorMessage(from: $0) }.first
+            }
+            if let data = dict["data"] as? [String: Any],
+               let message = providerErrorMessage(from: data) {
+                return message
+            }
+            if let encoded = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]),
+               let text = String(data: encoded, encoding: .utf8) {
+                return text
+            }
+        }
+        if let array = value as? [Any] {
+            return array.compactMap { providerErrorMessage(from: $0) }.first
+        }
+        return nil
     }
 }
 

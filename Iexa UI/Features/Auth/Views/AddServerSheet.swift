@@ -38,7 +38,7 @@ struct AddServerSheet: View {
                         Image(systemName: "info.circle.fill")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.brandPrimary)
-                        Text("每个站点地址会保存一个会话。要在同一站点使用不同账号，请先切换过去并退出登录。")
+                        Text("可连接 Iexa 原生站点，也可直连兼容 API。直连 API 的 401/403 表示上游 API Key 或模型权限问题，不是本机登录过期。")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -61,7 +61,7 @@ struct AddServerSheet: View {
 
                         ModernTextField(
                             label: "站点 URL",
-                            placeholder: "https://your-server.com 或 https://api.example.com",
+                            placeholder: "原生站点 URL，或兼容 API Base URL",
                             text: $url,
                             keyboardType: .URL,
                             textContentType: .URL,
@@ -72,7 +72,7 @@ struct AddServerSheet: View {
                             VStack(spacing: Spacing.lg) {
                                 ModernTextField(
                                     label: "API Key（可选）",
-                                    placeholder: "Iexa 原生站点可选；直连 API 必填",
+                                    placeholder: "直连 API 必填；原生站点可选",
                                     text: $apiKey,
                                     isSecure: true
                                 )

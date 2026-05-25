@@ -239,6 +239,16 @@ enum LocalAlpineToolDisplayRegistry {
             return LocalAlpineToolDisplay(icon: "doc.on.doc", title: "应用补丁")
         case "write_files", "write_file", "write":
             return LocalAlpineToolDisplay(icon: "doc.badge.plus", title: "写入文件")
+        case "delete_file", "delete_files", "remove_file", "remove_files", "delete", "rm":
+            return LocalAlpineToolDisplay(icon: "trash", title: "删除文件")
+        case "list_dir", "list", "ls":
+            return LocalAlpineToolDisplay(icon: "folder", title: "列出目录")
+        case "glob", "find_files":
+            return LocalAlpineToolDisplay(icon: "doc.text.magnifyingglass", title: "匹配文件")
+        case "grep", "search_files":
+            return LocalAlpineToolDisplay(icon: "magnifyingglass", title: "搜索文本")
+        case "verify", "check":
+            return LocalAlpineToolDisplay(icon: "checkmark.seal", title: "验证")
         case "command", "shell", "bash", "exec":
             return LocalAlpineToolDisplay(icon: "terminal.fill", title: "运行命令")
         case "diagnostic":
@@ -618,6 +628,31 @@ actor LocalAlpineAgentService {
                 }
             }
 
+            if !command.deleteFiles.isEmpty {
+                let context = Self.toolCallContext(
+                    runId: toolRunId,
+                    name: "delete_files",
+                    detail: Self.toolDetail(forDeleteFiles: command.deleteFiles),
+                    cwd: effectiveCWD,
+                    filePaths: command.deleteFiles.map(\.path)
+                )
+                await emitTool(Self.toolCallStart(context))
+                let deleteResult = await deleteFiles(command.deleteFiles, cwd: effectiveCWD)
+                stepLines.append(deleteResult.summary)
+                commandResults.append(contentsOf: deleteResult.commandResults)
+                deleteResult.editedPaths.forEach { editedFilePaths.insert($0) }
+                await emitTool(Self.toolCallResult(
+                    context,
+                    exitCode: deleteResult.hadFailure ? 1 : 0,
+                    outputPreview: deleteResult.summary,
+                    failed: deleteResult.hadFailure
+                ))
+                if deleteResult.hadFailure {
+                    shouldRunShellCommand = false
+                    stopRemainingCommands = true
+                }
+            }
+
             if let shellCommand = command.command?.trimmingCharacters(in: .whitespacesAndNewlines),
                !shellCommand.isEmpty,
                shouldRunShellCommand {
@@ -649,11 +684,11 @@ actor LocalAlpineAgentService {
 
                 let context = Self.toolCallContext(
                     runId: toolRunId,
-                    name: "command",
-                    detail: Self.oneLine(commandToExecute),
+                    name: command.shellToolName ?? "command",
+                    detail: command.shellToolDetail ?? Self.oneLine(commandToExecute),
                     cwd: effectiveCWD,
                     command: commandToExecute,
-                    filePaths: []
+                    filePaths: command.shellToolFilePaths
                 )
                 await emitTool(Self.toolCallStart(context))
                 var result = await LocalAlpineTerminalService.shared.execute(
@@ -844,7 +879,18 @@ actor LocalAlpineAgentService {
         let patches = command.patchFiles
             .map { "\(($0.path ?? "").lowercased()):\($0.patch.hashValue)" }
             .joined(separator: "|")
-        return "\(cwd)\n\(shell)\n\(files)\n\(reads)\n\(edits)\n\(patches)"
+        let deletes = command.deleteFiles
+            .map { delete in
+                let path = delete.path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                return "\(path):\(delete.recursive):\(delete.missingOK)"
+            }
+            .joined(separator: "|")
+        let shellTool = [
+            command.shellToolName ?? "",
+            command.shellToolDetail ?? "",
+            command.shellToolFilePaths.joined(separator: "|")
+        ].joined(separator: ":")
+        return "\(cwd)\n\(shell)\n\(files)\n\(reads)\n\(edits)\n\(patches)\n\(deletes)\n\(shellTool)"
     }
 
     private nonisolated static func commandResult(
@@ -951,6 +997,10 @@ actor LocalAlpineAgentService {
         files.map(\.path).prefix(3).joined(separator: ", ")
     }
 
+    private nonisolated static func toolDetail(forDeleteFiles requests: [LocalAlpineDeleteFileRequest]) -> String {
+        requests.map(\.path).prefix(3).joined(separator: ", ")
+    }
+
     private func extractInstructionBlocks(from content: String) -> [String] {
         Self.instructionBlocks(from: content)
     }
@@ -965,6 +1015,10 @@ actor LocalAlpineAgentService {
 
         let shell = block.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !shell.isEmpty else { throw LocalAlpineAgentError.noCommands }
+        if let convertedCommands = Self.commandsByConvertingCatHeredocWrites(from: shell),
+           !convertedCommands.isEmpty {
+            return convertedCommands
+        }
         guard Self.looksLikeShellBlock(shell) else { throw LocalAlpineAgentError.noCommands }
         return [LocalAlpineAgentCommand(command: shell, cwd: nil)]
     }
@@ -989,8 +1043,25 @@ actor LocalAlpineAgentService {
         var readFiles = parseReadFilesForCommand(from: dict)
         var editFiles = parseEditFilesForCommand(from: dict)
         var patchFiles = parsePatchFilesForCommand(from: dict)
+        var deleteFiles = parseDeleteFilesForCommand(from: dict)
 
-        if let command = Self.shellCommandString(from: dict) {
+        let shellCommand = Self.shellCommandString(from: dict)
+        if let generatedToolCommand = Self.generatedShellCommand(from: dict, shellCommand: shellCommand) {
+            return [LocalAlpineAgentCommand(
+                command: generatedToolCommand.command,
+                cwd: generatedToolCommand.cwd ?? Self.cwdString(from: dict),
+                writeFiles: files,
+                readFiles: readFiles,
+                editFiles: editFiles,
+                patchFiles: patchFiles,
+                deleteFiles: deleteFiles,
+                shellToolName: generatedToolCommand.toolName,
+                shellToolDetail: generatedToolCommand.detail,
+                shellToolFilePaths: generatedToolCommand.filePaths
+            )]
+        }
+
+        if let command = shellCommand {
             if let selector = Self.structuredToolSelector(command) {
                 switch selector {
                 case "read":
@@ -1001,10 +1072,12 @@ actor LocalAlpineAgentService {
                     if patchFiles.isEmpty { patchFiles = parsePatchFiles(from: dict) }
                 case "write":
                     if files.isEmpty { files = parseWriteFiles(from: dict) }
+                case "delete":
+                    if deleteFiles.isEmpty { deleteFiles = parseDeleteFiles(from: dict) }
                 default:
                     break
                 }
-                guard !files.isEmpty || !readFiles.isEmpty || !editFiles.isEmpty || !patchFiles.isEmpty else {
+                guard !files.isEmpty || !readFiles.isEmpty || !editFiles.isEmpty || !patchFiles.isEmpty || !deleteFiles.isEmpty else {
                     return []
                 }
                 return [LocalAlpineAgentCommand(
@@ -1013,7 +1086,8 @@ actor LocalAlpineAgentService {
                     writeFiles: files,
                     readFiles: readFiles,
                     editFiles: editFiles,
-                    patchFiles: patchFiles
+                    patchFiles: patchFiles,
+                    deleteFiles: deleteFiles
                 )]
             }
             return [LocalAlpineAgentCommand(
@@ -1022,18 +1096,20 @@ actor LocalAlpineAgentService {
                 writeFiles: files,
                 readFiles: readFiles,
                 editFiles: editFiles,
-                patchFiles: patchFiles
+                patchFiles: patchFiles,
+                deleteFiles: deleteFiles
             )]
         }
 
-        if !files.isEmpty || !readFiles.isEmpty || !editFiles.isEmpty || !patchFiles.isEmpty {
+        if !files.isEmpty || !readFiles.isEmpty || !editFiles.isEmpty || !patchFiles.isEmpty || !deleteFiles.isEmpty {
             return [LocalAlpineAgentCommand(
                 command: nil,
                 cwd: Self.cwdString(from: dict),
                 writeFiles: files,
                 readFiles: readFiles,
                 editFiles: editFiles,
-                patchFiles: patchFiles
+                patchFiles: patchFiles,
+                deleteFiles: deleteFiles
             )]
         }
 
@@ -1061,9 +1137,105 @@ actor LocalAlpineAgentService {
             return "patch"
         case "write_files", "write_file", "write":
             return "write"
+        case "delete_file", "delete_files", "remove_file", "remove_files", "delete", "rm":
+            return "delete"
         default:
             return nil
         }
+    }
+
+    private nonisolated static func generatedShellCommand(
+        from dict: [String: Any],
+        shellCommand: String?
+    ) -> (command: String, toolName: String, detail: String, filePaths: [String], cwd: String?)? {
+        let selector = shellCommand?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let cwd = cwdString(from: dict)
+
+        if dict["list_dir"] != nil || dict["ls"] != nil || dict["list"] != nil
+            || selector == "list_dir" || selector == "ls" || selector == "list" {
+            let object = dict["list_dir"] ?? dict["ls"] ?? dict["list"] ?? dict
+            let path = pathString(from: object) ?? pathString(from: dict) ?? "."
+            let depth = max(1, min(intValue(value(for: ["max_depth", "depth"], in: object)) ?? 2, 8))
+            let includeHidden = boolValue(value(for: ["hidden", "include_hidden", "all"], in: object)) ?? true
+            let quotedPath = shellSingleQuotedStatic(path)
+            let visibleFilter = includeHidden ? "" : " | grep -v '/\\.'"
+            let command = """
+            printf '== pwd ==\\n' && pwd && printf '\\n== list: %s ==\\n' \(quotedPath) && ls -la \(quotedPath) 2>/dev/null || true
+            printf '\\n== find maxdepth \(depth): %s ==\\n' \(quotedPath) && find \(quotedPath) -maxdepth \(depth) -mindepth 1 2>/dev/null\(visibleFilter) | sed -n '1,240p'
+            """
+            return (command, "list_dir", path, [path], cwd)
+        }
+
+        if dict["glob"] != nil || dict["find_files"] != nil
+            || selector == "glob" || selector == "find_files" {
+            let object = dict["glob"] ?? dict["find_files"] ?? dict
+            let pattern = stringValue(object) ?? stringValue(value(for: ["pattern", "query", "name"], in: object)) ?? "*"
+            let path = directoryPathString(from: object) ?? directoryPathString(from: dict) ?? "."
+            let depth = max(1, min(intValue(value(for: ["max_depth", "depth"], in: object)) ?? 8, 20))
+            let command = "find \(shellSingleQuotedStatic(path)) -maxdepth \(depth) -name \(shellSingleQuotedStatic(pattern)) 2>/dev/null | sed -n '1,240p'"
+            return (command, "glob", pattern, [path], cwd)
+        }
+
+        if dict["grep"] != nil || dict["search_files"] != nil
+            || selector == "grep" || selector == "search_files" {
+            let object = dict["grep"] ?? dict["search_files"] ?? dict
+            guard let pattern = (stringValue(object) ?? stringValue(value(for: ["pattern", "query", "text", "regex"], in: object)))?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !pattern.isEmpty else {
+                return nil
+            }
+            let path = directoryPathString(from: object) ?? directoryPathString(from: dict) ?? "."
+            let include = (stringValue(value(for: ["include", "name"], in: object))
+                ?? stringValue(value(for: ["include", "name"], in: dict)))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let caseSensitive = boolValue(value(for: ["case_sensitive", "caseSensitive"], in: object))
+                ?? boolValue(value(for: ["case_sensitive", "caseSensitive"], in: dict))
+                ?? true
+            let grepFlag = caseSensitive ? "-RIn" : "-RIni"
+            if let include, !include.isEmpty {
+                let command = """
+                find \(shellSingleQuotedStatic(path)) -type f -name \(shellSingleQuotedStatic(include)) -exec grep \(grepFlag) -- \(shellSingleQuotedStatic(pattern)) {} \\; 2>/dev/null | sed -n '1,240p'
+                """
+                return (command, "grep", pattern, [path], cwd)
+            } else {
+                let command = "grep \(grepFlag) -- \(shellSingleQuotedStatic(pattern)) \(shellSingleQuotedStatic(path)) 2>/dev/null | sed -n '1,240p'"
+                return (command, "grep", pattern, [path], cwd)
+            }
+        }
+
+        if dict["verify"] != nil || dict["check"] != nil
+            || selector == "verify" || selector == "check" {
+            let object = dict["verify"] ?? dict["check"] ?? dict
+            if let command = stringValue(value(for: ["command", "cmd", "shell", "run"], in: object))?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !command.isEmpty,
+               !["verify", "check"].contains(command.lowercased()) {
+                return (command, "verify", oneLine(command), [], cwd)
+            }
+            guard let path = pathString(from: object) else {
+                return ("pwd && find . -maxdepth 2 -type f | sed -n '1,120p'", "verify", "workspace", [], cwd)
+            }
+            let command: String
+            let lower = path.lowercased()
+            if lower.hasSuffix(".py") || lower.hasSuffix(".pyw") {
+                command = "python3 -m py_compile \(shellSingleQuotedStatic(path)) && python3 \(shellSingleQuotedStatic(path))"
+            } else if lower.hasSuffix(".lua") {
+                command = "if command -v lua >/dev/null 2>&1; then lua \(shellSingleQuotedStatic(path)); elif command -v lua5.4 >/dev/null 2>&1 || apk add --no-cache lua5.4; then lua5.4 \(shellSingleQuotedStatic(path)); else apk add --no-cache lua && lua \(shellSingleQuotedStatic(path)); fi"
+            } else if lower.hasSuffix(".js") || lower.hasSuffix(".mjs") || lower.hasSuffix(".cjs") {
+                command = "node \(shellSingleQuotedStatic(path))"
+            } else if lower.hasSuffix(".ts") {
+                command = "command -v npx >/dev/null 2>&1 && npx tsc --noEmit \(shellSingleQuotedStatic(path)) || cat \(shellSingleQuotedStatic(path)) >/dev/null"
+            } else if lower.hasSuffix("package.json") {
+                command = "node -e \"const p=require('./package.json'); console.log(p.scripts||{})\" && { npm test -- --watch=false 2>/dev/null || npm run build 2>/dev/null || true; }"
+            } else {
+                command = "test -e \(shellSingleQuotedStatic(path)) && ls -la \(shellSingleQuotedStatic(path))"
+            }
+            return (command, "verify", path, [path], cwd)
+        }
+
+        return nil
     }
 
     private nonisolated static func cwdString(from dict: [String: Any]) -> String? {
@@ -1186,6 +1358,34 @@ actor LocalAlpineAgentService {
         return []
     }
 
+    private func parseDeleteFilesForCommand(from dict: [String: Any]) -> [LocalAlpineDeleteFileRequest] {
+        parseDeleteFiles(from: Self.deleteFilesObject(from: dict))
+    }
+
+    private nonisolated static func deleteFilesObject(from dict: [String: Any]) -> Any? {
+        dict["delete_file"] ?? dict["delete_files"] ?? dict["remove_file"] ?? dict["remove_files"] ?? dict["delete"]
+    }
+
+    private func parseDeleteFiles(from object: Any?) -> [LocalAlpineDeleteFileRequest] {
+        if let array = object as? [Any] {
+            return array.flatMap { parseDeleteFiles(from: $0) }
+        }
+        if let dict = object as? [String: Any] {
+            let nestedDeletes = parseDeleteFiles(from: Self.deleteFilesObject(from: dict))
+            guard nestedDeletes.isEmpty else { return nestedDeletes }
+            guard let path = Self.pathString(from: dict) else { return [] }
+            return [LocalAlpineDeleteFileRequest(
+                path: path,
+                recursive: Self.boolValue(dict["recursive"] ?? dict["recurse"] ?? dict["directory"] ?? dict["dir"]) ?? false,
+                missingOK: Self.boolValue(dict["missing_ok"] ?? dict["missingOK"] ?? dict["ignore_missing"] ?? dict["force"]) ?? true
+            )]
+        }
+        if let path = Self.pathString(from: object ?? "") {
+            return [LocalAlpineDeleteFileRequest(path: path, recursive: false, missingOK: true)]
+        }
+        return []
+    }
+
     private nonisolated static func pathString(from dict: [String: Any]) -> String? {
         ((dict["path"] as? String)
             ?? (dict["file_path"] as? String)
@@ -1196,10 +1396,66 @@ actor LocalAlpineAgentService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private nonisolated static func pathString(from object: Any) -> String? {
+        if let path = object as? String {
+            let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let dict = object as? [String: Any] {
+            return pathString(from: dict)
+        }
+        return nil
+    }
+
+    private nonisolated static func directoryPathString(from object: Any) -> String? {
+        guard let dict = object as? [String: Any] else { return nil }
+        for key in ["path", "dir", "directory", "root", "cwd", "workdir", "base"] {
+            if let value = dict[key] as? String {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func value(for keys: [String], in object: Any) -> Any? {
+        guard let dict = object as? [String: Any] else { return nil }
+        for key in keys {
+            if let value = dict[key] {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func stringValue(_ value: Any?) -> String? {
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return nil
+    }
+
     private nonisolated static func intValue(_ value: Any?) -> Int? {
         if let intValue = value as? Int { return intValue }
         if let doubleValue = value as? Double { return Int(doubleValue) }
         if let stringValue = value as? String { return Int(stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return nil
+    }
+
+    private nonisolated static func boolValue(_ value: Any?) -> Bool? {
+        if let boolValue = value as? Bool { return boolValue }
+        if let intValue = value as? Int { return intValue != 0 }
+        if let stringValue = value as? String {
+            switch stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true", "yes", "y", "1", "on":
+                return true
+            case "false", "no", "n", "0", "off":
+                return false
+            default:
+                return nil
+            }
+        }
         return nil
     }
 
@@ -1615,6 +1871,81 @@ actor LocalAlpineAgentService {
             summary: lines.joined(separator: "\n"),
             commandResults: commandResults,
             writtenFiles: writtenFiles,
+            editedPaths: editedPaths,
+            hadFailure: hadFailure
+        )
+    }
+
+    private func deleteFiles(_ requests: [LocalAlpineDeleteFileRequest], cwd: String) async -> LocalAlpineStructuredToolResult {
+        var lines = ["删除文件（delete_file）"]
+        var commandResults: [LocalAlpineAgentCommandResult] = []
+        var editedPaths: [String] = []
+        var hadFailure = false
+
+        for request in requests.prefix(maxCommandsPerResponse) {
+            let target = resolvedFilePath(request.path, cwd: cwd)
+            let command = request.recursive ? "delete_file --recursive \(target)" : "delete_file \(target)"
+            do {
+                let didDelete = try await LocalAlpineTerminalService.shared.deleteItem(
+                    path: target,
+                    recursive: request.recursive
+                )
+                if didDelete {
+                    let output = "deleted: \(target)"
+                    lines.append("- `\(target)` 已删除\(request.recursive ? "（recursive）" : "")。")
+                    editedPaths.append(target)
+                    let result = LocalAlpineCommandResult(
+                        command: command,
+                        output: output,
+                        exitCode: 0,
+                        interactiveRequest: nil
+                    )
+                    commandResults.append(Self.commandResult(command: command, cwd: cwd, result: result))
+                } else if request.missingOK {
+                    let output = "missing: \(target) (ignored)"
+                    lines.append("- `\(target)` 不存在，已忽略。")
+                    let result = LocalAlpineCommandResult(
+                        command: command,
+                        output: output,
+                        exitCode: 0,
+                        interactiveRequest: nil
+                    )
+                    commandResults.append(Self.commandResult(command: command, cwd: cwd, result: result))
+                } else {
+                    let output = "delete_file failed for `\(target)`: file does not exist"
+                    lines.append("- \(output)")
+                    let result = LocalAlpineCommandResult(
+                        command: command,
+                        output: output,
+                        exitCode: 1,
+                        interactiveRequest: nil
+                    )
+                    commandResults.append(Self.commandResult(command: command, cwd: cwd, result: result))
+                    hadFailure = true
+                }
+            } catch {
+                let output = "delete_file failed for `\(target)`: \(error.localizedDescription)"
+                lines.append("- \(output)")
+                let result = LocalAlpineCommandResult(
+                    command: command,
+                    output: output,
+                    exitCode: 1,
+                    interactiveRequest: nil
+                )
+                commandResults.append(Self.commandResult(command: command, cwd: cwd, result: result))
+                hadFailure = true
+            }
+        }
+
+        let skipped = max(0, requests.count - maxCommandsPerResponse)
+        if skipped > 0 {
+            lines.append("- 已跳过 \(skipped) 个多余删除请求，避免一次删除过多。")
+        }
+
+        return LocalAlpineStructuredToolResult(
+            summary: lines.joined(separator: "\n"),
+            commandResults: commandResults,
+            writtenFiles: [],
             editedPaths: editedPaths,
             hadFailure: hadFailure
         )
@@ -2214,6 +2545,10 @@ actor LocalAlpineAgentService {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
+    private nonisolated static func shellSingleQuotedStatic(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
     private func unsafeCodeFileWriteWarning(for command: String) -> String? {
         guard Self.commandWritesCodeThroughShellText(command) else { return nil }
         return """
@@ -2222,6 +2557,185 @@ actor LocalAlpineAgentService {
         Code files are indentation/escaping-sensitive. Do not write source files through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts.
         Re-send the change through structured `iexa_alpine` JSON using `edit_file`, `patch_file`, or same-path `write_files` with `code_lines`, `content_lines`, or `content_base64`, then run a bounded verification command before executing it.
         """
+    }
+
+    private nonisolated static func commandsByConvertingCatHeredocWrites(
+        from shell: String
+    ) -> [LocalAlpineAgentCommand]? {
+        let normalized = shell
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.components(separatedBy: "\n")
+        guard lines.contains(where: { line in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.hasPrefix("cat ") && trimmed.contains("<<") && trimmed.contains(">")
+        }) else {
+            return nil
+        }
+
+        var commands: [LocalAlpineAgentCommand] = []
+        var pendingShellLines: [String] = []
+        var convertedCount = 0
+        var index = 0
+
+        func flushPendingShell() {
+            let shell = pendingShellLines
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            pendingShellLines.removeAll(keepingCapacity: true)
+            guard !shell.isEmpty, looksLikeShellBlock(shell) else { return }
+            commands.append(LocalAlpineAgentCommand(command: shell, cwd: nil))
+        }
+
+        while index < lines.count {
+            let line = lines[index]
+            guard let opening = catHeredocOpening(from: line) else {
+                pendingShellLines.append(line)
+                index += 1
+                continue
+            }
+
+            var bodyLines: [String] = []
+            var closingIndex: Int?
+            var bodyIndex = index + 1
+            while bodyIndex < lines.count {
+                if lines[bodyIndex].trimmingCharacters(in: .whitespacesAndNewlines) == opening.delimiter {
+                    closingIndex = bodyIndex
+                    break
+                }
+                bodyLines.append(lines[bodyIndex])
+                bodyIndex += 1
+            }
+            guard let closingIndex else {
+                return nil
+            }
+
+            flushPendingShell()
+            var content = bodyLines.joined(separator: "\n")
+            if !bodyLines.isEmpty {
+                content += "\n"
+            }
+            commands.append(LocalAlpineAgentCommand(
+                command: nil,
+                cwd: nil,
+                writeFiles: [
+                    LocalAlpineAgentFile(
+                        path: opening.path,
+                        content: content,
+                        source: Self.isPythonTarget(opening.path) ? .codeLines : .contentLines
+                    )
+                ]
+            ))
+            convertedCount += 1
+            index = closingIndex + 1
+        }
+
+        flushPendingShell()
+        return convertedCount > 0 ? commands : nil
+    }
+
+    private nonisolated static func catHeredocOpening(
+        from line: String
+    ) -> (path: String, delimiter: String)? {
+        let words = shellWords(in: line)
+        guard words.first == "cat" else { return nil }
+
+        var path: String?
+        var delimiter: String?
+        var index = 1
+        while index < words.count {
+            let word = words[index]
+            if word == ">" || word == "1>" {
+                let next = index + 1
+                guard next < words.count else { return nil }
+                path = words[next]
+                index += 2
+                continue
+            }
+            if word.hasPrefix(">"), word != ">", word != ">>" {
+                path = String(word.dropFirst())
+                index += 1
+                continue
+            }
+            if word == "<<" || word == "<<-" {
+                let next = index + 1
+                guard next < words.count else { return nil }
+                delimiter = words[next]
+                index += 2
+                continue
+            }
+            if word.hasPrefix("<<") {
+                var marker = String(word.dropFirst(2))
+                if marker.hasPrefix("-") {
+                    marker.removeFirst()
+                }
+                if !marker.isEmpty {
+                    delimiter = marker
+                }
+                index += 1
+                continue
+            }
+            index += 1
+        }
+
+        guard let path = path?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let delimiter = delimiter?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty,
+              !delimiter.isEmpty,
+              !path.contains("*"),
+              !path.contains("?"),
+              !path.contains("["),
+              path.lowercased().range(
+                of: #"\.(?:py|pyw|js|jsx|ts|tsx|mjs|cjs|html|htm|css|scss|sass|swift|kt|kts|java|c|cc|cpp|cxx|h|hpp|cs|go|rs|rb|php|sh|bash|zsh|fish|pl|lua|r|sql|json|jsonc|yaml|yml|toml|xml)$"#,
+                options: .regularExpression
+              ) != nil else {
+            return nil
+        }
+        return (path, delimiter)
+    }
+
+    private nonisolated static func shellWords(in line: String) -> [String] {
+        var words: [String] = []
+        var current = ""
+        var quote: Character?
+        var escaped = false
+
+        for character in line {
+            if escaped {
+                current.append(character)
+                escaped = false
+                continue
+            }
+            if character == "\\" {
+                escaped = true
+                continue
+            }
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                } else {
+                    current.append(character)
+                }
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character
+                continue
+            }
+            if character.isWhitespace {
+                if !current.isEmpty {
+                    words.append(current)
+                    current = ""
+                }
+            } else {
+                current.append(character)
+            }
+        }
+
+        if !current.isEmpty {
+            words.append(current)
+        }
+        return words
     }
 
     private nonisolated static func commandWritesCodeThroughShellText(_ command: String) -> Bool {
@@ -2711,6 +3225,10 @@ private struct LocalAlpineAgentCommand: Sendable {
     let readFiles: [LocalAlpineReadFileRequest]
     let editFiles: [LocalAlpineEditFileRequest]
     let patchFiles: [LocalAlpinePatchFileRequest]
+    let deleteFiles: [LocalAlpineDeleteFileRequest]
+    let shellToolName: String?
+    let shellToolDetail: String?
+    let shellToolFilePaths: [String]
 
     init(
         command: String?,
@@ -2718,7 +3236,11 @@ private struct LocalAlpineAgentCommand: Sendable {
         writeFiles: [LocalAlpineAgentFile] = [],
         readFiles: [LocalAlpineReadFileRequest] = [],
         editFiles: [LocalAlpineEditFileRequest] = [],
-        patchFiles: [LocalAlpinePatchFileRequest] = []
+        patchFiles: [LocalAlpinePatchFileRequest] = [],
+        deleteFiles: [LocalAlpineDeleteFileRequest] = [],
+        shellToolName: String? = nil,
+        shellToolDetail: String? = nil,
+        shellToolFilePaths: [String] = []
     ) {
         self.command = command
         self.cwd = cwd
@@ -2726,6 +3248,10 @@ private struct LocalAlpineAgentCommand: Sendable {
         self.readFiles = readFiles
         self.editFiles = editFiles
         self.patchFiles = patchFiles
+        self.deleteFiles = deleteFiles
+        self.shellToolName = shellToolName
+        self.shellToolDetail = shellToolDetail
+        self.shellToolFilePaths = shellToolFilePaths
     }
 }
 
@@ -2776,6 +3302,12 @@ private struct LocalAlpineEditReplacement: Sendable {
 private struct LocalAlpinePatchFileRequest: Sendable {
     let path: String?
     let patch: String
+}
+
+private struct LocalAlpineDeleteFileRequest: Sendable {
+    let path: String
+    let recursive: Bool
+    let missingOK: Bool
 }
 
 private enum LocalAlpineAgentFileSource: Equatable, Sendable {

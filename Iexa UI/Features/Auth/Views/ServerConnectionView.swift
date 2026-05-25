@@ -233,7 +233,7 @@ struct ServerConnectionView: View {
                             .opacity(appeared ? 1 : 0)
                             .offset(y: appeared ? 0 : 10)
 
-                        Text("连接 Iexa 原生站点或任意兼容 API")
+                        Text("连接 Iexa 原生站点或兼容 API Base URL")
                             .scaledFont(size: 16)
                             .foregroundStyle(theme.textSecondary)
                             .opacity(appeared ? 1 : 0)
@@ -269,7 +269,7 @@ struct ServerConnectionView: View {
 
                         ModernTextField(
                             label: "APIKEY（可选）",
-                            placeholder: "原生站点可选，直连 API 必填",
+                            placeholder: "直连 API 必填；原生站点可选",
                             text: $viewModel.apiKey,
                             isSecure: true,
                             textContentType: .password,
@@ -385,7 +385,7 @@ struct ServerConnectionView: View {
                             .scaledFont(size: 14, weight: .medium)
                             .foregroundStyle(theme.textSecondary)
 
-                        Text("Iexa 原生站点填 URL 即可（API Key 可选）。OpenAI/Gemini/Claude 兼容 API 请填写服务商 Base URL 和 API Key，Iexa 会自动补全所需 API 后缀。")
+                        Text("Iexa 原生站点填 URL 即可。OpenAI/Gemini/Claude 兼容 API 请填写服务商 Base URL 和 API Key；若上游返回 401/403，请检查 API Key、模型权限或额度。")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textTertiary)
                             .multilineTextAlignment(.center)

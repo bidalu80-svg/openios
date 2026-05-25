@@ -526,7 +526,7 @@ final class APIClient: @unchecked Sendable {
                 return Self.imageOnlyCompatibleModels()
             } catch {
                 let apiError = APIError.from(error)
-                if apiError.requiresReauth {
+                if apiError.isHTTPAuthFailure {
                     sawAuthFailure = error
                     break
                 }
