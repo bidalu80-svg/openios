@@ -2335,7 +2335,7 @@ actor LocalAlpineAgentService {
         }
 
         guard !removalRanges.isEmpty else {
-            return content
+            return cleanedVisibleProtocolNoise(from: content)
         }
 
         let mutable = NSMutableString(string: content)
@@ -2351,6 +2351,7 @@ actor LocalAlpineAgentService {
             .replacingOccurrences(of: #"\r\n?"#, with: "\n", options: .regularExpression)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        cleaned = cleanedVisibleProtocolNoise(from: cleaned)
 
         let handoffPatterns = [
             #"请[^\n。！？!?]{0,12}本地执行结果[^\n。！？!?]{0,100}[。！？!?]?"#,
@@ -2391,6 +2392,31 @@ actor LocalAlpineAgentService {
             return first
         }
         return unique.joined(separator: " ")
+    }
+
+    nonisolated private static func cleanedVisibleProtocolNoise(from content: String) -> String {
+        var cleaned = content
+            .replacingOccurrences(of: #"\r\n?"#, with: "\n", options: .regularExpression)
+
+        let protocolNoisePatterns = [
+            #"(?im)^\s*<?/?(?:tool|ool)?\s*`?iexa_alpine`?[^。\n.!?]*(?:does\s+not\s+exists?|not\s+exist|not\s+available)[^。\n.!?]*[。.!?]*\s*"#,
+            #"(?im)^\s*[^。\n.!?]*`?iexa_alpine`?[^。\n.!?]*(?:工具不存在|不存在|不可用|无法调用|不能调用)[^。\n.!?]*[。.!?]*\s*"#,
+            #"(?im)<+/?(?:tool|ool)\s*`?iexa_alpine`?[^。\n.!?]*[。.!?]*"#
+        ]
+        for pattern in protocolNoisePatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                cleaned = regex.stringByReplacingMatches(
+                    in: cleaned,
+                    range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                    withTemplate: ""
+                )
+            }
+        }
+
+        return cleaned
+            .replacingOccurrences(of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     nonisolated private static func visibleSentences(from content: String) -> [String] {
@@ -2541,16 +2567,48 @@ actor LocalAlpineAgentService {
     nonisolated private static func incompleteInstructionFenceRange(in content: String) -> NSRange? {
         let markerRange = content.range(of: "```iexa_alpine", options: [.caseInsensitive, .backwards])
             ?? content.range(of: "```local_alpine_exec", options: [.caseInsensitive, .backwards])
-        guard let markerRange else {
-            return nil
+        if let markerRange {
+            let afterMarker = content[markerRange.upperBound...]
+            guard afterMarker.range(of: "```") == nil else {
+                return nil
+            }
+
+            return NSRange(markerRange.lowerBound..<content.endIndex, in: content)
         }
 
-        let afterMarker = content[markerRange.upperBound...]
-        guard afterMarker.range(of: "```") == nil else {
+        guard let fenceRange = content.range(of: "```", options: [.backwards]) else {
             return nil
         }
+        let afterFence = content[fenceRange.upperBound...]
+        guard afterFence.range(of: "```") == nil else { return nil }
 
-        return NSRange(markerRange.lowerBound..<content.endIndex, in: content)
+        let parts = afterFence.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+        let info = parts.first.map(String.init) ?? ""
+        let body = parts.count > 1 ? String(parts[1]) : ""
+        let token = info
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .first
+            .map { String($0).lowercased() } ?? ""
+        guard isPartialInstructionFenceToken(token, body: body) else {
+            return nil
+        }
+        return NSRange(fenceRange.lowerBound..<content.endIndex, in: content)
+    }
+
+    nonisolated private static func isPartialInstructionFenceToken(_ token: String, body: String) -> Bool {
+        guard !token.isEmpty else { return false }
+        let instructionTokens = ["iexa_alpine", "local_alpine_exec"]
+        if instructionTokens.contains(where: { $0.hasPrefix(token) || token.hasPrefix($0) }) {
+            return true
+        }
+        if token == "json" {
+            let loweredBody = body.lowercased()
+            return loweredBody.contains("\"iexa")
+                || loweredBody.contains("iexa_alpine")
+                || loweredBody.contains("local_alpine_exec")
+        }
+        return false
     }
 
     nonisolated private static func incompleteInstructionTagRange(in content: String) -> NSRange? {

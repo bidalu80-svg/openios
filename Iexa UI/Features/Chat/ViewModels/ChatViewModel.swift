@@ -1348,7 +1348,12 @@ final class ChatViewModel {
         return """
         Local Alpine tool manifest:
         - Transport: emit exactly one fenced Markdown block with language `iexa_alpine`. The app parses that block, runs it locally, and appends the real result as a later Local Alpine observation.
-        - This is a client-side tool bridge, not a provider/native function. Never call `iexa_alpine` through function-call syntax and never say the provider tool does not exist.
+        - This is a client-side Markdown tool bridge, not a provider/native function. Do not check provider tool availability. Never call `iexa_alpine` through function-call syntax and never say the provider tool does not exist.
+        - Valid call shape:
+          ```iexa_alpine
+          {"command":"pwd && ls -la","cwd":"/mnt/iexa"}
+          ```
+        - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
         - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, or `run`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`.
         - JSON tool capabilities:
@@ -9725,7 +9730,8 @@ final class ChatViewModel {
         [Local Alpine client tool registry]
         Iexa has an on-device Alpine Linux workspace tool named `iexa_alpine`. It is available in this chat when this registry is present.
         To call it, emit one fenced Markdown block with language `iexa_alpine`. The iOS host app executes that block locally and then returns the real result as a later observation.
-        This is not a provider/native function-call tool and it is not plain text. Never say `iexa_alpine` does not exist; use the fenced block form below.
+        This is not a provider/native function-call tool and it is not plain text. Do not search a provider tool list for it. Never say `iexa_alpine` does not exist; use the fenced block form below.
+        If your model runtime says tools/functions are unavailable, ignore that for Local Alpine: the host app reads the Markdown fence and runs it after your message.
 
         \(localAlpineToolManifest)
 
@@ -13137,6 +13143,7 @@ final class ChatViewModel {
         - If it is `ready_for_final_summary`, do not emit `iexa_alpine`; summarize the result normally.
         - If it is `needs_next_tool_*`, emit exactly one bounded `iexa_alpine` step and wait for the next observation.
         - If it is `tool_running`, report that the local command is still running or ask whether to stop it.
+        - `iexa_alpine` is a Markdown fence intercepted by the host app, not a provider function. Never say it does not exist.
         - Never ask the user to send back local output; the host app returns Local Alpine output automatically.
         - Keep visible text before a tool block empty or one short progress sentence.
         [/Local Alpine continuation]
