@@ -4697,14 +4697,17 @@ private struct LocalAlpineResultCard: View {
 
     private var hiddenActivityCount: Int {
         if !toolCalls.isEmpty {
-            return max(0, toolCalls.count - 6)
+            return 0
         }
         return max(0, writtenFiles.count - 4) + max(0, executableCommandResults.count - 5)
     }
 
     private var effectiveCommandCount: Int {
         guard !toolCalls.isEmpty else { return executableCommandResults.count }
-        return toolCalls.filter { ["command", "diagnostic"].contains($0.name) && !$0.isRunning }.count
+        return toolCalls.filter {
+            ["command", "diagnostic", "compile", "test", "run_script", "install_dependency", "network_fetch", "verify"].contains($0.name)
+                && !$0.isRunning
+        }.count
     }
 
     var body: some View {
@@ -4756,14 +4759,14 @@ private struct LocalAlpineResultCard: View {
     private var activityLedger: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !toolCalls.isEmpty {
-                ForEach(Array(toolCalls.prefix(6)), id: \.id) { call in
+                ForEach(toolCalls, id: \.id) { call in
                     let display = LocalAlpineToolDisplayRegistry.display(for: call.name)
                     activityRow(
                         icon: call.failed ? "exclamationmark.circle.fill" : display.icon,
                         tint: call.failed ? .orange : (call.isRunning ? theme.brandPrimary : theme.textTertiary),
-                        label: call.isRunning ? "运行中" : (call.failed ? "有错误" : "已完成"),
+                        label: call.statusDescription,
                         value: call.displayDetail,
-                        detail: call.exitCode.map { "退出码 \($0) · \(call.cwd)" } ?? call.cwd
+                        detail: activityDetail(for: call)
                     )
                 }
             } else {
@@ -4781,7 +4784,7 @@ private struct LocalAlpineResultCard: View {
                     activityRow(
                         icon: result.failed ? "exclamationmark.circle.fill" : "terminal.fill",
                         tint: result.failed ? .orange : theme.textTertiary,
-                        label: result.failed ? "运行出错" : "已运行",
+                        label: result.failed ? "运行出错" : "运行完成",
                         value: oneLineCommand(result.command),
                         detail: "退出码 \(result.exitCode.map(String.init) ?? "unknown") · \(result.cwd)"
                     )
@@ -4803,6 +4806,24 @@ private struct LocalAlpineResultCard: View {
         )
     }
 
+    private func activityDetail(for call: LocalAlpineToolCall) -> String {
+        var parts: [String] = []
+        if let exitCode = call.exitCode {
+            parts.append("退出码 \(exitCode)")
+        } else if call.isRunning {
+            parts.append("执行中")
+        }
+        if !call.cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            parts.append(call.cwd)
+        }
+        if let output = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !output.isEmpty,
+           !call.isRunning {
+            parts.append(oneLineCommand(output))
+        }
+        return parts.joined(separator: " · ")
+    }
+
     private func activityRow(
         icon: String,
         tint: Color,
@@ -4817,10 +4838,11 @@ private struct LocalAlpineResultCard: View {
                 .frame(width: 15, height: 15)
 
             VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
                     Text(label)
                         .scaledFont(size: 11, weight: .semibold)
                         .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
                     Text(value)
                         .scaledFont(size: 11, weight: .medium, design: .monospaced)
                         .foregroundStyle(theme.textPrimary)

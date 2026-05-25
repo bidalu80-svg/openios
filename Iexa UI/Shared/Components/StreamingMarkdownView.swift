@@ -953,8 +953,8 @@ struct StreamingMarkdownView: View {
                 )))
                 return collapseParsedUnits(units, fallback: text)
             }
-            let lang = afterOpen[afterOpen.startIndex..<newlineIdx]
-                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let rawLanguage = afterOpen[afterOpen.startIndex..<newlineIdx]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             let contentStart = afterOpen.index(after: newlineIdx)
             let searchArea = remaining[contentStart...]
             guard let closeRange = findClosingFence(in: searchArea, from: contentStart) else {
@@ -965,14 +965,17 @@ struct StreamingMarkdownView: View {
                 let unclosedCode = String(searchArea)
                 if !unclosedCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     units.append(.segment(codeSegmentForFence(
-                        language: lang.isEmpty ? "text" : lang,
+                        language: rawLanguage.isEmpty ? "text" : rawLanguage,
                         code: unclosedCode,
                         isStreamingBlock: isStreaming
                     )))
                 }
                 return collapseParsedUnits(units, fallback: text)
             }
-            let codeContent = String(remaining[contentStart..<closeRange.lowerBound])
+            let rawCodeContent = String(remaining[contentStart..<closeRange.lowerBound])
+            let recoveredFence = recoveredMalformedFence(language: rawLanguage, content: rawCodeContent)
+            let lang = recoveredFence.language
+            let codeContent = recoveredFence.content
             let normalizedBlock = normalizedCodeBlock(language: lang, content: codeContent)
             let isChart = chartLanguageTags.contains(lang) && looksLikeChartJSON(codeContent)
             let isHTML = lang == "html" && codeContent.contains("<") && codeContent.contains(">") && codeContent.count >= 10
@@ -1202,6 +1205,32 @@ struct StreamingMarkdownView: View {
             return ParsedBlock(language: "text", content: content)
         }
         return nil
+    }
+
+    private func recoveredMalformedFence(language: String, content: String) -> ParsedBlock {
+        let originalLanguageLine = language.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedLanguage = originalLanguageLine.lowercased()
+        guard !trimmedLanguage.isEmpty else {
+            return ParsedBlock(language: trimmedLanguage, content: content)
+        }
+        guard !isRecognizedCodeLanguage(trimmedLanguage) else {
+            return ParsedBlock(language: trimmedLanguage, content: content)
+        }
+
+        let parts = originalLanguageLine.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        guard parts.count == 2 else {
+            return ParsedBlock(language: trimmedLanguage, content: content)
+        }
+        let languageToken = String(parts[0]).lowercased()
+        guard isRecognizedCodeLanguage(languageToken) else {
+            return ParsedBlock(language: trimmedLanguage, content: content)
+        }
+
+        let firstCommandLine = String(parts[1])
+        let recoveredContent = content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? firstCommandLine
+            : firstCommandLine + "\n" + content
+        return ParsedBlock(language: languageToken, content: recoveredContent)
     }
 
     private func isRecognizedCodeLanguage(_ language: String) -> Bool {

@@ -249,6 +249,16 @@ enum LocalAlpineToolDisplayRegistry {
             return LocalAlpineToolDisplay(icon: "magnifyingglass", title: "搜索文本")
         case "verify", "check":
             return LocalAlpineToolDisplay(icon: "checkmark.seal", title: "验证")
+        case "compile", "build":
+            return LocalAlpineToolDisplay(icon: "hammer", title: "编译")
+        case "test":
+            return LocalAlpineToolDisplay(icon: "checklist", title: "测试")
+        case "run_script", "run":
+            return LocalAlpineToolDisplay(icon: "play.circle", title: "运行脚本")
+        case "install_dependency", "install":
+            return LocalAlpineToolDisplay(icon: "shippingbox", title: "安装依赖")
+        case "network_fetch", "fetch":
+            return LocalAlpineToolDisplay(icon: "network", title: "联网请求")
         case "command", "shell", "bash", "exec":
             return LocalAlpineToolDisplay(icon: "terminal.fill", title: "运行命令")
         case "diagnostic":
@@ -682,10 +692,15 @@ actor LocalAlpineAgentService {
                     continue
                 }
 
+                let classifiedShellTool = Self.shellToolClassification(
+                    for: commandToExecute,
+                    fallbackName: command.shellToolName,
+                    fallbackDetail: command.shellToolDetail
+                )
                 let context = Self.toolCallContext(
                     runId: toolRunId,
-                    name: command.shellToolName ?? "command",
-                    detail: command.shellToolDetail ?? Self.oneLine(commandToExecute),
+                    name: classifiedShellTool.name,
+                    detail: classifiedShellTool.detail,
                     cwd: effectiveCWD,
                     command: commandToExecute,
                     filePaths: command.shellToolFilePaths
@@ -1142,6 +1157,47 @@ actor LocalAlpineAgentService {
         default:
             return nil
         }
+    }
+
+    private nonisolated static func shellToolClassification(
+        for command: String,
+        fallbackName: String?,
+        fallbackDetail: String?
+    ) -> (name: String, detail: String) {
+        let detail = fallbackDetail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmedCommand
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+
+        if let fallbackName,
+           !fallbackName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           fallbackName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "command" {
+            return (fallbackName, detail?.isEmpty == false ? detail! : oneLine(trimmedCommand))
+        }
+
+        let classifiedName: String
+        if normalized.range(of: #"(^|[;&|]\s*)(?:apk|apt|brew|pip3?|npm|pnpm|yarn)\s+(?:add|install|i)\b"#, options: .regularExpression) != nil {
+            classifiedName = "install_dependency"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:swift|xcodebuild|make|cmake|gcc|g\+\+|clang|cargo|go|npm|pnpm|yarn)\s+(?:build|compile|archive|run\s+build)\b"#, options: .regularExpression) != nil
+            || normalized.contains(" py_compile ")
+            || normalized.hasPrefix("python3 -m py_compile")
+            || normalized.hasPrefix("python -m py_compile") {
+            classifiedName = "compile"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:pytest|python3?\s+-m\s+pytest|npm\s+test|pnpm\s+test|yarn\s+test|go\s+test|cargo\s+test)\b"#, options: .regularExpression) != nil {
+            classifiedName = "test"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:curl|wget)\s+"#, options: .regularExpression) != nil {
+            classifiedName = "network_fetch"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:python3?|node|deno|bun|ruby|php|lua|go\s+run|cargo\s+run|swift\s+run)\b"#, options: .regularExpression) != nil {
+            classifiedName = "run_script"
+        } else {
+            classifiedName = "command"
+        }
+
+        return (
+            classifiedName,
+            detail?.isEmpty == false ? detail! : oneLine(trimmedCommand)
+        )
     }
 
     private nonisolated static func generatedShellCommand(
