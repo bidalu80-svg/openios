@@ -12509,6 +12509,11 @@ final class ChatViewModel {
         } else if emittedLocalAlpineInstruction {
             localAlpineNoCommandContinuationRetries = 0
             localAlpineContinuationTask = nil
+            scheduleLocalAlpineAgentIfNeeded(
+                messageId: assistantMessageId,
+                content: rawContent,
+                error: nil
+            )
         } else if shouldRetryMissingTool, let parentResultId {
             if !retryLocalAlpineContinuationAfterMissingTool(parentId: parentResultId) {
                 appendLocalAlpineNoToolCallStopMessage(parentId: parentResultId)
