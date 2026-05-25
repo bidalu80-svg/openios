@@ -2343,11 +2343,68 @@ actor LocalAlpineAgentService {
             mutable.replaceCharacters(in: range, with: "")
         }
 
-        let cleaned = (mutable as String)
+        return cleanedVisibleToolPreface(from: mutable as String)
+    }
+
+    nonisolated private static func cleanedVisibleToolPreface(from content: String) -> String {
+        var cleaned = content
+            .replacingOccurrences(of: #"\r\n?"#, with: "\n", options: .regularExpression)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return cleaned
+        let handoffPatterns = [
+            #"请[^\n。！？!?]{0,12}本地执行结果[^\n。！？!?]{0,100}[。！？!?]?"#,
+            #"我再根据结果[^\n。！？!?]{0,100}[。！？!?]?"#,
+            #"please\s+(?:send|return|provide)[^\n.?!]{0,80}(?:result|output)[^\n.?!]{0,80}[.?!]?"#
+        ]
+        for pattern in handoffPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                cleaned = regex.stringByReplacingMatches(
+                    in: cleaned,
+                    range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                    withTemplate: ""
+                )
+            }
+        }
+
+        cleaned = cleaned
+            .replacingOccurrences(of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let sentences = visibleSentences(from: cleaned)
+        guard !sentences.isEmpty else { return cleaned }
+
+        var seen = Set<String>()
+        let unique = sentences.filter { sentence in
+            let key = sentence
+                .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+                .lowercased()
+            guard !key.isEmpty else { return false }
+            return seen.insert(key).inserted
+        }
+        guard let first = unique.first else { return "" }
+        if unique.count == 1 {
+            return first
+        }
+        if cleaned.contains("正在") || cleaned.localizedCaseInsensitiveContains("local alpine") {
+            return first
+        }
+        return unique.joined(separator: " ")
+    }
+
+    nonisolated private static func visibleSentences(from content: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: #"[^。！？!?\n]+[。！？!?]?"#) else {
+            return content
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        let nsContent = content as NSString
+        let fullRange = NSRange(location: 0, length: nsContent.length)
+        return regex.matches(in: content, range: fullRange)
+            .map { nsContent.substring(with: $0.range).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     nonisolated static func instructionBlocks(from content: String) -> [String] {

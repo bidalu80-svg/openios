@@ -1477,7 +1477,7 @@ struct ChatDetailView: View {
             }
 
             // ── Streaming status indicators ──
-            if message.role == .assistant {
+            if message.role == .assistant && !isLocalAlpineResultMessage(message) {
                 IsolatedStreamingStatus(
                     streamingStore: viewModel.streamingStore,
                     message: message
