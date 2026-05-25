@@ -342,12 +342,7 @@ final class TextToSpeechService: NSObject {
 
     func availableVoices() -> [AVSpeechSynthesisVoice] {
         AVSpeechSynthesisVoice.speechVoices()
-            .sorted { lhs, rhs in
-                if lhs.language != rhs.language {
-                    return lhs.language < rhs.language
-                }
-                return lhs.quality.rawValue > rhs.quality.rawValue
-            }
+            .sorted(areVoicesInPreferredOrder)
     }
 
     /// Detects the dominant language of `text` using NLLanguageRecognizer and
@@ -365,7 +360,7 @@ final class TextToSpeechService: NSObject {
         if let lang = detected, !lang.isEmpty {
             let match = allVoices
                 .filter { $0.language.hasPrefix(lang) }
-                .sorted { $0.quality.rawValue > $1.quality.rawValue }
+                .sorted(areVoicesInPreferredOrder)
                 .first
             if let match { return match }
         }
@@ -374,9 +369,36 @@ final class TextToSpeechService: NSObject {
         let deviceLang = Locale.current.language.languageCode?.identifier ?? "en"
         return allVoices
             .filter { $0.language.hasPrefix(deviceLang) }
-            .sorted { $0.quality.rawValue > $1.quality.rawValue }
+            .sorted(areVoicesInPreferredOrder)
             .first
         ?? AVSpeechSynthesisVoice(language: "en-US")
+    }
+
+    private func areVoicesInPreferredOrder(_ lhs: AVSpeechSynthesisVoice, _ rhs: AVSpeechSynthesisVoice) -> Bool {
+        let currentLanguage = Locale.current.language.languageCode?.identifier
+        let lhsScore = preferredVoiceScore(lhs, currentLanguage: currentLanguage)
+        let rhsScore = preferredVoiceScore(rhs, currentLanguage: currentLanguage)
+        if lhsScore != rhsScore { return lhsScore > rhsScore }
+
+        if lhs.language != rhs.language { return lhs.language < rhs.language }
+        return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+    }
+
+    private func preferredVoiceScore(_ voice: AVSpeechSynthesisVoice, currentLanguage: String?) -> Int {
+        var score = voice.quality.rawValue * 100
+        let identifier = voice.identifier.lowercased()
+        let name = voice.name.lowercased()
+
+        if identifier.contains("siri") || name.contains("siri") {
+            score += 50
+        }
+        if let currentLanguage, voice.language.hasPrefix(currentLanguage) {
+            score += 25
+        }
+        if voice.language == Locale.current.identifier.replacingOccurrences(of: "_", with: "-") {
+            score += 10
+        }
+        return score
     }
 
     // MARK: - Streaming TTS

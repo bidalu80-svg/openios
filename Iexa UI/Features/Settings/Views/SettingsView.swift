@@ -850,6 +850,16 @@ struct TTSSettingsView: View {
         return options
     }
 
+    private var selectedSystemVoiceLabel: String {
+        if voiceIdentifier.isEmpty {
+            return "自动（优先高质量）"
+        }
+        guard let voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier) else {
+            return voiceIdentifier
+        }
+        return "\(voice.name) · \(systemVoiceQualityLabel(voice))"
+    }
+
     var body: some View {
         List {
             // Engine Selection
@@ -1103,9 +1113,7 @@ struct TTSSettingsView: View {
                             Text("声音")
                             Spacer()
                             Text(
-                                voiceIdentifier.isEmpty
-                                    ? "自动（检测语言）"
-                                    : (AVSpeechSynthesisVoice(identifier: voiceIdentifier)?.name ?? voiceIdentifier)
+                                selectedSystemVoiceLabel
                             )
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -1129,7 +1137,7 @@ struct TTSSettingsView: View {
                 } header: {
                     Text("系统语音")
                 } footer: {
-                    Text("这些设置会在使用 Apple 内置语音合成器时生效。")
+                    Text("使用 Apple 内置语音合成器。App 会优先选择当前语言的 Siri/高级/增强声音；系统设置里的 Siri 声音 1-4 不一定会开放给第三方 App。")
                 }
             }
 
@@ -1494,10 +1502,14 @@ struct TTSSettingsView: View {
             service.stop()
             isSpeaking = false
         } else {
+            let previousEngine = service.preferredEngine
             syncSettingsToService()
             syncEngineToService()
             syncKokoroConfig()
             syncQwen3Config()
+            if selectedEngine == "system" || selectedEngine == "auto" {
+                service.preferredEngine = .system
+            }
             isSpeaking = true
             service.onComplete = { [self] in
                 isSpeaking = false
@@ -1505,6 +1517,7 @@ struct TTSSettingsView: View {
             service.speak(
                 "你好！这是文本转语音的试听。我可以把 AI 助手的回复朗读出来。"
             )
+            service.preferredEngine = previousEngine
         }
     }
 
@@ -2052,7 +2065,9 @@ struct TTSVoicePickerView: View {
         guard !searchText.isEmpty else { return voices }
         let q = searchText.lowercased()
         return voices.filter { voice in
-            voice.name.lowercased().contains(q) || voice.language.lowercased().contains(q)
+            voice.name.lowercased().contains(q)
+            || voice.language.lowercased().contains(q)
+            || systemVoiceQualityLabel(voice).lowercased().contains(q)
         }
     }
 
@@ -2067,7 +2082,7 @@ struct TTSVoicePickerView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("自动（检测语言）")
                                 .fontWeight(.medium)
-                            Text("根据每条消息的语言选择最合适的声音")
+                            Text("优先使用当前语言的 Siri/高级/增强声音")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -2090,7 +2105,7 @@ struct TTSVoicePickerView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(voice.name)
                                 .fontWeight(.medium)
-                            Text(voice.language)
+                            Text("\(voice.language) · \(systemVoiceQualityLabel(voice))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -2107,6 +2122,23 @@ struct TTSVoicePickerView: View {
         .searchable(text: $searchText, prompt: "搜索声音或语言…")
         .navigationTitle("语音声音")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private func systemVoiceQualityLabel(_ voice: AVSpeechSynthesisVoice) -> String {
+    let identifier = voice.identifier.lowercased()
+    let name = voice.name.lowercased()
+    if identifier.contains("siri") || name.contains("siri") {
+        return "Siri"
+    }
+
+    switch voice.quality {
+    case .premium:
+        return "高级"
+    case .enhanced:
+        return "增强"
+    default:
+        return "普通"
     }
 }
 
