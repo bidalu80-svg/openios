@@ -342,7 +342,7 @@ final class TextToSpeechService: NSObject {
 
     func availableVoices() -> [AVSpeechSynthesisVoice] {
         AVSpeechSynthesisVoice.speechVoices()
-            .sorted(areVoicesInPreferredOrder)
+            .sorted(by: areVoicesInPreferredOrder)
     }
 
     /// Detects the dominant language of `text` using NLLanguageRecognizer and
@@ -360,7 +360,7 @@ final class TextToSpeechService: NSObject {
         if let lang = detected, !lang.isEmpty {
             let match = allVoices
                 .filter { $0.language.hasPrefix(lang) }
-                .sorted(areVoicesInPreferredOrder)
+                .sorted(by: areVoicesInPreferredOrder)
                 .first
             if let match { return match }
         }
@@ -369,7 +369,7 @@ final class TextToSpeechService: NSObject {
         let deviceLang = Locale.current.language.languageCode?.identifier ?? "en"
         return allVoices
             .filter { $0.language.hasPrefix(deviceLang) }
-            .sorted(areVoicesInPreferredOrder)
+            .sorted(by: areVoicesInPreferredOrder)
             .first
         ?? AVSpeechSynthesisVoice(language: "en-US")
     }

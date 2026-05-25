@@ -30,6 +30,13 @@ private struct LocalAlpineAgentCommandFailure {
     let outputPreview: String
 }
 
+private struct LocalAlpineAgentCompletedCommand {
+    let command: String
+    let cwd: String
+    let exitCode: Int?
+    let outputPreview: String
+}
+
 private struct ParsedLocalAlpineCommand {
     let command: String
     let cwd: String
@@ -351,6 +358,7 @@ final class ChatViewModel {
     private var localAlpineAutoExecutionPaused = false
     private var localAlpineNoCommandContinuationRetries = 0
     private var localAlpineFailedCommands: [String: LocalAlpineAgentCommandFailure] = [:]
+    private var localAlpineCompletedCommands: [String: LocalAlpineAgentCompletedCommand] = [:]
     private var localAlpineFailureSignatures: [String: Int] = [:]
     private var localAlpineBlockedRepeatCommands: [String: Int] = [:]
     private var localAlpineFinalSummaryParentIds: Set<String> = []
@@ -1862,6 +1870,29 @@ final class ChatViewModel {
 
         return pythonHeredocWritePatterns.contains { pattern in
             command.range(of: pattern, options: .regularExpression) != nil
+        }
+    }
+
+    private static func localAlpineCommandMutatesState(_ command: String) -> Bool {
+        let normalized = command
+            .replacingOccurrences(of: "\\", with: "/")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+        if localAlpineCommandWritesCodeWithHeredoc(normalized) {
+            return true
+        }
+        let mutationPatterns = [
+            #"(?m)(^|[;&|]\s*)apk\s+add\b"#,
+            #"(?m)(^|[;&|]\s*)(?:python3?\s+-m\s+pip|pip3?|npm|yarn|pnpm)\s+(?:install|i|add)\b"#,
+            #"(?m)(^|[;&|]\s*)(?:rm|mv|cp|mkdir|touch|chmod|chown|ln)\b"#,
+            #"(?m)(^|[;&|]\s*)(?:git\s+(?:checkout|switch|merge|pull|reset|clean|apply|am)|patch)\b"#,
+            #"(?m)(^|[;&|]\s*)(?:sed|perl)\s+[^;&|]*\s-i\b"#,
+            #"(?:^|[^0-9])(?:>>?|1>)\s*[^;&|]+"#
+        ]
+        return mutationPatterns.contains {
+            normalized.range(of: $0, options: .regularExpression) != nil
         }
     }
 
@@ -6028,6 +6059,7 @@ final class ChatViewModel {
         localAlpineAutoExecutionPaused = false
         localAlpineNoCommandContinuationRetries = 0
         localAlpineFailedCommands.removeAll()
+        localAlpineCompletedCommands.removeAll()
         localAlpineFailureSignatures.removeAll()
         localAlpineBlockedRepeatCommands.removeAll()
         localAlpineFinalSummaryParentIds.removeAll()
@@ -11247,6 +11279,9 @@ final class ChatViewModel {
         guard !localAlpineAutoExecutionPaused else { return }
         guard let message = conversation?.messages.first(where: { $0.id == messageId }),
               message.role == .assistant else { return }
+        if message.metadata?["iexa_local_alpine_final_summary"] != nil {
+            return
+        }
         guard !localAlpineAgentExecutedMessageIds.contains(messageId) else { return }
         if localAlpineStepsSinceLastUser() >= localAlpineAgentMaxSteps {
             localAlpineAgentExecutedMessageIds.insert(messageId)
@@ -11773,6 +11808,22 @@ final class ChatViewModel {
         return failure
     }
 
+    private func repeatedCompletedLocalAlpineCommand(for content: String) -> LocalAlpineAgentCompletedCommand? {
+        let commands = Self.localAlpineCommands(in: content)
+        guard !commands.isEmpty else { return nil }
+        if commands.contains(where: {
+            $0.hasWriteFiles || Self.localAlpineCommandWritesCodeWithHeredoc($0.command)
+        }) {
+            return nil
+        }
+        guard let command = commands.first(where: {
+            localAlpineCompletedCommands[Self.localAlpineCommandKey(command: $0.command, cwd: $0.cwd)] != nil
+        }) else { return nil }
+        return localAlpineCompletedCommands[
+            Self.localAlpineCommandKey(command: command.command, cwd: command.cwd)
+        ]
+    }
+
     private func appendLocalAlpinePythonInspectionGuardIfNeeded(
         attemptedMessageId _: String,
         content _: String
@@ -11813,6 +11864,26 @@ final class ChatViewModel {
             )
             let signature = Self.localAlpineFailureSignature(commandResult)
             localAlpineFailureSignatures[signature] = (localAlpineFailureSignatures[signature] ?? 0) + 1
+        }
+    }
+
+    private func recordLocalAlpineCompletedCommands(from result: LocalAlpineAgentResult) {
+        if result.editedFileCount > 0 || !result.writtenFiles.isEmpty {
+            localAlpineCompletedCommands.removeAll()
+            return
+        }
+        for commandResult in result.commandResults where !commandResult.failed {
+            if Self.localAlpineCommandMutatesState(commandResult.command) {
+                localAlpineCompletedCommands.removeAll()
+                continue
+            }
+            let key = Self.localAlpineCommandKey(command: commandResult.command, cwd: commandResult.cwd)
+            localAlpineCompletedCommands[key] = LocalAlpineAgentCompletedCommand(
+                command: commandResult.command,
+                cwd: commandResult.cwd,
+                exitCode: commandResult.exitCode,
+                outputPreview: commandResult.outputPreview
+            )
         }
     }
 
@@ -11887,6 +11958,35 @@ final class ChatViewModel {
         \(pythonRepairInstruction)
         """
         return appendLocalAlpineSystemResult(parentId: parentId, content: content)
+    }
+
+    private func appendLocalAlpineRepeatedCompletedCommandMessage(
+        parentId: String,
+        completed: LocalAlpineAgentCompletedCommand
+    ) {
+        let content = """
+        Local Alpine 执行结果
+
+        已拦截重复命令，避免把同一个脚本再次运行。
+
+        已完成的命令：
+
+        ```bash
+        \(completed.command)
+        ```
+
+        工作目录：`\(completed.cwd)`
+        退出码：`\(completed.exitCode.map(String.init) ?? "unknown")`
+
+        上次输出摘要：
+
+        ```text
+        \(completed.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : completed.outputPreview)
+        ```
+
+        这条命令已经执行过；后续只需要总结结果或换一个不同的检查步骤。
+        """
+        appendLocalAlpineSystemResult(parentId: parentId, content: content)
     }
 
     private func appendLocalAlpineRepeatedErrorStopMessage(parentId: String, result: LocalAlpineAgentCommandResult) {
@@ -12095,6 +12195,12 @@ final class ChatViewModel {
         let hasExecutableBlocks = await LocalAlpineAgentService.shared.hasExecutableBlocks(in: content)
         guard hasExecutableBlocks else { return }
 
+        if let completedCommand = repeatedCompletedLocalAlpineCommand(for: content) {
+            appendLocalAlpineRepeatedCompletedCommandMessage(parentId: messageId, completed: completedCommand)
+            localAlpineAgentStopRequested = true
+            return
+        }
+
         if let repeatedFailure = repeatedLocalAlpineFailure(for: content) {
             let guardMessageId = appendLocalAlpineRepeatedCommandMessage(parentId: messageId, failure: repeatedFailure)
             if !localAlpineAgentStopRequested {
@@ -12226,6 +12332,7 @@ final class ChatViewModel {
         let resultMetadata = resultMessageSnapshot?.metadata
         let resultFiles = resultMessageSnapshot?.files
         recordLocalAlpineFailures(from: result)
+        recordLocalAlpineCompletedCommands(from: result)
         conversation?.history.updateNode(id: resultMessageId) { node in
             node.content = result.summary
             node.done = true
@@ -13412,10 +13519,12 @@ final class ChatViewModel {
 
         if let completedAssistantContentForAgent {
             scheduleLocalNativeToolIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
-            if conversation?.messages.first(where: { $0.id == id }).map(Self.isLocalAlpineAgentResult) != true {
+            let completedMessage = conversation?.messages.first(where: { $0.id == id })
+            if completedMessage.map(Self.isLocalAlpineAgentResult) != true,
+               completedMessage?.metadata?["iexa_local_alpine_final_summary"] == nil {
                 scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
             }
-            if conversation?.messages.first(where: { $0.id == id }).map(Self.isLocalWorkspaceAgentResult) != true {
+            if completedMessage.map(Self.isLocalWorkspaceAgentResult) != true {
                 scheduleLocalWorkspaceAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
             }
         }
