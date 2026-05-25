@@ -929,7 +929,7 @@ struct ChatDetailView: View {
                 text: $vm.inputText,
                 attachments: $vm.attachments,
                 placeholder: placeholderText,
-                isEnabled: !vm.isStreaming,
+                isEnabled: !vm.isStreaming || vm.canSendWhileStreaming,
                 onSend: { Task { await viewModel.sendMessage() } },
                 onStopGenerating: vm.isStreaming ? { viewModel.stopStreaming() } : nil,
                 contextBudgetStatus: vm.contextBudgetStatus,
@@ -4761,11 +4761,13 @@ private struct LocalAlpineResultCard: View {
             if !toolCalls.isEmpty {
                 ForEach(toolCalls, id: \.id) { call in
                     let display = LocalAlpineToolDisplayRegistry.display(for: call.name)
+                    let lineDelta = call.displayLineDelta.trimmingCharacters(in: .whitespacesAndNewlines)
                     activityRow(
                         icon: call.failed ? "exclamationmark.circle.fill" : display.icon,
                         tint: call.failed ? .orange : (call.isRunning ? theme.brandPrimary : theme.textTertiary),
                         label: call.statusDescription,
                         value: call.displayDetail,
+                        lineDelta: lineDelta,
                         detail: activityDetail(for: call)
                     )
                 }
@@ -4776,6 +4778,7 @@ private struct LocalAlpineResultCard: View {
                         tint: theme.brandPrimary,
                         label: "已编辑",
                         value: file.path,
+                        lineDelta: "",
                         detail: "\(file.lineCount) 行 · \(file.byteCount) B"
                     )
                 }
@@ -4786,6 +4789,7 @@ private struct LocalAlpineResultCard: View {
                         tint: result.failed ? .orange : theme.textTertiary,
                         label: result.failed ? "运行出错" : "运行完成",
                         value: oneLineCommand(result.command),
+                        lineDelta: "",
                         detail: "退出码 \(result.exitCode.map(String.init) ?? "unknown") · \(result.cwd)"
                     )
                 }
@@ -4829,6 +4833,7 @@ private struct LocalAlpineResultCard: View {
         tint: Color,
         label: String,
         value: String,
+        lineDelta: String = "",
         detail: String
     ) -> some View {
         HStack(alignment: .top, spacing: 7) {
@@ -4848,6 +4853,12 @@ private struct LocalAlpineResultCard: View {
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                    if !lineDelta.isEmpty {
+                        Text(lineDelta)
+                            .scaledFont(size: 11, weight: .semibold, design: .monospaced)
+                            .foregroundStyle(lineDelta.contains("-") ? .orange : .green)
+                            .lineLimit(1)
+                    }
                 }
                 Text(detail)
                     .scaledFont(size: 10, weight: .medium)

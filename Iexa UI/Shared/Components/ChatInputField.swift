@@ -613,45 +613,62 @@ struct ChatInputField: View {
 
     // MARK: - Trailing Button (Send / Stop / Voice)
 
+    private var stopGeneratingButton: some View {
+        Button {
+            Haptics.play(.light)
+            onStopGenerating?()
+        } label: {
+            Circle()
+                .fill(theme.error.opacity(0.15))
+                .frame(width: 26, height: 26)
+                .overlay(
+                    Image(systemName: "stop.fill")
+                        .scaledFont(size: 10, weight: .bold)
+                        .foregroundStyle(theme.error)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Stop Generating")
+        .transition(.scale.combined(with: .opacity))
+    }
+
+    private var sendMessageButton: some View {
+        Button {
+            Haptics.play(.light)
+            onSend()
+        } label: {
+            Circle()
+                .fill(theme.brandPrimary)
+                .frame(width: 26, height: 26)
+                .overlay(
+                    Image(systemName: "arrow.up")
+                        .scaledFont(size: 11, weight: .bold)
+                        .foregroundStyle(theme.brandOnPrimary)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Send message")
+        .transition(.scale.combined(with: .opacity))
+    }
+
     private var trailingButton: some View {
         Group {
             if onStopGenerating != nil && !isEnabled {
-                // Stop generating
-                Button {
-                    Haptics.play(.light)
-                    onStopGenerating?()
-                } label: {
-                    Circle()
-                        .fill(theme.error.opacity(0.15))
-                        .frame(width: 26, height: 26)
-                        .overlay(
-                            Image(systemName: "stop.fill")
-                                .scaledFont(size: 10, weight: .bold)
-                                .foregroundStyle(theme.error)
-                        )
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Stop Generating")
-                .transition(.scale.combined(with: .opacity))
+                stopGeneratingButton
 
             } else if canSend {
-                // Send message
-                Button {
-                    Haptics.play(.light)
-                    onSend()
-                } label: {
-                    Circle()
-                        .fill(theme.brandPrimary)
-                        .frame(width: 26, height: 26)
-                        .overlay(
-                            Image(systemName: "arrow.up")
-                                .scaledFont(size: 11, weight: .bold)
-                                .foregroundStyle(theme.brandOnPrimary)
-                        )
+                if onStopGenerating != nil {
+                    HStack(spacing: 8) {
+                        stopGeneratingButton
+                        sendMessageButton
+                    }
+                    .transition(.scale.combined(with: .opacity))
+                } else {
+                    sendMessageButton
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Send message")
-                .transition(.scale.combined(with: .opacity))
+
+            } else if onStopGenerating != nil {
+                stopGeneratingButton
 
             } else if !hasQuickPills, let onVoiceInput {
                 // Voice button — only in inline position when no pill row exists

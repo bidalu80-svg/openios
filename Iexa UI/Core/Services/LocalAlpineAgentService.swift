@@ -181,6 +181,26 @@ struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
     }
 }
 
+struct LocalAlpineLineDelta: Codable, Hashable, Sendable {
+    let added: Int
+    let deleted: Int
+
+    var isEmpty: Bool {
+        added == 0 && deleted == 0
+    }
+
+    var displayText: String {
+        var parts: [String] = []
+        if added > 0 {
+            parts.append("+\(added)")
+        }
+        if deleted > 0 {
+            parts.append("-\(deleted)")
+        }
+        return parts.joined(separator: " ")
+    }
+}
+
 struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
     let command: String
     let cwd: String
@@ -258,7 +278,7 @@ enum LocalAlpineToolDisplayRegistry {
         case "install_dependency", "install":
             return LocalAlpineToolDisplay(icon: "shippingbox", title: "安装依赖")
         case "network_fetch", "fetch":
-            return LocalAlpineToolDisplay(icon: "network", title: "联网请求")
+            return LocalAlpineToolDisplay(icon: "network", title: "网络请求")
         case "command", "shell", "bash", "exec":
             return LocalAlpineToolDisplay(icon: "terminal.fill", title: "运行命令")
         case "diagnostic":
@@ -281,9 +301,68 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
     let exitCode: Int?
     let outputPreview: String?
     let filePaths: [String]
+    let lineDelta: LocalAlpineLineDelta?
     let startedAtMs: Int64
     let completedAtMs: Int64?
     let failed: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id, runId, name, phase, title, detail, cwd, command, exitCode, outputPreview
+        case filePaths, lineDelta, startedAtMs, completedAtMs, failed
+    }
+
+    init(
+        id: String,
+        runId: String,
+        name: String,
+        phase: LocalAlpineToolCallPhase,
+        title: String,
+        detail: String,
+        cwd: String,
+        command: String?,
+        exitCode: Int?,
+        outputPreview: String?,
+        filePaths: [String],
+        lineDelta: LocalAlpineLineDelta? = nil,
+        startedAtMs: Int64,
+        completedAtMs: Int64?,
+        failed: Bool
+    ) {
+        self.id = id
+        self.runId = runId
+        self.name = name
+        self.phase = phase
+        self.title = title
+        self.detail = detail
+        self.cwd = cwd
+        self.command = command
+        self.exitCode = exitCode
+        self.outputPreview = outputPreview
+        self.filePaths = filePaths
+        self.lineDelta = lineDelta
+        self.startedAtMs = startedAtMs
+        self.completedAtMs = completedAtMs
+        self.failed = failed
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        runId = try container.decode(String.self, forKey: .runId)
+        name = try container.decode(String.self, forKey: .name)
+        phase = try container.decode(LocalAlpineToolCallPhase.self, forKey: .phase)
+        title = try container.decode(String.self, forKey: .title)
+        detail = (try? container.decode(String.self, forKey: .detail)) ?? ""
+        cwd = (try? container.decode(String.self, forKey: .cwd)) ?? ""
+        command = try? container.decode(String.self, forKey: .command)
+        exitCode = try? container.decode(Int.self, forKey: .exitCode)
+        outputPreview = try? container.decode(String.self, forKey: .outputPreview)
+        filePaths = (try? container.decode([String].self, forKey: .filePaths)) ?? []
+        lineDelta = try? container.decode(LocalAlpineLineDelta.self, forKey: .lineDelta)
+        startedAtMs = (try? container.decode(Int64.self, forKey: .startedAtMs)) ?? 0
+        completedAtMs = try? container.decode(Int64.self, forKey: .completedAtMs)
+        failed = (try? container.decode(Bool.self, forKey: .failed)) ?? false
+    }
 
     var isRunning: Bool {
         phase == .start
@@ -297,6 +376,10 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
             return command
         }
         return filePaths.joined(separator: ", ")
+    }
+
+    var displayLineDelta: String {
+        lineDelta?.displayText ?? ""
     }
 
     var statusDescription: String {
@@ -323,6 +406,7 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
                 exitCode: call.exitCode,
                 outputPreview: call.outputPreview.map { String($0.prefix(4_000)) },
                 filePaths: Array(call.filePaths.prefix(12)),
+                lineDelta: call.lineDelta,
                 startedAtMs: call.startedAtMs,
                 completedAtMs: call.completedAtMs,
                 failed: call.failed
@@ -542,6 +626,7 @@ actor LocalAlpineAgentService {
                     context,
                     exitCode: readResult.hadFailure ? 1 : 0,
                     outputPreview: readResult.summary,
+                    lineDelta: readResult.lineDelta,
                     failed: readResult.hadFailure
                 ))
                 if readResult.hadFailure {
@@ -568,6 +653,7 @@ actor LocalAlpineAgentService {
                     context,
                     exitCode: editResult.hadFailure ? 1 : 0,
                     outputPreview: editResult.summary,
+                    lineDelta: editResult.lineDelta,
                     failed: editResult.hadFailure
                 ))
                 if editResult.hadFailure {
@@ -594,6 +680,7 @@ actor LocalAlpineAgentService {
                     context,
                     exitCode: patchResult.hadFailure ? 1 : 0,
                     outputPreview: patchResult.summary,
+                    lineDelta: patchResult.lineDelta,
                     failed: patchResult.hadFailure
                 ))
                 if patchResult.hadFailure {
@@ -619,6 +706,7 @@ actor LocalAlpineAgentService {
                     context,
                     exitCode: writeResult.hadFailure ? 125 : 0,
                     outputPreview: writeResult.summary,
+                    lineDelta: writeResult.lineDelta,
                     failed: writeResult.hadFailure
                 ))
                 if writeResult.hadFailure {
@@ -655,6 +743,7 @@ actor LocalAlpineAgentService {
                     context,
                     exitCode: deleteResult.hadFailure ? 1 : 0,
                     outputPreview: deleteResult.summary,
+                    lineDelta: deleteResult.lineDelta,
                     failed: deleteResult.hadFailure
                 ))
                 if deleteResult.hadFailure {
@@ -956,6 +1045,7 @@ actor LocalAlpineAgentService {
             exitCode: nil,
             outputPreview: nil,
             filePaths: context.filePaths,
+            lineDelta: nil,
             startedAtMs: context.startedAtMs,
             completedAtMs: nil,
             failed: false
@@ -966,6 +1056,7 @@ actor LocalAlpineAgentService {
         _ context: LocalAlpineToolCallContext,
         exitCode: Int?,
         outputPreview: String?,
+        lineDelta: LocalAlpineLineDelta? = nil,
         failed: Bool
     ) -> LocalAlpineToolCall {
         LocalAlpineToolCall(
@@ -980,6 +1071,7 @@ actor LocalAlpineAgentService {
             exitCode: exitCode,
             outputPreview: outputPreview.map { String($0.prefix(4_000)) },
             filePaths: context.filePaths,
+            lineDelta: lineDelta?.isEmpty == true ? nil : lineDelta,
             startedAtMs: context.startedAtMs,
             completedAtMs: Self.nowMs(),
             failed: failed
@@ -1635,6 +1727,7 @@ actor LocalAlpineAgentService {
         var lines = ["写入文件（结构化写入）"]
         var writtenPaths: [String] = []
         var writtenFiles: [LocalAlpineWrittenFile] = []
+        var lineDelta = LocalAlpineLineDelta(added: 0, deleted: 0)
         var hadFailure = false
         for file in files.prefix(maxCommandsPerResponse) {
             let outcome = await writeProtectedFile(file, cwd: cwd)
@@ -1644,6 +1737,9 @@ actor LocalAlpineAgentService {
             }
             if let writtenFile = outcome.writtenFile {
                 writtenFiles.append(writtenFile)
+            }
+            if let delta = outcome.lineDelta {
+                lineDelta = Self.combinedLineDelta(lineDelta, delta)
             }
             if outcome.hadFailure {
                 hadFailure = true
@@ -1657,6 +1753,7 @@ actor LocalAlpineAgentService {
             summary: lines.joined(separator: "\n"),
             writtenPaths: writtenPaths,
             writtenFiles: writtenFiles,
+            lineDelta: lineDelta.isEmpty ? nil : lineDelta,
             hadFailure: hadFailure
         )
     }
@@ -1716,6 +1813,7 @@ actor LocalAlpineAgentService {
             commandResults: commandResults,
             writtenFiles: [],
             editedPaths: [],
+            lineDelta: nil,
             hadFailure: hadFailure
         )
     }
@@ -1763,15 +1861,17 @@ actor LocalAlpineAgentService {
         var commandResults: [LocalAlpineAgentCommandResult] = []
         var writtenFiles: [LocalAlpineWrittenFile] = []
         var editedPaths: [String] = []
+        var lineDelta = LocalAlpineLineDelta(added: 0, deleted: 0)
         var hadFailure = false
 
         for request in requests.prefix(maxCommandsPerResponse) {
             let target = resolvedFilePath(request.path, cwd: cwd)
             do {
                 let data = try await LocalAlpineTerminalService.shared.readFile(path: target)
-                guard var content = String(data: data, encoding: .utf8) else {
+                guard let originalContent = String(data: data, encoding: .utf8) else {
                     throw LocalAlpineAgentEditError.binaryFile(target)
                 }
+                var content = originalContent
 
                 var replacementNotes: [String] = []
                 for replacement in request.replacements {
@@ -1803,6 +1903,7 @@ actor LocalAlpineAgentService {
                     LocalAlpineAgentFile(path: target, content: content, source: .editFile),
                     cwd: cwd
                 )
+                let delta = outcome.lineDelta ?? Self.lineDelta(from: originalContent, to: content)
                 lines.append("- `\(target)`")
                 lines.append(contentsOf: replacementNotes)
                 lines.append(contentsOf: outcome.lines.map { "  \($0)" })
@@ -1811,6 +1912,9 @@ actor LocalAlpineAgentService {
                 }
                 if let writtenPath = outcome.writtenPath {
                     editedPaths.append(writtenPath)
+                }
+                if !outcome.hadFailure {
+                    lineDelta = Self.combinedLineDelta(lineDelta, delta)
                 }
                 hadFailure = hadFailure || outcome.hadFailure
                 let result = LocalAlpineCommandResult(
@@ -1844,6 +1948,7 @@ actor LocalAlpineAgentService {
             commandResults: commandResults,
             writtenFiles: writtenFiles,
             editedPaths: editedPaths,
+            lineDelta: lineDelta.isEmpty ? nil : lineDelta,
             hadFailure: hadFailure
         )
     }
@@ -1864,11 +1969,89 @@ actor LocalAlpineAgentService {
         return updated
     }
 
+    private func existingTextFileContent(path: String) async -> String? {
+        guard let data = try? await LocalAlpineTerminalService.shared.readFile(path: path) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func lineCountBeforeDelete(path: String) async -> Int {
+        guard let content = await existingTextFileContent(path: path) else {
+            return 0
+        }
+        return Self.sourceLineCount(content)
+    }
+
+    private nonisolated static func combinedLineDelta(
+        _ lhs: LocalAlpineLineDelta,
+        _ rhs: LocalAlpineLineDelta
+    ) -> LocalAlpineLineDelta {
+        LocalAlpineLineDelta(
+            added: lhs.added + rhs.added,
+            deleted: lhs.deleted + rhs.deleted
+        )
+    }
+
+    private nonisolated static func lineDelta(from oldContent: String, to newContent: String) -> LocalAlpineLineDelta {
+        let oldLines = sourceLines(oldContent)
+        let newLines = sourceLines(newContent)
+        let common = longestCommonSubsequenceLength(oldLines, newLines)
+        return LocalAlpineLineDelta(
+            added: max(0, newLines.count - common),
+            deleted: max(0, oldLines.count - common)
+        )
+    }
+
+    private nonisolated static func sourceLineCount(_ content: String) -> Int {
+        sourceLines(content).count
+    }
+
+    private nonisolated static func sourceLines(_ content: String) -> [String] {
+        if content.isEmpty { return [] }
+        var normalized = content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        if normalized.hasSuffix("\n") {
+            normalized.removeLast()
+        }
+        if normalized.isEmpty { return [] }
+        return normalized.components(separatedBy: "\n")
+    }
+
+    private nonisolated static func longestCommonSubsequenceLength(_ oldLines: [String], _ newLines: [String]) -> Int {
+        guard !oldLines.isEmpty, !newLines.isEmpty else { return 0 }
+        if oldLines.count * newLines.count > 250_000 {
+            let oldSet = Set(oldLines)
+            return newLines.reduce(into: 0) { count, line in
+                if oldSet.contains(line) {
+                    count += 1
+                }
+            }
+        }
+
+        var previous = Array(repeating: 0, count: newLines.count + 1)
+        var current = previous
+        for oldLine in oldLines {
+            current[0] = 0
+            for index in 0..<newLines.count {
+                if oldLine == newLines[index] {
+                    current[index + 1] = previous[index] + 1
+                } else {
+                    current[index + 1] = max(previous[index + 1], current[index])
+                }
+            }
+            swap(&previous, &current)
+        }
+        return previous[newLines.count]
+    }
+
     private func patchFiles(_ requests: [LocalAlpinePatchFileRequest], cwd: String) async -> LocalAlpineStructuredToolResult {
         var lines = ["修补文件（patch_file）"]
         var commandResults: [LocalAlpineAgentCommandResult] = []
         var writtenFiles: [LocalAlpineWrittenFile] = []
         var editedPaths: [String] = []
+        var lineDelta = LocalAlpineLineDelta(added: 0, deleted: 0)
         var hadFailure = false
 
         for request in requests.prefix(maxCommandsPerResponse) {
@@ -1887,6 +2070,7 @@ actor LocalAlpineAgentService {
                     LocalAlpineAgentFile(path: target, content: patched, source: .patchFile),
                     cwd: cwd
                 )
+                let delta = outcome.lineDelta ?? Self.lineDelta(from: content, to: patched)
                 lines.append("- `\(target)`")
                 lines.append(contentsOf: outcome.lines.map { "  \($0)" })
                 if let writtenFile = outcome.writtenFile {
@@ -1894,6 +2078,9 @@ actor LocalAlpineAgentService {
                 }
                 if let writtenPath = outcome.writtenPath {
                     editedPaths.append(writtenPath)
+                }
+                if !outcome.hadFailure {
+                    lineDelta = Self.combinedLineDelta(lineDelta, delta)
                 }
                 hadFailure = hadFailure || outcome.hadFailure
                 let result = LocalAlpineCommandResult(
@@ -1928,6 +2115,7 @@ actor LocalAlpineAgentService {
             commandResults: commandResults,
             writtenFiles: writtenFiles,
             editedPaths: editedPaths,
+            lineDelta: lineDelta.isEmpty ? nil : lineDelta,
             hadFailure: hadFailure
         )
     }
@@ -1936,12 +2124,14 @@ actor LocalAlpineAgentService {
         var lines = ["删除文件（delete_file）"]
         var commandResults: [LocalAlpineAgentCommandResult] = []
         var editedPaths: [String] = []
+        var lineDelta = LocalAlpineLineDelta(added: 0, deleted: 0)
         var hadFailure = false
 
         for request in requests.prefix(maxCommandsPerResponse) {
             let target = resolvedFilePath(request.path, cwd: cwd)
             let command = request.recursive ? "delete_file --recursive \(target)" : "delete_file \(target)"
             do {
+                let deletedLineCount = await lineCountBeforeDelete(path: target)
                 let didDelete = try await LocalAlpineTerminalService.shared.deleteItem(
                     path: target,
                     recursive: request.recursive
@@ -1949,6 +2139,11 @@ actor LocalAlpineAgentService {
                 if didDelete {
                     let output = "deleted: \(target)"
                     lines.append("- `\(target)` 已删除\(request.recursive ? "（recursive）" : "")。")
+                    if deletedLineCount > 0 {
+                        let delta = LocalAlpineLineDelta(added: 0, deleted: deletedLineCount)
+                        lineDelta = Self.combinedLineDelta(lineDelta, delta)
+                        lines.append("  - 行数变化：\(delta.displayText)")
+                    }
                     editedPaths.append(target)
                     let result = LocalAlpineCommandResult(
                         command: command,
@@ -2003,6 +2198,7 @@ actor LocalAlpineAgentService {
             commandResults: commandResults,
             writtenFiles: [],
             editedPaths: editedPaths,
+            lineDelta: lineDelta.isEmpty ? nil : lineDelta,
             hadFailure: hadFailure
         )
     }
@@ -2126,6 +2322,7 @@ actor LocalAlpineAgentService {
                 ],
                 writtenPath: nil,
                 writtenFile: nil,
+                lineDelta: nil,
                 hadFailure: true
             )
         }
@@ -2136,6 +2333,7 @@ actor LocalAlpineAgentService {
                 ],
                 writtenPath: nil,
                 writtenFile: nil,
+                lineDelta: nil,
                 hadFailure: true
             )
         }
@@ -2145,6 +2343,7 @@ actor LocalAlpineAgentService {
                 lines: ["- `\(target)` 写入失败：内容不是有效 UTF-8"],
                 writtenPath: nil,
                 writtenFile: nil,
+                lineDelta: nil,
                 hadFailure: true
             )
         }
@@ -2202,6 +2401,7 @@ actor LocalAlpineAgentService {
         notes: [String] = []
     ) async -> LocalAlpineProtectedWriteOutcome {
         let split = splitFilePath(target)
+        let originalContent = await existingTextFileContent(path: target)
         do {
             try await LocalAlpineTerminalService.shared.writeFile(
                 data: data,
@@ -2216,10 +2416,15 @@ actor LocalAlpineAgentService {
                     ],
                     writtenPath: nil,
                     writtenFile: nil,
+                    lineDelta: nil,
                     hadFailure: true
                 )
             }
+            let delta = Self.lineDelta(from: originalContent ?? "", to: content)
             var lines = ["- `\(target)` (\(data.count) B，已写入，来源：\(source.displayName))"]
+            if !delta.isEmpty {
+                lines.append("  - 行数变化：\(delta.displayText)")
+            }
             lines.append(contentsOf: notes.map { "  - \($0)" })
             return LocalAlpineProtectedWriteOutcome(
                 lines: lines,
@@ -2230,6 +2435,7 @@ actor LocalAlpineAgentService {
                     source: source.displayName,
                     byteCount: data.count
                 ),
+                lineDelta: delta.isEmpty ? nil : delta,
                 hadFailure: false
             )
         } catch {
@@ -2237,6 +2443,7 @@ actor LocalAlpineAgentService {
                 lines: ["- `\(target)` 写入失败：\(error.localizedDescription)"],
                 writtenPath: nil,
                 writtenFile: nil,
+                lineDelta: nil,
                 hadFailure: true
             )
         }
@@ -2254,6 +2461,7 @@ actor LocalAlpineAgentService {
                 lines: ["- `\(target)` 写入失败：内容不是有效 UTF-8"],
                 writtenPath: nil,
                 writtenFile: nil,
+                lineDelta: nil,
                 hadFailure: true
             )
         }
@@ -2275,6 +2483,7 @@ actor LocalAlpineAgentService {
                 lines: lines,
                 writtenPath: directWrite.writtenPath,
                 writtenFile: directWrite.writtenFile,
+                lineDelta: directWrite.lineDelta,
                 hadFailure: false
             )
         }
@@ -2306,6 +2515,7 @@ actor LocalAlpineAgentService {
             lines: lines,
             writtenPath: directWrite.writtenPath,
             writtenFile: directWrite.writtenFile,
+            lineDelta: directWrite.lineDelta,
             hadFailure: true
         )
     }
@@ -2322,6 +2532,7 @@ actor LocalAlpineAgentService {
                 lines: ["- `\(target)` 写入失败：内容不是有效 UTF-8"],
                 writtenPath: nil,
                 writtenFile: nil,
+                lineDelta: nil,
                 hadFailure: true
             )
         }
@@ -2351,6 +2562,7 @@ actor LocalAlpineAgentService {
                 lines: lines,
                 writtenPath: nil,
                 writtenFile: nil,
+                lineDelta: nil,
                 hadFailure: true
             )
         }
@@ -2373,6 +2585,7 @@ actor LocalAlpineAgentService {
             lines: lines,
             writtenPath: directWrite.writtenPath,
             writtenFile: directWrite.writtenFile,
+            lineDelta: directWrite.lineDelta,
             hadFailure: false
         )
     }
@@ -3415,6 +3628,7 @@ private struct LocalAlpineProtectedWriteOutcome {
     let lines: [String]
     let writtenPath: String?
     let writtenFile: LocalAlpineWrittenFile?
+    let lineDelta: LocalAlpineLineDelta?
     let hadFailure: Bool
 }
 
@@ -3422,6 +3636,7 @@ private struct LocalAlpineWriteResult {
     let summary: String
     let writtenPaths: [String]
     let writtenFiles: [LocalAlpineWrittenFile]
+    let lineDelta: LocalAlpineLineDelta?
     let hadFailure: Bool
 }
 
@@ -3430,6 +3645,7 @@ private struct LocalAlpineStructuredToolResult {
     let commandResults: [LocalAlpineAgentCommandResult]
     let writtenFiles: [LocalAlpineWrittenFile]
     let editedPaths: [String]
+    let lineDelta: LocalAlpineLineDelta?
     let hadFailure: Bool
 }
 
