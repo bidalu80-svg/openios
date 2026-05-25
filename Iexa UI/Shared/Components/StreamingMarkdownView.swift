@@ -447,21 +447,21 @@ struct StreamingMarkdownView: View {
 
     private static let dataImageMarkdownPattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
+            pattern: #"!?\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
             options: [.caseInsensitive]
         )
     }()
 
     private static let partialDataImageMarkdownPattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
+            pattern: #"!?\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
             options: [.caseInsensitive]
         )
     }()
 
     private static let partialMarkdownImagePattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"!\[[^\]]*\]\([^)]*$"#,
+            pattern: #"!?\[[^\]]*\]\([^)]*$"#,
             options: [.caseInsensitive]
         )
     }()
@@ -1270,7 +1270,10 @@ enum InlineDataPayloadSanitizer {
     ]
 
     static func sanitizedDisplayText(_ text: String) -> String {
-        guard text.contains("base64") || text.contains("data:image") || text.contains("data:video") || text.contains("data:audio") else {
+        guard text.range(of: "base64", options: .caseInsensitive) != nil
+            || text.range(of: "data:image", options: .caseInsensitive) != nil
+            || text.range(of: "data:video", options: .caseInsensitive) != nil
+            || text.range(of: "data:audio", options: .caseInsensitive) != nil else {
             return text
         }
 

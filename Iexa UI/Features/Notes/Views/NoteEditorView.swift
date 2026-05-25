@@ -563,7 +563,7 @@ struct NoteEditorView: View {
         }
 
         let dir = baseDir
-            .appendingPathComponent("OpenUI", isDirectory: true)
+            .appendingPathComponent("IexaUI", isDirectory: true)
             .appendingPathComponent(folderName, isDirectory: true)
 
         do {

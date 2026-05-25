@@ -118,7 +118,7 @@ struct NewChannelIntent: AppIntent {
 
 /// Provides the app's shortcuts to the Shortcuts app and Siri.
 /// All shortcuts mirror the widget quick-action buttons exactly.
-struct OpenUIShortcutsProvider: AppShortcutsProvider {
+struct IexaUIShortcutsProvider: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
             intent: NewChatIntent(),

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ish_dir="${1:-External/ish}"
-bridge="${2:-Open UI/Core/Services/LocalAlpineNativeRuntimeBridge.c}"
+bridge="${2:-Iexa UI/Core/Services/LocalAlpineNativeRuntimeBridge.c}"
 object="${3:-$PWD/.build/local-alpine-ish-probe/LocalAlpineNativeRuntimeBridge.o}"
 sdk="${SDKROOT:-$(xcrun --sdk iphoneos --show-sdk-path)}"
 

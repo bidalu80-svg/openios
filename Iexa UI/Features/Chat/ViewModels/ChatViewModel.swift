@@ -12992,10 +12992,11 @@ final class ChatViewModel {
         error: ChatMessageError? = nil
     ) {
         let displayContent = Self.cleanedProviderCitationArtifacts(content)
+        let safeDisplayContent = Self.safeAssistantDisplayContent(displayContent)
         let shouldHandleLocalAlpineDisplay = terminalEnabled && selectedTerminalIsLocalAlpine
         let visibleAlpineDisplayContent: String? = {
             guard shouldHandleLocalAlpineDisplay else { return nil }
-            var visible = LocalAlpineAgentService.visibleContent(from: displayContent)
+            var visible = LocalAlpineAgentService.visibleContent(from: safeDisplayContent)
             if displayContent.localizedCaseInsensitiveContains("iexa_workspace")
                 || visible.localizedCaseInsensitiveContains("iexa_workspace") {
                 let workspaceVisible = LocalWorkspaceAgentService.visibleContent(from: visible)
@@ -13005,7 +13006,7 @@ final class ChatViewModel {
             }
             return visible
         }()
-        let renderedDisplayContent = visibleAlpineDisplayContent ?? displayContent
+        let renderedDisplayContent = visibleAlpineDisplayContent ?? safeDisplayContent
         let alpineInstructionIsHidden = shouldHandleLocalAlpineDisplay
             && Self.contentContainsLocalAlpineInstruction(displayContent)
             && visibleAlpineDisplayContent != nil
@@ -13042,10 +13043,14 @@ final class ChatViewModel {
             if !isStreaming && streamingStore.streamingMessageId == id {
                 // Streaming just ended — flush store to conversation
                 let result = streamingStore.endStreaming()
-                let finalContent = displayContent.isEmpty ? result.content : displayContent
-                let agentContent = content.isEmpty ? result.content : content
+                let finalRawContent = content.isEmpty ? result.content : content
+                let finalContent = safeDisplayContent.isEmpty
+                    ? Self.safeAssistantDisplayContent(result.content)
+                    : safeDisplayContent
+                let agentContent = finalRawContent
                 conversation?.messages[index].content = finalContent
                 conversation?.messages[index].isStreaming = false
+                attachInlineImages(from: finalRawContent, to: index)
                 // Merge sources from store into message
                 if !result.sources.isEmpty {
                     for source in result.sources {
@@ -13087,6 +13092,9 @@ final class ChatViewModel {
                 // Normal non-streaming update (e.g., error before streaming started)
                 conversation?.messages[index].content = renderedDisplayContent
                 conversation?.messages[index].isStreaming = isStreaming
+                if !isStreaming {
+                    attachInlineImages(from: content, to: index)
+                }
                 // Also update tree node for non-streaming completions (e.g., error paths)
                 if !isStreaming && !renderedDisplayContent.isEmpty {
                     conversation?.history.updateNode(id: id) { node in
@@ -13096,7 +13104,7 @@ final class ChatViewModel {
                 }
                 if !isStreaming {
                     completedAssistantContentForAgent = content.isEmpty ? displayContent : content
-                    completedAssistantDisplayContent = displayContent
+                    completedAssistantDisplayContent = safeDisplayContent
                 }
             }
             if let sources { conversation?.messages[index].sources = sources }
@@ -13219,6 +13227,20 @@ final class ChatViewModel {
         )
     }
 
+    private static func safeAssistantDisplayContent(_ text: String) -> String {
+        guard text.range(of: "data:image/", options: .caseInsensitive) != nil
+            || text.range(of: "data:video/", options: .caseInsensitive) != nil
+            || text.range(of: "data:audio/", options: .caseInsensitive) != nil
+            || text.range(of: "base64", options: .caseInsensitive) != nil else {
+            return text
+        }
+        return transformProseOutsideFencedCode(in: text) { prose in
+            InlineDataPayloadSanitizer.sanitizedDisplayText(
+                cleanedAssistantInlineImagePayloads(prose)
+            )
+        }
+    }
+
     private static func cleanedInternalPromptArtifacts(_ text: String) -> String {
         var cleaned = text
         let blockNames = [
@@ -13244,6 +13266,31 @@ final class ChatViewModel {
             cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return cleaned
+    }
+
+    private func attachInlineImages(from rawContent: String, to messageIndex: Int) {
+        let extractedImages = Self.extractInlineImageReferences(from: rawContent)
+        guard !extractedImages.isEmpty else { return }
+
+        var merged = conversation?.messages[messageIndex].files ?? []
+        var appended = false
+        for image in extractedImages {
+            if !merged.contains(where: { $0.url == image.url || $0.displayURL == image.displayURL }) {
+                merged.append(image)
+                appended = true
+            }
+        }
+        guard appended else { return }
+
+        conversation?.messages[messageIndex].files = merged
+        let messageId = conversation?.messages[messageIndex].id
+        if let messageId {
+            conversation?.history.updateNode(id: messageId) { node in
+                node.content = conversation?.messages[messageIndex].content ?? node.content
+                node.files = merged
+                node.done = true
+            }
+        }
     }
 
     /// Fires a subtle haptic pulse during token streaming, throttled via
@@ -13532,10 +13579,10 @@ final class ChatViewModel {
             }
         }
 
-        addMatches(#"!\[[^\]]*\]\((data:image/[^)\s]+)\)"#)
+        addMatches(#"!?\[[^\]]*\]\((data:image/[^)\s]+)\)"#)
         addMatches(#"<img[^>]+src=["'](data:image/[^"']+)["']"#)
-        addMatches(#"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{128,})"#)
-        addMatches(#"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_-]{128,})""#)
+        addMatches(#"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,})"#)
+        addMatches(#"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_\-\s]{128,})""#)
 
         return results.compactMap { value -> String? in
             let trimmed = value
@@ -13589,23 +13636,9 @@ final class ChatViewModel {
     }
 
     private static func cleanedAssistantContentAfterImageExtraction(_ content: String) -> String {
-        var cleaned = content
-        let patterns = [
-            #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
-            #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
-            #"<img[^>]+src=["']data:image/[^"']+["'][^>]*>"#,
-            #"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,}"#,
-            #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"[A-Za-z0-9+/=_-]{128,}""#
-        ]
-        for pattern in patterns {
-            cleaned = cleaned.replacingOccurrences(
-                of: pattern,
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
+        let cleaned = transformProseOutsideFencedCode(in: content) { prose in
+            cleanedAssistantInlineImagePayloads(prose)
         }
-        cleaned = cleaned.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         if !extractImageReferenceStrings(from: content).isEmpty {
             let startsLikeRawJSON = cleaned.hasPrefix("{") || cleaned.hasPrefix("[")
@@ -13620,6 +13653,82 @@ final class ChatViewModel {
         }
 
         return cleaned
+    }
+
+    private static func transformProseOutsideFencedCode(
+        in text: String,
+        transform: (String) -> String
+    ) -> String {
+        guard text.contains("```") else {
+            return transform(text)
+        }
+
+        var result = ""
+        var cursor = text.startIndex
+
+        while let openRange = text.range(of: "```", range: cursor..<text.endIndex) {
+            if cursor < openRange.lowerBound {
+                result += transform(String(text[cursor..<openRange.lowerBound]))
+            }
+
+            let afterOpen = text[openRange.upperBound...]
+            guard let newlineIdx = afterOpen.firstIndex(of: "\n") else {
+                result += String(text[openRange.lowerBound..<text.endIndex])
+                return result
+            }
+
+            let contentStart = afterOpen.index(after: newlineIdx)
+            if let closeRange = findClosingFence(in: text[contentStart...], from: contentStart) {
+                result += String(text[openRange.lowerBound..<closeRange.upperBound])
+                cursor = closeRange.upperBound
+            } else {
+                result += String(text[openRange.lowerBound..<text.endIndex])
+                return result
+            }
+        }
+
+        if cursor < text.endIndex {
+            result += transform(String(text[cursor..<text.endIndex]))
+        }
+        return result
+    }
+
+    private static func findClosingFence(
+        in substring: Substring,
+        from start: String.Index
+    ) -> Range<String.Index>? {
+        var searchStart = start
+        while searchStart < substring.endIndex {
+            guard let range = substring.range(of: "```", range: searchStart..<substring.endIndex) else {
+                return nil
+            }
+            let linePrefix = substring[substring.startIndex..<range.lowerBound]
+            if linePrefix.isEmpty || linePrefix.last == "\n" {
+                return range
+            }
+            searchStart = range.upperBound
+        }
+        return nil
+    }
+
+    private static func cleanedAssistantInlineImagePayloads(_ content: String) -> String {
+        var cleaned = content
+        let patterns = [
+            #"!?\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
+            #"!?\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
+            #"<img[^>]+src=["']data:image/[^"']+["'][^>]*>"#,
+            #"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,}"#,
+            #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"[A-Za-z0-9+/=_\-\s]{128,}""#
+        ]
+        for pattern in patterns {
+            cleaned = cleaned.replacingOccurrences(
+                of: pattern,
+                with: "",
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+        return cleaned.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func appendSources(id: String, sources: [ChatSourceReference]) {

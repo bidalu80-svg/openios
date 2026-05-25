@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "38EB667C2F39CE5A00AED774"
-               BuildableName = "Open UI.app"
-               BlueprintName = "Open UI"
-               ReferencedContainer = "container:Open UI.xcodeproj">
+               BuildableName = "Iexa.app"
+               BlueprintName = "Iexa UI"
+               ReferencedContainer = "container:Iexa UI.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -45,9 +45,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "38EB667C2F39CE5A00AED774"
-            BuildableName = "Open UI.app"
-            BlueprintName = "Open UI"
-            ReferencedContainer = "container:Open UI.xcodeproj">
+            BuildableName = "Iexa.app"
+            BlueprintName = "Iexa UI"
+            ReferencedContainer = "container:Iexa UI.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -62,9 +62,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "38EB667C2F39CE5A00AED774"
-            BuildableName = "Open UI.app"
-            BlueprintName = "Open UI"
-            ReferencedContainer = "container:Open UI.xcodeproj">
+            BuildableName = "Iexa.app"
+            BlueprintName = "Iexa UI"
+            ReferencedContainer = "container:Iexa UI.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

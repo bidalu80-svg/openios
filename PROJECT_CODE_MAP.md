@@ -1,12 +1,12 @@
-# Open Relay / Iexa iOS Code Map
+# Iexa iOS Code Map
 
-这份地图用于以后快速改项目。先看“按需求找入口”，再按对应链路进入具体文件。项目主体是 SwiftUI iOS App，目录名仍保留为 `Open UI`，本地 Markdown 包在 `MarkdownView`，GitHub Actions 负责无证书/有证书 IPA 构建。
+这份地图用于以后快速改项目。先看“按需求找入口”，再按对应链路进入具体文件。项目主体是 SwiftUI iOS App，目录名仍保留为 `Iexa UI`，本地 Markdown 包在 `MarkdownView`，GitHub Actions 负责无证书/有证书 IPA 构建。
 
 ## 1. 总览
 
 ```text
-Open-Relay-main-latest/
-├─ Open UI/                         iOS App 主工程源码
+Iexa-main-latest/
+├─ Iexa UI/                         iOS App 主工程源码
 │  ├─ App/                          App 启动、RootView、深链、生命周期
 │  ├─ Navigation/                   全局路由
 │  ├─ Core/
@@ -30,7 +30,7 @@ Open-Relay-main-latest/
 │  │  ├─ Components/                跨页面 UI 组件
 │  │  └─ Theme/                     主题、颜色、字体、动画
 │  └─ Resources/                    内置资源，如 Alpine rootfs
-├─ OpenUIWidgets/                   Widget / Live Activity 扩展
+├─ IexaUIWidgets/                   Widget / Live Activity 扩展
 ├─ MarkdownView/                    本地 Swift Package：Markdown 渲染器
 ├─ scripts/                         CI、本地 Alpine rootfs/iSH 准备脚本
 ├─ .github/workflows/               GitHub Actions IPA 构建
@@ -41,7 +41,7 @@ Open-Relay-main-latest/
 
 ```mermaid
 flowchart TD
-    A[Open_UIApp] --> B[AppDependencyContainer]
+    A[Iexa_UIApp] --> B[AppDependencyContainer]
     A --> C[AppRouter]
     A --> D[RootView]
     D --> E{AuthPhase}
@@ -57,10 +57,10 @@ flowchart TD
 
 | 文件 | 作用 | 常改场景 |
 | --- | --- | --- |
-| `Open UI/App/Open_UIApp.swift` | App 入口、RootView、生命周期、深链、Quick Action、文件导入 | 启动白屏、登录后跳转、后台崩溃、外部文件打开、Widget 跳转 |
-| `Open UI/Core/Services/DependencyContainer.swift` | 创建并持有 API、Socket、ConversationManager、语音、附件等服务 | 换服务器后状态异常、全局服务初始化、缓存清理 |
-| `Open UI/Navigation/AppRouter.swift` | NavigationStack 路由、sheet、语音通话浮窗状态 | 页面跳转、弹窗、语音通话最小化 |
-| `Open UI/Navigation/Route.swift` | 路由枚举 | 新增页面入口 |
+| `Iexa UI/App/Iexa_UIApp.swift` | App 入口、RootView、生命周期、深链、Quick Action、文件导入 | 启动白屏、登录后跳转、后台崩溃、外部文件打开、Widget 跳转 |
+| `Iexa UI/Core/Services/DependencyContainer.swift` | 创建并持有 API、Socket、ConversationManager、语音、附件等服务 | 换服务器后状态异常、全局服务初始化、缓存清理 |
+| `Iexa UI/Navigation/AppRouter.swift` | NavigationStack 路由、sheet、语音通话浮窗状态 | 页面跳转、弹窗、语音通话最小化 |
+| `Iexa UI/Navigation/Route.swift` | 路由枚举 | 新增页面入口 |
 
 全局原则：
 
@@ -85,12 +85,12 @@ flowchart LR
 
 | 文件 | 作用 | 常改场景 |
 | --- | --- | --- |
-| `Open UI/Features/Auth/ViewModels/AuthViewModel.swift` | 服务器连接、登录、注册、LDAP、SSO、Cloudflare/代理认证、账号切换 | 登录失败、登录后闪退、服务器识别、token 恢复 |
-| `Open UI/Features/Auth/Views/*.swift` | 登录/服务器连接/SSO/代理挑战 UI | 登录页样式、输入项、错误提示 |
-| `Open UI/Core/Models/ServerConfig.swift` | 服务器类型、URL、Headers、自签证书、Provider 类型 | 第三方站点兼容、OpenAI/Gemini/Anthropic 路径 |
-| `Open UI/Core/Services/ServerConfigStore.swift` | 保存服务器、多账号、active server | 多账号切换、服务器列表、迁移 |
-| `Open UI/Core/Networking/NetworkManager.swift` | 统一 URLSession 请求、headers、错误解析、上传、流式字节 | 所有 HTTP 通用问题、证书、Cloudflare headers |
-| `Open UI/Core/Networking/APIClient.swift` | 后端 API 大集合 | 新接口、模型列表、聊天、图片/视频、管理员、日历、终端 |
+| `Iexa UI/Features/Auth/ViewModels/AuthViewModel.swift` | 服务器连接、登录、注册、LDAP、SSO、Cloudflare/代理认证、账号切换 | 登录失败、登录后闪退、服务器识别、token 恢复 |
+| `Iexa UI/Features/Auth/Views/*.swift` | 登录/服务器连接/SSO/代理挑战 UI | 登录页样式、输入项、错误提示 |
+| `Iexa UI/Core/Models/ServerConfig.swift` | 服务器类型、URL、Headers、自签证书、Provider 类型 | 第三方站点兼容、OpenAI/Gemini/Anthropic 路径 |
+| `Iexa UI/Core/Services/ServerConfigStore.swift` | 保存服务器、多账号、active server | 多账号切换、服务器列表、迁移 |
+| `Iexa UI/Core/Networking/NetworkManager.swift` | 统一 URLSession 请求、headers、错误解析、上传、流式字节 | 所有 HTTP 通用问题、证书、Cloudflare headers |
+| `Iexa UI/Core/Networking/APIClient.swift` | 后端 API 大集合 | 新接口、模型列表、聊天、图片/视频、管理员、日历、终端 |
 
 改登录问题优先看：
 
@@ -124,14 +124,14 @@ sequenceDiagram
 
 | 文件 | 作用 | 常改场景 |
 | --- | --- | --- |
-| `Open UI/Features/Chat/ViewModels/ChatViewModel.swift` | 聊天大脑：发送、流式、Socket、附件上下文、工具、联网搜索、本地 Alpine、续跑、标题/usage 等 | 绝大多数聊天行为问题 |
-| `Open UI/Features/Chat/Views/ChatDetailView.swift` | 聊天详情页面：消息列表、输入框、附件 sheet、菜单、复制、Action 输入弹窗 | UI 展示、输入栏、消息操作、局部复制 |
-| `Open UI/Features/Chat/Views/MainChatView.swift` | 手机主聊天布局、抽屉、会话列表和详情切换 | 首页布局、抽屉、创建新聊天 |
-| `Open UI/Features/Chat/Views/iPadMainChatView.swift` | iPad 双栏布局 | iPad 布局 |
-| `Open UI/Features/Chat/ViewModels/ChatListViewModel.swift` | 会话列表加载、搜索、删除、置顶 | 聊天列表问题 |
-| `Open UI/Core/Services/ConversationManager.swift` | 对 `APIClient` 的聊天业务封装，也含本地会话 fallback store | 拉取/保存会话、上传文件、发送消息 |
-| `Open UI/Core/Models/Conversation.swift` | Conversation、ChatTask、树形历史派生 | 消息树、版本、任务列表 |
-| `Open UI/Core/Models/ChatMessage.swift` | ChatMessage、status、sources、files、metadata、error | 消息字段、来源、附件、错误展示 |
+| `Iexa UI/Features/Chat/ViewModels/ChatViewModel.swift` | 聊天大脑：发送、流式、Socket、附件上下文、工具、联网搜索、本地 Alpine、续跑、标题/usage 等 | 绝大多数聊天行为问题 |
+| `Iexa UI/Features/Chat/Views/ChatDetailView.swift` | 聊天详情页面：消息列表、输入框、附件 sheet、菜单、复制、Action 输入弹窗 | UI 展示、输入栏、消息操作、局部复制 |
+| `Iexa UI/Features/Chat/Views/MainChatView.swift` | 手机主聊天布局、抽屉、会话列表和详情切换 | 首页布局、抽屉、创建新聊天 |
+| `Iexa UI/Features/Chat/Views/iPadMainChatView.swift` | iPad 双栏布局 | iPad 布局 |
+| `Iexa UI/Features/Chat/ViewModels/ChatListViewModel.swift` | 会话列表加载、搜索、删除、置顶 | 聊天列表问题 |
+| `Iexa UI/Core/Services/ConversationManager.swift` | 对 `APIClient` 的聊天业务封装，也含本地会话 fallback store | 拉取/保存会话、上传文件、发送消息 |
+| `Iexa UI/Core/Models/Conversation.swift` | Conversation、ChatTask、树形历史派生 | 消息树、版本、任务列表 |
+| `Iexa UI/Core/Models/ChatMessage.swift` | ChatMessage、status、sources、files、metadata、error | 消息字段、来源、附件、错误展示 |
 
 `ChatViewModel.swift` 里最常定位的区域：
 
@@ -171,13 +171,13 @@ flowchart TD
 
 | 文件 | 作用 | 常改场景 |
 | --- | --- | --- |
-| `Open UI/Shared/Components/ChatMessageBubble.swift` | 单条消息气泡容器 | 消息气泡样式 |
-| `Open UI/Shared/Components/StreamingMarkdownView.swift` | Markdown 解析和渲染、代码块、图片/HTML/SVG/表格等展示 | 代码块缩进、复制、Markdown 乱渲染、图片展示 |
-| `Open UI/Shared/Components/PythonCodeBlockView.swift` | Python 代码块专用入口，现在复用原样代码视图 | Python 缩进/复制/展示 |
-| `Open UI/Shared/Components/ChatInputField.swift` | 输入框、工具按钮、附件预览、语音按钮、发送按钮 | 输入栏、开关、附件、语音入口 |
-| `Open UI/Shared/Components/ToolsMenuSheet.swift` | 工具菜单 sheet | 工具选择 UI |
-| `Open UI/Shared/Components/ModelSelectorSheet.swift` / `ModelPickerView.swift` | 模型选择 | 模型 picker |
-| `Open UI/Shared/Components/UsageInfoPopover.swift` | token/上下文用量弹窗 | 用量显示 |
+| `Iexa UI/Shared/Components/ChatMessageBubble.swift` | 单条消息气泡容器 | 消息气泡样式 |
+| `Iexa UI/Shared/Components/StreamingMarkdownView.swift` | Markdown 解析和渲染、代码块、图片/HTML/SVG/表格等展示 | 代码块缩进、复制、Markdown 乱渲染、图片展示 |
+| `Iexa UI/Shared/Components/PythonCodeBlockView.swift` | Python 代码块专用入口，现在复用原样代码视图 | Python 缩进/复制/展示 |
+| `Iexa UI/Shared/Components/ChatInputField.swift` | 输入框、工具按钮、附件预览、语音按钮、发送按钮 | 输入栏、开关、附件、语音入口 |
+| `Iexa UI/Shared/Components/ToolsMenuSheet.swift` | 工具菜单 sheet | 工具选择 UI |
+| `Iexa UI/Shared/Components/ModelSelectorSheet.swift` / `ModelPickerView.swift` | 模型选择 | 模型 picker |
+| `Iexa UI/Shared/Components/UsageInfoPopover.swift` | token/上下文用量弹窗 | 用量显示 |
 
 改代码块缩进/复制优先看：
 
@@ -203,12 +203,12 @@ flowchart LR
 
 | 文件 | 作用 | 常改场景 |
 | --- | --- | --- |
-| `Open UI/Core/Services/FileAttachmentService.swift` | PhotosPicker/File URL 处理、图片压缩、上传、附件状态 | 图片/文件发送失败、上传卡住、文件大小 |
-| `Open UI/Shared/Components/UnifiedAttachmentPicker.swift` | 附件选择 UI | 相册/文件入口 |
-| `Open UI/Shared/Components/AuthenticatedImageView.swift` | 需要鉴权的图片显示 | 后端图片显示失败 |
-| `Open UI/Core/Services/ImageCacheService.swift` | 图片缓存、鉴权 headers、自签证书、favicon | 图片缓存、头像/生成图显示 |
-| `Open UI/Core/Networking/SSEStream.swift` | 从 SSE 中提取图片引用/usage/content | 生成图流式解析 |
-| `Open UI/Core/Networking/APIClient.swift` | `generateImage`、`editImage`、`generateVideo`、文件上传接口 | 图片/视频生成、provider 兼容 |
+| `Iexa UI/Core/Services/FileAttachmentService.swift` | PhotosPicker/File URL 处理、图片压缩、上传、附件状态 | 图片/文件发送失败、上传卡住、文件大小 |
+| `Iexa UI/Shared/Components/UnifiedAttachmentPicker.swift` | 附件选择 UI | 相册/文件入口 |
+| `Iexa UI/Shared/Components/AuthenticatedImageView.swift` | 需要鉴权的图片显示 | 后端图片显示失败 |
+| `Iexa UI/Core/Services/ImageCacheService.swift` | 图片缓存、鉴权 headers、自签证书、favicon | 图片缓存、头像/生成图显示 |
+| `Iexa UI/Core/Networking/SSEStream.swift` | 从 SSE 中提取图片引用/usage/content | 生成图流式解析 |
+| `Iexa UI/Core/Networking/APIClient.swift` | `generateImage`、`editImage`、`generateVideo`、文件上传接口 | 图片/视频生成、provider 兼容 |
 
 改图片生成或编辑：
 
@@ -234,13 +234,13 @@ flowchart TD
 
 | 文件 | 作用 | 常改场景 |
 | --- | --- | --- |
-| `Open UI/Features/Settings/Views/SettingsView.swift` | 聊天行为设置，包含联网搜索总开关 | 用户级开关、默认行为 |
-| `Open UI/Features/Chat/Views/ChatDetailView.swift` | 把设置态传给输入栏和会话 UI | 开关是否显示/可用 |
-| `Open UI/Shared/Components/ChatInputField.swift` | 会话内联网搜索按钮 | 按钮样式、禁用态 |
-| `Open UI/Features/Chat/ViewModels/ChatViewModel.swift` | 开关权限、搜索上下文、工具调用、续答 | 搜索触发、结果注入、只有开关打开才能用 |
-| `Open UI/Core/Services/ClientWebSearchService.swift` | 客户端搜索服务入口 | 搜索请求格式 |
-| `Open UI/Core/Services/BrowserWebSearchService.swift` | 浏览器/搜索页抓取实现 | 搜索结果质量、解析 |
-| `Open UI/Core/Networking/WebSearchConfig.swift` | 搜索配置模型 | 搜索参数 |
+| `Iexa UI/Features/Settings/Views/SettingsView.swift` | 聊天行为设置，包含联网搜索总开关 | 用户级开关、默认行为 |
+| `Iexa UI/Features/Chat/Views/ChatDetailView.swift` | 把设置态传给输入栏和会话 UI | 开关是否显示/可用 |
+| `Iexa UI/Shared/Components/ChatInputField.swift` | 会话内联网搜索按钮 | 按钮样式、禁用态 |
+| `Iexa UI/Features/Chat/ViewModels/ChatViewModel.swift` | 开关权限、搜索上下文、工具调用、续答 | 搜索触发、结果注入、只有开关打开才能用 |
+| `Iexa UI/Core/Services/ClientWebSearchService.swift` | 客户端搜索服务入口 | 搜索请求格式 |
+| `Iexa UI/Core/Services/BrowserWebSearchService.swift` | 浏览器/搜索页抓取实现 | 搜索结果质量、解析 |
+| `Iexa UI/Core/Networking/WebSearchConfig.swift` | 搜索配置模型 | 搜索参数 |
 
 注意：
 
@@ -265,15 +265,15 @@ flowchart TD
 
 | 文件 | 作用 | 常改场景 |
 | --- | --- | --- |
-| `Open UI/Core/Services/LocalAlpineAgentService.swift` | 解析/执行 `iexa_alpine`，写文件、执行命令、结果 metadata | AI 写文件缩进错、执行链路、工具协议 |
-| `Open UI/Core/Services/LocalCodeWriteGuard.swift` | 判断代码文件语言、写入安全策略 | 哪些文件算代码、写入规则 |
-| `Open UI/Core/Services/LocalAlpineTerminalService.swift` | Alpine 终端命令执行、交互输入、状态 | 命令运行、stdin 小窗口、超时 |
-| `Open UI/Core/Services/LocalAlpineTerminalAgentRunner.swift` | agent 工具块运行器 | 工具块调度格式 |
-| `Open UI/Core/Services/LocalAlpineNativeRuntime.swift` | Swift 到本地 iSH runtime 封装 | 本地运行时、rootfs、挂载 |
-| `Open UI/Core/Services/LocalAlpineNativeRuntimeBridge.c` | C bridge | native runtime 编译/链接 |
-| `Open UI/Core/Services/LocalAlpineNativeRuntimeABI.h` | ABI 头文件 | Swift/C 接口 |
-| `Open UI/Features/Terminal/Views/LocalWorkspaceFileBrowserView.swift` | 本地 Alpine 工作区/rootfs 浏览、预览、分享、删除、rootfs 重置 | 文件浏览、rootfs 管理 |
-| `Open UI/Resources/iexa-alpine-rootfs.tar.gz` | 内置 Alpine rootfs | rootfs 更新 |
+| `Iexa UI/Core/Services/LocalAlpineAgentService.swift` | 解析/执行 `iexa_alpine`，写文件、执行命令、结果 metadata | AI 写文件缩进错、执行链路、工具协议 |
+| `Iexa UI/Core/Services/LocalCodeWriteGuard.swift` | 判断代码文件语言、写入安全策略 | 哪些文件算代码、写入规则 |
+| `Iexa UI/Core/Services/LocalAlpineTerminalService.swift` | Alpine 终端命令执行、交互输入、状态 | 命令运行、stdin 小窗口、超时 |
+| `Iexa UI/Core/Services/LocalAlpineTerminalAgentRunner.swift` | agent 工具块运行器 | 工具块调度格式 |
+| `Iexa UI/Core/Services/LocalAlpineNativeRuntime.swift` | Swift 到本地 iSH runtime 封装 | 本地运行时、rootfs、挂载 |
+| `Iexa UI/Core/Services/LocalAlpineNativeRuntimeBridge.c` | C bridge | native runtime 编译/链接 |
+| `Iexa UI/Core/Services/LocalAlpineNativeRuntimeABI.h` | ABI 头文件 | Swift/C 接口 |
+| `Iexa UI/Features/Terminal/Views/LocalWorkspaceFileBrowserView.swift` | 本地 Alpine 工作区/rootfs 浏览、预览、分享、删除、rootfs 重置 | 文件浏览、rootfs 管理 |
+| `Iexa UI/Resources/iexa-alpine-rootfs.tar.gz` | 内置 Alpine rootfs | rootfs 更新 |
 | `scripts/prepare-local-alpine-rootfs.*` | 准备 rootfs | 构建资源 |
 | `scripts/prepare-ish-source.*` | 准备 iSH source | CI 本地 Alpine runtime |
 | `scripts/build-local-alpine-ish-ci.sh` | CI 编译 iSH runtime | IPA 构建失败 |
@@ -299,9 +299,9 @@ flowchart TD
 
 | 文件 | 作用 | 常改场景 |
 | --- | --- | --- |
-| `Open UI/Core/Services/LocalWorkspaceAgentService.swift` | 旧本地工作区工具块 `iexa_workspace` | 旧工作区路径兼容 |
-| `Open UI/Core/Services/LocalNativeToolService.swift` | 本地 iOS 原生工具块 | iOS 原生能力工具 |
-| `Open UI/Features/Chat/ViewModels/ChatViewModel.swift` | 调度 workspace/alpine/native 工具 | 工具调用是否自动续跑 |
+| `Iexa UI/Core/Services/LocalWorkspaceAgentService.swift` | 旧本地工作区工具块 `iexa_workspace` | 旧工作区路径兼容 |
+| `Iexa UI/Core/Services/LocalNativeToolService.swift` | 本地 iOS 原生工具块 | iOS 原生能力工具 |
+| `Iexa UI/Features/Chat/ViewModels/ChatViewModel.swift` | 调度 workspace/alpine/native 工具 | 工具调用是否自动续跑 |
 
 当前推荐：
 
@@ -324,11 +324,11 @@ flowchart LR
 
 | 文件 | 作用 | 常改场景 |
 | --- | --- | --- |
-| `Open UI/Features/Calendar/Views/CalendarView.swift` | 日历 UI：年/月/周/日视图、UICalendarView bridge、农历显示 | 日历外观、农历、日期选择、事件块 |
-| `Open UI/Features/Calendar/ViewModels/CalendarViewModel.swift` | 加载 calendar/event、月份范围、增删事件 | 事件加载、创建/删除、视图切换 |
-| `Open UI/Core/Models/CalendarModels.swift` | OWCalendar、CalendarEvent、CreateRequest | 字段解析、后端兼容 |
-| `Open UI/Core/Services/LocalCalendarService.swift` | EventKit 本机日历权限和读写 | iOS 系统日历同步、权限 |
-| `Open UI/Core/Networking/APIClient.swift` | `getCalendars/getCalendarEvents/createCalendarEvent/deleteCalendarEvent` | 后端日历 |
+| `Iexa UI/Features/Calendar/Views/CalendarView.swift` | 日历 UI：年/月/周/日视图、UICalendarView bridge、农历显示 | 日历外观、农历、日期选择、事件块 |
+| `Iexa UI/Features/Calendar/ViewModels/CalendarViewModel.swift` | 加载 calendar/event、月份范围、增删事件 | 事件加载、创建/删除、视图切换 |
+| `Iexa UI/Core/Models/CalendarModels.swift` | OWCalendar、CalendarEvent、CreateRequest | 字段解析、后端兼容 |
+| `Iexa UI/Core/Services/LocalCalendarService.swift` | EventKit 本机日历权限和读写 | iOS 系统日历同步、权限 |
+| `Iexa UI/Core/Networking/APIClient.swift` | `getCalendars/getCalendarEvents/createCalendarEvent/deleteCalendarEvent` | 后端日历 |
 
 农历显示：
 
@@ -340,13 +340,13 @@ flowchart LR
 
 | 文件 | 作用 | 常改场景 |
 | --- | --- | --- |
-| `Open UI/Features/Settings/Views/SettingsView.swift` | 设置首页、聊天行为、默认模型、TTS/STT、通知、退出 | 聊天行为开关、默认模型、语音配置 |
-| `Open UI/Features/Settings/Views/AppearanceSettingsView.swift` | 外观设置 | 主题、暗色、字体 |
-| `Open UI/Features/Settings/Views/AccessibilitySettingsView.swift` | 可访问性 | 字体、动画、辅助功能 |
-| `Open UI/Features/Settings/Views/ServerManagementView.swift` | 服务器管理 | 增删服务器 |
-| `Open UI/Features/Settings/Views/ProfileView.swift` | 用户资料 | 头像、昵称 |
-| `Open UI/Features/Settings/Views/MemoriesView.swift` | 记忆管理 | memory UI |
-| `Open UI/Features/Settings/Views/LocalSkillsSettingsView.swift` | 本地 skills | 本地技能 |
+| `Iexa UI/Features/Settings/Views/SettingsView.swift` | 设置首页、聊天行为、默认模型、TTS/STT、通知、退出 | 聊天行为开关、默认模型、语音配置 |
+| `Iexa UI/Features/Settings/Views/AppearanceSettingsView.swift` | 外观设置 | 主题、暗色、字体 |
+| `Iexa UI/Features/Settings/Views/AccessibilitySettingsView.swift` | 可访问性 | 字体、动画、辅助功能 |
+| `Iexa UI/Features/Settings/Views/ServerManagementView.swift` | 服务器管理 | 增删服务器 |
+| `Iexa UI/Features/Settings/Views/ProfileView.swift` | 用户资料 | 头像、昵称 |
+| `Iexa UI/Features/Settings/Views/MemoriesView.swift` | 记忆管理 | memory UI |
+| `Iexa UI/Features/Settings/Views/LocalSkillsSettingsView.swift` | 本地 skills | 本地技能 |
 
 聊天行为设置重点在 `ChatSettingsView`，通常通过 `@AppStorage` 写 UserDefaults，然后 `ChatViewModel` 或输入栏观察变化。
 
@@ -354,15 +354,15 @@ flowchart LR
 
 | 文件 | 作用 | 常改场景 |
 | --- | --- | --- |
-| `Open UI/Features/Workspace/Views/ModelListView.swift` / `ModelEditorView.swift` | 模型列表和编辑 | 模型参数、能力、头像、默认值 |
-| `Open UI/Core/Services/ModelManager.swift` | 模型 API 封装 | 模型 CRUD |
-| `Open UI/Core/Models/AIModel.swift` | 聊天模型基础结构、actions、capabilities | 模型能力判断 |
-| `Open UI/Core/Models/WorkspaceModels.swift` | Prompt/Knowledge/Skill/Tool/Function/Model detail | Workspace 数据模型 |
-| `Open UI/Core/Services/PromptManager.swift` | Prompt CRUD | Prompt 管理 |
-| `Open UI/Core/Services/KnowledgeManager.swift` | 知识库 CRUD | 知识库 |
-| `Open UI/Core/Services/SkillsManager.swift` | Skill CRUD | Skills |
-| `Open UI/Core/Services/ToolsManager.swift` | Tool CRUD | Tools |
-| `Open UI/Core/Services/FunctionsManager.swift` | Admin Functions CRUD | 函数工具 |
+| `Iexa UI/Features/Workspace/Views/ModelListView.swift` / `ModelEditorView.swift` | 模型列表和编辑 | 模型参数、能力、头像、默认值 |
+| `Iexa UI/Core/Services/ModelManager.swift` | 模型 API 封装 | 模型 CRUD |
+| `Iexa UI/Core/Models/AIModel.swift` | 聊天模型基础结构、actions、capabilities | 模型能力判断 |
+| `Iexa UI/Core/Models/WorkspaceModels.swift` | Prompt/Knowledge/Skill/Tool/Function/Model detail | Workspace 数据模型 |
+| `Iexa UI/Core/Services/PromptManager.swift` | Prompt CRUD | Prompt 管理 |
+| `Iexa UI/Core/Services/KnowledgeManager.swift` | 知识库 CRUD | 知识库 |
+| `Iexa UI/Core/Services/SkillsManager.swift` | Skill CRUD | Skills |
+| `Iexa UI/Core/Services/ToolsManager.swift` | Tool CRUD | Tools |
+| `Iexa UI/Core/Services/FunctionsManager.swift` | Admin Functions CRUD | 函数工具 |
 
 模型能力影响聊天：
 
@@ -374,8 +374,8 @@ flowchart LR
 
 | 目录/文件 | 作用 |
 | --- | --- |
-| `Open UI/Features/Admin/Views/AdminConsoleView.swift` | 管理后台主入口 |
-| `Open UI/Features/Admin/ViewModels/AdminViewModel.swift` | 管理后台主 VM |
+| `Iexa UI/Features/Admin/Views/AdminConsoleView.swift` | 管理后台主入口 |
+| `Iexa UI/Features/Admin/ViewModels/AdminViewModel.swift` | 管理后台主 VM |
 | `AdminGeneralSettingsViewModel.swift` | 通用设置 |
 | `AdminConnectionsViewModel.swift` | 连接配置 |
 | `AdminImagesViewModel.swift` | 图片模型/图片配置 |
@@ -403,18 +403,18 @@ flowchart TD
 
 | 文件 | 作用 | 常改场景 |
 | --- | --- | --- |
-| `Open UI/Core/Services/DictationService.swift` | 输入框听写状态机，server/on-device 切换 | 说句话转半天、听写失败 |
-| `Open UI/Core/Services/OnDeviceASRService.swift` | 本地 ASR 模型下载/加载/转写/后台暂停 | Qwen/Parakeet 下载、Processing 卡住 |
-| `Open UI/Core/Services/ServerSpeechRecognitionService.swift` | 服务端 STT 上传 | 服务端听写 |
-| `Open UI/Core/Services/SpeechRecognitionService.swift` | Apple Speech | 系统语音识别 |
-| `Open UI/Core/Services/TextToSpeechService.swift` | TTS 总入口，system/server/kokoro | 朗读、流式朗读、声音选择 |
-| `Open UI/Core/Services/MLXTextToSpeechService.swift` | Kokoro/MLX TTS | 本地 TTS 模型 |
-| `Open UI/Features/VoiceCall/ViewModels/VoiceCallViewModel.swift` | 语音通话逻辑 | 语音通话 |
-| `Open UI/Features/VoiceCall/Views/*.swift` | 通话 UI 和悬浮 pill | 通话界面 |
+| `Iexa UI/Core/Services/DictationService.swift` | 输入框听写状态机，server/on-device 切换 | 说句话转半天、听写失败 |
+| `Iexa UI/Core/Services/OnDeviceASRService.swift` | 本地 ASR 模型下载/加载/转写/后台暂停 | Qwen/Parakeet 下载、Processing 卡住 |
+| `Iexa UI/Core/Services/ServerSpeechRecognitionService.swift` | 服务端 STT 上传 | 服务端听写 |
+| `Iexa UI/Core/Services/SpeechRecognitionService.swift` | Apple Speech | 系统语音识别 |
+| `Iexa UI/Core/Services/TextToSpeechService.swift` | TTS 总入口，system/server/kokoro | 朗读、流式朗读、声音选择 |
+| `Iexa UI/Core/Services/MLXTextToSpeechService.swift` | Kokoro/MLX TTS | 本地 TTS 模型 |
+| `Iexa UI/Features/VoiceCall/ViewModels/VoiceCallViewModel.swift` | 语音通话逻辑 | 语音通话 |
+| `Iexa UI/Features/VoiceCall/Views/*.swift` | 通话 UI 和悬浮 pill | 通话界面 |
 
 后台安全点：
 
-- `Open_UIApp` 在进入后台时会停止/卸载 MLX 相关模型，避免 iOS 后台 GPU 崩溃。
+- `Iexa_UIApp` 在进入后台时会停止/卸载 MLX 相关模型，避免 iOS 后台 GPU 崩溃。
 - ASR 卡住时同时查 `DictationService.state` 和 `OnDeviceASRService.state`。
 
 ## 15. Notes、Channels、Automations、Archive
@@ -431,7 +431,7 @@ flowchart TD
 
 | 文件 | 作用 |
 | --- | --- |
-| `Open UI/Shared/Theme/AppTheme.swift` | 主题入口 |
+| `Iexa UI/Shared/Theme/AppTheme.swift` | 主题入口 |
 | `ColorTokens.swift` | 颜色 token |
 | `Typography.swift` | 字体 |
 | `DesignTokens.swift` | 间距、圆角等 |
@@ -454,18 +454,18 @@ flowchart TD
 | `MarkdownView/Sources/MarkdownView/Components/CodeView` | 包内代码视图 |
 | `MarkdownView/Tests` | Markdown 包测试 |
 
-一般聊天里的代码块外观优先改 `Open UI/Shared/Components/StreamingMarkdownView.swift`，只有 parser 或底层 Markdown 包问题才改 `MarkdownView/`。
+一般聊天里的代码块外观优先改 `Iexa UI/Shared/Components/StreamingMarkdownView.swift`，只有 parser 或底层 Markdown 包问题才改 `MarkdownView/`。
 
 ## 18. Widget / Live Activity
 
 | 文件 | 作用 |
 | --- | --- |
-| `OpenUIWidgets/OpenUIWidgetsBundle.swift` | Widget bundle |
-| `OpenUIWidgets/OpenUIWidgets.swift` | Widget 入口 |
-| `OpenUIWidgets/OpenUIWidgetsLiveActivity.swift` | Live Activity |
-| `OpenUIWidgets/OpenUIWidgetsControl.swift` | Control Center widget |
-| `Open UI/Core/Services/SharedDataService.swift` | App 和 Widget 共享数据 |
-| `Open UI/Core/Services/RunLiveActivityService.swift` | 聊天/本地 Alpine 运行 Live Activity |
+| `IexaUIWidgets/IexaUIWidgetsBundle.swift` | Widget bundle |
+| `IexaUIWidgets/IexaUIWidgets.swift` | Widget 入口 |
+| `IexaUIWidgets/IexaUIWidgetsLiveActivity.swift` | Live Activity |
+| `IexaUIWidgets/IexaUIWidgetsControl.swift` | Control Center widget |
+| `Iexa UI/Core/Services/SharedDataService.swift` | App 和 Widget 共享数据 |
+| `Iexa UI/Core/Services/RunLiveActivityService.swift` | 聊天/本地 Alpine 运行 Live Activity |
 
 CI 无证书 IPA 会去掉 extension 插件；有证书构建要给主 App 和 Widget 分别配 provisioning profile。
 
@@ -515,7 +515,7 @@ flowchart LR
 | 管理后台设置 | `Features/Admin/ViewModels/*`, `Features/Admin/Views/*`, `APIClient.swift` |
 | 语音输入/听写 | `DictationService.swift`, `OnDeviceASRService.swift`, `ServerSpeechRecognitionService.swift`, `ChatInputField.swift` |
 | TTS/朗读 | `TextToSpeechService.swift`, `MLXTextToSpeechService.swift`, `SettingsView.swift` |
-| Widget/Live Activity | `OpenUIWidgets/*`, `SharedDataService.swift`, `RunLiveActivityService.swift` |
+| Widget/Live Activity | `IexaUIWidgets/*`, `SharedDataService.swift`, `RunLiveActivityService.swift` |
 | IPA 构建 | `scripts/trigger-clean-ipa-build.ps1`, `.github/workflows/build-ios-ipa.yml` |
 
 ## 21. 修改时的安全边界
@@ -542,13 +542,13 @@ flowchart LR
 rg --files -g "!build" -g "!DerivedData" -g "!.git" -g "!*.ipa" -g "!*.xcarchive"
 
 # 找 Swift 类型入口
-rg -n "^(struct|final class|class|actor|enum|protocol|extension) " "Open UI"
+rg -n "^(struct|final class|class|actor|enum|protocol|extension) " "Iexa UI"
 
 # 找聊天发送链路
-rg -n "sendMessage|buildAPIMessagesAsync|buildChatFeatures|scheduleLocalAlpine|executeLocalAlpine|resolveWebSearch" "Open UI/Features/Chat/ViewModels/ChatViewModel.swift"
+rg -n "sendMessage|buildAPIMessagesAsync|buildChatFeatures|scheduleLocalAlpine|executeLocalAlpine|resolveWebSearch" "Iexa UI/Features/Chat/ViewModels/ChatViewModel.swift"
 
 # 找 API 方法
-rg -n "func .*async throws" "Open UI/Core/Networking/APIClient.swift"
+rg -n "func .*async throws" "Iexa UI/Core/Networking/APIClient.swift"
 
 # 本地静态 whitespace 检查
 git diff --check

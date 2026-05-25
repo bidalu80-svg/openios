@@ -9,7 +9,7 @@
 /* Begin PBXBuildFile section */
 		3852C70F2F71110800283682 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3852C70E2F71110800283682 /* WidgetKit.framework */; };
 		3852C7112F71110800283682 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3852C7102F71110800283682 /* SwiftUI.framework */; };
-		3852C7222F71110900283682 /* OpenUIWidgetsExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 3852C70C2F71110800283682 /* OpenUIWidgetsExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		3852C7222F71110900283682 /* IexaUIWidgetsExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 3852C70C2F71110800283682 /* IexaUIWidgetsExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		38754A972F845BE60012CD28 /* ReactionContextMenu in Frameworks */ = {isa = PBXBuildFile; productRef = 38754A962F845BE60012CD28 /* ReactionContextMenu */; };
 		387CA40E2F882523000B5152 /* MarkdownParser in Frameworks */ = {isa = PBXBuildFile; productRef = 387CA40D2F882523000B5152 /* MarkdownParser */; };
 		387CA4102F882523000B5152 /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = 387CA40F2F882523000B5152 /* MarkdownView */; };
@@ -32,7 +32,7 @@
 			containerPortal = 38EB66752F39CE5A00AED774 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = 3852C70B2F71110800283682;
-			remoteInfo = OpenUIWidgetsExtension;
+			remoteInfo = IexaUIWidgetsExtension;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -43,7 +43,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				3852C7222F71110900283682 /* OpenUIWidgetsExtension.appex in Embed Foundation Extensions */,
+				3852C7222F71110900283682 /* IexaUIWidgetsExtension.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -51,44 +51,44 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		3852C70C2F71110800283682 /* OpenUIWidgetsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OpenUIWidgetsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		3852C70C2F71110800283682 /* IexaUIWidgetsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = IexaUIWidgetsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		3852C70E2F71110800283682 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		3852C7102F71110800283682 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		38EB667D2F39CE5A00AED774 /* Iexa.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Iexa.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		3852C7232F71110900283682 /* Exceptions for "OpenUIWidgets" folder in "OpenUIWidgetsExtension" target */ = {
+		3852C7232F71110900283682 /* Exceptions for "IexaUIWidgets" folder in "IexaUIWidgetsExtension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
 			);
-			target = 3852C70B2F71110800283682 /* OpenUIWidgetsExtension */;
+			target = 3852C70B2F71110800283682 /* IexaUIWidgetsExtension */;
 		};
-		38EB66802F39CE5B00AED774 /* Exceptions for "Open UI" folder in "Open UI" target */ = {
+		38EB66802F39CE5B00AED774 /* Exceptions for "Iexa UI" folder in "Iexa UI" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
 			);
-			target = 38EB667C2F39CE5A00AED774 /* Open UI */;
+			target = 38EB667C2F39CE5A00AED774 /* Iexa UI */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		3852C7122F71110800283682 /* OpenUIWidgets */ = {
+		3852C7122F71110800283682 /* IexaUIWidgets */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				3852C7232F71110900283682 /* Exceptions for "OpenUIWidgets" folder in "OpenUIWidgetsExtension" target */,
+				3852C7232F71110900283682 /* Exceptions for "IexaUIWidgets" folder in "IexaUIWidgetsExtension" target */,
 			);
-			path = OpenUIWidgets;
+			path = IexaUIWidgets;
 			sourceTree = "<group>";
 		};
-		38EB667F2F39CE5A00AED774 /* Open UI */ = {
+		38EB667F2F39CE5A00AED774 /* Iexa UI */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				38EB66802F39CE5B00AED774 /* Exceptions for "Open UI" folder in "Open UI" target */,
+				38EB66802F39CE5B00AED774 /* Exceptions for "Iexa UI" folder in "Iexa UI" target */,
 			);
-			path = "Open UI";
+			path = "Iexa UI";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -139,8 +139,8 @@
 		38EB66742F39CE5A00AED774 = {
 			isa = PBXGroup;
 			children = (
-				38EB667F2F39CE5A00AED774 /* Open UI */,
-				3852C7122F71110800283682 /* OpenUIWidgets */,
+				38EB667F2F39CE5A00AED774 /* Iexa UI */,
+				3852C7122F71110800283682 /* IexaUIWidgets */,
 				3852C70D2F71110800283682 /* Frameworks */,
 				38EB667E2F39CE5A00AED774 /* Products */,
 			);
@@ -150,7 +150,7 @@
 			isa = PBXGroup;
 			children = (
 				38EB667D2F39CE5A00AED774 /* Iexa.app */,
-				3852C70C2F71110800283682 /* OpenUIWidgetsExtension.appex */,
+				3852C70C2F71110800283682 /* IexaUIWidgetsExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -158,9 +158,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		3852C70B2F71110800283682 /* OpenUIWidgetsExtension */ = {
+		3852C70B2F71110800283682 /* IexaUIWidgetsExtension */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 3852C7242F71110900283682 /* Build configuration list for PBXNativeTarget "OpenUIWidgetsExtension" */;
+			buildConfigurationList = 3852C7242F71110900283682 /* Build configuration list for PBXNativeTarget "IexaUIWidgetsExtension" */;
 			buildPhases = (
 				3852C7082F71110800283682 /* Sources */,
 				3852C7092F71110800283682 /* Frameworks */,
@@ -171,18 +171,18 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				3852C7122F71110800283682 /* OpenUIWidgets */,
+				3852C7122F71110800283682 /* IexaUIWidgets */,
 			);
-			name = OpenUIWidgetsExtension;
+			name = IexaUIWidgetsExtension;
 			packageProductDependencies = (
 			);
-			productName = OpenUIWidgetsExtension;
-			productReference = 3852C70C2F71110800283682 /* OpenUIWidgetsExtension.appex */;
+			productName = IexaUIWidgetsExtension;
+			productReference = 3852C70C2F71110800283682 /* IexaUIWidgetsExtension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
-		38EB667C2F39CE5A00AED774 /* Open UI */ = {
+		38EB667C2F39CE5A00AED774 /* Iexa UI */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 38EB668D2F39CE5C00AED774 /* Build configuration list for PBXNativeTarget "Open UI" */;
+			buildConfigurationList = 38EB668D2F39CE5C00AED774 /* Build configuration list for PBXNativeTarget "Iexa UI" */;
 			buildPhases = (
 				38EB66792F39CE5A00AED774 /* Sources */,
 				38EB667A2F39CE5A00AED774 /* Frameworks */,
@@ -195,9 +195,9 @@
 				3852C7212F71110900283682 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				38EB667F2F39CE5A00AED774 /* Open UI */,
+				38EB667F2F39CE5A00AED774 /* Iexa UI */,
 			);
-			name = "Open UI";
+			name = "Iexa UI";
 			packageProductDependencies = (
 				38AA00002FA9B00000MRMAID /* BeautifulMermaid */,
 				38AA00032FA9B00000SVGDRW /* SwiftDraw */,
@@ -236,7 +236,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 38EB66782F39CE5A00AED774 /* Build configuration list for PBXProject "Open UI" */;
+			buildConfigurationList = 38EB66782F39CE5A00AED774 /* Build configuration list for PBXProject "Iexa UI" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -261,8 +261,8 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				38EB667C2F39CE5A00AED774 /* Open UI */,
-				3852C70B2F71110800283682 /* OpenUIWidgetsExtension */,
+				38EB667C2F39CE5A00AED774 /* Iexa UI */,
+				3852C70B2F71110800283682 /* IexaUIWidgetsExtension */,
 			);
 		};
 /* End PBXProject section */
@@ -304,7 +304,7 @@
 /* Begin PBXTargetDependency section */
 		3852C7212F71110900283682 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 3852C70B2F71110800283682 /* OpenUIWidgetsExtension */;
+			target = 3852C70B2F71110800283682 /* IexaUIWidgetsExtension */;
 			targetProxy = 3852C7202F71110900283682 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -315,12 +315,12 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
-				CODE_SIGN_ENTITLEMENTS = OpenUIWidgets/OpenUIWidgets.entitlements;
+				CODE_SIGN_ENTITLEMENTS = IexaUIWidgets/IexaUIWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_TEAM = 6ARX8PF3MT;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = OpenUIWidgets/Info.plist;
+				INFOPLIST_FILE = IexaUIWidgets/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Iexa;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Blank";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.1;
@@ -330,7 +330,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 3.7;
-				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.OpenUIWidget;
+				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.IexaUIWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -347,12 +347,12 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
-				CODE_SIGN_ENTITLEMENTS = OpenUIWidgets/OpenUIWidgets.entitlements;
+				CODE_SIGN_ENTITLEMENTS = IexaUIWidgets/IexaUIWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_TEAM = 6ARX8PF3MT;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = OpenUIWidgets/Info.plist;
+				INFOPLIST_FILE = IexaUIWidgets/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Iexa;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Blank";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.1;
@@ -362,7 +362,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 3.7;
-				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.OpenUIWidget;
+				PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.IexaUIWidget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -504,13 +504,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = IexaIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = "Open UI/Open UI.entitlements";
+				CODE_SIGN_ENTITLEMENTS = "Iexa UI/Iexa UI.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_TEAM = 6ARX8PF3MT;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "Open UI/Info.plist";
+				INFOPLIST_FILE = "Iexa UI/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Iexa;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
@@ -559,13 +559,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = IexaIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = "Open UI/Open UI.entitlements";
+				CODE_SIGN_ENTITLEMENTS = "Iexa UI/Iexa UI.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_TEAM = 6ARX8PF3MT;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "Open UI/Info.plist";
+				INFOPLIST_FILE = "Iexa UI/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Iexa;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
@@ -612,7 +612,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		3852C7242F71110900283682 /* Build configuration list for PBXNativeTarget "OpenUIWidgetsExtension" */ = {
+		3852C7242F71110900283682 /* Build configuration list for PBXNativeTarget "IexaUIWidgetsExtension" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				3852C7252F71110900283682 /* Debug */,
@@ -621,7 +621,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		38EB66782F39CE5A00AED774 /* Build configuration list for PBXProject "Open UI" */ = {
+		38EB66782F39CE5A00AED774 /* Build configuration list for PBXProject "Iexa UI" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				38EB668B2F39CE5C00AED774 /* Debug */,
@@ -630,7 +630,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		38EB668D2F39CE5C00AED774 /* Build configuration list for PBXNativeTarget "Open UI" */ = {
+		38EB668D2F39CE5C00AED774 /* Build configuration list for PBXNativeTarget "Iexa UI" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				38EB668E2F39CE5C00AED774 /* Debug */,

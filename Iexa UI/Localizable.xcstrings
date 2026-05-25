@@ -208362,236 +208362,236 @@
         }
       }
     },
-    "Open UI" : {
+    "Iexa UI" : {
       "comment" : "App name shown on the server connection screen",
       "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "az" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "bg" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "bo" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "bs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "ca" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "ceb" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "da" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "el" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "en-GB" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "et" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "eu" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "fi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "fr-CA" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "ga" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "gl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "hr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "hu" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "id" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "ka" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "kab" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "lt" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "lv" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "ms" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "nb" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "pa" : {
@@ -208603,31 +208603,31 @@
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "pt-PT" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "ro" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "sk" : {
@@ -208639,7 +208639,7 @@
         "sr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "sv" : {
@@ -208651,7 +208651,7 @@
         "th" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "tk" : {
@@ -208663,25 +208663,25 @@
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "ug" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "ur" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "uz" : {
@@ -208693,19 +208693,19 @@
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open UI"
+            "value" : "Iexa UI"
           }
         }
       }

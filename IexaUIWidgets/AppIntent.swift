@@ -1,9 +1,9 @@
 //
 //  AppIntent.swift
-//  OpenUIWidgets
+//  IexaUIWidgets
 //
 //  App intents for the widget extension.
-//  The Control Center "New Chat" intent lives in OpenUIWidgetsControl.swift.
+//  The Control Center "New Chat" intent lives in IexaUIWidgetsControl.swift.
 //
 
 import WidgetKit

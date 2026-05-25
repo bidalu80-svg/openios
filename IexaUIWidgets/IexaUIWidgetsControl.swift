@@ -1,6 +1,6 @@
 //
-//  OpenUIWidgetsControl.swift
-//  OpenUIWidgets
+//  IexaUIWidgetsControl.swift
+//  IexaUIWidgets
 //
 //  Control Center widget (iOS 18+) — one-tap "新对话" button.
 //
@@ -11,8 +11,8 @@ import WidgetKit
 
 // MARK: - New Chat Control Button
 
-struct OpenUIWidgetsControl: ControlWidget {
-    static let kind: String = "com.openui.openui.OpenUINewChatControl"
+struct IexaUIWidgetsControl: ControlWidget {
+    static let kind: String = "com.openui.openui.IexaUINewChatControl"
 
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: Self.kind) {
@@ -37,7 +37,7 @@ struct OpenNewChatControlIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & OpensIntent {
         // Open the app via the deep link URL, which triggers the .onOpenURL
-        // handler in Open_UIApp.swift — the same path used by the home screen widget.
+        // handler in Iexa_UIApp.swift — the same path used by the home screen widget.
         // This is far more reliable than the cross-process UserDefaults relay, which
         // had a race condition where the main app might read before the value was set.
         return .result(opensIntent: OpenURLIntent(URL(string: "openui://new-chat")!))

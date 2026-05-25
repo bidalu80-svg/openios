@@ -1,6 +1,6 @@
 //
-//  OpenUIWidgets.swift
-//  OpenUIWidgets
+//  IexaUIWidgets.swift
+//  IexaUIWidgets
 //
 //  Iexa widget suite — action-focused, instant-launch widgets.
 //  Modern adaptive design: supports Default, Dark, Clear, and Tinted modes.
@@ -12,7 +12,7 @@ import SwiftUI
 
 // MARK: - Deep Link URLs
 
-private enum OpenUIURL {
+private enum IexaUIURL {
     static let newChat    = URL(string: "openui://new-chat")!
     static let voiceCall  = URL(string: "openui://voice-call")!
     static let cameraChat = URL(string: "openui://camera-chat")!
@@ -45,7 +45,7 @@ struct StaticActionProvider: TimelineProvider {
 // MARK: ═══════════════════════════════════════════
 
 struct QuickActionsWidget: Widget {
-    let kind = "OpenUIQuickActions"
+    let kind = "IexaUIQuickActions"
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: StaticActionProvider()) { _ in
             QuickActionsWidgetView()
@@ -92,7 +92,7 @@ struct QuickActionsSmallView: View {
             VStack(spacing: gap) {
                 HStack(spacing: gap) {
                     // App icon (new chat)
-                    Link(destination: OpenUIURL.newChat) {
+                    Link(destination: IexaUIURL.newChat) {
                         SmallCircleButton(size: size) {
                             Image("AppIconImage")
                                 .resizable()
@@ -103,7 +103,7 @@ struct QuickActionsSmallView: View {
                         }
                     }
                     // Mic (voice call)
-                    Link(destination: OpenUIURL.voiceCall) {
+                    Link(destination: IexaUIURL.voiceCall) {
                         SmallCircleButton(size: size) {
                             Image(systemName: "mic.fill")
                                 .font(.system(size: size * 0.34, weight: .bold))
@@ -114,7 +114,7 @@ struct QuickActionsSmallView: View {
                 }
                 HStack(spacing: gap) {
                     // Camera
-                    Link(destination: OpenUIURL.cameraChat) {
+                    Link(destination: IexaUIURL.cameraChat) {
                         SmallCircleButton(size: size) {
                             Image(systemName: "camera.fill")
                                 .font(.system(size: size * 0.34, weight: .bold))
@@ -123,7 +123,7 @@ struct QuickActionsSmallView: View {
                         }
                     }
                     // Files
-                    Link(destination: OpenUIURL.fileChat) {
+                    Link(destination: IexaUIURL.fileChat) {
                         SmallCircleButton(size: size) {
                             Image(systemName: "paperclip")
                                 .font(.system(size: size * 0.34, weight: .bold))
@@ -177,10 +177,10 @@ struct QuickActionsMediumView: View {
 
                 // ── Action buttons: Camera · Photos · Channel · Files ──
                 HStack(spacing: 0) {
-                    MediumActionButton(systemName: "camera.fill",  label: "Camera",  url: OpenUIURL.cameraChat)
-                    MediumActionButton(systemName: "photo.fill",   label: "Photos",  url: OpenUIURL.photosChat)
-                    MediumActionButton(systemName: "number",       label: "Channel", url: OpenUIURL.newChannel)
-                    MediumActionButton(systemName: "paperclip",    label: "Files",   url: OpenUIURL.fileChat)
+                    MediumActionButton(systemName: "camera.fill",  label: "Camera",  url: IexaUIURL.cameraChat)
+                    MediumActionButton(systemName: "photo.fill",   label: "Photos",  url: IexaUIURL.photosChat)
+                    MediumActionButton(systemName: "number",       label: "Channel", url: IexaUIURL.newChannel)
+                    MediumActionButton(systemName: "paperclip",    label: "Files",   url: IexaUIURL.fileChat)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -196,7 +196,7 @@ private struct MediumSearchBar: View {
     var body: some View {
         ZStack(alignment: .trailing) {
             // Primary: entire bar → new chat
-            Link(destination: OpenUIURL.newChat) {
+            Link(destination: IexaUIURL.newChat) {
                 HStack(spacing: 10) {
                     Image("AppIconImage")
                         .resizable()
@@ -217,7 +217,7 @@ private struct MediumSearchBar: View {
             }
 
             // Mic overlay → voice call
-            Link(destination: OpenUIURL.voiceCall) {
+            Link(destination: IexaUIURL.voiceCall) {
                 Image(systemName: "mic.fill")
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(.secondary)
@@ -288,7 +288,7 @@ private struct MediumActionButton: View {
 // MARK: ═══════════════════════════════════════════
 
 struct LockScreenWidget: Widget {
-    let kind = "OpenUILockScreen"
+    let kind = "IexaUILockScreen"
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: StaticActionProvider()) { _ in
             LockScreenWidgetView()
@@ -306,7 +306,7 @@ struct LockScreenWidgetView: View {
     var body: some View {
         switch family {
         case .accessoryCircular:
-            Link(destination: OpenUIURL.newChat) {
+            Link(destination: IexaUIURL.newChat) {
                 ZStack {
                     AccessoryWidgetBackground()
                     Image(systemName: "bubble.left.and.text.bubble.right.fill")
@@ -315,7 +315,7 @@ struct LockScreenWidgetView: View {
                 }
             }
         case .accessoryRectangular:
-            Link(destination: OpenUIURL.newChat) {
+            Link(destination: IexaUIURL.newChat) {
                 HStack(spacing: 8) {
                     Image(systemName: "bubble.left.and.text.bubble.right.fill")
                         .font(.system(size: 14, weight: .semibold))
@@ -331,11 +331,11 @@ struct LockScreenWidgetView: View {
                 }
             }
         case .accessoryInline:
-            Link(destination: OpenUIURL.newChat) {
+            Link(destination: IexaUIURL.newChat) {
                 Label("Ask Iexa", systemImage: "bubble.left.and.text.bubble.right.fill")
             }
         default:
-            Link(destination: OpenUIURL.newChat) {
+            Link(destination: IexaUIURL.newChat) {
                 Image(systemName: "bubble.left.and.text.bubble.right.fill")
                     .widgetAccentable()
             }

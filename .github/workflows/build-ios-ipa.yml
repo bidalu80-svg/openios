@@ -170,7 +170,7 @@ jobs:
           from pathlib import Path
 
           app_bundle_id = os.environ.get('IOS_BUNDLE_ID') or 'com.openui.openui'
-          widget_bundle_id = os.environ.get('IOS_WIDGET_BUNDLE_ID') or f'{app_bundle_id}.OpenUIWidget'
+          widget_bundle_id = os.environ.get('IOS_WIDGET_BUNDLE_ID') or f'{app_bundle_id}.IexaUIWidget'
           team_id = os.environ.get('IOS_TEAM_ID', '')
           identity = os.environ.get('IOS_SIGNING_IDENTITY', '')
           profile = os.environ.get('IOS_PROVISIONING_PROFILE_SPECIFIER', '')
@@ -178,13 +178,13 @@ jobs:
           has_signing = os.environ.get('HAS_SIGNING_SECRETS') == 'true'
           has_widget_signing = os.environ.get('HAS_WIDGET_SIGNING') == 'true'
 
-          p = Path('Open UI.xcodeproj/project.pbxproj')
+          p = Path('Iexa UI.xcodeproj/project.pbxproj')
           s = p.read_text()
 
           # The available provisioning profile does not include Iexa's optional
           # app-group/GPU/memory entitlements, so disable them for CI packaging.
-          s = s.replace('CODE_SIGN_ENTITLEMENTS = "Open UI/Open UI.entitlements";', 'CODE_SIGN_ENTITLEMENTS = "";')
-          s = s.replace('CODE_SIGN_ENTITLEMENTS = OpenUIWidgets/OpenUIWidgets.entitlements;', 'CODE_SIGN_ENTITLEMENTS = "";')
+          s = s.replace('CODE_SIGN_ENTITLEMENTS = "Iexa UI/Iexa UI.entitlements";', 'CODE_SIGN_ENTITLEMENTS = "";')
+          s = s.replace('CODE_SIGN_ENTITLEMENTS = IexaUIWidgets/IexaUIWidgets.entitlements;', 'CODE_SIGN_ENTITLEMENTS = "";')
 
           # A Live Activity/Dynamic Island widget is a separate extension and
           # must be signed with a matching extension provisioning profile. If CI
@@ -194,12 +194,12 @@ jobs:
               for object_id, label in [
                   ('38A141942F4B9A1A00697C6F', 'Embed Foundation Extensions'),
                   ('3852C7212F71110900283682', 'PBXTargetDependency'),
-                  ('3852C70B2F71110800283682', 'OpenUIWidgetsExtension'),
-                  ('3852C70C2F71110800283682', 'OpenUIWidgetsExtension.appex'),
+                  ('3852C70B2F71110800283682', 'IexaUIWidgetsExtension'),
+                  ('3852C70C2F71110800283682', 'IexaUIWidgetsExtension.appex'),
               ]:
                   s = re.sub(rf'\n\t+{object_id} /\* {re.escape(label)} \*/,', '', s)
 
-          s = s.replace('PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.OpenUIWidget;', f'PRODUCT_BUNDLE_IDENTIFIER = {widget_bundle_id};')
+          s = s.replace('PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui.IexaUIWidget;', f'PRODUCT_BUNDLE_IDENTIFIER = {widget_bundle_id};')
           s = s.replace('PRODUCT_BUNDLE_IDENTIFIER = com.openui.openui;', f'PRODUCT_BUNDLE_IDENTIFIER = {app_bundle_id};')
 
           if has_signing:
@@ -220,7 +220,7 @@ jobs:
                       )
 
                   s = re.sub(
-                      r'CODE_SIGN_STYLE = Manual;\n(?:.*\n){0,12}?\t+INFOPLIST_FILE = OpenUIWidgets/Info.plist;',
+                      r'CODE_SIGN_STYLE = Manual;\n(?:.*\n){0,12}?\t+INFOPLIST_FILE = IexaUIWidgets/Info.plist;',
                       use_widget_profile,
                       s,
                   )
@@ -232,7 +232,7 @@ jobs:
         if: env.HAS_SIGNING_SECRETS == 'true'
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
-          WIDGET_BUNDLE_ID="${IOS_WIDGET_BUNDLE_ID:-${APP_BUNDLE_ID}.OpenUIWidget}"
+          WIDGET_BUNDLE_ID="${IOS_WIDGET_BUNDLE_ID:-${APP_BUNDLE_ID}.IexaUIWidget}"
           EFFECTIVE_EXPORT_METHOD="${IOS_EFFECTIVE_EXPORT_METHOD:-release-testing}"
           cat > ExportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -272,7 +272,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('Open UI.xcodeproj/project.pbxproj')
+          p = Path('Iexa UI.xcodeproj/project.pbxproj')
           s = p.read_text()
           # CI checks out this repository as the workspace root, so the local
           # MarkdownView package lives inside the repo instead of beside it.
@@ -283,8 +283,8 @@ jobs:
       - name: Prepare bundled Local Alpine rootfs
         run: |
           bash scripts/prepare-local-alpine-rootfs.sh
-          test -s "Open UI/Resources/iexa-alpine-rootfs.tar.gz"
-          tar -tzf "Open UI/Resources/iexa-alpine-rootfs.tar.gz" | sed 's#^\./##' > "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"
+          test -s "Iexa UI/Resources/iexa-alpine-rootfs.tar.gz"
+          tar -tzf "Iexa UI/Resources/iexa-alpine-rootfs.tar.gz" | sed 's#^\./##' > "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"
           required_exact_paths=(
             bin/busybox
             bin/sh
@@ -322,7 +322,7 @@ jobs:
           mkdir -p ".build/local-alpine-resources"
           bash scripts/prepare-local-alpine-fakefs.sh \
             External/ish \
-            "Open UI/Resources/iexa-alpine-rootfs.tar.gz" \
+            "Iexa UI/Resources/iexa-alpine-rootfs.tar.gz" \
             ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs"
           test -d ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/data"
           test -s ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db"
@@ -347,7 +347,7 @@ jobs:
           done
           bash scripts/build-local-alpine-ish-ci.sh External/ish "$RUNNER_TEMP/ish-products"
           bash scripts/enable-local-alpine-ish-ci.sh \
-            "Open UI.xcodeproj/project.pbxproj" \
+            "Iexa UI.xcodeproj/project.pbxproj" \
             "$RUNNER_TEMP/ish-products" \
             "External/ish" \
             ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs"
@@ -359,8 +359,8 @@ jobs:
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
           xcodebuild \
-            -project "Open UI.xcodeproj" \
-            -scheme "Open UI" \
+            -project "Iexa UI.xcodeproj" \
+            -scheme "Iexa UI" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
@@ -388,8 +388,8 @@ jobs:
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
           mkdir -p "$RUNNER_TEMP/exported" "$RUNNER_TEMP/unsigned-build-app" "$RUNNER_TEMP/unsigned-ipa/Payload"
           xcodebuild \
-            -project "Open UI.xcodeproj" \
-            -scheme "Open UI" \
+            -project "Iexa UI.xcodeproj" \
+            -scheme "Iexa UI" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             TARGET_BUILD_DIR="$RUNNER_TEMP/unsigned-build-app" \

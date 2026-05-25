@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-project_file="${1:-Open UI.xcodeproj/project.pbxproj}"
+project_file="${1:-Iexa UI.xcodeproj/project.pbxproj}"
 ish_products="${2:-$PWD/.build/ish-products}"
 ish_dir="${3:-External/ish}"
 fakefs_dir="${4:-.build/local-alpine-resources/iexa-alpine-rootfs.fakefs}"

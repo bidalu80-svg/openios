@@ -9,7 +9,7 @@ The Iexa side now looks for these optional native symbols at runtime:
 They are declared in:
 
 ```text
-Open UI/Core/Services/LocalAlpineNativeRuntimeABI.h
+Iexa UI/Core/Services/LocalAlpineNativeRuntimeABI.h
 ```
 
 This keeps Open Terminal and provider requests isolated. If the symbols are not
@@ -36,7 +36,7 @@ The lower-level pieces needed for a headless command runner are:
 - `libfakefs.a`
 - fakefs import/export helpers from `tools/fakefs.*`
 - boot/exec calls from `kernel/init.h`, `kernel/calls.h`, `kernel/task.h`
-- rootfs archive `Open UI/Resources/iexa-alpine-rootfs.tar.gz`
+- rootfs archive `Iexa UI/Resources/iexa-alpine-rootfs.tar.gz`
 
 Prepare a complete iSH checkout with:
 
@@ -71,7 +71,7 @@ Storyboard/UI targets inside Iexa.
 
 ## Current Native File
 
-`Open UI/Core/Services/LocalAlpineNativeRuntimeBridge.c` contains a gated native adapter:
+`Iexa UI/Core/Services/LocalAlpineNativeRuntimeBridge.c` contains a gated native adapter:
 
 - default build: exports the ABI and returns unavailable
 - `IEXA_LOCAL_ALPINE_ISH=1`: boots iSH low-level core, mounts fakefs rootfs,

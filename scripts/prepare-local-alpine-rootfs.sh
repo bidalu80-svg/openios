@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-output_path="${1:-Open UI/Resources/iexa-alpine-rootfs.tar.gz}"
+output_path="${1:-Iexa UI/Resources/iexa-alpine-rootfs.tar.gz}"
 rootfs_url="${IEXA_ALPINE_ROOTFS_URL:-https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86/alpine-minirootfs-3.19.9-x86.tar.gz}"
 expected_sha256="${IEXA_ALPINE_ROOTFS_SHA256:-8b85e1c9c743704eda40f69cd82c80ac3805732eb0906f35c870b44d91e1818d}"
 preinstall_packages="${IEXA_ALPINE_PREINSTALL_PACKAGES:-}"

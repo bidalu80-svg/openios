@@ -22,7 +22,7 @@ import MLX
 final class AppDelegate: NSObject, UIApplicationDelegate {
 
     /// Pending shortcut action type string, set by the scene delegate.
-    /// Consumed by the `scenePhase == .active` handler in `Open_UIApp`.
+    /// Consumed by the `scenePhase == .active` handler in `Iexa_UIApp`.
     static var pendingShortcutAction: String?
 
     /// Return a scene configuration that uses our custom SceneDelegate.
@@ -75,7 +75,7 @@ final class ShortcutSceneDelegate: UIResponder, UIWindowSceneDelegate {
 }
 
 @main
-struct Open_UIApp: App {
+struct Iexa_UIApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var dependencies = AppDependencyContainer()
     @State private var router = AppRouter()

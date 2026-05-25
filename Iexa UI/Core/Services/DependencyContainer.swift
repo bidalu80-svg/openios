@@ -300,7 +300,7 @@ final class AppDependencyContainer: ServiceContainer {
 
     /// A file received from another app via "Open In" / iOS share sheet,
     /// waiting to be injected into the chat input by ``ChatDetailView``.
-    /// Set by ``handleIncomingFileURL`` in ``Open_UIApp``, consumed once by the view.
+    /// Set by ``handleIncomingFileURL`` in ``Iexa_UIApp``, consumed once by the view.
     var pendingIncomingFile: ChatAttachment?
 
     /// Incremented each time a new incoming file arrives.

@@ -111,14 +111,14 @@ cd openios
 ### 2. Open in Xcode
 
 ```bash
-open "Open UI.xcodeproj"
+open "Iexa UI.xcodeproj"
 ```
 
 > Xcode will automatically fetch all Swift Package dependencies on first open. This may take a minute.
 
 ### 3. Configure Signing
 
-1. Select the **Open UI** target in the Project Navigator
+1. Select the **Iexa UI** target in the Project Navigator
 2. Go to **Signing & Capabilities**
 3. Choose your **Development Team**
 4. Update the **Bundle Identifier** if needed

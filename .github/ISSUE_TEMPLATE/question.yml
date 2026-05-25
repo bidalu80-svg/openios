@@ -1,5 +1,5 @@
 name: "❓ Question / Help"
-description: "Ask about setup, configuration, or how to use Open UI."
+description: "Ask about setup, configuration, or how to use Iexa UI."
 labels: ["question"]
 body:
   - type: markdown

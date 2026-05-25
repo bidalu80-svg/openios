@@ -13,7 +13,7 @@ This project now has an isolated Local Alpine terminal slot next to the existing
 The source root archive lives at:
 
 ```text
-Open UI/Resources/iexa-alpine-rootfs.tar.gz
+Iexa UI/Resources/iexa-alpine-rootfs.tar.gz
 ```
 
 It is prepared from Alpine's latest stable x86 minirootfs. The bundled archive
@@ -36,7 +36,7 @@ The GitHub Actions IPA workflow verifies this file, converts it with iSH's
 `fakefsify`, and bundles the generated directory resource:
 
 ```text
-Open UI/Resources/iexa-alpine-rootfs.fakefs/
+Iexa UI/Resources/iexa-alpine-rootfs.fakefs/
 ```
 
 On first local command execution, Iexa copies that bundled fakefs directory into:
@@ -70,20 +70,20 @@ workspace mount.
 The Swift-side insertion point is:
 
 ```text
-Open UI/Core/Services/LocalAlpineTerminalService.swift
-Open UI/Core/Services/LocalAlpineNativeRuntime.swift
-Open UI/Core/Services/LocalAlpineNativeRuntimeABI.h
-Open UI/Core/Services/LocalAlpineNativeRuntimeBridge.c
+Iexa UI/Core/Services/LocalAlpineTerminalService.swift
+Iexa UI/Core/Services/LocalAlpineNativeRuntime.swift
+Iexa UI/Core/Services/LocalAlpineNativeRuntimeABI.h
+Iexa UI/Core/Services/LocalAlpineNativeRuntimeBridge.c
 ```
 
 The UI and chat state already route Local Alpine separately through:
 
 ```text
-Open UI/Core/Models/Terminal.swift
-Open UI/Features/Terminal/ViewModels/TerminalBrowserViewModel.swift
-Open UI/Features/Chat/ViewModels/ChatViewModel.swift
-Open UI/Features/Chat/Views/MainChatView.swift
-Open UI/Features/Chat/Views/iPadMainChatView.swift
+Iexa UI/Core/Models/Terminal.swift
+Iexa UI/Features/Terminal/ViewModels/TerminalBrowserViewModel.swift
+Iexa UI/Features/Chat/ViewModels/ChatViewModel.swift
+Iexa UI/Features/Chat/Views/MainChatView.swift
+Iexa UI/Features/Chat/Views/iPadMainChatView.swift
 ```
 
 `LocalAlpineNativeRuntimeBridge.c` exports the native ABI with a safe default

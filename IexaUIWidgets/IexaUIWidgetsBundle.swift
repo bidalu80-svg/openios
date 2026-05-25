@@ -1,13 +1,13 @@
 //
-//  OpenUIWidgetsBundle.swift
-//  OpenUIWidgets
+//  IexaUIWidgetsBundle.swift
+//  IexaUIWidgets
 //
 
 import WidgetKit
 import SwiftUI
 
 @main
-struct OpenUIWidgetsBundle: WidgetBundle {
+struct IexaUIWidgetsBundle: WidgetBundle {
     var body: some Widget {
         // Home screen widget — single resizable widget (drag to switch small ↔ medium)
         QuickActionsWidget()
@@ -19,6 +19,6 @@ struct OpenUIWidgetsBundle: WidgetBundle {
         IexaRunLiveActivityWidget()
 
         // Control Center (iOS 18+)
-        OpenUIWidgetsControl()
+        IexaUIWidgetsControl()
     }
 }
