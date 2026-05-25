@@ -5127,7 +5127,8 @@ final class ChatViewModel {
 
         let mutationTerms = [
             "修改", "编辑", "改一下", "修复代码", "替换", "删除", "清理", "重命名",
-            "复制", "移动", "保存", "modify", "edit", "patch", "replace",
+            "复制", "移动", "保存", "改成", "加上", "补上", "删掉", "移除",
+            "modify", "edit", "patch", "replace",
             "delete", "remove", "clean", "rename", "copy", "move", "save"
         ]
         let localObjectTerms = [
@@ -5149,10 +5150,13 @@ final class ChatViewModel {
         }
 
         let executionTerms = [
-            "执行", "运行", "跑一下", "跑这段", "跑上面", "测试", "验证", "调试",
-            "修复", "修一下", "帮我修", "修这个", "解决", "编译", "构建", "跑通", "执行脚本", "运行脚本",
+            "执行", "运行", "帮我跑", "给我跑", "跑一下", "跑一遍", "跑这个", "跑这段", "跑上面",
+            "跑脚本", "跑代码", "跑测试", "跑项目", "跑起来", "跑通", "测试", "验证", "调试",
+            "修复", "修一下", "帮我修", "修这个", "解决", "编译", "构建", "执行脚本", "运行脚本",
+            "帮我做", "给我做", "做一下", "处理一下", "搞一下", "弄一下", "实现", "优化",
+            "完善", "新增", "补齐", "完成这个", "直接做", "你来做",
             "run", "execute", "test", "verify", "debug", "fix", "compile",
-            "build", "run script", "execute script"
+            "build", "implement", "optimize", "complete", "run script", "execute script"
         ]
         if containsAny(text, executionTerms) {
             return .executeOrVerify
@@ -5253,7 +5257,40 @@ final class ChatViewModel {
     }
 
     private static func localAlpineUserRequestRequiresHostExecution(_ text: String) -> Bool {
-        localAlpineIntent(for: text).requiresHostExecution
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        if isLocalAlpineExecutionBlockedRequest(normalized) {
+            return false
+        }
+        let intent = localAlpineIntent(forNormalized: normalized)
+        switch intent {
+        case .explicitLocalAlpine, .shellCommand:
+            return true
+        case .none:
+            return false
+        case .inspectLocalState, .mutateLocalState, .executeOrVerify, .setupDependency, .networkFetch, .generatedFile:
+            return !isLocalAlpineExplanationOnlyRequest(normalized)
+        }
+    }
+
+    private static func isLocalAlpineExecutionBlockedRequest(_ normalized: String) -> Bool {
+        let blockedTerms = [
+            "不要执行", "不用执行", "别执行", "先别执行", "不要运行", "不用运行", "别运行",
+            "不要真的执行", "别真的执行", "不要操作", "别操作",
+            "do not execute", "don't execute", "do not run", "don't run",
+            "no need to run", "don't actually execute", "do not actually execute"
+        ]
+        return blockedTerms.contains { normalized.contains($0) }
+    }
+
+    private static func isLocalAlpineExplanationOnlyRequest(_ normalized: String) -> Bool {
+        let explanationOnlyTerms = [
+            "只解释", "解释一下", "讲解", "说明一下", "示例", "例子", "怎么写", "如何写",
+            "只给命令", "给我命令",
+            "explain", "show example", "example only", "just show", "only show",
+            "just give me the command", "give me the command"
+        ]
+        return explanationOnlyTerms.contains { normalized.contains($0) }
     }
 
     private static func normalizedLocalAlpineExecutableContent(from content: String) -> String? {
@@ -5291,6 +5328,86 @@ final class ChatViewModel {
         \(json)
         ```
         """
+    }
+
+    private static func normalizedLocalAlpineExecutableContentFromShellFences(from content: String) -> String? {
+        let shellBlocks = localAlpineFallbackShellFenceBlocks(from: content)
+        guard !shellBlocks.isEmpty else { return nil }
+        return """
+        ```iexa_alpine
+        \(shellBlocks.joined(separator: "\n\n"))
+        ```
+        """
+    }
+
+    private static func localAlpineFallbackShellFenceBlocks(from content: String) -> [String] {
+        let nsContent = content as NSString
+        let fullRange = NSRange(location: 0, length: nsContent.length)
+        guard let regex = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)```"#, options: [.caseInsensitive]) else {
+            return []
+        }
+        let shellFenceLanguages: Set<String> = [
+            "bash", "sh", "shell", "zsh", "fish", "ash", "terminal", "console"
+        ]
+        let plainFenceLanguages: Set<String> = ["", "text", "txt", "plaintext"]
+
+        return regex.matches(in: content, range: fullRange).compactMap { match in
+            guard match.numberOfRanges >= 3 else { return nil }
+            let info = nsContent.substring(with: match.range(at: 1))
+            let language = info
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(whereSeparator: { $0 == " " || $0 == "\t" })
+                .first
+                .map { String($0).lowercased() } ?? ""
+
+            let body = nsContent.substring(with: match.range(at: 2))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !body.isEmpty else { return nil }
+            let shell = normalizedShellFallbackBody(from: body)
+            guard !shell.isEmpty else { return nil }
+            if shellFenceLanguages.contains(language) {
+                return shell
+            }
+            if plainFenceLanguages.contains(language),
+               shouldAutoRouteRawShellTextToLocalAlpine(shell) {
+                return shell
+            }
+            return nil
+        }
+    }
+
+    private static func normalizedShellFallbackBody(from shell: String) -> String {
+        let lines = shell.components(separatedBy: .newlines)
+        let promptedCommands = lines.compactMap { line -> String? in
+            guard line.range(of: #"^\s*\$\s+\S"#, options: .regularExpression) != nil else {
+                return nil
+            }
+            return line.replacingOccurrences(
+                of: #"^\s*\$\s+"#,
+                with: "",
+                options: .regularExpression
+            )
+        }
+        if !promptedCommands.isEmpty {
+            return promptedCommands
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return stripShellPromptPrefixes(from: shell)
+    }
+
+    private static func stripShellPromptPrefixes(from shell: String) -> String {
+        shell
+            .components(separatedBy: .newlines)
+            .map { line in
+                line.replacingOccurrences(
+                    of: #"^\s*\$\s+"#,
+                    with: "",
+                    options: .regularExpression
+                )
+            }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func localAlpineCommandObjects(fromNormalized object: Any) -> [Any] {
@@ -7261,7 +7378,12 @@ final class ChatViewModel {
             modelId: modelId
         ) {
             Task {
-                await retryInitialLocalAlpineProtocolAfterMissingTool(assistantMessageId: assistantMessageId)
+                if !(await takeOverInitialLocalAlpineShellFallback(
+                    assistantMessageId: assistantMessageId,
+                    content: acc.content
+                )) {
+                    await retryInitialLocalAlpineProtocolAfterMissingTool(assistantMessageId: assistantMessageId)
+                }
             }
             return
         }
@@ -7409,7 +7531,44 @@ final class ChatViewModel {
             return false
         }
         return Self.localAlpineUserRequestRequiresHostExecution(latestUser.content)
-            || Self.isLocalAlpineManualRunOrRefusalResponse(content)
+    }
+
+    private func takeOverInitialLocalAlpineShellFallback(
+        assistantMessageId: String,
+        content: String
+    ) async -> Bool {
+        guard let executableContent = Self.normalizedLocalAlpineExecutableContentFromShellFences(from: content) else {
+            return false
+        }
+        guard await LocalAlpineAgentService.shared.hasExecutableBlocks(in: executableContent) else {
+            return false
+        }
+        guard let assistantIndex = conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) else {
+            cleanupStreaming()
+            return false
+        }
+        let treeParentId = conversation?.history.nodes[assistantMessageId]?.parentId
+        let previousUserId: String? = {
+            guard let messages = conversation?.messages else { return nil }
+            return messages[..<assistantIndex].last(where: { $0.role == .user })?.id
+        }()
+        guard let parentId = treeParentId ?? previousUserId else {
+            cleanupStreaming()
+            return false
+        }
+
+        discardLocalAlpineControlMessage(
+            assistantMessageId: assistantMessageId,
+            restoreCurrentIdTo: parentId
+        )
+        localAlpineContinuationParentIds.remove(parentId)
+        localAlpineFinalSummaryParentIds.remove(parentId)
+        await resetStreamingStateAfterLocalAlpineControlTakeover()
+
+        localAlpineAgentStopRequested = false
+        localAlpineAgentExecutedMessageIds.remove(parentId)
+        await executeLocalAlpineAgent(messageId: parentId, content: executableContent)
+        return true
     }
 
     private func retryInitialLocalAlpineProtocolAfterMissingTool(assistantMessageId: String) async {
@@ -7436,6 +7595,13 @@ final class ChatViewModel {
         localAlpineFinalSummaryParentIds.remove(parentId)
         localAlpineNoCommandContinuationRetries = 0
 
+        await resetStreamingStateAfterLocalAlpineControlTakeover()
+
+        localAlpineAgentStopRequested = false
+        scheduleLocalAlpineContinuationIfNeeded(after: parentId, forceContinue: true)
+    }
+
+    private func resetStreamingStateAfterLocalAlpineControlTakeover() async {
         isStreaming = false
         hasFinishedStreaming = false
         isExternallyStreaming = false
@@ -7454,9 +7620,6 @@ final class ChatViewModel {
         endBackgroundTask()
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
-
-        localAlpineAgentStopRequested = false
-        scheduleLocalAlpineContinuationIfNeeded(after: parentId, forceContinue: true)
     }
 
     private func discardLocalAlpineControlMessage(
@@ -7556,7 +7719,12 @@ final class ChatViewModel {
             content: finalAssistantContent,
             modelId: modelId
         ) {
-            await retryInitialLocalAlpineProtocolAfterMissingTool(assistantMessageId: assistantMessageId)
+            if !(await takeOverInitialLocalAlpineShellFallback(
+                assistantMessageId: assistantMessageId,
+                content: finalAssistantContent
+            )) {
+                await retryInitialLocalAlpineProtocolAfterMissingTool(assistantMessageId: assistantMessageId)
+            }
             return
         }
         let lastUser = conversation?.messages.last(where: { $0.role == .user && !Self.isLocalWorkspaceAgentResult($0) })
@@ -11559,7 +11727,7 @@ final class ChatViewModel {
 
         模型没有发出可执行的 `iexa_alpine` 工具调用，我已停止本轮自动循环，避免反复空转。
 
-        这不是执行失败，而是模型没有按工具协议行动。请换一个支持工具调用/结构化输出更稳定的模型，或继续发送“继续执行”，我会重新要求模型发出 `iexa_alpine` 工具调用。
+        这不是脚本执行失败，而是模型没有按工具协议行动。请换一个支持结构化输出更稳定的模型，或直接重发执行要求；我会优先尝试从模型给出的 Bash 命令里接管执行。
         """
         appendAssistantResult(
             parentId: parentId,
@@ -12441,12 +12609,27 @@ final class ChatViewModel {
 
         let rawContent = content
         let emittedLocalAlpineInstruction = Self.contentContainsLocalAlpineInstruction(rawContent)
-        let shouldRetryMissingTool = !isFinalSummary && !emittedLocalAlpineInstruction && parentNeedsFollowUp
+        let fallbackExecutableContent = (!isFinalSummary && !emittedLocalAlpineInstruction)
+            ? Self.normalizedLocalAlpineExecutableContentFromShellFences(from: rawContent)
+            : nil
+        let fallbackHasExecutableBlocks: Bool
+        if let fallbackExecutableContent {
+            fallbackHasExecutableBlocks = await LocalAlpineAgentService.shared.hasExecutableBlocks(in: fallbackExecutableContent)
+        } else {
+            fallbackHasExecutableBlocks = false
+        }
+        let shouldTakeOverShellFallback = fallbackHasExecutableBlocks && parentNeedsFollowUp
+        let shouldRetryMissingTool = !isFinalSummary
+            && !emittedLocalAlpineInstruction
+            && !shouldTakeOverShellFallback
+            && parentNeedsFollowUp
         let doneDescription: String
         if isFinalSummary {
             doneDescription = "已整理本地 Alpine 回答"
         } else if emittedLocalAlpineInstruction {
             doneDescription = "已决定继续执行下一步"
+        } else if shouldTakeOverShellFallback {
+            doneDescription = "已接管 Bash 命令并继续执行"
         } else {
             doneDescription = "已整理本地 Alpine 输出"
         }
@@ -12457,7 +12640,7 @@ final class ChatViewModel {
             occurredAt: .now
         )
         let finalContent: String
-        if shouldRetryMissingTool, let parentResultId {
+        if (shouldTakeOverShellFallback || shouldRetryMissingTool), let parentResultId {
             discardLocalAlpineControlMessage(
                 assistantMessageId: assistantMessageId,
                 restoreCurrentIdTo: parentResultId
@@ -12514,6 +12697,16 @@ final class ChatViewModel {
                 content: rawContent,
                 error: nil
             )
+        } else if shouldTakeOverShellFallback,
+                  let parentResultId,
+                  let fallbackExecutableContent {
+            localAlpineNoCommandContinuationRetries = 0
+            localAlpineContinuationTask = nil
+            localAlpineContinuationParentIds.remove(parentResultId)
+            localAlpineFinalSummaryParentIds.remove(parentResultId)
+            localAlpineAgentStopRequested = false
+            localAlpineAgentExecutedMessageIds.remove(parentResultId)
+            await executeLocalAlpineAgent(messageId: parentResultId, content: fallbackExecutableContent)
         } else if shouldRetryMissingTool, let parentResultId {
             if !retryLocalAlpineContinuationAfterMissingTool(parentId: parentResultId) {
                 appendLocalAlpineNoToolCallStopMessage(parentId: parentResultId)

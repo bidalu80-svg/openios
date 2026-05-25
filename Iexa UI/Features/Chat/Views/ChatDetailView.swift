@@ -5352,6 +5352,16 @@ private func superscriptNumber(_ n: Int) -> String {
 struct UserMessageContentView: View {
     let content: String
     @Environment(\.theme) private var theme
+    @State private var isExpanded = false
+
+    private static let collapseCharacterThreshold = 700
+    private static let collapseLineThreshold = 12
+    private static let collapsedLineLimit = 10
+
+    private var shouldCollapse: Bool {
+        content.count > Self.collapseCharacterThreshold
+            || content.components(separatedBy: .newlines).count > Self.collapseLineThreshold
+    }
 
     /// Parses `content` into alternating text / skill segments.
     /// Pattern: `<$slug|slug>` — captures the slug before `|`.
@@ -5382,11 +5392,55 @@ struct UserMessageContentView: View {
         let segs = segments
         let hasChips = segs.contains { if case .skill = $0 { return true }; return false }
 
-        if !hasChips {
-            Text(content)
-                .scaledFont(size: 15, context: .content)
-        } else {
-            SkillTaggedTextView(segments: segs)
+        VStack(alignment: .trailing, spacing: 8) {
+            Group {
+                if !hasChips {
+                    Text(content)
+                        .scaledFont(size: 15, context: .content)
+                        .lineLimit(shouldCollapse && !isExpanded ? Self.collapsedLineLimit : nil)
+                } else {
+                    SkillTaggedTextView(
+                        segments: segs,
+                        lineLimit: shouldCollapse && !isExpanded ? Self.collapsedLineLimit : nil
+                    )
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if shouldCollapse && !isExpanded {
+                    LinearGradient(
+                        colors: [.clear, theme.chatBubbleUser.opacity(0.92)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 36)
+                    .allowsHitTesting(false)
+                }
+            }
+
+            if shouldCollapse {
+                Button {
+                    withAnimation(MicroAnimation.snappy) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(isExpanded ? "收起" : "展开全文")
+                            .scaledFont(size: 12, weight: .semibold)
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .scaledFont(size: 11, weight: .bold)
+                        Text("\(content.count) 字")
+                            .scaledFont(size: 11, weight: .medium)
+                            .opacity(0.76)
+                    }
+                    .foregroundStyle(theme.chatBubbleUserText)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(theme.chatBubbleUserText.opacity(0.16))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isExpanded ? "收起长文本" : "展开长文本")
+            }
         }
     }
 }
@@ -5802,12 +5856,14 @@ private struct MessagePDFKitView: UIViewRepresentable {
 /// Uses `Layout` to flow content left-to-right, wrapping as needed.
 private struct SkillTaggedTextView: View {
     let segments: [UserMessageContentView_Segment]
+    var lineLimit: Int? = nil
     @Environment(\.theme) private var theme
 
     var body: some View {
         // Build one or more lines. We use a simple VStack + HStack wrap
         // by splitting on newlines first, then rendering each line's chips inline.
-        let lines = buildLines()
+        let allLines = buildLines()
+        let lines = lineLimit.map { Array(allLines.prefix($0)) } ?? allLines
         VStack(alignment: .trailing, spacing: 2) {
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                 FlowRow(segments: line, theme: theme)
