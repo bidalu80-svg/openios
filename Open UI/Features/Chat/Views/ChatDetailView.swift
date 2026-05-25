@@ -4004,24 +4004,23 @@ private struct DynamicImageGenerationGradient: View {
                 TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
                     ImageGenerationGradientCanvas(
                         isDark: isDark,
-                        phase: Self.phase(for: timeline.date)
+                        time: Self.animationTime(for: timeline.date)
                     )
                 }
             } else {
-                ImageGenerationGradientCanvas(isDark: isDark, phase: 0.18)
+                ImageGenerationGradientCanvas(isDark: isDark, time: 0.18)
             }
         }
     }
 
-    private static func phase(for date: Date) -> Double {
-        let progress = date.timeIntervalSinceReferenceDate / 10.5
-        return progress - floor(progress)
+    private static func animationTime(for date: Date) -> Double {
+        date.timeIntervalSinceReferenceDate
     }
 }
 
 private struct ImageGenerationGradientCanvas: View {
     let isDark: Bool
-    let phase: Double
+    let time: Double
 
     var body: some View {
         Canvas(opaque: true, colorMode: .linear, rendersAsynchronously: true) { context, size in
@@ -4034,19 +4033,35 @@ private struct ImageGenerationGradientCanvas: View {
                 rectPath,
                 with: .linearGradient(
                     Gradient(colors: baseColors),
-                    startPoint: .zero,
-                    endPoint: CGPoint(x: size.width, y: size.height)
+                    startPoint: movingPoint(x: -0.10, y: 0.12, scale: size, phaseOffset: 0.00),
+                    endPoint: movingPoint(x: 1.12, y: 0.92, scale: size, phaseOffset: 0.42)
                 )
             )
 
             let shortEdge = min(size.width, size.height)
+            drawFlowBand(
+                in: &context,
+                size: size,
+                colorA: Color(red: 1.00, green: 0.48, blue: 0.76),
+                colorB: Color(red: 0.44, green: 0.74, blue: 1.00),
+                offset: 0.08,
+                opacity: isDark ? 0.26 : 0.22
+            )
+            drawFlowBand(
+                in: &context,
+                size: size,
+                colorA: Color(red: 1.00, green: 0.82, blue: 0.42),
+                colorB: Color(red: 0.54, green: 0.98, blue: 0.80),
+                offset: 0.58,
+                opacity: isDark ? 0.22 : 0.18
+            )
             drawPatch(
                 in: &context,
                 size: size,
                 base: CGPoint(x: 0.20, y: 0.20),
-                radius: shortEdge * 0.64,
+                radius: shortEdge * 0.70,
                 color: Color(red: 1.00, green: 0.72, blue: 0.28),
-                speed: 0.52,
+                speed: 0.88,
                 offset: 0.03,
                 opacity: isDark ? 0.44 : 0.38
             )
@@ -4054,9 +4069,9 @@ private struct ImageGenerationGradientCanvas: View {
                 in: &context,
                 size: size,
                 base: CGPoint(x: 0.76, y: 0.22),
-                radius: shortEdge * 0.72,
+                radius: shortEdge * 0.78,
                 color: Color(red: 0.24, green: 0.78, blue: 1.00),
-                speed: 0.64,
+                speed: 0.96,
                 offset: 0.24,
                 opacity: isDark ? 0.48 : 0.40
             )
@@ -4064,9 +4079,9 @@ private struct ImageGenerationGradientCanvas: View {
                 in: &context,
                 size: size,
                 base: CGPoint(x: 0.30, y: 0.74),
-                radius: shortEdge * 0.76,
+                radius: shortEdge * 0.82,
                 color: Color(red: 0.78, green: 0.44, blue: 1.00),
-                speed: 0.48,
+                speed: 0.82,
                 offset: 0.53,
                 opacity: isDark ? 0.48 : 0.42
             )
@@ -4074,9 +4089,9 @@ private struct ImageGenerationGradientCanvas: View {
                 in: &context,
                 size: size,
                 base: CGPoint(x: 0.84, y: 0.78),
-                radius: shortEdge * 0.62,
+                radius: shortEdge * 0.70,
                 color: Color(red: 0.20, green: 1.00, blue: 0.62),
-                speed: 0.56,
+                speed: 0.92,
                 offset: 0.79,
                 opacity: isDark ? 0.40 : 0.36
             )
@@ -4084,9 +4099,9 @@ private struct ImageGenerationGradientCanvas: View {
                 in: &context,
                 size: size,
                 base: CGPoint(x: 0.54, y: 0.48),
-                radius: shortEdge * 0.58,
+                radius: shortEdge * 0.66,
                 color: Color(red: 1.00, green: 0.42, blue: 0.68),
-                speed: 0.76,
+                speed: 1.10,
                 offset: 0.41,
                 opacity: isDark ? 0.36 : 0.32
             )
@@ -4112,6 +4127,48 @@ private struct ImageGenerationGradientCanvas: View {
             ]
     }
 
+    private func movingPoint(x: Double, y: Double, scale size: CGSize, phaseOffset: Double) -> CGPoint {
+        let angle = time * 0.68 + phaseOffset * .pi * 2
+        return CGPoint(
+            x: size.width * CGFloat(x + 0.18 * sin(angle) + 0.07 * cos(angle * 1.7)),
+            y: size.height * CGFloat(y + 0.14 * cos(angle * 0.8) + 0.05 * sin(angle * 1.3))
+        )
+    }
+
+    private func drawFlowBand(
+        in context: inout GraphicsContext,
+        size: CGSize,
+        colorA: Color,
+        colorB: Color,
+        offset: Double,
+        opacity: Double
+    ) {
+        let angle = time * 1.65 + offset * .pi * 2
+        let centerX = size.width * CGFloat(0.50 + 0.34 * sin(angle))
+        let centerY = size.height * CGFloat(0.50 + 0.18 * cos(angle * 0.72))
+        let bandWidth = max(size.width, size.height) * 0.62
+        let bandRect = CGRect(
+            x: centerX - bandWidth * 0.5,
+            y: centerY - size.height * 0.72,
+            width: bandWidth,
+            height: size.height * 1.44
+        )
+        let path = Path(roundedRect: bandRect, cornerRadius: bandWidth * 0.5)
+        context.fill(
+            path,
+            with: .linearGradient(
+                Gradient(colors: [
+                    colorA.opacity(0.0),
+                    colorA.opacity(opacity),
+                    colorB.opacity(opacity * 0.72),
+                    colorB.opacity(0.0)
+                ]),
+                startPoint: CGPoint(x: bandRect.minX, y: bandRect.minY),
+                endPoint: CGPoint(x: bandRect.maxX, y: bandRect.maxY)
+            )
+        )
+    }
+
     private func drawPatch(
         in context: inout GraphicsContext,
         size: CGSize,
@@ -4122,18 +4179,20 @@ private struct ImageGenerationGradientCanvas: View {
         offset: Double,
         opacity: Double
     ) {
-        let angle = (phase * speed + offset) * .pi * 2
-        let driftX = 0.12 * sin(angle) + 0.04 * cos(angle * 0.73)
-        let driftY = 0.10 * cos(angle * 0.82 + 0.35) + 0.04 * sin(angle * 1.17)
+        let angle = time * speed + offset * .pi * 2
+        let driftX = 0.25 * sin(angle) + 0.08 * cos(angle * 0.73)
+        let driftY = 0.22 * cos(angle * 0.82 + 0.35) + 0.08 * sin(angle * 1.17)
+        let pulse = 1.0 + 0.10 * sin(angle * 1.3 + 0.4)
         let center = CGPoint(
             x: size.width * min(1.12, max(-0.12, base.x + CGFloat(driftX))),
             y: size.height * min(1.12, max(-0.12, base.y + CGFloat(driftY)))
         )
+        let effectiveRadius = radius * CGFloat(pulse)
         let rect = CGRect(
-            x: center.x - radius,
-            y: center.y - radius,
-            width: radius * 2,
-            height: radius * 2
+            x: center.x - effectiveRadius,
+            y: center.y - effectiveRadius,
+            width: effectiveRadius * 2,
+            height: effectiveRadius * 2
         )
         let path = Path(ellipseIn: rect)
         let secondary = color.opacity(opacity * 0.62)
@@ -4145,7 +4204,7 @@ private struct ImageGenerationGradientCanvas: View {
             ]),
             center: center,
             startRadius: 0,
-            endRadius: radius
+            endRadius: effectiveRadius
         )
         context.fill(path, with: resolved)
     }
