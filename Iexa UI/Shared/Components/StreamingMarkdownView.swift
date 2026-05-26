@@ -1211,28 +1211,28 @@ struct StreamingMarkdownView: View {
 
     private func recoveredMalformedFence(language: String, content: String) -> ParsedBlock {
         let originalLanguageLine = language.trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayLanguage = displayLanguage(forFenceInfo: originalLanguageLine)
-        guard !displayLanguage.isEmpty else {
-            return ParsedBlock(language: displayLanguage, content: content)
+        let normalizedLanguage = displayLanguage(forFenceInfo: originalLanguageLine)
+        guard !normalizedLanguage.isEmpty else {
+            return ParsedBlock(language: normalizedLanguage, content: content)
         }
         guard originalLanguageLine.contains(where: { $0.isWhitespace }) else {
-            return ParsedBlock(language: displayLanguage, content: content)
+            return ParsedBlock(language: normalizedLanguage, content: content)
         }
 
         let parts = originalLanguageLine.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
         guard parts.count == 2 else {
-            return ParsedBlock(language: displayLanguage, content: content)
+            return ParsedBlock(language: normalizedLanguage, content: content)
         }
         let languageToken = displayLanguage(forFenceInfo: String(parts[0]))
         let firstCommandLine = String(parts[1])
         guard looksLikeInlineFenceCode(firstCommandLine) else {
-            return ParsedBlock(language: languageToken.isEmpty ? displayLanguage : languageToken, content: content)
+            return ParsedBlock(language: languageToken.isEmpty ? normalizedLanguage : languageToken, content: content)
         }
 
         let recoveredContent = content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? firstCommandLine
             : firstCommandLine + "\n" + content
-        return ParsedBlock(language: languageToken.isEmpty ? displayLanguage : languageToken, content: recoveredContent)
+        return ParsedBlock(language: languageToken.isEmpty ? normalizedLanguage : languageToken, content: recoveredContent)
     }
 
     private func displayLanguage(forFenceInfo language: String) -> String {
