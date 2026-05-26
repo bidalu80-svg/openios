@@ -6280,17 +6280,23 @@ final class ChatViewModel {
     }
 
     private static func localAlpineCommandObjects(fromNormalized object: Any) -> [Any] {
-        if let dict = object as? [String: Any],
-           let nested = dict["iexa_alpine"]
-            ?? dict["commands"]
-            ?? dict["steps"]
-            ?? dict["actions"]
-            ?? dict["plan"]
-            ?? dict["tool_calls"]
-            ?? dict["toolCalls"]
-            ?? dict["tool_uses"]
-            ?? dict["toolUses"] {
-            return localAlpineCommandObjects(fromNormalized: nested)
+        if let dict = object as? [String: Any] {
+            let nestedKeys = [
+                "iexa_alpine",
+                "commands",
+                "steps",
+                "actions",
+                "plan",
+                "tool_calls",
+                "toolCalls",
+                "tool_uses",
+                "toolUses"
+            ]
+            for key in nestedKeys {
+                if let nested = dict[key] {
+                    return localAlpineCommandObjects(fromNormalized: nested)
+                }
+            }
         }
         if let array = object as? [Any] {
             return array.flatMap { localAlpineCommandObjects(fromNormalized: $0) }
