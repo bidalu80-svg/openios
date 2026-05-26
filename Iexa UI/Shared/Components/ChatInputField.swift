@@ -2,6 +2,7 @@ import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
 import PDFKit
+import UIKit
 
 // MARK: - Chat Attachment
 
@@ -405,7 +406,7 @@ struct ChatInputField: View {
     private var inlinePlusButton: some View {
         Button {
             Haptics.play(.light)
-            isFocused = false
+            dismissKeyboard()
             showToolsSheet = true
         } label: {
             ZStack {
@@ -464,7 +465,7 @@ struct ChatInputField: View {
                 Haptics.play(.light)
             },
             onSubmit: {
-                if sendOnEnter && canSend { onSend() }
+                if sendOnEnter { submitMessage() }
             },
             onHashTrigger: onHashTrigger,
             onHashDismiss: onHashDismiss,
@@ -478,6 +479,26 @@ struct ChatInputField: View {
         )
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityLabel(placeholder)
+    }
+
+    private func dismissKeyboard() {
+        isFocused = false
+        onHashDismiss?()
+        onAtDismiss?()
+        onSlashDismiss?()
+        onDollarDismiss?()
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
+    }
+
+    private func submitMessage() {
+        guard canSend else { return }
+        dismissKeyboard()
+        onSend()
     }
 
     // MARK: - Inline Terminal Button
@@ -616,6 +637,7 @@ struct ChatInputField: View {
     private var stopGeneratingButton: some View {
         Button {
             Haptics.play(.light)
+            dismissKeyboard()
             onStopGenerating?()
         } label: {
             Circle()
@@ -635,7 +657,7 @@ struct ChatInputField: View {
     private var sendMessageButton: some View {
         Button {
             Haptics.play(.light)
-            onSend()
+            submitMessage()
         } label: {
             Circle()
                 .fill(theme.brandPrimary)

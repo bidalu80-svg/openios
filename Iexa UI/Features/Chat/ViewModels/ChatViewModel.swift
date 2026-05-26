@@ -4905,21 +4905,29 @@ final class ChatViewModel {
                                 force: true
                             )
                             var generatedImages: [(imageReference: String, displayReference: String)] = []
+                            var imageFailures: [Error] = []
                             if !editImages.isEmpty {
                                 for prompt in imagePrompts {
-                                    let imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                        try await manager.editImage(
-                                            prompt: prompt,
-                                            model: modelId,
-                                            images: editImages,
-                                            size: requestedImageSize
-                                        )
+                                    do {
+                                        try Task.checkCancellation()
+                                        let imageReference = try await self.runImageRequestWithRateLimitRetry {
+                                            try await manager.editImage(
+                                                prompt: prompt,
+                                                model: modelId,
+                                                images: editImages,
+                                                size: requestedImageSize
+                                            )
+                                        }
+                                        let displayReference = await self.localDisplayImageReference(
+                                            from: imageReference,
+                                            canvasSize: requestedCanvasSize
+                                        ) ?? imageReference
+                                        generatedImages.append((imageReference: imageReference, displayReference: displayReference))
+                                    } catch {
+                                        if Task.isCancelled || error is CancellationError { throw error }
+                                        imageFailures.append(error)
+                                        self.logger.warning("One image edit request failed: \(error.localizedDescription)")
                                     }
-                                    let displayReference = await self.localDisplayImageReference(
-                                        from: imageReference,
-                                        canvasSize: requestedCanvasSize
-                                    ) ?? imageReference
-                                    generatedImages.append((imageReference: imageReference, displayReference: displayReference))
                                 }
                             } else {
                                 guard !imagePrompt.isEmpty else {
@@ -4932,23 +4940,47 @@ final class ChatViewModel {
                                     )
                                 }
                                 for prompt in imagePrompts {
-                                    let imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                        try await manager.generateImage(
-                                            prompt: prompt,
-                                            model: modelId,
-                                            size: requestedImageSize
-                                        )
+                                    do {
+                                        try Task.checkCancellation()
+                                        let imageReference = try await self.runImageRequestWithRateLimitRetry {
+                                            try await manager.generateImage(
+                                                prompt: prompt,
+                                                model: modelId,
+                                                size: requestedImageSize
+                                            )
+                                        }
+                                        let displayReference = await self.localDisplayImageReference(
+                                            from: imageReference,
+                                            canvasSize: requestedCanvasSize
+                                        ) ?? imageReference
+                                        generatedImages.append((imageReference: imageReference, displayReference: displayReference))
+                                    } catch {
+                                        if Task.isCancelled || error is CancellationError { throw error }
+                                        imageFailures.append(error)
+                                        self.logger.warning("One image generation request failed: \(error.localizedDescription)")
                                     }
-                                    let displayReference = await self.localDisplayImageReference(
-                                        from: imageReference,
-                                        canvasSize: requestedCanvasSize
-                                    ) ?? imageReference
-                                    generatedImages.append((imageReference: imageReference, displayReference: displayReference))
                                 }
                             }
+                            if generatedImages.isEmpty {
+                                if let lastFailure = imageFailures.last {
+                                    throw lastFailure
+                                }
+                                throw APIError.unknown(
+                                    underlying: NSError(
+                                        domain: "ChatViewModel",
+                                        code: -1,
+                                        userInfo: [NSLocalizedDescriptionKey: "没有成功生成图片。"]
+                                    )
+                                )
+                            }
+                            let assistantText = Self.imageGenerationAssistantText(
+                                successCount: generatedImages.count,
+                                requestedCount: imagePrompts.count,
+                                failureCount: imageFailures.count
+                            )
                             self.updateAssistantMessage(
                                 id: assistantMessageId,
-                                content: "",
+                                content: imageFailures.isEmpty ? "" : assistantText,
                                 isStreaming: false
                             )
                             for image in generatedImages {
@@ -4961,7 +4993,7 @@ final class ChatViewModel {
                             self.recordTokenUsageForCompletedTurn(
                                 assistantMessageId: assistantMessageId,
                                 userText: messageText,
-                                assistantText: "已生成图片",
+                                assistantText: assistantText,
                                 userAttachments: currentAttachments,
                                 mediaKind: .image,
                                 mediaCount: max(generatedImages.count, 1)
@@ -4972,7 +5004,7 @@ final class ChatViewModel {
                             self.activeTaskId = nil
                             self.lastTaskExtractionLength = 0
                             await self.persistLocalConversationIfNeeded()
-                            await self.sendCompletionNotificationIfNeeded(content: "已生成图片")
+                            await self.sendCompletionNotificationIfNeeded(content: assistantText)
                             self.endBackgroundTask()
                             NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                             return
@@ -6740,7 +6772,7 @@ final class ChatViewModel {
               !Self.isLocalAlpineExplanationOnlyRequest(normalized) else {
             return false
         }
-        return true
+        return Self.localAlpineUserRequestRequiresHostExecution(normalized)
     }
 
     private func sendLocalAlpineAgentCoreTurn(
@@ -7015,6 +7047,31 @@ final class ChatViewModel {
         }
 
         let trimmedPlan = rawPlan.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let clarification = LocalAlpineAgentCore.clarificationQuestion(from: trimmedPlan) {
+            let clarificationStatus = ChatStatusUpdate(
+                action: "local_alpine_agent",
+                description: "需要补充信息",
+                done: true,
+                occurredAt: .now
+            )
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: clarification.question,
+                isStreaming: false,
+                statusHistory: [clarificationStatus]
+            )
+            conversation?.history.updateNode(id: assistantMessageId) { node in
+                node.content = clarification.question
+                node.done = true
+                node.statusHistory = [clarificationStatus]
+            }
+            cleanupStreaming()
+            await persistLocalConversationIfNeeded()
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            localAlpineAgentStopRequested = true
+            return
+        }
+
         guard let plan = LocalAlpineAgentCore.plan(
             from: trimmedPlan,
             normalizeContent: Self.normalizedLocalAlpineExecutableContent,
@@ -7026,30 +7083,6 @@ final class ChatViewModel {
             fenceJSONObject: Self.localAlpineFencedJSONObject,
             preview: Self.localAlpineCommandPreview
         ) else {
-            if let clarification = LocalAlpineAgentCore.clarificationQuestion(from: trimmedPlan) {
-                let clarificationStatus = ChatStatusUpdate(
-                    action: "local_alpine_agent",
-                    description: "需要补充信息",
-                    done: true,
-                    occurredAt: .now
-                )
-                updateAssistantMessage(
-                    id: assistantMessageId,
-                    content: clarification.question,
-                    isStreaming: false,
-                    statusHistory: [clarificationStatus]
-                )
-                conversation?.history.updateNode(id: assistantMessageId) { node in
-                    node.content = clarification.question
-                    node.done = true
-                    node.statusHistory = [clarificationStatus]
-                }
-                cleanupStreaming()
-                await persistLocalConversationIfNeeded()
-                NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
-                localAlpineAgentStopRequested = true
-                return
-            }
             let clarificationStatus = ChatStatusUpdate(
                 action: "local_alpine_agent",
                 description: "需要补充信息",
@@ -7870,22 +7903,29 @@ final class ChatViewModel {
                     force: true
                 )
                 var generatedImages: [(imageReference: String, displayReference: String)] = []
+                var imageFailures: [Error] = []
                 if !editImages.isEmpty {
                     for prompt in imagePrompts {
-                        try Task.checkCancellation()
-                        let imageReference = try await self.runImageRequestWithRateLimitRetry {
-                            try await manager.editImage(
-                                prompt: prompt,
-                                model: modelId,
-                                images: editImages,
-                                size: requestedImageSize
-                            )
+                        do {
+                            try Task.checkCancellation()
+                            let imageReference = try await self.runImageRequestWithRateLimitRetry {
+                                try await manager.editImage(
+                                    prompt: prompt,
+                                    model: modelId,
+                                    images: editImages,
+                                    size: requestedImageSize
+                                )
+                            }
+                            let displayReference = await self.localDisplayImageReference(
+                                from: imageReference,
+                                canvasSize: requestedCanvasSize
+                            ) ?? imageReference
+                            generatedImages.append((imageReference: imageReference, displayReference: displayReference))
+                        } catch {
+                            if Task.isCancelled || error is CancellationError { throw error }
+                            imageFailures.append(error)
+                            self.logger.warning("One image edit request failed: \(error.localizedDescription)")
                         }
-                        let displayReference = await self.localDisplayImageReference(
-                            from: imageReference,
-                            canvasSize: requestedCanvasSize
-                        ) ?? imageReference
-                        generatedImages.append((imageReference: imageReference, displayReference: displayReference))
                     }
                 } else {
                     guard !imagePrompt.isEmpty else {
@@ -7898,25 +7938,48 @@ final class ChatViewModel {
                         )
                     }
                     for prompt in imagePrompts {
-                        try Task.checkCancellation()
-                        let imageReference = try await self.runImageRequestWithRateLimitRetry {
-                            try await manager.generateImage(
-                                prompt: prompt,
-                                model: modelId,
-                                size: requestedImageSize
-                            )
+                        do {
+                            try Task.checkCancellation()
+                            let imageReference = try await self.runImageRequestWithRateLimitRetry {
+                                try await manager.generateImage(
+                                    prompt: prompt,
+                                    model: modelId,
+                                    size: requestedImageSize
+                                )
+                            }
+                            let displayReference = await self.localDisplayImageReference(
+                                from: imageReference,
+                                canvasSize: requestedCanvasSize
+                            ) ?? imageReference
+                            generatedImages.append((imageReference: imageReference, displayReference: displayReference))
+                        } catch {
+                            if Task.isCancelled || error is CancellationError { throw error }
+                            imageFailures.append(error)
+                            self.logger.warning("One image generation request failed: \(error.localizedDescription)")
                         }
-                        let displayReference = await self.localDisplayImageReference(
-                            from: imageReference,
-                            canvasSize: requestedCanvasSize
-                        ) ?? imageReference
-                        generatedImages.append((imageReference: imageReference, displayReference: displayReference))
                     }
                 }
                 try Task.checkCancellation()
+                if generatedImages.isEmpty {
+                    if let lastFailure = imageFailures.last {
+                        throw lastFailure
+                    }
+                    throw APIError.unknown(
+                        underlying: NSError(
+                            domain: "ChatViewModel",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "没有成功生成图片。"]
+                        )
+                    )
+                }
+                let assistantText = Self.imageGenerationAssistantText(
+                    successCount: generatedImages.count,
+                    requestedCount: imagePrompts.count,
+                    failureCount: imageFailures.count
+                )
                 self.updateAssistantMessage(
                     id: assistantMessageId,
-                    content: "",
+                    content: imageFailures.isEmpty ? "" : assistantText,
                     isStreaming: false
                 )
                 for image in generatedImages {
@@ -7929,13 +7992,13 @@ final class ChatViewModel {
                 self.recordTokenUsageForCompletedTurn(
                     assistantMessageId: assistantMessageId,
                     userText: messageText,
-                    assistantText: "已生成图片",
+                    assistantText: assistantText,
                     userAttachments: currentAttachments,
                     mediaKind: .image,
                     mediaCount: max(generatedImages.count, 1)
                 )
                 await self.persistLocalConversationIfNeeded()
-                await self.sendCompletionNotificationIfNeeded(content: "已生成图片")
+                await self.sendCompletionNotificationIfNeeded(content: assistantText)
                 NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                 self.finishDirectMediaGenerationTask(messageId: assistantMessageId)
             } catch {
@@ -10695,6 +10758,20 @@ final class ChatViewModel {
             Variant \(index) of \(count): create a distinct image, not a duplicate. Keep the user's core subject and requirements, but vary composition, camera angle, lighting, background details, color accents, and small visual details from the other variants.
             """
         }
+    }
+
+    private static func imageGenerationAssistantText(
+        successCount: Int,
+        requestedCount: Int,
+        failureCount: Int
+    ) -> String {
+        if failureCount <= 0 {
+            return successCount > 1 ? "已生成 \(successCount) 张图片" : "已生成图片"
+        }
+        if successCount > 0 {
+            return "已生成 \(successCount)/\(requestedCount) 张图片，\(failureCount) 张生成失败。"
+        }
+        return "图片生成失败。"
     }
 
     private static func looksLikeImageGenerationRequest(_ text: String) -> Bool {

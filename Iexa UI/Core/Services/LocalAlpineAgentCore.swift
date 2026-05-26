@@ -464,13 +464,30 @@ enum LocalAlpineAgentCore {
             return string
         }
         if let dict = object as? [String: Any] {
-            for key in ["ask_user", "question", "clarification", "message"] {
+            for key in ["ask_user", "question", "clarification"] {
                 if let value = dict[key] {
                     return question(from: value)
                 }
             }
+            if !hasExecutablePlanKey(dict), let value = dict["message"] {
+                return question(from: value)
+            }
         }
         return nil
+    }
+
+    private static func hasExecutablePlanKey(_ dict: [String: Any]) -> Bool {
+        let executableKeys = [
+            "iexa_alpine", "commands", "steps", "actions", "plan",
+            "tool_calls", "toolCalls", "tool_uses", "toolUses",
+            "command", "cmd", "shell", "list_dir", "read_file", "read_files",
+            "write_file", "write_files", "edit_file", "edit_files",
+            "patch_file", "patch_files", "delete_file", "delete_files",
+            "glob", "grep", "verify", "run_script", "run_program",
+            "compile", "build", "test", "run_tests", "install_dependency",
+            "install_dependencies", "install"
+        ]
+        return executableKeys.contains { dict[$0] != nil }
     }
 
     private static func clip(_ text: String, maxCharacters: Int) -> String {
