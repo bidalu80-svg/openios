@@ -1253,6 +1253,7 @@ actor LocalAlpineAgentService {
             ?? stringValue(dict["tool"])
             ?? stringValue(dict["tool_name"])
             ?? stringValue(dict["toolName"])
+            ?? stringValue(dict["recipient_name"])
             ?? stringValue(dict["action"])
         guard let rawName else { return nil }
         let normalizedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -1267,6 +1268,7 @@ actor LocalAlpineAgentService {
             || dict["tool"] != nil
             || dict["tool_name"] != nil
             || dict["toolName"] != nil
+            || dict["recipient_name"] != nil
         guard isToolEnvelope else { return nil }
 
         let rawInput = functionDict?["arguments"]
@@ -1284,7 +1286,7 @@ actor LocalAlpineAgentService {
         let envelopeKeys: Set<String> = [
             "type", "id", "name", "tool", "tool_name", "toolName", "action",
             "function", "input", "arguments", "args", "parameters", "params",
-            "tool_call_id", "index"
+            "tool_call_id", "index", "recipient_name"
         ]
         let stripped = dict.filter { !envelopeKeys.contains($0.key) }
         return stripped.isEmpty ? nil : stripped
@@ -1305,7 +1307,9 @@ actor LocalAlpineAgentService {
         guard localAlpineToolNames.contains(name) else { return nil }
 
         switch name {
-        case "command", "shell", "shell_command", "bash", "run_command", "execute_command":
+        case "command", "shell", "shell_command", "bash", "run_command", "execute_command",
+             "exec_command", "run_shell", "execute_shell", "shell_exec", "terminal",
+             "functions.exec_command":
             if let dict = input as? [String: Any] {
                 if shellCommandString(from: dict) != nil {
                     return dict
@@ -1325,6 +1329,8 @@ actor LocalAlpineAgentService {
             return ["write_files": input ?? [String: Any]()]
         case "edit":
             return ["edit_file": input ?? [String: Any]()]
+        case "multi_edit", "multiedit":
+            return ["edit_files": input ?? [String: Any]()]
         case "patch":
             return ["patch_file": input ?? [String: Any]()]
         case "delete":
@@ -1337,7 +1343,7 @@ actor LocalAlpineAgentService {
             return ["compile": input ?? [String: Any]()]
         case "run_tests":
             return ["test": input ?? [String: Any]()]
-        case "fetch", "http_request":
+        case "fetch", "http_request", "web_fetch", "webfetch":
             return ["network_fetch": input ?? [String: Any]()]
         case "diagnose":
             return ["diagnostic": input ?? [String: Any]()]
@@ -1369,9 +1375,11 @@ actor LocalAlpineAgentService {
 
     private static let localAlpineToolNames: Set<String> = [
         "command", "shell", "shell_command", "bash", "run_command", "execute_command",
+        "exec_command", "run_shell", "execute_shell", "shell_exec", "terminal",
+        "functions.exec_command",
         "read", "read_file", "read_files",
         "write", "write_file", "write_files", "create_file", "create_files",
-        "edit", "edit_file", "edit_files", "replace_file",
+        "edit", "edit_file", "edit_files", "replace_file", "multi_edit", "multiedit",
         "patch", "patch_file", "patch_files", "apply_patch",
         "delete", "delete_file", "delete_files", "remove_file", "remove_files",
         "list_dir", "ls", "list",
@@ -1381,7 +1389,7 @@ actor LocalAlpineAgentService {
         "install_dependency", "install_dependencies", "install",
         "compile", "build",
         "test", "run_tests",
-        "network_fetch", "fetch", "http_request",
+        "network_fetch", "fetch", "http_request", "web_fetch", "webfetch",
         "diagnostic", "diagnose",
         "file_operation", "file_ops",
         "lint_format", "lint", "format"
@@ -1494,7 +1502,7 @@ actor LocalAlpineAgentService {
             (keys: ["install_dependency", "install_dependencies", "install"], toolName: "install_dependency"),
             (keys: ["compile", "build"], toolName: "compile"),
             (keys: ["test", "run_tests"], toolName: "test"),
-            (keys: ["network_fetch", "fetch", "http_request"], toolName: "network_fetch"),
+            (keys: ["network_fetch", "fetch", "http_request", "web_fetch", "webfetch"], toolName: "network_fetch"),
             (keys: ["diagnostic", "diagnose"], toolName: "diagnostic"),
             (keys: ["file_operation", "file_ops"], toolName: "file_operation"),
             (keys: ["lint_format", "lint", "format"], toolName: "lint_format")
@@ -1508,6 +1516,20 @@ actor LocalAlpineAgentService {
                     let detail = stringValue(value(for: ["detail", "title", "description", "path"], in: object))
                         ?? oneLine(path)
                     return (scriptCommand, semanticTool.toolName, detail, uniqueNonEmpty([path]), cwd)
+                }
+                if semanticTool.toolName == "network_fetch",
+                   let url = httpURLString(from: object) ?? httpURLString(from: dict) {
+                    let quotedURL = shellSingleQuotedStatic(url)
+                    let command = """
+                    if command -v curl >/dev/null 2>&1; then
+                      curl -L --max-time 30 \(quotedURL)
+                    else
+                      wget -T 30 -qO- \(quotedURL)
+                    fi | sed -n '1,240p'
+                    """
+                    let detail = stringValue(value(for: ["detail", "title", "description"], in: object))
+                        ?? oneLine(url)
+                    return (command, semanticTool.toolName, detail, [url], cwd)
                 }
                 if let rawCommand = stringValue(object)
                     ?? stringValue(value(for: ["command", "cmd", "shell", "run"], in: object))
@@ -1879,6 +1901,24 @@ actor LocalAlpineAgentService {
             }
         }
         return nil
+    }
+
+    private nonisolated static func httpURLString(from object: Any?) -> String? {
+        if let string = stringValue(object), stringLooksLikeHTTPURL(string) {
+            return string
+        }
+        guard let dict = object as? [String: Any] else { return nil }
+        for key in ["url", "uri", "href", "request_url", "requestURL", "endpoint"] {
+            if let url = stringValue(dict[key]), stringLooksLikeHTTPURL(url) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func stringLooksLikeHTTPURL(_ value: String) -> Bool {
+        let lowercased = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://")
     }
 
     private nonisolated static func value(for keys: [String], in object: Any) -> Any? {
@@ -3413,7 +3453,7 @@ actor LocalAlpineAgentService {
             .split(whereSeparator: { $0 == " " || $0 == "\t" })
             .first
             .map { String($0).lowercased() } ?? ""
-        if token == "iexa_alpine" {
+        if token == "iexa_alpine" || token == "local_alpine_exec" {
             return true
         }
         guard token == "json" else { return false }
@@ -3504,7 +3544,7 @@ actor LocalAlpineAgentService {
         if shellWrapperPayloadLooksExecutable(dict["install_dependency"] ?? dict["install_dependencies"] ?? dict["install"])
             || shellWrapperPayloadLooksExecutable(dict["compile"] ?? dict["build"])
             || shellWrapperPayloadLooksExecutable(dict["test"] ?? dict["run_tests"])
-            || shellWrapperPayloadLooksExecutable(dict["network_fetch"] ?? dict["fetch"] ?? dict["http_request"])
+            || networkFetchPayloadLooksValid(dict["network_fetch"] ?? dict["fetch"] ?? dict["http_request"] ?? dict["web_fetch"] ?? dict["webfetch"])
             || shellWrapperPayloadLooksExecutable(dict["diagnostic"] ?? dict["diagnose"])
             || shellWrapperPayloadLooksExecutable(dict["file_operation"] ?? dict["file_ops"])
             || shellWrapperPayloadLooksExecutable(dict["lint_format"] ?? dict["lint"] ?? dict["format"]) {
@@ -3599,6 +3639,13 @@ actor LocalAlpineAgentService {
     private nonisolated static func shellWrapperPayloadLooksExecutable(_ object: Any?) -> Bool {
         guard let command = commandLikeString(from: object) else { return false }
         return shellCommandPayloadLooksExecutable(command)
+    }
+
+    private nonisolated static func networkFetchPayloadLooksValid(_ object: Any?) -> Bool {
+        if shellWrapperPayloadLooksExecutable(object) {
+            return true
+        }
+        return httpURLString(from: object) != nil
     }
 
     private nonisolated static func shellCommandPayloadLooksExecutable(_ command: String) -> Bool {
@@ -3790,6 +3837,7 @@ actor LocalAlpineAgentService {
         if let tagRegex = try? NSRegularExpression(pattern: #"<local_alpine_exec>[\s\S]*?</local_alpine_exec>"#, options: [.caseInsensitive]) {
             removalRanges.append(contentsOf: tagRegex.matches(in: content, range: fullRange).map(\.range))
         }
+        removalRanges.append(contentsOf: toolUseInstructionRanges(in: content, includeIncomplete: true))
         removalRanges.append(contentsOf: pseudoToolCallRanges(in: content, includeIncomplete: true))
 
         if let incompleteFenceRange = incompleteInstructionFenceRange(in: content) {
@@ -3921,7 +3969,129 @@ actor LocalAlpineAgentService {
                 blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .newlines))
             }
         }
+        if let tagRegex = try? NSRegularExpression(pattern: #"<local_alpine_exec>([\s\S]*?)</local_alpine_exec>"#, options: [.caseInsensitive]) {
+            let matches = tagRegex.matches(in: content, range: fullRange)
+            for match in matches where match.numberOfRanges >= 2 {
+                blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .newlines))
+            }
+        }
+        blocks.append(contentsOf: toolUseInstructionPayloads(in: content).map(\.payload))
+        for range in pseudoToolCallRangesWithPayload(in: content, includeIncomplete: false) {
+            blocks.append(nsContent.substring(with: range.payload).trimmingCharacters(in: .newlines))
+        }
         return blocks
+    }
+
+    nonisolated private static func toolUseInstructionRanges(
+        in content: String,
+        includeIncomplete: Bool
+    ) -> [NSRange] {
+        var ranges = toolUseInstructionPayloads(in: content).map(\.full)
+        if includeIncomplete,
+           let incompleteRange = incompleteToolUseInstructionRange(in: content) {
+            ranges.append(incompleteRange)
+        }
+        return ranges
+    }
+
+    nonisolated private static func toolUseInstructionPayloads(
+        in content: String
+    ) -> [(full: NSRange, payload: String)] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<tool_use\b[^>]*>([\s\S]*?)</tool_use>"#,
+            options: [.caseInsensitive]
+        ) else {
+            return []
+        }
+
+        let nsContent = content as NSString
+        let fullRange = NSRange(location: 0, length: nsContent.length)
+        var payloads: [(full: NSRange, payload: String)] = []
+        for match in regex.matches(in: content, range: fullRange) where match.numberOfRanges >= 2 {
+            let body = nsContent.substring(with: match.range(at: 1))
+            guard let name = xmlTagContent("name", in: body),
+                  let payload = serializedToolUsePayload(
+                    name: name,
+                    argumentsText: xmlTagContent("arguments", in: body)
+                        ?? xmlTagContent("input", in: body)
+                        ?? xmlTagContent("args", in: body)
+                        ?? xmlTagContent("parameters", in: body)
+                        ?? xmlTagContent("params", in: body)
+                  ) else {
+                continue
+            }
+            payloads.append((full: match.range, payload: payload))
+        }
+        return payloads
+    }
+
+    nonisolated private static func serializedToolUsePayload(
+        name rawName: String,
+        argumentsText rawArguments: String?
+    ) -> String? {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              localAlpineToolNames.contains(name.lowercased()) else {
+            return nil
+        }
+
+        let arguments: Any
+        if let rawArguments = rawArguments?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !rawArguments.isEmpty {
+            arguments = decodedJSONValue(rawArguments) ?? rawArguments
+        } else {
+            arguments = [String: Any]()
+        }
+
+        let envelope: [String: Any] = [
+            "type": "tool_use",
+            "name": name,
+            "arguments": arguments
+        ]
+        guard JSONSerialization.isValidJSONObject(envelope),
+              let data = try? JSONSerialization.data(withJSONObject: envelope, options: [.prettyPrinted]) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    nonisolated private static func xmlTagContent(_ tag: String, in content: String) -> String? {
+        let pattern = #"<\#(tag)\b[^>]*>([\s\S]*?)</\#(tag)>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let nsContent = content as NSString
+        let range = NSRange(location: 0, length: nsContent.length)
+        guard let match = regex.firstMatch(in: content, range: range),
+              match.numberOfRanges >= 2 else {
+            return nil
+        }
+        return xmlDecodedText(nsContent.substring(with: match.range(at: 1)))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func xmlDecodedText(_ content: String) -> String {
+        var text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("<![CDATA[") && text.hasSuffix("]]>") {
+            text = String(text.dropFirst("<![CDATA[".count).dropLast("]]>".count))
+        }
+        return text
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&amp;", with: "&")
+    }
+
+    nonisolated private static func incompleteToolUseInstructionRange(in content: String) -> NSRange? {
+        guard let markerRange = content.range(of: "<tool_use", options: [.caseInsensitive, .backwards]) else {
+            return nil
+        }
+        let afterMarker = content[markerRange.upperBound...]
+        guard afterMarker.range(of: "</tool_use>", options: .caseInsensitive) == nil else {
+            return nil
+        }
+        return NSRange(markerRange.lowerBound..<content.endIndex, in: content)
     }
 
     nonisolated private static func pseudoToolCallRanges(in content: String, includeIncomplete: Bool) -> [NSRange] {

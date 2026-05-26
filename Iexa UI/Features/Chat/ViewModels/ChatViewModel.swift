@@ -364,6 +364,7 @@ final class ChatViewModel {
     private var localAlpineAgentStopRequested = false
     private var localAlpineAutoExecutionPaused = false
     private var localAlpineNoCommandContinuationRetries = 0
+    private var localAlpineMissingToolRetryParentIds: Set<String> = []
     private var localAlpineFailedCommands: [String: LocalAlpineAgentCommandFailure] = [:]
     private var localAlpineCompletedCommands: [String: LocalAlpineAgentCompletedCommand] = [:]
     private var localAlpineFailureSignatures: [String: Int] = [:]
@@ -375,7 +376,7 @@ final class ChatViewModel {
     private var localAlpineLiveToolCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
     private var localAlpineRuntimeCapabilitySnapshot: LocalAlpineRuntimeCapabilitySnapshot?
     private let localAlpineAgentMaxSteps = 10
-    private let localAlpineContinuationMaxNoCommandRetries = 0
+    private let localAlpineContinuationMaxNoCommandRetries = 1
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     @ObservationIgnored private var localAlpineInputContinuation: CheckedContinuation<String?, Never>?
@@ -1415,7 +1416,7 @@ final class ChatViewModel {
         LocalAlpineToolCapability(
             name: "network_fetch",
             description: "Fetch URLs or call HTTP APIs from Alpine with a visible network step.",
-            arguments: ["command/cmd/shell/run", "cwd?", "aliases: fetch/http_request"]
+            arguments: ["command/cmd/shell/run", "cwd?", "aliases: fetch/http_request/web_fetch/webfetch"]
         ),
         LocalAlpineToolCapability(
             name: "diagnostic",
@@ -1452,16 +1453,20 @@ final class ChatViewModel {
         }
         return """
         Local Alpine tool manifest:
-        - Transport: emit exactly one fenced Markdown block with language `iexa_alpine`. The app parses that block, runs it locally, and appends the real result as a later Local Alpine observation.
+        - Primary transport: emit exactly one fenced Markdown block with language `iexa_alpine`. The app parses that block, runs it locally, and appends the real result as a later Local Alpine observation.
         - This is a client-side Markdown tool bridge, not a provider/native function. Do not check provider tool availability. Never call `iexa_alpine` through function-call syntax and never say the provider tool does not exist.
         - Valid call shape:
           ```iexa_alpine
           {"command":"pwd && ls -la","cwd":"/mnt/iexa"}
           ```
-        - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
+        - Compatibility call shapes are accepted when the model/provider insists on prompt tool syntax:
+          <local_alpine_exec>{"command":"pwd && ls -la","cwd":"/mnt/iexa"}</local_alpine_exec>
+          <tool_use><name>Bash</name><arguments>{"command":"pwd && ls -la","cwd":"/mnt/iexa"}</arguments></tool_use>
+        - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, naked function-call JSON without an accepted Local Alpine wrapper, or any sentence saying `iexa_alpine` is missing.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
         - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, or `run`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`.
         - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, `run_script`, `install_dependency`, `compile`, `test`, `network_fetch`, or `diagnostic` when one fits. The host converts or labels them as visible tool calls.
+        - Compatibility aliases inside JSON are accepted: Claude-style `Bash`, `Read`, `Write`, `Edit`, `MultiEdit`, `LS`, `Glob`, `Grep`, `WebFetch`, and OpenAI/MCP-style `recipient_name:"functions.exec_command"` map to the Local Alpine tools above.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
         - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, or macOS-only utilities.
         - Service/process commands: prefer foreground commands and bounded verification. Do not assume OpenRC/system services are available unless a prior command proves it.
@@ -1857,6 +1862,7 @@ final class ChatViewModel {
             ?? (dict["tool"] as? String)
             ?? (dict["tool_name"] as? String)
             ?? (dict["toolName"] as? String)
+            ?? (dict["recipient_name"] as? String)
             ?? (dict["action"] as? String)
         guard let rawName else { return nil }
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -1872,6 +1878,7 @@ final class ChatViewModel {
             || dict["tool"] != nil
             || dict["tool_name"] != nil
             || dict["toolName"] != nil
+            || dict["recipient_name"] != nil
         guard isEnvelope else { return nil }
 
         let rawInput = functionDict?["arguments"]
@@ -1883,7 +1890,9 @@ final class ChatViewModel {
             ?? strippedLocalAlpineToolEnvelopeInput(from: dict)
         let input = decodedLocalAlpineJSONValue(rawInput) ?? [String: Any]()
         switch name {
-        case "command", "shell", "shell_command", "bash", "run_command", "execute_command":
+        case "command", "shell", "shell_command", "bash", "run_command", "execute_command",
+             "exec_command", "run_shell", "execute_shell", "shell_exec", "terminal",
+             "functions.exec_command":
             if let command = input as? String {
                 return ["command": command]
             }
@@ -1894,6 +1903,8 @@ final class ChatViewModel {
             return ["write_files": input]
         case "edit":
             return ["edit_file": input]
+        case "multi_edit", "multiedit":
+            return ["edit_files": input]
         case "patch":
             return ["patch_file": input]
         case "delete":
@@ -1906,7 +1917,7 @@ final class ChatViewModel {
             return ["compile": input]
         case "run_tests":
             return ["test": input]
-        case "fetch", "http_request":
+        case "fetch", "http_request", "web_fetch", "webfetch":
             return ["network_fetch": input]
         case "diagnose":
             return ["diagnostic": input]
@@ -1940,7 +1951,7 @@ final class ChatViewModel {
         let envelopeKeys: Set<String> = [
             "type", "id", "name", "tool", "tool_name", "toolName", "action",
             "function", "input", "arguments", "args", "parameters", "params",
-            "tool_call_id", "index"
+            "tool_call_id", "index", "recipient_name"
         ]
         let stripped = dict.filter { !envelopeKeys.contains($0.key) }
         return stripped.isEmpty ? nil : stripped
@@ -5588,6 +5599,9 @@ final class ChatViewModel {
         if isLocalAlpineExecutionBlockedRequest(normalized) {
             return false
         }
+        if isLocalAlpineCapabilityQuestionOnlyRequest(normalized) {
+            return false
+        }
         let intent = localAlpineIntent(forNormalized: normalized)
         switch intent {
         case .explicitLocalAlpine, .shellCommand:
@@ -6857,6 +6871,7 @@ final class ChatViewModel {
         localAlpineAgentStopRequested = false
         localAlpineAutoExecutionPaused = false
         localAlpineNoCommandContinuationRetries = 0
+        localAlpineMissingToolRetryParentIds.removeAll()
         localAlpineFailedCommands.removeAll()
         localAlpineCompletedCommands.removeAll()
         localAlpineFailureSignatures.removeAll()
@@ -6877,6 +6892,7 @@ final class ChatViewModel {
         localAlpineContinuationTask = nil
         cancelLocalAlpineInput()
         localAlpineContinuationParentIds.removeAll()
+        localAlpineMissingToolRetryParentIds.removeAll()
         localAlpineActiveRunIdsByMessageId.removeAll()
         localAlpineLiveToolCallsByMessageId.removeAll()
     }
@@ -6891,6 +6907,7 @@ final class ChatViewModel {
         cancelLocalAlpineInput()
         localAlpineNoCommandContinuationRetries = 0
         localAlpineContinuationParentIds.removeAll()
+        localAlpineMissingToolRetryParentIds.removeAll()
         localAlpineActiveRunIdsByMessageId.removeAll()
         localAlpineLiveToolCallsByMessageId.removeAll()
     }
@@ -11787,6 +11804,13 @@ final class ChatViewModel {
             }
             return localAlpineTerminalApplies
         }()
+        let latestLocalAlpineObservationMessageId: String? = shouldIncludeLocalAlpineContext
+            ? conversation.messages.last(where: {
+                Self.isLocalAlpineAgentResult($0)
+                    && !Self.isLocalAlpineProtocolCorrectionMessage($0)
+                    && !$0.isStreaming
+            })?.id
+            : nil
         let memoryContext = await localMemorySystemContext()
         let workspaceContext: String? = {
             if shouldIncludeLocalAlpineContext || localAlpineTerminalApplies {
@@ -11833,9 +11857,16 @@ final class ChatViewModel {
                 continue
             }
             if isLocalAlpineResult {
-                // Local Alpine results are represented once in the structured execution-state
-                // system section above. Re-sending every result as a separate system message
-                // duplicates tool output, slows agent turns, and makes continuation policy noisier.
+                // Keep historical results summarized above, but surface the newest real
+                // observation as a tool-result-like message for the next agent decision.
+                if let latestLocalAlpineObservationMessageId,
+                   message.id == latestLocalAlpineObservationMessageId {
+                    let modelContent = contentForModel(
+                        message: message,
+                        includeImageCanvasInstruction: false
+                    )
+                    apiMessages.append(["role": "system", "content": modelContent])
+                }
                 continue
             }
             let modelContent = contentForModel(
@@ -12270,9 +12301,6 @@ final class ChatViewModel {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content
         let effectiveModelId = selectedModelId ?? message.model ?? conversation?.model ?? ""
-        guard Self.contentContainsLocalAlpineInstruction(content) else {
-            return
-        }
         guard shouldExposeLocalAlpineAgentForCurrentTurn(
             latestUserText: latestUserText,
             modelId: effectiveModelId
@@ -12283,11 +12311,19 @@ final class ChatViewModel {
            shouldKeepMediaGenerationRequestOffLocalAlpine(latestUserText, modelId: effectiveModelId) {
             return
         }
-        let executableContent = Self.normalizedLocalAlpineExecutableContent(from: content)
+        let hasExplicitInstruction = Self.contentContainsLocalAlpineInstruction(content)
+        let executableContent = hasExplicitInstruction
+            ? Self.normalizedLocalAlpineExecutableContent(from: content)
+            : nil
         guard let executableContent else {
+            scheduleLocalAlpineMissingToolRetryIfNeeded(
+                messageId: messageId,
+                latestUserText: latestUserText,
+                assistantContent: content,
+                modelId: effectiveModelId
+            )
             return
         }
-
         localAlpineAgentExecutedMessageIds.insert(messageId)
         localAlpineAgentTask = Task { [weak self] in
             let hasExecutableBlocks = await LocalAlpineAgentService.shared.hasExecutableBlocks(in: executableContent)
@@ -12297,6 +12333,42 @@ final class ChatViewModel {
             }
             await self?.refreshLocalAlpineRuntimeCapabilitiesIfNeeded()
             await self?.executeLocalAlpineAgent(messageId: messageId, content: executableContent)
+        }
+    }
+
+    private func scheduleLocalAlpineMissingToolRetryIfNeeded(
+        messageId: String,
+        latestUserText: String?,
+        assistantContent: String,
+        modelId: String
+    ) {
+        guard !localAlpineMissingToolRetryParentIds.contains(messageId) else { return }
+        guard let latestUserText,
+              Self.localAlpineUserRequestRequiresHostExecution(latestUserText) else {
+            return
+        }
+        guard shouldExposeLocalAlpineAgentForCurrentTurn(
+            latestUserText: latestUserText,
+            modelId: modelId
+        ) else {
+            return
+        }
+        guard localAlpineStepsSinceLastUser() < localAlpineAgentMaxSteps else {
+            appendLocalAlpineAgentLimitMessage(parentId: messageId)
+            return
+        }
+
+        localAlpineMissingToolRetryParentIds.insert(messageId)
+        let retryParentId = appendLocalAlpineMissingToolCorrectionMessage(
+            parentId: messageId,
+            latestUserText: latestUserText,
+            assistantContent: assistantContent
+        )
+        localAlpineNoCommandContinuationRetries = localAlpineContinuationMaxNoCommandRetries
+        localAlpineContinuationParentIds.insert(retryParentId)
+        localAlpineContinuationTask?.cancel()
+        localAlpineContinuationTask = Task { [weak self] in
+            await self?.startLocalAlpineContinuation(parentId: retryParentId, forceContinue: true)
         }
     }
 
@@ -12766,6 +12838,36 @@ final class ChatViewModel {
             metadata: [
                 "iexa_local_alpine_result": "true",
                 "iexa_local_alpine_no_tool_call_stop": "true"
+            ]
+        )
+    }
+
+    private func appendLocalAlpineMissingToolCorrectionMessage(
+        parentId: String,
+        latestUserText: String,
+        assistantContent: String
+    ) -> String {
+        let content = """
+        Local Alpine Agent 接管
+
+        上一条模型回复没有发出可执行的 `iexa_alpine` 工具调用，但用户请求需要真实本地项目操作。已触发一次协议纠偏续跑。
+
+        user_goal:
+        \(Self.clippedForSystemContext(latestUserText, maxCharacters: 1_500))
+
+        previous_response:
+        \(Self.clippedForSystemContext(assistantContent, maxCharacters: 2_000))
+
+        required_next_action: missing tool call. 下一步必须直接发出一个有界的 `iexa_alpine` 工具块来读取、写入、运行、验证或诊断 `/mnt/iexa`，除非用户目标本身已经被真实本地输出证明完成。
+        """
+        return appendAssistantResult(
+            parentId: parentId,
+            model: "Local Alpine",
+            content: content,
+            metadata: [
+                "iexa_local_alpine_result": "true",
+                "iexa_local_alpine_protocol_correction": "true",
+                "iexa_local_alpine_raw_result": content
             ]
         )
     }
@@ -13464,10 +13566,17 @@ final class ChatViewModel {
         guard let modelId = selectedModelId ?? conversation.model else { return }
         guard !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
+        let parentIsProtocolCorrection = conversation.messages.first(where: { $0.id == parentId })
+            .map(Self.isLocalAlpineProtocolCorrectionMessage) == true
         let assistantMessageId = UUID().uuidString
-        let thinkingDescription = finalSummaryOnly
-            ? "本地输出已返回，正在整理回答..."
-            : "本地输出已返回，正在思考下一步..."
+        let thinkingDescription: String
+        if finalSummaryOnly {
+            thinkingDescription = "本地输出已返回，正在整理回答..."
+        } else if parentIsProtocolCorrection {
+            thinkingDescription = "正在接管本地执行..."
+        } else {
+            thinkingDescription = "本地输出已返回，正在思考下一步..."
+        }
         let thinkingStatus = ChatStatusUpdate(
             action: "local_alpine_agent",
             description: thinkingDescription,
@@ -13512,7 +13621,10 @@ final class ChatViewModel {
         if finalSummaryOnly {
             Self.appendLocalAlpineFinalSummaryInstruction(to: &apiMessages)
         } else {
-            Self.appendLocalAlpineContinuationInstruction(to: &apiMessages)
+            Self.appendLocalAlpineContinuationInstruction(
+                to: &apiMessages,
+                missingToolRetry: localAlpineNoCommandContinuationRetries > 0
+            )
         }
 
         isStreaming = true
@@ -13782,6 +13894,10 @@ final class ChatViewModel {
                 content: rawContent,
                 error: nil
             )
+        } else if parentNeedsFollowUp,
+                  let parentResultId,
+                  retryLocalAlpineContinuationAfterMissingTool(parentId: parentResultId) {
+            return
         } else {
             localAlpineNoCommandContinuationRetries = 0
             localAlpineAgentStopRequested = true
@@ -13791,8 +13907,21 @@ final class ChatViewModel {
     }
 
     private func retryLocalAlpineContinuationAfterMissingTool(parentId: String) -> Bool {
-        _ = parentId
-        return false
+        guard !localAlpineAgentStopRequested else { return false }
+        guard localAlpineNoCommandContinuationRetries < localAlpineContinuationMaxNoCommandRetries else {
+            appendLocalAlpineNoToolCallStopMessage(parentId: parentId)
+            localAlpineAgentStopRequested = true
+            localAlpineContinuationTask = nil
+            return false
+        }
+
+        localAlpineNoCommandContinuationRetries += 1
+        localAlpineContinuationParentIds.remove(parentId)
+        localAlpineContinuationTask?.cancel()
+        localAlpineContinuationTask = Task { [weak self] in
+            await self?.startLocalAlpineContinuation(parentId: parentId, forceContinue: true)
+        }
+        return true
     }
 
     private func localAlpineParentNeedsToolFollowUp(_ parentMessageId: String) -> Bool {
@@ -14192,7 +14321,17 @@ final class ChatViewModel {
         cleanupStreaming()
     }
 
-    private static func appendLocalAlpineContinuationInstruction(to messages: inout [[String: Any]]) {
+    private static func appendLocalAlpineContinuationInstruction(
+        to messages: inout [[String: Any]],
+        missingToolRetry: Bool = false
+    ) {
+        let retryInstruction = missingToolRetry ? """
+
+        Missing-tool retry:
+        - The previous assistant/continuation turn did not emit the required `iexa_alpine` block even though the controller state still requires local work.
+        - Do not answer with prose only in this retry. Emit exactly one fenced `iexa_alpine` block unless the latest controller_verdict is `ready_for_final_summary`.
+        - If you cannot safely continue, emit one bounded diagnostic/read/list tool call that gathers the missing local evidence.
+        """ : ""
         let instruction = """
         [Local Alpine continuation]
         You are in a continuous Local Alpine agent loop. Read the latest real Local Alpine result above.
@@ -14205,6 +14344,7 @@ final class ChatViewModel {
         - `iexa_alpine` is a Markdown fence intercepted by the host app, not a provider function. Never say it does not exist.
         - Never ask the user to send back local output; the host app returns Local Alpine output automatically.
         - Keep visible text before a tool block empty or one short progress sentence.
+        \(retryInstruction)
         [/Local Alpine continuation]
         """
         if !messages.isEmpty, messages[0]["role"] as? String == "system" {
