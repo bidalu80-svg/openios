@@ -232,7 +232,7 @@ struct ChannelImageGrid: View {
     let apiClient: APIClient?
     
     var body: some View {
-        let count = min(imageFiles.count, 4)
+        let count = min(imageFiles.count, 9)
         
         switch count {
         case 1:
@@ -252,20 +252,23 @@ struct ChannelImageGrid: View {
                 }
             }
         default:
-            LazyVGrid(columns: [
-                GridItem(.flexible(), spacing: 3),
-                GridItem(.flexible(), spacing: 3)
-            ], spacing: 3) {
-                ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { index, file in
+            let columnCount = count >= 5 ? 3 : 2
+            let columns = Array(
+                repeating: GridItem(.flexible(), spacing: 3),
+                count: columnCount
+            )
+
+            LazyVGrid(columns: columns, spacing: 3) {
+                ForEach(Array(imageFiles.prefix(9).enumerated()), id: \.offset) { index, file in
                     if let fileId = file.url, !fileId.isEmpty {
                         AuthenticatedImageView(fileId: fileId, apiClient: apiClient)
-                            .frame(maxHeight: 130)
+                            .frame(maxHeight: columnCount == 3 ? 92 : 130)
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                             .overlay(alignment: .bottomTrailing) {
-                                if index == 3 && imageFiles.count > 4 {
+                                if index == 8 && imageFiles.count > 9 {
                                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                                         .fill(.black.opacity(0.5))
-                                    Text("+\(imageFiles.count - 4)")
+                                    Text("+\(imageFiles.count - 9)")
                                         .scaledFont(size: 18, weight: .bold)
                                         .foregroundStyle(.white)
                                 }

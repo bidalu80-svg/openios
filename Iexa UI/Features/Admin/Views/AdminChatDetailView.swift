@@ -337,21 +337,33 @@ struct AdminChatDetailView: View {
 
         VStack(alignment: .trailing, spacing: Spacing.xs) {
             if !imageFiles.isEmpty {
-                HStack(spacing: Spacing.sm) {
-                    Spacer()
-                    ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
-                        if let fileId = file.url, !fileId.isEmpty {
-                            // Show a placeholder for images (no auth context in admin view)
-                            RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
-                                .fill(theme.surfaceContainer)
-                                .frame(width: 80, height: 80)
-                                .overlay {
-                                    Image(systemName: "photo")
-                                        .scaledFont(size: 20)
-                                        .foregroundStyle(theme.textTertiary)
-                                }
+                let displayImageFiles = Array(imageFiles.prefix(9))
+                let columnCount = min(displayImageFiles.count, 3)
+                let thumbnailSize: CGFloat = 80
+                let gridWidth = CGFloat(columnCount) * thumbnailSize + CGFloat(columnCount - 1) * Spacing.sm
+                let columns = Array(
+                    repeating: GridItem(.fixed(thumbnailSize), spacing: Spacing.sm),
+                    count: columnCount
+                )
+
+                HStack {
+                    Spacer(minLength: 48)
+                    LazyVGrid(columns: columns, alignment: .trailing, spacing: Spacing.sm) {
+                        ForEach(Array(displayImageFiles.enumerated()), id: \.offset) { _, file in
+                            if let fileId = file.url, !fileId.isEmpty {
+                                // Show a placeholder for images (no auth context in admin view)
+                                RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
+                                    .fill(theme.surfaceContainer)
+                                    .frame(width: thumbnailSize, height: thumbnailSize)
+                                    .overlay {
+                                        Image(systemName: "photo")
+                                            .scaledFont(size: 20)
+                                            .foregroundStyle(theme.textTertiary)
+                                    }
+                            }
                         }
                     }
+                    .frame(width: gridWidth, alignment: .trailing)
                 }
             }
             if !nonImageFiles.isEmpty {
@@ -395,11 +407,20 @@ struct AdminChatDetailView: View {
     private func messageFilesView(files: [ChatMessageFile]) -> some View {
         let imageFiles = files.filter { $0.type == "image" || ($0.contentType ?? "").hasPrefix("image/") }
         if !imageFiles.isEmpty {
-            HStack(spacing: Spacing.sm) {
-                ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, _ in
+            let displayImageFiles = Array(imageFiles.prefix(9))
+            let columns = displayImageFiles.count == 1
+                ? [GridItem(.flexible())]
+                : [
+                    GridItem(.flexible(), spacing: Spacing.sm),
+                    GridItem(.flexible(), spacing: Spacing.sm),
+                    GridItem(.flexible(), spacing: Spacing.sm)
+                ]
+
+            LazyVGrid(columns: columns, spacing: Spacing.sm) {
+                ForEach(Array(displayImageFiles.enumerated()), id: \.offset) { _, _ in
                     RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
                         .fill(theme.surfaceContainer)
-                        .frame(height: 100)
+                        .frame(height: displayImageFiles.count == 1 ? 180 : 100)
                         .overlay {
                             Image(systemName: "photo")
                                 .scaledFont(size: 24)

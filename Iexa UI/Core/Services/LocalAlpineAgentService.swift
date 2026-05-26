@@ -1146,7 +1146,11 @@ actor LocalAlpineAgentService {
             return []
         }
 
-        if let nested = dict["iexa_alpine"] ?? dict["commands"] ?? dict["steps"] {
+        if let nested = dict["iexa_alpine"]
+            ?? dict["commands"]
+            ?? dict["steps"]
+            ?? dict["actions"]
+            ?? dict["plan"] {
             return parseCommands(from: nested)
         }
         if let nestedToolCalls = dict["tool_calls"]
@@ -1238,10 +1242,24 @@ actor LocalAlpineAgentService {
 
     private nonisolated static func shellCommandString(from dict: [String: Any]) -> String? {
         for key in ["command", "cmd", "shell", "bash", "exec", "run"] {
-            if let value = dict[key] as? String,
-               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return value
+            if let command = shellCommandString(fromValue: dict[key]) {
+                return command
             }
+        }
+        return nil
+    }
+
+    private nonisolated static func shellCommandString(fromValue value: Any?) -> String? {
+        if let string = stringValue(value) {
+            return string
+        }
+        if let array = value as? [Any] {
+            let commands = array.compactMap { shellCommandString(fromValue: $0) }
+            guard !commands.isEmpty else { return nil }
+            return commands.joined(separator: " && ")
+        }
+        if let dict = value as? [String: Any] {
+            return shellCommandString(from: dict)
         }
         return nil
     }
@@ -3476,7 +3494,10 @@ actor LocalAlpineAgentService {
         if let nested = dict["iexa_alpine"] {
             return objectContainsLocalAlpineExecutablePayload(nested, allowPlainShellString: true)
         }
-        if let nested = dict["commands"] ?? dict["steps"] {
+        if let nested = dict["commands"]
+            ?? dict["steps"]
+            ?? dict["actions"]
+            ?? dict["plan"] {
             return objectContainsLocalAlpineExecutablePayload(nested, allowPlainShellString: true)
         }
         if let nestedToolCalls = dict["tool_calls"]

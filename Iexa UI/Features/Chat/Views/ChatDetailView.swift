@@ -2440,18 +2440,29 @@ struct ChatDetailView: View {
         if !imageFiles.isEmpty || !nonImageFiles.isEmpty {
             VStack(alignment: .trailing, spacing: Spacing.xs) {
                 if !imageFiles.isEmpty {
-                    HStack(spacing: Spacing.sm) {
-                        Spacer(minLength: 64)
-                        ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
-                            if let fileId = imageReference(for: file) {
-                                chatImageView(fileId: fileId, allowsEditing: false)
-                                    .frame(
-                                        maxWidth: imageFiles.count == 1 ? 220 : 104,
-                                        maxHeight: imageFiles.count == 1 ? 220 : 104
-                                    )
-                                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                    let displayImageFiles = Array(imageFiles.prefix(9))
+                    let columnCount = min(displayImageFiles.count, 3)
+                    let thumbnailSize: CGFloat = displayImageFiles.count == 1 ? 220 : 88
+                    let gridWidth = displayImageFiles.count == 1
+                        ? thumbnailSize
+                        : CGFloat(columnCount) * thumbnailSize + CGFloat(columnCount - 1) * Spacing.sm
+                    let columns = Array(
+                        repeating: GridItem(.fixed(thumbnailSize), spacing: Spacing.sm),
+                        count: columnCount
+                    )
+
+                    HStack {
+                        Spacer(minLength: 0)
+                        LazyVGrid(columns: columns, alignment: .trailing, spacing: Spacing.sm) {
+                            ForEach(Array(displayImageFiles.enumerated()), id: \.offset) { _, file in
+                                if let fileId = imageReference(for: file) {
+                                    chatImageView(fileId: fileId, allowsEditing: false)
+                                        .frame(width: thumbnailSize, height: thumbnailSize)
+                                        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                                }
                             }
                         }
+                        .frame(width: gridWidth, alignment: .trailing)
                     }
                 }
                 if !nonImageFiles.isEmpty {
@@ -2473,18 +2484,29 @@ struct ChatDetailView: View {
 
         VStack(alignment: .trailing, spacing: Spacing.xs) {
             if !imageFiles.isEmpty {
-                HStack(spacing: Spacing.sm) {
-                    Spacer()
-                    ForEach(Array(imageFiles.prefix(4).enumerated()), id: \.offset) { _, file in
-                        if let fileId = imageReference(for: file) {
-                            chatImageView(fileId: fileId, allowsEditing: false)
-                                .frame(
-                                    maxWidth: imageFiles.count == 1 ? 200 : 100,
-                                    maxHeight: imageFiles.count == 1 ? 200 : 100
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                let displayImageFiles = Array(imageFiles.prefix(9))
+                let columnCount = min(displayImageFiles.count, 3)
+                let thumbnailSize: CGFloat = displayImageFiles.count == 1 ? 200 : 88
+                let gridWidth = displayImageFiles.count == 1
+                    ? thumbnailSize
+                    : CGFloat(columnCount) * thumbnailSize + CGFloat(columnCount - 1) * Spacing.sm
+                let columns = Array(
+                    repeating: GridItem(.fixed(thumbnailSize), spacing: Spacing.sm),
+                    count: columnCount
+                )
+
+                HStack {
+                    Spacer(minLength: 0)
+                    LazyVGrid(columns: columns, alignment: .trailing, spacing: Spacing.sm) {
+                        ForEach(Array(displayImageFiles.enumerated()), id: \.offset) { _, file in
+                            if let fileId = imageReference(for: file) {
+                                chatImageView(fileId: fileId, allowsEditing: false)
+                                    .frame(width: thumbnailSize, height: thumbnailSize)
+                                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                            }
                         }
                     }
+                    .frame(width: gridWidth, alignment: .trailing)
                 }
             }
             if !nonImageFiles.isEmpty {
@@ -2656,16 +2678,20 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func messageFilesView(files: [ChatMessageFile]) -> some View {
-        let imageFiles = files.filter { isImageFile($0) }
+        let imageFiles = Array(files.filter { isImageFile($0) }.prefix(9))
         let nonImageFiles = files.filter {
             !isImageFile($0)
                 && $0.type != "collection"
                 && $0.type != "folder"
         }
         if !imageFiles.isEmpty {
+            let columnCount = imageFiles.count >= 5 ? 3 : 2
             let columns = imageFiles.count == 1
                 ? [GridItem(.flexible())]
-                : [GridItem(.flexible(), spacing: Spacing.sm), GridItem(.flexible(), spacing: Spacing.sm)]
+                : Array(
+                    repeating: GridItem(.flexible(), spacing: Spacing.sm),
+                    count: columnCount
+                )
 
             LazyVGrid(columns: columns, spacing: Spacing.sm) {
                 ForEach(Array(imageFiles.enumerated()), id: \.element) { _, file in

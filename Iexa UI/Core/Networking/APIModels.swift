@@ -406,7 +406,7 @@ struct ChatCompletionRequest: Sendable {
                 "repeat_last_n", "tfs_z", "repeat_penalty",
                 "num_keep", "num_ctx", "num_batch",
                 "reasoning_effort", "think", "format",
-                "include_reasoning", "reasoning_format", "extra_body"
+                "response_format", "include_reasoning", "reasoning_format", "extra_body"
             ]
             for (key, value) in params where passthroughKeys.contains(key) {
                 data[key] = value
@@ -479,11 +479,15 @@ struct ChatCompletionRequest: Sendable {
             let passthroughKeys: Set<String> = [
                 "temperature", "seed",
                 "top_p", "reasoning_effort",
-                "max_output_tokens"
+                "max_output_tokens", "response_format", "text"
             ]
             for (key, value) in params where passthroughKeys.contains(key) {
                 if key == "reasoning_effort" {
                     data["reasoning"] = ["effort": value]
+                } else if key == "response_format",
+                          let responseFormat = value as? [String: Any],
+                          responseFormat["type"] as? String == "json_object" {
+                    data["text"] = ["format": ["type": "json_object"]]
                 } else {
                     data[key] = value
                 }
