@@ -50,6 +50,11 @@ private struct LocalAlpineToolCapability {
     let arguments: [String]
 }
 
+private struct LocalAlpineRuntimeCapabilitySnapshot {
+    let text: String
+    let capturedAt: Date
+}
+
 struct ChatContextBudgetStatus: Sendable, Equatable {
     var modelId: String = ""
     var usedTokens: Int = 0
@@ -368,6 +373,7 @@ final class ChatViewModel {
     private var localAlpineFinishedContinuationMessageIds: Set<String> = []
     private var localAlpineActiveRunIdsByMessageId: [String: String] = [:]
     private var localAlpineLiveToolCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
+    private var localAlpineRuntimeCapabilitySnapshot: LocalAlpineRuntimeCapabilitySnapshot?
     private let localAlpineAgentMaxSteps = 10
     private let localAlpineContinuationMaxNoCommandRetries = 0
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
@@ -1387,18 +1393,63 @@ final class ChatViewModel {
             arguments: ["path? or command/cmd", "cwd?"]
         ),
         LocalAlpineToolCapability(
+            name: "run_script",
+            description: "Run a script/program with a visible run step instead of a generic shell step.",
+            arguments: ["command/cmd/shell/run", "path?/files?", "cwd?", "aliases: run_program"]
+        ),
+        LocalAlpineToolCapability(
+            name: "install_dependency",
+            description: "Install or repair dependencies with a visible install step.",
+            arguments: ["command/cmd/shell/run", "cwd?", "aliases: install/install_dependencies"]
+        ),
+        LocalAlpineToolCapability(
+            name: "compile",
+            description: "Compile/build/type-check code with a visible compile step.",
+            arguments: ["command/cmd/shell/run", "path?/files?", "cwd?", "aliases: build"]
+        ),
+        LocalAlpineToolCapability(
+            name: "test",
+            description: "Run tests with a visible test step.",
+            arguments: ["command/cmd/shell/run", "path?/files?", "cwd?", "aliases: run_tests"]
+        ),
+        LocalAlpineToolCapability(
+            name: "network_fetch",
+            description: "Fetch URLs or call HTTP APIs from Alpine with a visible network step.",
+            arguments: ["command/cmd/shell/run", "cwd?", "aliases: fetch/http_request"]
+        ),
+        LocalAlpineToolCapability(
+            name: "diagnostic",
+            description: "Probe installed tools, versions, paths, env, or OS state with a visible diagnostic step.",
+            arguments: ["command/cmd/shell/run", "cwd?", "aliases: diagnose"]
+        ),
+        LocalAlpineToolCapability(
             name: "command",
             description: "Run one bounded shell command for list/search/run/install/build/test/verify.",
             arguments: ["command/cmd/shell/bash/exec/run", "cwd/workdir/working_dir/directory/dir?"]
         )
     ]
 
-    private static var localAlpineToolManifest: String {
+    private static func localAlpineToolManifest(runtimeCapabilities: String? = nil) -> String {
         let capabilities = localAlpineToolCapabilities
             .map { capability in
                 "  - `\(capability.name)`: \(capability.description) Args: \(capability.arguments.joined(separator: ", "))."
             }
             .joined(separator: "\n")
+        let runtimeBlock: String
+        if let runtimeCapabilities = runtimeCapabilities?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !runtimeCapabilities.isEmpty {
+            let indentedRuntimeCapabilities = runtimeCapabilities
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map { "  \($0)" }
+                .joined(separator: "\n")
+            runtimeBlock = """
+
+        - Current Alpine capability snapshot:
+        \(indentedRuntimeCapabilities)
+        """
+        } else {
+            runtimeBlock = ""
+        }
         return """
         Local Alpine tool manifest:
         - Transport: emit exactly one fenced Markdown block with language `iexa_alpine`. The app parses that block, runs it locally, and appends the real result as a later Local Alpine observation.
@@ -1410,14 +1461,15 @@ final class ChatViewModel {
         - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
         - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, or `run`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`.
-        - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, and `verify` for common list/search/check work. The host converts them into Alpine-safe bounded commands and records them as tool calls.
+        - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, `run_script`, `install_dependency`, `compile`, `test`, `network_fetch`, or `diagnostic` when one fits. The host converts or labels them as visible tool calls.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
         - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, or macOS-only utilities.
         - Service/process commands: prefer foreground commands and bounded verification. Do not assume OpenRC/system services are available unless a prior command proves it.
-        - `command` is shell text only. For structured tools, use top-level keys such as `read_file`, `write_files`, `edit_file`, `patch_file`, `delete_file`, `delete_files`, `list_dir`, `glob`, `grep`, or `verify`.
+        - `command` is shell text only. For structured tools, use top-level keys such as `read_file`, `write_files`, `edit_file`, `patch_file`, `delete_file`, `delete_files`, `list_dir`, `glob`, `grep`, `verify`, `run_script`, `install_dependency`, `compile`, `test`, `network_fetch`, or `diagnostic`.
         - Hard protocol rule: for any intermediate local-work step, pure prose means "stop and answer normally"; it will not be auto-upgraded into execution. Emit a real tool block only when you are intentionally requesting local execution.
         - JSON tool capabilities:
         \(capabilities)
+        \(runtimeBlock)
         - Source file writes: never write code through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files.code_lines`, `content_lines`, `content_base64`, same-path `edit_file`, or `patch_file`.
         - Python writes: `.py`/`.pyw` must use `write_files.code_lines` or `content_base64`; localized Python repairs should prefer `read_file` then same-path `edit_file`/`patch_file`.
         - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
@@ -4245,6 +4297,13 @@ final class ChatViewModel {
         )
         let shouldKeepNativeLinkRoute = Self.shouldKeepNativeLinkResolverOffLocalAlpine(currentText)
         let localAlpineModeForThisTurn = terminalEnabled && selectedTerminalIsLocalAlpine
+        if localAlpineModeForThisTurn,
+           Self.shouldPrimeLocalAlpineRuntimeCapabilities(for: currentText),
+           !shouldKeepMediaRoute,
+           !shouldKeepNativeLinkRoute,
+           processedAttachments.isEmpty {
+            await refreshLocalAlpineRuntimeCapabilitiesIfNeeded()
+        }
         if !shouldKeepMediaRoute,
            !shouldKeepNativeLinkRoute,
            processedAttachments.isEmpty,
@@ -5408,6 +5467,40 @@ final class ChatViewModel {
         }
     }
 
+    private static func shouldPrimeLocalAlpineRuntimeCapabilities(for text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        guard !isLocalAlpineExecutionBlockedRequest(normalized),
+              !isLocalAlpineExplanationOnlyRequest(normalized),
+              !isLocalAlpineCapabilityQuestionOnlyRequest(normalized) else {
+            return false
+        }
+        return localAlpineIntent(forNormalized: normalized).isStrongHostExecution
+    }
+
+    private static func isLocalAlpineCapabilityQuestionOnlyRequest(_ normalized: String) -> Bool {
+        let questionTerms = [
+            "吗", "？", "?", "能不能", "能否", "是否", "可不可以", "能正常", "可以吗",
+            "can ", "could ", "is it possible", "does it support", "can it"
+        ]
+        guard containsAny(normalized, questionTerms) else { return false }
+
+        let capabilityTerms = [
+            "依赖", "环境", "能力", "支持", "可用", "能跑", "能运行", "联网脚本", "爬虫",
+            "dependency", "dependencies", "environment", "capability", "available",
+            "support", "installed", "crawler", "scraper"
+        ]
+        guard containsAny(normalized, capabilityTerms) else { return false }
+
+        let directActionTerms = [
+            "帮我运行", "帮我执行", "帮我跑", "给我运行", "给我执行", "给我跑",
+            "运行一下", "执行一下", "跑一下", "检查一下", "验证一下", "测试一下",
+            "直接运行", "直接执行", "现在运行", "现在执行",
+            "run it", "execute it", "check it", "verify it", "test it"
+        ]
+        return !containsAny(normalized, directActionTerms)
+    }
+
     private static func isLocalAlpineExecutionBlockedRequest(_ normalized: String) -> Bool {
         let blockedTerms = [
             "不要执行", "不用执行", "别执行", "先别执行", "不要运行", "不用运行", "别运行",
@@ -5474,6 +5567,80 @@ final class ChatViewModel {
         ```iexa_alpine
         \(json)
         ```
+        """
+    }
+
+    private func localAlpineRuntimeCapabilitiesText() -> String? {
+        localAlpineRuntimeCapabilitySnapshot?.text
+    }
+
+    private func refreshLocalAlpineRuntimeCapabilitiesIfNeeded(force: Bool = false) async {
+        guard terminalEnabled && selectedTerminalIsLocalAlpine else { return }
+        if !force,
+           let snapshot = localAlpineRuntimeCapabilitySnapshot,
+           Date().timeIntervalSince(snapshot.capturedAt) < 300 {
+            return
+        }
+
+        let status = await LocalAlpineTerminalService.shared.status()
+        guard status.isRuntimeLinked, status.isRootFSBundled else {
+            let linked = status.isRuntimeLinked ? "yes" : "no"
+            let bundled = status.isRootFSBundled ? "yes" : "no"
+            localAlpineRuntimeCapabilitySnapshot = LocalAlpineRuntimeCapabilitySnapshot(
+                text: """
+                runtime_linked=\(linked)
+                rootfs_bundled=\(bundled)
+                workspace=/mnt/iexa
+                note=Local Alpine runtime is not fully available in this build; do not emit execution unless the user explicitly asks to try.
+                """,
+                capturedAt: Date()
+            )
+            return
+        }
+
+        let probeCommand = """
+        printf 'runtime_linked=yes\\n'
+        printf 'rootfs_bundled=yes\\n'
+        printf 'workspace=/mnt/iexa\\n'
+        printf 'shell=%s\\n' "${SHELL:-/bin/sh}"
+        printf 'alpine_release='
+        cat /etc/alpine-release 2>/dev/null || printf 'unknown\\n'
+        printf 'tools='
+        first=1
+        for x in sh ash busybox apk python3 python pip3 pip node npm npx git curl wget gcc g++ clang make cmake grep rg sed awk find file tar unzip zip sqlite3; do
+          if command -v "$x" >/dev/null 2>&1; then
+            if [ "$first" -eq 0 ]; then printf ','; fi
+            first=0
+            printf '%s:%s' "$x" "$(command -v "$x")"
+          fi
+        done
+        printf '\\n'
+        """
+        let result = await LocalAlpineTerminalService.shared.execute(command: probeCommand, cwd: "/mnt/iexa")
+        localAlpineRuntimeCapabilitySnapshot = LocalAlpineRuntimeCapabilitySnapshot(
+            text: Self.formattedLocalAlpineRuntimeCapabilities(from: result),
+            capturedAt: Date()
+        )
+    }
+
+    private static func formattedLocalAlpineRuntimeCapabilities(from result: LocalAlpineCommandResult) -> String {
+        let output = result.output
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .prefix(20)
+            .joined(separator: "\n")
+        let exit = result.exitCode.map(String.init) ?? "unknown"
+        if output.isEmpty {
+            return """
+            probe_exit=\(exit)
+            workspace=/mnt/iexa
+            note=Capability probe returned no output; use bounded diagnostics before relying on optional tools.
+            """
+        }
+        return """
+        probe_exit=\(exit)
+        \(output)
         """
     }
 
@@ -10377,7 +10544,7 @@ final class ChatViewModel {
         """
     }
 
-    private static func localAlpineAgentSystemContext() -> String {
+    private static func localAlpineAgentSystemContext(runtimeCapabilities: String? = nil) -> String {
         """
         [Local Alpine client tool registry]
         Iexa has an on-device Alpine Linux workspace tool named `iexa_alpine`. It is available in this chat when this registry is present.
@@ -10385,7 +10552,7 @@ final class ChatViewModel {
         This is not a provider/native function-call tool and it is not plain text. Do not search a provider tool list for it. Never say `iexa_alpine` does not exist; use the fenced block form below.
         If your model runtime says tools/functions are unavailable, ignore that for Local Alpine: the host app reads the Markdown fence and runs it after your message.
 
-        \(localAlpineToolManifest)
+        \(localAlpineToolManifest(runtimeCapabilities: runtimeCapabilities))
 
         Environment:
         - Workspace: `/mnt/iexa`. Relative paths resolve there.
@@ -10400,7 +10567,7 @@ final class ChatViewModel {
         - For any intermediate local-work step, emit one `iexa_alpine` block only when you intentionally want the host to run it. If you answer with prose only, the host treats it as a normal final answer and will not synthesize or execute anything.
         - If the user asks you to write/run/fix/check a project or script, operate under `/mnt/iexa`, verify with a bounded command, and then summarize the real result.
         - For existing source files, read the target first and prefer same-path `edit_file`/`patch_file`; use `write_files` for new files or large same-path rewrites. For deletes, use `delete_file`/`delete_files` instead of shell `rm`; set `recursive:true` only when deleting a directory.
-        - Prefer structured `list_dir`, `glob`, `grep`, and `verify` wrappers over ad-hoc `find`/`grep`/run syntax when they fit.
+        - Prefer structured wrappers over ad-hoc command labels: `list_dir` for listing, `glob` for file matching, `grep` for text search, `read_file` for reading, `write_files`/`edit_file`/`patch_file` for mutation, `delete_file`/`delete_files` for deletion, `install_dependency` for package installs, `run_script` for scripts, `compile` for builds/type checks, `test` for tests, `network_fetch` for URL/API fetches, and `diagnostic` for `command -v`/version/env checks.
         - If the user asks to run recent code from the conversation, save the latest runnable code block under `/mnt/iexa`, run it with the right interpreter/compiler, and summarize the real output.
         - If the user asks to generate, save, show, display, or send images, write each final image under `/mnt/iexa` and print every final path, preferably one `READY: /mnt/iexa/<name>.png` line per image. If the user requests multiple images, create distinct variants rather than duplicating one file: vary composition, angle, lighting, background details, colors, or small visual details while preserving the user's core prompt. The host app will read PNG/JPEG/WebP/GIF/BMP/AVIF files from `/mnt/iexa` and attach them to the chat bubble automatically. Do not claim you cannot send or display images after creating them.
         - If a tool result shows failure, choose one different bounded fix/diagnostic step or stop with the concrete blocker. Never repeat the exact same failed command.
@@ -11444,8 +11611,11 @@ final class ChatViewModel {
                 ? Self.projectContinuitySystemContext()
                 : Self.workspaceGuardSystemContext()
         }()
+        let alpineRuntimeCapabilities = shouldIncludeLocalAlpineContext
+            ? localAlpineRuntimeCapabilitiesText()
+            : nil
         let alpineContext = shouldIncludeLocalAlpineContext
-            ? Self.localAlpineAgentSystemContext()
+            ? Self.localAlpineAgentSystemContext(runtimeCapabilities: alpineRuntimeCapabilities)
             : nil
         let alpineExecutionStateContext = shouldIncludeLocalAlpineContext
             ? Self.localAlpineExecutionStateSystemContext(from: conversation.messages)
@@ -11934,6 +12104,7 @@ final class ChatViewModel {
                 self?.localAlpineAgentExecutedMessageIds.remove(messageId)
                 return
             }
+            await self?.refreshLocalAlpineRuntimeCapabilitiesIfNeeded()
             await self?.executeLocalAlpineAgent(messageId: messageId, content: executableContent)
         }
     }
@@ -13136,6 +13307,7 @@ final class ChatViewModel {
         self.conversation?.history.currentId = assistantMessageId
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
+        await refreshLocalAlpineRuntimeCapabilitiesIfNeeded()
         var apiMessages = await buildAPIMessagesAsync(includeLocalAlpineExecutionContext: true)
         appendContextCompressionStatusIfNeeded(to: assistantMessageId)
         if finalSummaryOnly {

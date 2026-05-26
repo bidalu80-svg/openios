@@ -279,6 +279,10 @@ enum LocalAlpineToolDisplayRegistry {
             return LocalAlpineToolDisplay(icon: "shippingbox", title: "安装依赖")
         case "network_fetch", "fetch":
             return LocalAlpineToolDisplay(icon: "network", title: "网络请求")
+        case "file_operation", "file_ops":
+            return LocalAlpineToolDisplay(icon: "folder", title: "文件操作")
+        case "lint_format", "lint", "format":
+            return LocalAlpineToolDisplay(icon: "checkmark.seal", title: "检查格式")
         case "command", "shell", "bash", "exec":
             return LocalAlpineToolDisplay(icon: "terminal.fill", title: "运行命令")
         case "diagnostic":
@@ -1233,6 +1237,20 @@ actor LocalAlpineAgentService {
         return nil
     }
 
+    private nonisolated static func semanticCommandString(
+        from dict: [String: Any],
+        excludingSelectors selectors: [String]
+    ) -> String? {
+        for key in ["cmd", "shell", "bash", "exec", "run", "command"] {
+            guard let value = dict[key] as? String else { continue }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if selectors.contains(trimmed.lowercased()) { continue }
+            return trimmed
+        }
+        return nil
+    }
+
     private nonisolated static func structuredToolSelector(_ command: String) -> String? {
         let normalized = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch normalized {
@@ -1269,19 +1287,39 @@ actor LocalAlpineAgentService {
         }
 
         let classifiedName: String
-        if normalized.range(of: #"(^|[;&|]\s*)(?:apk|apt|brew|pip3?|npm|pnpm|yarn)\s+(?:add|install|i)\b"#, options: .regularExpression) != nil {
+        if normalized.range(of: #"(^|[;&|]\s*)(?:apk|apt-get|apt|yum|dnf|pacman|brew|pip3?|npm|pnpm|yarn)\s+(?:add|install|i)\b"#, options: .regularExpression) != nil
+            || normalized.range(of: #"(^|[;&|]\s*)python3?\s+-m\s+pip\s+(?:install|i)\b"#, options: .regularExpression) != nil {
             classifiedName = "install_dependency"
         } else if normalized.range(of: #"(^|[;&|]\s*)(?:swift|xcodebuild|make|cmake|gcc|g\+\+|clang|cargo|go|npm|pnpm|yarn)\s+(?:build|compile|archive|run\s+build)\b"#, options: .regularExpression) != nil
+            || normalized.range(of: #"(^|[;&|]\s*)(?:npm|pnpm|yarn)\s+run\s+(?:build|compile)\b"#, options: .regularExpression) != nil
+            || normalized.range(of: #"(^|[;&|]\s*)(?:tsc|npx\s+tsc)\b"#, options: .regularExpression) != nil
             || normalized.contains(" py_compile ")
             || normalized.hasPrefix("python3 -m py_compile")
             || normalized.hasPrefix("python -m py_compile") {
             classifiedName = "compile"
-        } else if normalized.range(of: #"(^|[;&|]\s*)(?:pytest|python3?\s+-m\s+pytest|npm\s+test|pnpm\s+test|yarn\s+test|go\s+test|cargo\s+test)\b"#, options: .regularExpression) != nil {
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:pytest|python3?\s+-m\s+pytest|npm\s+test|pnpm\s+test|yarn\s+test|go\s+test|cargo\s+test|swift\s+test)\b"#, options: .regularExpression) != nil
+            || normalized.range(of: #"(^|[;&|]\s*)(?:npm|pnpm|yarn)\s+run\s+test\b"#, options: .regularExpression) != nil {
             classifiedName = "test"
         } else if normalized.range(of: #"(^|[;&|]\s*)(?:curl|wget)\s+"#, options: .regularExpression) != nil {
             classifiedName = "network_fetch"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:ruff|black|prettier|eslint|swiftlint|shellcheck)\b"#, options: .regularExpression) != nil
+            || normalized.contains(" --check") {
+            classifiedName = "lint_format"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:command\s+-v|which|type|uname|id|whoami|date|env|printenv|apk\s+(?:info|search|version)|busybox)\b"#, options: .regularExpression) != nil
+            || normalized.range(of: #"(^|[;&|]\s*)(?:python3?|pip3?|node|npm|gcc|g\+\+|clang|make|cmake|git|curl|wget)\s+(?:--version|-v|version)\b"#, options: .regularExpression) != nil {
+            classifiedName = "diagnostic"
         } else if normalized.range(of: #"(^|[;&|]\s*)(?:python3?|node|deno|bun|ruby|php|lua|go\s+run|cargo\s+run|swift\s+run)\b"#, options: .regularExpression) != nil {
             classifiedName = "run_script"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:sh|ash|bash)\s+(?:/|\./|[\w.-]+\.|\w+)"#, options: .regularExpression) != nil {
+            classifiedName = "run_script"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:grep|egrep|fgrep|rg)\b"#, options: .regularExpression) != nil {
+            classifiedName = "grep"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:pwd|ls|tree|find)\b"#, options: .regularExpression) != nil {
+            classifiedName = "list_dir"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:cat|sed\s+-n|head|tail)\b"#, options: .regularExpression) != nil {
+            classifiedName = "read_file"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:mkdir|cp|mv|touch|chmod|chown|ln)\b"#, options: .regularExpression) != nil {
+            classifiedName = "file_operation"
         } else {
             classifiedName = "command"
         }
@@ -1300,6 +1338,41 @@ actor LocalAlpineAgentService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         let cwd = cwdString(from: dict)
+
+        let semanticShellTools: [(keys: [String], toolName: String)] = [
+            (keys: ["run_script", "run_program"], toolName: "run_script"),
+            (keys: ["install_dependency", "install_dependencies", "install"], toolName: "install_dependency"),
+            (keys: ["compile", "build"], toolName: "compile"),
+            (keys: ["test", "run_tests"], toolName: "test"),
+            (keys: ["network_fetch", "fetch", "http_request"], toolName: "network_fetch"),
+            (keys: ["diagnostic", "diagnose"], toolName: "diagnostic"),
+            (keys: ["file_operation", "file_ops"], toolName: "file_operation"),
+            (keys: ["lint_format", "lint", "format"], toolName: "lint_format")
+        ]
+        for semanticTool in semanticShellTools {
+            if let key = semanticTool.keys.first(where: { dict[$0] != nil }) {
+                let object = dict[key] ?? dict
+                if let command = stringValue(object)
+                    ?? stringValue(value(for: ["command", "cmd", "shell", "run"], in: object))
+                    ?? shellCommand {
+                    let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmedCommand.isEmpty,
+                       !semanticTool.keys.contains(trimmedCommand.lowercased()) {
+                        let detail = stringValue(value(for: ["detail", "title", "description", "path"], in: object))
+                            ?? oneLine(trimmedCommand)
+                        let paths = pathStrings(from: value(for: ["paths", "files", "file_paths"], in: object))
+                            + pathStrings(from: value(for: ["path", "file", "file_path"], in: object))
+                        return (trimmedCommand, semanticTool.toolName, detail, uniqueNonEmpty(paths), cwd)
+                    }
+                }
+            } else if let selector, semanticTool.keys.contains(selector) {
+                let command = semanticCommandString(from: dict, excludingSelectors: semanticTool.keys)
+                    ?? shellCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let command, !command.isEmpty, !semanticTool.keys.contains(command.lowercased()) {
+                    return (command, semanticTool.toolName, oneLine(command), [], cwd)
+                }
+            }
+        }
 
         if dict["list_dir"] != nil || dict["ls"] != nil || dict["list"] != nil
             || selector == "list_dir" || selector == "ls" || selector == "list" {
@@ -1582,6 +1655,32 @@ actor LocalAlpineAgentService {
             return trimmed.isEmpty ? nil : trimmed
         }
         return nil
+    }
+
+    private nonisolated static func pathStrings(from value: Any?) -> [String] {
+        if let string = stringValue(value) {
+            return [string]
+        }
+        if let array = value as? [Any] {
+            return array.flatMap { pathStrings(from: $0) }
+        }
+        if let dict = value as? [String: Any],
+           let path = pathString(from: dict) {
+            return [path]
+        }
+        return []
+    }
+
+    private nonisolated static func uniqueNonEmpty(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        var result: [String] = []
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !seen.contains(trimmed) else { continue }
+            seen.insert(trimmed)
+            result.append(trimmed)
+        }
+        return result
     }
 
     private nonisolated static func intValue(_ value: Any?) -> Int? {
