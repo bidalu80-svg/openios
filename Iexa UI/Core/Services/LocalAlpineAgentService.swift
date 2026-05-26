@@ -1146,8 +1146,17 @@ actor LocalAlpineAgentService {
             return []
         }
 
-        if let nested = dict["iexa_alpine"] ?? dict["commands"] {
+        if let nested = dict["iexa_alpine"] ?? dict["commands"] ?? dict["steps"] {
             return parseCommands(from: nested)
+        }
+        if let nestedToolCalls = dict["tool_calls"]
+            ?? dict["toolCalls"]
+            ?? dict["tool_uses"]
+            ?? dict["toolUses"] {
+            return parseCommands(from: nestedToolCalls)
+        }
+        if let toolUseObject = Self.localAlpineCommandObject(fromToolUseEnvelope: dict) {
+            return parseCommands(from: toolUseObject)
         }
 
         var files = parseWriteFilesForCommand(from: dict)
@@ -1236,6 +1245,147 @@ actor LocalAlpineAgentService {
         }
         return nil
     }
+
+    private nonisolated static func localAlpineCommandObject(fromToolUseEnvelope dict: [String: Any]) -> Any? {
+        let functionDict = dict["function"] as? [String: Any]
+        let rawName = stringValue(functionDict?["name"])
+            ?? stringValue(dict["name"])
+            ?? stringValue(dict["tool"])
+            ?? stringValue(dict["tool_name"])
+            ?? stringValue(dict["toolName"])
+            ?? stringValue(dict["action"])
+        guard let rawName else { return nil }
+        let normalizedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let isToolEnvelope = (stringValue(dict["type"])?.lowercased() == "tool_use")
+            || dict["tool_call_id"] != nil
+            || dict["function"] != nil
+            || dict["input"] != nil
+            || dict["arguments"] != nil
+            || dict["args"] != nil
+            || dict["parameters"] != nil
+            || dict["params"] != nil
+            || dict["tool"] != nil
+            || dict["tool_name"] != nil
+            || dict["toolName"] != nil
+        guard isToolEnvelope else { return nil }
+
+        let rawInput = functionDict?["arguments"]
+            ?? dict["input"]
+            ?? dict["arguments"]
+            ?? dict["args"]
+            ?? dict["parameters"]
+            ?? dict["params"]
+            ?? strippedToolEnvelopeInput(from: dict)
+        let input = decodedJSONValue(rawInput)
+        return localAlpineCommandObject(toolName: normalizedName, input: input)
+    }
+
+    private nonisolated static func strippedToolEnvelopeInput(from dict: [String: Any]) -> [String: Any]? {
+        let envelopeKeys: Set<String> = [
+            "type", "id", "name", "tool", "tool_name", "toolName", "action",
+            "function", "input", "arguments", "args", "parameters", "params",
+            "tool_call_id", "index"
+        ]
+        let stripped = dict.filter { !envelopeKeys.contains($0.key) }
+        return stripped.isEmpty ? nil : stripped
+    }
+
+    private nonisolated static func decodedJSONValue(_ value: Any?) -> Any? {
+        guard let value else { return nil }
+        if let string = value as? String,
+           let data = string.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) {
+            return object
+        }
+        return value
+    }
+
+    private nonisolated static func localAlpineCommandObject(toolName rawName: String, input: Any?) -> Any? {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard localAlpineToolNames.contains(name) else { return nil }
+
+        switch name {
+        case "command", "shell", "shell_command", "bash", "run_command", "execute_command":
+            if let dict = input as? [String: Any] {
+                if shellCommandString(from: dict) != nil {
+                    return dict
+                }
+                if let command = stringValue(dict["command"] ?? dict["cmd"] ?? dict["shell"] ?? dict["bash"] ?? dict["run"]) {
+                    return ["command": command]
+                }
+                return dict
+            }
+            if let command = stringValue(input) {
+                return ["command": command]
+            }
+            return nil
+        case "read":
+            return ["read_file": input ?? [String: Any]()]
+        case "write":
+            return ["write_files": input ?? [String: Any]()]
+        case "edit":
+            return ["edit_file": input ?? [String: Any]()]
+        case "patch":
+            return ["patch_file": input ?? [String: Any]()]
+        case "delete":
+            return ["delete_file": input ?? [String: Any]()]
+        case "ls", "list":
+            return ["list_dir": input ?? [String: Any]()]
+        case "install", "install_dependencies":
+            return ["install_dependency": input ?? [String: Any]()]
+        case "build":
+            return ["compile": input ?? [String: Any]()]
+        case "run_tests":
+            return ["test": input ?? [String: Any]()]
+        case "fetch", "http_request":
+            return ["network_fetch": input ?? [String: Any]()]
+        case "diagnose":
+            return ["diagnostic": input ?? [String: Any]()]
+        case "file_ops":
+            return ["file_operation": input ?? [String: Any]()]
+        case "lint", "format":
+            return ["lint_format": input ?? [String: Any]()]
+        case "read_file", "read_files",
+             "write_file", "write_files", "create_file", "create_files",
+             "edit_file", "edit_files", "replace_file",
+             "patch_file", "patch_files", "apply_patch",
+             "delete_file", "delete_files", "remove_file", "remove_files",
+             "list_dir",
+             "glob", "find_files",
+             "grep", "search_files",
+             "run_script", "run_program",
+             "install_dependency",
+             "compile",
+             "test",
+             "network_fetch",
+             "diagnostic",
+             "file_operation",
+             "lint_format":
+            return [name: input ?? [String: Any]()]
+        default:
+            return nil
+        }
+    }
+
+    private static let localAlpineToolNames: Set<String> = [
+        "command", "shell", "shell_command", "bash", "run_command", "execute_command",
+        "read", "read_file", "read_files",
+        "write", "write_file", "write_files", "create_file", "create_files",
+        "edit", "edit_file", "edit_files", "replace_file",
+        "patch", "patch_file", "patch_files", "apply_patch",
+        "delete", "delete_file", "delete_files", "remove_file", "remove_files",
+        "list_dir", "ls", "list",
+        "glob", "find_files",
+        "grep", "search_files",
+        "run_script", "run_program",
+        "install_dependency", "install_dependencies", "install",
+        "compile", "build",
+        "test", "run_tests",
+        "network_fetch", "fetch", "http_request",
+        "diagnostic", "diagnose",
+        "file_operation", "file_ops",
+        "lint_format", "lint", "format"
+    ]
 
     private nonisolated static func semanticCommandString(
         from dict: [String: Any],
@@ -1352,10 +1502,21 @@ actor LocalAlpineAgentService {
         for semanticTool in semanticShellTools {
             if let key = semanticTool.keys.first(where: { dict[$0] != nil }) {
                 let object = dict[key] ?? dict
-                if let command = stringValue(object)
+                if semanticTool.toolName == "run_script",
+                   let path = pathString(from: object) ?? pathString(from: dict),
+                   let scriptCommand = scriptCommand(for: path) {
+                    let detail = stringValue(value(for: ["detail", "title", "description", "path"], in: object))
+                        ?? oneLine(path)
+                    return (scriptCommand, semanticTool.toolName, detail, uniqueNonEmpty([path]), cwd)
+                }
+                if let rawCommand = stringValue(object)
                     ?? stringValue(value(for: ["command", "cmd", "shell", "run"], in: object))
                     ?? shellCommand {
-                    let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trimmedCommand = commandForSemanticTool(
+                        semanticTool.toolName,
+                        rawCommand: rawCommand,
+                        object: object
+                    )
                     if !trimmedCommand.isEmpty,
                        !semanticTool.keys.contains(trimmedCommand.lowercased()) {
                         let detail = stringValue(value(for: ["detail", "title", "description", "path"], in: object))
@@ -1369,7 +1530,12 @@ actor LocalAlpineAgentService {
                 let command = semanticCommandString(from: dict, excludingSelectors: semanticTool.keys)
                     ?? shellCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
                 if let command, !command.isEmpty, !semanticTool.keys.contains(command.lowercased()) {
-                    return (command, semanticTool.toolName, oneLine(command), [], cwd)
+                    let normalizedCommand = commandForSemanticTool(
+                        semanticTool.toolName,
+                        rawCommand: command,
+                        object: dict
+                    )
+                    return (normalizedCommand, semanticTool.toolName, oneLine(normalizedCommand), [], cwd)
                 }
             }
         }
@@ -1443,7 +1609,7 @@ actor LocalAlpineAgentService {
             if lower.hasSuffix(".py") || lower.hasSuffix(".pyw") {
                 command = "python3 -m py_compile \(shellSingleQuotedStatic(path)) && python3 \(shellSingleQuotedStatic(path))"
             } else if lower.hasSuffix(".lua") {
-                command = "if command -v lua >/dev/null 2>&1; then lua \(shellSingleQuotedStatic(path)); elif command -v lua5.4 >/dev/null 2>&1 || apk add --no-cache lua5.4; then lua5.4 \(shellSingleQuotedStatic(path)); else apk add --no-cache lua && lua \(shellSingleQuotedStatic(path)); fi"
+                command = luaRunCommand(for: path)
             } else if lower.hasSuffix(".js") || lower.hasSuffix(".mjs") || lower.hasSuffix(".cjs") {
                 command = "node \(shellSingleQuotedStatic(path))"
             } else if lower.hasSuffix(".ts") {
@@ -1457,6 +1623,82 @@ actor LocalAlpineAgentService {
         }
 
         return nil
+    }
+
+    private nonisolated static func commandForSemanticTool(
+        _ toolName: String,
+        rawCommand: String,
+        object: Any
+    ) -> String {
+        let trimmed = rawCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard toolName == "run_script" else { return trimmed }
+        let path = pathString(from: object) ?? trimmed
+        if let scriptCommand = scriptCommand(for: path) {
+            return scriptCommand
+        }
+        if commandAlreadyLooksExecutable(trimmed) {
+            return trimmed
+        }
+        return trimmed
+    }
+
+    private nonisolated static func commandAlreadyLooksExecutable(_ command: String) -> Bool {
+        command.range(of: #"[\s;&|<>`$]"#, options: .regularExpression) != nil
+            || command.hasPrefix("./")
+            || command.hasPrefix("/")
+    }
+
+    private nonisolated static func scriptCommand(for path: String) -> String? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard !scriptPathLooksLikeCommand(trimmed) else { return nil }
+        let lower = trimmed.lowercased()
+        if lower.hasSuffix(".py") || lower.hasSuffix(".pyw") {
+            return "python3 \(shellSingleQuotedStatic(trimmed))"
+        }
+        if lower.hasSuffix(".lua") {
+            return luaRunCommand(for: trimmed)
+        }
+        if lower.hasSuffix(".js") || lower.hasSuffix(".mjs") || lower.hasSuffix(".cjs") {
+            return "node \(shellSingleQuotedStatic(trimmed))"
+        }
+        if lower.hasSuffix(".sh") || lower.hasSuffix(".bash") {
+            return "sh \(shellSingleQuotedStatic(trimmed))"
+        }
+        if lower.hasSuffix(".rb") {
+            return "ruby \(shellSingleQuotedStatic(trimmed))"
+        }
+        if lower.hasSuffix(".php") {
+            return "php \(shellSingleQuotedStatic(trimmed))"
+        }
+        if lower.hasSuffix(".pl") {
+            return "perl \(shellSingleQuotedStatic(trimmed))"
+        }
+        if lower.hasSuffix(".ts") {
+            return "node \(shellSingleQuotedStatic(trimmed))"
+        }
+        return nil
+    }
+
+    private nonisolated static func scriptPathLooksLikeCommand(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.range(of: #"[;&|<>`$]"#, options: .regularExpression) != nil {
+            return true
+        }
+        let firstToken = trimmed.split(whereSeparator: { $0 == " " || $0 == "\t" }).first.map(String.init) ?? trimmed
+        let knownLaunchers: Set<String> = [
+            "python", "python3", "node", "deno", "bun", "sh", "ash", "bash",
+            "ruby", "php", "perl", "lua", "go", "cargo", "swift", "npm", "npx"
+        ]
+        return knownLaunchers.contains(firstToken.lowercased())
+    }
+
+    private nonisolated static func luaRunCommand(for path: String) -> String {
+        let quotedPath = shellSingleQuotedStatic(path)
+        return """
+        if command -v lua >/dev/null 2>&1; then lua \(quotedPath); elif command -v lua5.4 >/dev/null 2>&1; then lua5.4 \(quotedPath); elif command -v lua5.3 >/dev/null 2>&1; then lua5.3 \(quotedPath); elif apk add --no-cache lua5.4 >/dev/null 2>&1 && command -v lua5.4 >/dev/null 2>&1; then lua5.4 \(quotedPath); elif apk add --no-cache lua >/dev/null 2>&1 && command -v lua >/dev/null 2>&1; then lua \(quotedPath); else printf '/bin/sh: lua: not found\\n' >&2; exit 127; fi
+        """
     }
 
     private nonisolated static func cwdString(from dict: [String: Any]) -> String? {
@@ -3153,14 +3395,16 @@ actor LocalAlpineAgentService {
     }
 
     private static let knownShellCommands: Set<String> = [
-        "apk", "ash", "awk", "bash", "bunzip2", "busybox", "bzcat", "bzip2", "cat", "cd",
-        "chmod", "chown", "cmake", "cp", "curl", "date", "df", "dirname", "du", "echo",
-        "env", "find", "free", "g++", "gcc", "git", "grep", "gunzip", "gzip", "head",
-        "id", "install", "ln", "ls", "lua", "make", "mkdir", "mv", "nc", "node", "npm",
-        "npx", "patch", "perl", "pip", "pip3", "printf", "ps", "pwd", "python", "python3",
-        "rm", "rmdir", "sed", "sh", "sleep", "sort", "tail", "tar", "tee", "test", "top",
-        "touch", "tr", "uname", "uniq", "unzip", "vi", "vim", "wget", "which", "whoami",
-        "xargs", "xz", "zip"
+        "apk", "ash", "awk", "bash", "black", "bun", "bunzip2", "busybox", "bzcat", "bzip2",
+        "cargo", "cat", "cd", "chmod", "chown", "clang", "cmake", "cp", "curl", "date",
+        "deno", "df", "dirname", "du", "echo", "env", "eslint", "find", "free", "g++",
+        "gcc", "git", "go", "grep", "gunzip", "gzip", "head", "id", "install", "ln",
+        "ls", "lua", "lua5.1", "lua5.2", "lua5.3", "lua5.4", "make", "mkdir", "mv", "nc",
+        "node", "npm", "npx", "patch", "perl", "php", "pip", "pip3", "pnpm", "prettier",
+        "printf", "ps", "pwd", "pytest", "python", "python3", "rg", "rm", "rmdir", "ruby",
+        "ruff", "sed", "sh", "sleep", "sort", "swift", "tail", "tar", "tee", "test",
+        "top", "touch", "tr", "tsc", "uname", "uniq", "unzip", "uv", "vi", "vim", "wget",
+        "which", "whoami", "xargs", "xcodebuild", "xz", "yarn", "zip"
     ]
 
     private nonisolated static func isInstructionFence(info: String, body: String) -> Bool {
@@ -3173,7 +3417,271 @@ actor LocalAlpineAgentService {
             return true
         }
         guard token == "json" else { return false }
-        return body.contains("\"iexa_alpine\"")
+        return jsonBodyLooksLikeLocalAlpineInstruction(body)
+    }
+
+    private nonisolated static func jsonBodyLooksLikeLocalAlpineInstruction(_ body: String) -> Bool {
+        guard let data = body.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else {
+            return false
+        }
+        return objectLooksLikeLocalAlpineInstruction(object)
+    }
+
+    private nonisolated static func objectLooksLikeLocalAlpineInstruction(_ object: Any) -> Bool {
+        if let array = object as? [Any] {
+            return array.contains { objectLooksLikeLocalAlpineInstruction($0) }
+        }
+        guard let dict = object as? [String: Any] else { return false }
+        if let nested = dict["iexa_alpine"] {
+            return objectContainsLocalAlpineExecutablePayload(nested, allowPlainShellString: true)
+        }
+        if let nested = dict["commands"] ?? dict["steps"] {
+            return objectContainsLocalAlpineExecutablePayload(nested, allowPlainShellString: true)
+        }
+        if let nestedToolCalls = dict["tool_calls"]
+            ?? dict["toolCalls"]
+            ?? dict["tool_uses"]
+            ?? dict["toolUses"] {
+            return objectContainsLocalAlpineExecutablePayload(nestedToolCalls, allowPlainShellString: false)
+        }
+        if let toolObject = localAlpineCommandObject(fromToolUseEnvelope: dict) {
+            return objectContainsLocalAlpineExecutablePayload(toolObject, allowPlainShellString: true)
+        }
+        return localAlpineStructuredPayloadLooksExecutable(dict)
+    }
+
+    private nonisolated static func objectContainsLocalAlpineExecutablePayload(
+        _ object: Any,
+        allowPlainShellString: Bool
+    ) -> Bool {
+        if let array = object as? [Any] {
+            return array.contains {
+                objectContainsLocalAlpineExecutablePayload($0, allowPlainShellString: allowPlainShellString)
+            }
+        }
+        if let string = object as? String {
+            return allowPlainShellString && shellCommandPayloadLooksExecutable(string)
+        }
+        guard let dict = object as? [String: Any] else { return false }
+        return objectLooksLikeLocalAlpineInstruction(dict)
+    }
+
+    private nonisolated static func localAlpineStructuredPayloadLooksExecutable(_ dict: [String: Any]) -> Bool {
+        if let command = shellCommandString(from: dict) {
+            return shellCommandPayloadLooksExecutable(command)
+        }
+        if pathPayloadLooksValid(dict["read_file"] ?? dict["read_files"]) {
+            return true
+        }
+        if writePayloadLooksValid(dict["write_file"] ?? dict["write_files"] ?? dict["create_file"] ?? dict["create_files"]) {
+            return true
+        }
+        if editPayloadLooksValid(dict["edit_file"] ?? dict["edit_files"] ?? dict["replace_file"]) {
+            return true
+        }
+        if patchPayloadLooksValid(dict["patch_file"] ?? dict["patch_files"] ?? dict["apply_patch"]) {
+            return true
+        }
+        if pathPayloadLooksValid(dict["delete_file"] ?? dict["delete_files"] ?? dict["remove_file"] ?? dict["remove_files"]) {
+            return true
+        }
+        if directoryToolPayloadLooksValid(dict["list_dir"] ?? dict["ls"]) {
+            return true
+        }
+        if globPayloadLooksValid(dict["glob"] ?? dict["find_files"]) {
+            return true
+        }
+        if grepPayloadLooksValid(dict["grep"] ?? dict["search_files"]) {
+            return true
+        }
+        if verifyPayloadLooksValid(dict["verify"]) {
+            return true
+        }
+        if runScriptPayloadLooksValid(dict["run_script"] ?? dict["run_program"]) {
+            return true
+        }
+        if shellWrapperPayloadLooksExecutable(dict["install_dependency"] ?? dict["install_dependencies"] ?? dict["install"])
+            || shellWrapperPayloadLooksExecutable(dict["compile"] ?? dict["build"])
+            || shellWrapperPayloadLooksExecutable(dict["test"] ?? dict["run_tests"])
+            || shellWrapperPayloadLooksExecutable(dict["network_fetch"] ?? dict["fetch"] ?? dict["http_request"])
+            || shellWrapperPayloadLooksExecutable(dict["diagnostic"] ?? dict["diagnose"])
+            || shellWrapperPayloadLooksExecutable(dict["file_operation"] ?? dict["file_ops"])
+            || shellWrapperPayloadLooksExecutable(dict["lint_format"] ?? dict["lint"] ?? dict["format"]) {
+            return true
+        }
+        return false
+    }
+
+    private nonisolated static func pathPayloadLooksValid(_ object: Any?) -> Bool {
+        guard let object else { return false }
+        if let array = object as? [Any] {
+            return array.contains { pathPayloadLooksValid($0) }
+        }
+        return pathString(from: object) != nil
+    }
+
+    private nonisolated static func directoryToolPayloadLooksValid(_ object: Any?) -> Bool {
+        guard let object else { return false }
+        if let array = object as? [Any] {
+            return array.contains { directoryToolPayloadLooksValid($0) }
+        }
+        if let string = object as? String {
+            return !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if let dict = object as? [String: Any] {
+            return dict.isEmpty || directoryPathString(from: dict) != nil || pathString(from: dict) != nil
+        }
+        return false
+    }
+
+    private nonisolated static func globPayloadLooksValid(_ object: Any?) -> Bool {
+        guard let object else { return false }
+        if let array = object as? [Any] {
+            return array.contains { globPayloadLooksValid($0) }
+        }
+        if let string = stringValue(object) {
+            return !string.isEmpty
+        }
+        if let dict = object as? [String: Any] {
+            return stringValue(dict["pattern"] ?? dict["query"] ?? dict["name"]) != nil
+                || directoryPathString(from: dict) != nil
+                || dict.isEmpty
+        }
+        return false
+    }
+
+    private nonisolated static func grepPayloadLooksValid(_ object: Any?) -> Bool {
+        guard let object else { return false }
+        if let array = object as? [Any] {
+            return array.contains { grepPayloadLooksValid($0) }
+        }
+        if let string = stringValue(object) {
+            return !string.isEmpty
+        }
+        if let dict = object as? [String: Any] {
+            return stringValue(dict["pattern"] ?? dict["query"] ?? dict["text"] ?? dict["regex"]) != nil
+        }
+        return false
+    }
+
+    private nonisolated static func verifyPayloadLooksValid(_ object: Any?) -> Bool {
+        guard let object else { return false }
+        if let array = object as? [Any] {
+            return array.contains { verifyPayloadLooksValid($0) }
+        }
+        if let command = commandLikeString(from: object) {
+            return shellCommandPayloadLooksExecutable(command)
+        }
+        if pathString(from: object) != nil {
+            return true
+        }
+        if let dict = object as? [String: Any] {
+            return dict.isEmpty
+        }
+        return false
+    }
+
+    private nonisolated static func runScriptPayloadLooksValid(_ object: Any?) -> Bool {
+        guard let object else { return false }
+        if let array = object as? [Any] {
+            return array.contains { runScriptPayloadLooksValid($0) }
+        }
+        if let path = pathString(from: object), scriptCommand(for: path) != nil {
+            return true
+        }
+        if let command = commandLikeString(from: object) {
+            return shellCommandPayloadLooksExecutable(command)
+        }
+        return false
+    }
+
+    private nonisolated static func shellWrapperPayloadLooksExecutable(_ object: Any?) -> Bool {
+        guard let command = commandLikeString(from: object) else { return false }
+        return shellCommandPayloadLooksExecutable(command)
+    }
+
+    private nonisolated static func shellCommandPayloadLooksExecutable(_ command: String) -> Bool {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if looksLikeShellBlock(trimmed) {
+            return true
+        }
+        let firstToken = trimmed.split(whereSeparator: { $0 == " " || $0 == "\t" }).first.map(String.init) ?? trimmed
+        return firstToken.hasPrefix("./")
+            || firstToken.hasPrefix("../")
+            || firstToken.hasPrefix("/")
+    }
+
+    private nonisolated static func commandLikeString(from object: Any?) -> String? {
+        guard let object else { return nil }
+        if let string = stringValue(object) {
+            return string
+        }
+        return stringValue(value(for: ["command", "cmd", "shell", "bash", "exec", "run"], in: object))
+    }
+
+    private nonisolated static func writePayloadLooksValid(_ object: Any?) -> Bool {
+        guard let object else { return false }
+        if let array = object as? [Any] {
+            return array.contains { writePayloadLooksValid($0) }
+        }
+        guard let dict = object as? [String: Any] else { return false }
+        let nested = dict["write_file"] ?? dict["write_files"] ?? dict["create_file"] ?? dict["create_files"]
+        if writePayloadLooksValid(nested) {
+            return true
+        }
+        return pathString(from: dict) != nil && writeFilePayload(from: dict) != nil
+    }
+
+    private nonisolated static func editPayloadLooksValid(_ object: Any?) -> Bool {
+        guard let object else { return false }
+        if let array = object as? [Any] {
+            return array.contains { editPayloadLooksValid($0) }
+        }
+        guard let dict = object as? [String: Any] else { return false }
+        let nested = dict["edit_file"] ?? dict["edit_files"] ?? dict["replace_file"]
+        if editPayloadLooksValid(nested) {
+            return true
+        }
+        guard pathString(from: dict) != nil else { return false }
+        if let replacements = (dict["replacements"] ?? dict["edits"]) as? [Any] {
+            return !replacements.isEmpty
+        }
+        let oldText = textPayload(
+            from: dict,
+            keys: ["old_text", "old_string", "find", "search", "before"],
+            lineKeys: ["old_lines", "find_lines", "before_lines"],
+            base64Keys: ["old_text_base64", "old_base64"]
+        )
+        let newText = textPayload(
+            from: dict,
+            keys: ["new_text", "new_string", "replace", "replacement", "after"],
+            lineKeys: ["new_lines", "replace_lines", "after_lines"],
+            base64Keys: ["new_text_base64", "new_base64"]
+        )
+        return oldText != nil && newText != nil
+    }
+
+    private nonisolated static func patchPayloadLooksValid(_ object: Any?) -> Bool {
+        guard let object else { return false }
+        if let array = object as? [Any] {
+            return array.contains { patchPayloadLooksValid($0) }
+        }
+        if let string = stringValue(object) {
+            return !string.isEmpty
+        }
+        guard let dict = object as? [String: Any] else { return false }
+        let nested = dict["patch_file"] ?? dict["patch_files"] ?? dict["apply_patch"]
+        if patchPayloadLooksValid(nested) {
+            return true
+        }
+        return textPayload(
+            from: dict,
+            keys: ["patch", "diff", "unified_diff"],
+            lineKeys: ["patch_lines", "diff_lines"],
+            base64Keys: ["patch_base64", "diff_base64"]
+        ) != nil
     }
 
     private nonisolated static func commandTargetsCodeOrIndentationSensitiveFile(_ normalizedCommand: String) -> Bool {

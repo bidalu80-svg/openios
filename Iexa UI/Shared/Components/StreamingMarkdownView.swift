@@ -804,7 +804,9 @@ struct StreamingMarkdownView: View {
 
         let proseLeadWords = [
             "关键", "说明", "建议", "注意", "总结", "备注", "解析", "修复", "执行", "结果", "下一步",
-            "key", "notes", "note", "summary", "explanation", "recommendation", "next"
+            "但", "如果", "不过", "另外", "因此", "所以", "当前", "这里", "上面", "下面",
+            "key", "notes", "note", "summary", "explanation", "recommendation", "next",
+            "but", "if", "however", "also", "therefore", "so", "because"
         ]
         let lowered = trimmed.lowercased()
         return proseLeadWords.contains { lowered.hasPrefix($0) }
@@ -974,7 +976,7 @@ struct StreamingMarkdownView: View {
             }
             let rawCodeContent = String(remaining[contentStart..<closeRange.lowerBound])
             let recoveredFence = recoveredMalformedFence(language: rawLanguage, content: rawCodeContent)
-            let lang = recoveredFence.language
+            let lang = displayLanguage(forFenceInfo: recoveredFence.language)
             let codeContent = recoveredFence.content
             let normalizedBlock = normalizedCodeBlock(language: lang, content: codeContent)
             let isChart = chartLanguageTags.contains(lang) && looksLikeChartJSON(codeContent)
@@ -1173,7 +1175,7 @@ struct StreamingMarkdownView: View {
     }
 
     private func normalizedCodeBlock(language: String, content: String) -> ParsedBlock? {
-        let trimmedLanguage = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let trimmedLanguage = displayLanguage(forFenceInfo: language)
         let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if !trimmedContent.isEmpty, !trimmedLanguage.isEmpty {
@@ -1201,7 +1203,7 @@ struct StreamingMarkdownView: View {
             }
         }
 
-        if !trimmedContent.isEmpty, trimmedLanguage.isEmpty, content.contains("\n") {
+        if !trimmedContent.isEmpty, trimmedLanguage.isEmpty {
             return ParsedBlock(language: "text", content: content)
         }
         return nil
@@ -1209,28 +1211,52 @@ struct StreamingMarkdownView: View {
 
     private func recoveredMalformedFence(language: String, content: String) -> ParsedBlock {
         let originalLanguageLine = language.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedLanguage = originalLanguageLine.lowercased()
-        guard !trimmedLanguage.isEmpty else {
-            return ParsedBlock(language: trimmedLanguage, content: content)
+        let displayLanguage = displayLanguage(forFenceInfo: originalLanguageLine)
+        guard !displayLanguage.isEmpty else {
+            return ParsedBlock(language: displayLanguage, content: content)
         }
-        guard !isRecognizedCodeLanguage(trimmedLanguage) else {
-            return ParsedBlock(language: trimmedLanguage, content: content)
+        guard originalLanguageLine.contains(where: { $0.isWhitespace }) else {
+            return ParsedBlock(language: displayLanguage, content: content)
         }
 
         let parts = originalLanguageLine.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
         guard parts.count == 2 else {
-            return ParsedBlock(language: trimmedLanguage, content: content)
+            return ParsedBlock(language: displayLanguage, content: content)
         }
-        let languageToken = String(parts[0]).lowercased()
-        guard isRecognizedCodeLanguage(languageToken) else {
-            return ParsedBlock(language: trimmedLanguage, content: content)
+        let languageToken = displayLanguage(forFenceInfo: String(parts[0]))
+        let firstCommandLine = String(parts[1])
+        guard looksLikeInlineFenceCode(firstCommandLine) else {
+            return ParsedBlock(language: languageToken.isEmpty ? displayLanguage : languageToken, content: content)
         }
 
-        let firstCommandLine = String(parts[1])
         let recoveredContent = content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? firstCommandLine
             : firstCommandLine + "\n" + content
-        return ParsedBlock(language: languageToken, content: recoveredContent)
+        return ParsedBlock(language: languageToken.isEmpty ? displayLanguage : languageToken, content: recoveredContent)
+    }
+
+    private func displayLanguage(forFenceInfo language: String) -> String {
+        let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return "" }
+        let firstToken = trimmed.split(maxSplits: 1, whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? trimmed
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789_+-#.")
+        if firstToken.unicodeScalars.allSatisfy({ allowed.contains($0) }) {
+            return firstToken
+        }
+        return trimmed
+    }
+
+    private func looksLikeInlineFenceCode(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let lowered = trimmed.lowercased()
+        let codeSignals = [
+            "(", ")", "{", "}", "[", "]", "=", ";", "&&", "||", "|", "<", ">",
+            "import ", "from ", "def ", "class ", "function ", "const ", "let ", "var ",
+            "local ", "print", "echo ", "cat ", "python", "node ", "npm ", "pip ",
+            "curl ", "wget ", "apk ", "swift ", "go ", "cargo ", "ruby ", "php "
+        ]
+        return codeSignals.contains { lowered.contains($0) }
     }
 
     private func isRecognizedCodeLanguage(_ language: String) -> Bool {
@@ -1242,7 +1268,7 @@ struct StreamingMarkdownView: View {
             "swift", "kotlin", "java", "javascript", "js", "typescript", "ts",
             "tsx", "jsx", "html", "css", "scss", "python", "py", "ruby", "rb",
             "go", "rust", "rs", "c", "cpp", "c++", "objc", "objective-c",
-            "php", "sql", "dockerfile", "makefile", "json", "jsonc",
+            "php", "lua", "sql", "dockerfile", "makefile", "json", "jsonc",
             "markdown", "md", "text", "txt"
         ]
         return languages.contains(normalized)

@@ -1685,8 +1685,17 @@ final class ChatViewModel {
         }
 
         guard let dict = object as? [String: Any] else { return nil }
-        if let nested = dict["iexa_alpine"] ?? dict["commands"] {
+        if let nested = dict["iexa_alpine"]
+            ?? dict["commands"]
+            ?? dict["steps"]
+            ?? dict["tool_calls"]
+            ?? dict["toolCalls"]
+            ?? dict["tool_uses"]
+            ?? dict["toolUses"] {
             return localAlpineInstructionPreview(from: nested)
+        }
+        if let toolObject = localAlpineCommandObject(fromToolEnvelope: dict) {
+            return localAlpineInstructionPreview(from: toolObject)
         }
 
         var lines: [String] = []
@@ -1815,8 +1824,17 @@ final class ChatViewModel {
         }
 
         guard let dict = object as? [String: Any] else { return [] }
-        if let nested = dict["iexa_alpine"] ?? dict["commands"] {
+        if let nested = dict["iexa_alpine"]
+            ?? dict["commands"]
+            ?? dict["steps"]
+            ?? dict["tool_calls"]
+            ?? dict["toolCalls"]
+            ?? dict["tool_uses"]
+            ?? dict["toolUses"] {
             return localAlpineCommands(from: nested)
+        }
+        if let toolObject = localAlpineCommandObject(fromToolEnvelope: dict) {
+            return localAlpineCommands(from: toolObject)
         }
 
         let command = ((dict["command"] as? String) ?? (dict["cmd"] as? String))?
@@ -1830,6 +1848,112 @@ final class ChatViewModel {
             hasWriteFiles: !writeFilePaths.isEmpty,
             writeFilePaths: writeFilePaths
         )]
+    }
+
+    private static func localAlpineCommandObject(fromToolEnvelope dict: [String: Any]) -> Any? {
+        let functionDict = dict["function"] as? [String: Any]
+        let rawName = (functionDict?["name"] as? String)
+            ?? (dict["name"] as? String)
+            ?? (dict["tool"] as? String)
+            ?? (dict["tool_name"] as? String)
+            ?? (dict["toolName"] as? String)
+            ?? (dict["action"] as? String)
+        guard let rawName else { return nil }
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !name.isEmpty else { return nil }
+        let isEnvelope = (dict["type"] as? String)?.lowercased() == "tool_use"
+            || dict["tool_call_id"] != nil
+            || dict["function"] != nil
+            || dict["input"] != nil
+            || dict["arguments"] != nil
+            || dict["args"] != nil
+            || dict["parameters"] != nil
+            || dict["params"] != nil
+            || dict["tool"] != nil
+            || dict["tool_name"] != nil
+            || dict["toolName"] != nil
+        guard isEnvelope else { return nil }
+
+        let rawInput = functionDict?["arguments"]
+            ?? dict["input"]
+            ?? dict["arguments"]
+            ?? dict["args"]
+            ?? dict["parameters"]
+            ?? dict["params"]
+            ?? strippedLocalAlpineToolEnvelopeInput(from: dict)
+        let input = decodedLocalAlpineJSONValue(rawInput) ?? [String: Any]()
+        switch name {
+        case "command", "shell", "shell_command", "bash", "run_command", "execute_command":
+            if let command = input as? String {
+                return ["command": command]
+            }
+            return input
+        case "read":
+            return ["read_file": input]
+        case "write":
+            return ["write_files": input]
+        case "edit":
+            return ["edit_file": input]
+        case "patch":
+            return ["patch_file": input]
+        case "delete":
+            return ["delete_file": input]
+        case "ls", "list":
+            return ["list_dir": input]
+        case "install", "install_dependencies":
+            return ["install_dependency": input]
+        case "build":
+            return ["compile": input]
+        case "run_tests":
+            return ["test": input]
+        case "fetch", "http_request":
+            return ["network_fetch": input]
+        case "diagnose":
+            return ["diagnostic": input]
+        case "file_ops":
+            return ["file_operation": input]
+        case "lint", "format":
+            return ["lint_format": input]
+        case "read_file", "read_files",
+             "write_file", "write_files", "create_file", "create_files",
+             "edit_file", "edit_files", "replace_file",
+             "patch_file", "patch_files", "apply_patch",
+             "delete_file", "delete_files", "remove_file", "remove_files",
+             "list_dir",
+             "glob", "find_files",
+             "grep", "search_files",
+             "run_script", "run_program",
+             "install_dependency",
+             "compile",
+             "test",
+             "network_fetch",
+             "diagnostic",
+             "file_operation",
+             "lint_format":
+            return [name: input]
+        default:
+            return nil
+        }
+    }
+
+    private static func strippedLocalAlpineToolEnvelopeInput(from dict: [String: Any]) -> [String: Any]? {
+        let envelopeKeys: Set<String> = [
+            "type", "id", "name", "tool", "tool_name", "toolName", "action",
+            "function", "input", "arguments", "args", "parameters", "params",
+            "tool_call_id", "index"
+        ]
+        let stripped = dict.filter { !envelopeKeys.contains($0.key) }
+        return stripped.isEmpty ? nil : stripped
+    }
+
+    private static func decodedLocalAlpineJSONValue(_ value: Any?) -> Any? {
+        guard let value else { return nil }
+        if let string = value as? String,
+           let data = string.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) {
+            return object
+        }
+        return value
     }
 
     private static func hasLocalAlpineWriteFiles(_ object: Any?) -> Bool {
@@ -5338,16 +5462,24 @@ final class ChatViewModel {
             return .setupDependency
         }
 
-        let executionTerms = [
+        let explicitExecutionTerms = [
             "执行", "运行", "帮我跑", "给我跑", "跑一下", "跑一遍", "跑这个", "跑这段", "跑上面",
             "跑脚本", "跑代码", "跑测试", "跑项目", "跑起来", "跑通", "测试", "验证", "调试",
-            "修复", "修一下", "帮我修", "修这个", "解决", "编译", "构建", "执行脚本", "运行脚本",
-            "帮我做", "给我做", "做一下", "处理一下", "搞一下", "弄一下", "实现", "优化",
-            "完善", "新增", "补齐", "完成这个", "直接做", "你来做",
-            "run", "execute", "test", "verify", "debug", "fix", "compile",
-            "build", "implement", "optimize", "complete", "run script", "execute script"
+            "编译", "构建", "执行脚本", "运行脚本",
+            "run", "execute", "test", "verify", "debug", "compile",
+            "build", "run script", "execute script"
         ]
-        if containsAny(text, executionTerms) {
+        if containsAny(text, explicitExecutionTerms) {
+            return .executeOrVerify
+        }
+
+        let broadWorkTerms = [
+            "修复", "修一下", "帮我修", "修这个", "解决",
+            "帮我做", "给我做", "做一下", "处理一下", "搞一下", "弄一下",
+            "实现", "优化", "完善", "新增", "补齐", "完成这个", "直接做", "你来做",
+            "fix", "implement", "optimize", "complete"
+        ]
+        if containsAnyPair(text, actions: broadWorkTerms, objects: localObjectTerms) {
             return .executeOrVerify
         }
 
@@ -5464,6 +5596,48 @@ final class ChatViewModel {
             return false
         case .inspectLocalState, .mutateLocalState, .executeOrVerify, .setupDependency, .networkFetch, .generatedFile:
             return !isLocalAlpineExplanationOnlyRequest(normalized)
+        }
+    }
+
+    private func shouldExposeLocalAlpineAgentForCurrentTurn(
+        latestUserText: String?,
+        modelId: String
+    ) -> Bool {
+        guard terminalEnabled && selectedTerminalIsLocalAlpine else { return false }
+        guard let latestUserText else {
+            return false
+        }
+        let shouldRun = Self.localAlpineUserRequestRequiresHostExecution(latestUserText)
+            || (Self.isExplicitLocalAlpineResumeRequest(latestUserText) && hasRecentLocalAlpineExecutionContextForResume())
+        guard shouldRun else { return false }
+        if shouldKeepMediaGenerationRequestOffLocalAlpine(latestUserText, modelId: modelId) {
+            return false
+        }
+        if Self.shouldKeepNativeLinkResolverOffLocalAlpine(latestUserText) {
+            return false
+        }
+        return true
+    }
+
+    private func hasRecentLocalAlpineExecutionContextForResume() -> Bool {
+        guard let messages = conversation?.messages,
+              let latestUserIndex = messages.lastIndex(where: {
+                  $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+              }) else {
+            return false
+        }
+
+        let lowerBound = messages.index(
+            latestUserIndex,
+            offsetBy: -min(12, messages.distance(from: messages.startIndex, to: latestUserIndex))
+        )
+        return messages[lowerBound..<latestUserIndex].contains { message in
+            if Self.isLocalAlpineAgentResult(message),
+               !Self.isLocalAlpineProtocolCorrectionMessage(message) {
+                return true
+            }
+            return message.metadata?["iexa_local_alpine_continuation"] == "true"
+                || message.metadata?["iexa_local_alpine_final_summary"] != nil
         }
     }
 
@@ -6067,7 +6241,13 @@ final class ChatViewModel {
 
     private static func localAlpineCommandObjects(fromNormalized object: Any) -> [Any] {
         if let dict = object as? [String: Any],
-           let nested = dict["iexa_alpine"] ?? dict["commands"] {
+           let nested = dict["iexa_alpine"]
+            ?? dict["commands"]
+            ?? dict["steps"]
+            ?? dict["tool_calls"]
+            ?? dict["toolCalls"]
+            ?? dict["tool_uses"]
+            ?? dict["toolUses"] {
             return localAlpineCommandObjects(fromNormalized: nested)
         }
         if let array = object as? [Any] {
@@ -9315,7 +9495,13 @@ final class ChatViewModel {
         if let sp = effectiveSP, !sp.trimmingCharacters(in: .whitespaces).isEmpty {
             params["system"] = sp
         }
-        let localAlpineClientSideTask = terminalEnabled && selectedTerminalIsLocalAlpine
+        let latestUserTextForLocalAlpine = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })?.content
+        let localAlpineClientSideTask = shouldExposeLocalAlpineAgentForCurrentTurn(
+            latestUserText: latestUserTextForLocalAlpine,
+            modelId: request.model
+        )
 
         if localAlpineClientSideTask {
             params.removeValue(forKey: "function_calling")
@@ -11591,11 +11777,10 @@ final class ChatViewModel {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content
         let localAlpineModelId = selectedModelId ?? conversation.model ?? ""
-        let localAlpineTerminalApplies = terminalEnabled && selectedTerminalIsLocalAlpine
-            && !(latestUserTextForLocalAlpine.map {
-                shouldKeepMediaGenerationRequestOffLocalAlpine($0, modelId: localAlpineModelId)
-            } ?? false)
-            && !(latestUserTextForLocalAlpine.map(Self.shouldKeepNativeLinkResolverOffLocalAlpine) ?? false)
+        let localAlpineTerminalApplies = shouldExposeLocalAlpineAgentForCurrentTurn(
+            latestUserText: latestUserTextForLocalAlpine,
+            modelId: localAlpineModelId
+        )
         let shouldIncludeLocalAlpineContext: Bool = {
             if let includeLocalAlpineExecutionContext {
                 return includeLocalAlpineExecutionContext
@@ -12086,6 +12271,12 @@ final class ChatViewModel {
         })?.content
         let effectiveModelId = selectedModelId ?? message.model ?? conversation?.model ?? ""
         guard Self.contentContainsLocalAlpineInstruction(content) else {
+            return
+        }
+        guard shouldExposeLocalAlpineAgentForCurrentTurn(
+            latestUserText: latestUserText,
+            modelId: effectiveModelId
+        ) else {
             return
         }
         if let latestUserText,
@@ -13222,6 +13413,14 @@ final class ChatViewModel {
            let nodes = conversation?.history.nodes,
            let parentNode = nodes[parentId],
            Self.contentContainsLocalAlpineInstruction(parentNode.content) {
+            let laterMessages = messages[messages.index(after: resultIndex)...]
+            if let laterUser = laterMessages.last(where: {
+                $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+            }) {
+                let text = laterUser.content
+                return Self.localAlpineUserRequestRequiresHostExecution(text)
+                    || Self.isExplicitLocalAlpineResumeRequest(text)
+            }
             return true
         }
         let laterMessages = messages[messages.index(after: resultIndex)...]
@@ -13616,6 +13815,10 @@ final class ChatViewModel {
         let latestUserText = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content
+        if let latestUserText,
+           Self.isLocalAlpineInterjection(latestUserText) {
+            return false
+        }
         return Self.localAlpineResultNeedsFollowUp(
             rawResult,
             commandResults: commandResults,
@@ -14049,7 +14252,14 @@ final class ChatViewModel {
     ) {
         let displayContent = Self.cleanedProviderCitationArtifacts(content)
         let safeDisplayContent = Self.safeAssistantDisplayContent(displayContent)
-        let shouldHandleLocalAlpineDisplay = terminalEnabled && selectedTerminalIsLocalAlpine
+        let localAlpineDisplayModelId = selectedModelId ?? conversation?.model ?? ""
+        let localAlpineDisplayUserText = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })?.content
+        let shouldHandleLocalAlpineDisplay = shouldExposeLocalAlpineAgentForCurrentTurn(
+            latestUserText: localAlpineDisplayUserText,
+            modelId: localAlpineDisplayModelId
+        )
         let visibleAlpineDisplayContent: String? = {
             guard shouldHandleLocalAlpineDisplay else { return nil }
             var visible = LocalAlpineAgentService.visibleContent(from: safeDisplayContent)

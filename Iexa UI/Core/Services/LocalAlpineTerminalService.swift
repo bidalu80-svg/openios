@@ -1133,6 +1133,57 @@ actor LocalAlpineTerminalService {
         fi
         export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
         export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
+        iexa_find_executable() {
+          _iexa_name="$1"
+          _iexa_old_ifs="$IFS"
+          IFS=:
+          for _iexa_dir in $PATH; do
+            [ -n "$_iexa_dir" ] || _iexa_dir=.
+            if [ -x "$_iexa_dir/$_iexa_name" ]; then
+              IFS="$_iexa_old_ifs"
+              printf '%s\n' "$_iexa_dir/$_iexa_name"
+              return 0
+            fi
+          done
+          IFS="$_iexa_old_ifs"
+          return 1
+        }
+        lua() {
+          if _iexa_lua="$(iexa_find_executable lua)"; then
+            "$_iexa_lua" "$@"
+          elif _iexa_lua="$(iexa_find_executable lua5.4)"; then
+            "$_iexa_lua" "$@"
+          elif _iexa_lua="$(iexa_find_executable lua5.3)"; then
+            "$_iexa_lua" "$@"
+          elif _iexa_lua="$(iexa_find_executable lua5.2)"; then
+            "$_iexa_lua" "$@"
+          elif _iexa_lua="$(iexa_find_executable lua5.1)"; then
+            "$_iexa_lua" "$@"
+          else
+            printf '/bin/sh: lua: not found\n' >&2
+            return 127
+          fi
+        }
+        python() {
+          if _iexa_python="$(iexa_find_executable python)"; then
+            "$_iexa_python" "$@"
+          elif _iexa_python="$(iexa_find_executable python3)"; then
+            "$_iexa_python" "$@"
+          else
+            printf '/bin/sh: python: not found\n' >&2
+            return 127
+          fi
+        }
+        pip() {
+          if _iexa_pip="$(iexa_find_executable pip)"; then
+            "$_iexa_pip" "$@"
+          elif _iexa_pip="$(iexa_find_executable pip3)"; then
+            "$_iexa_pip" "$@"
+          else
+            printf '/bin/sh: pip: not found\n' >&2
+            return 127
+          fi
+        }
         iexa_refresh_dns() {
           cat > /etc/resolv.conf <<'EOF'
         nameserver 1.1.1.1
