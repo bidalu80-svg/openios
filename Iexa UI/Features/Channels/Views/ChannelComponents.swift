@@ -746,7 +746,11 @@ struct ThreadDetailSheet: View {
         if !imageFiles.isEmpty {
             HStack(spacing: 4) {
                 ForEach(Array(imageFiles.prefix(3).enumerated()), id: \.offset) { _, file in
-                    if let fileId = file.url, !fileId.isEmpty {
+                    if file.isGeneratedImageFailurePlaceholder {
+                        GeneratedImageFailurePlaceholder()
+                            .frame(width: 60, height: 60)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    } else if let fileId = file.url, !fileId.isEmpty {
                         AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
                             .frame(width: 60, height: 60)
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))

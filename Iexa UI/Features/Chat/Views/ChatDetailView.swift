@@ -2455,7 +2455,11 @@ struct ChatDetailView: View {
                         Spacer(minLength: 0)
                         LazyVGrid(columns: columns, alignment: .trailing, spacing: Spacing.sm) {
                             ForEach(Array(displayImageFiles.enumerated()), id: \.offset) { _, file in
-                                if let fileId = imageReference(for: file) {
+                                if file.isGeneratedImageFailurePlaceholder {
+                                    GeneratedImageFailurePlaceholder()
+                                        .frame(width: thumbnailSize, height: thumbnailSize)
+                                        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                                } else if let fileId = imageReference(for: file) {
                                     chatImageView(fileId: fileId, allowsEditing: false)
                                         .frame(width: thumbnailSize, height: thumbnailSize)
                                         .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
@@ -2468,7 +2472,7 @@ struct ChatDetailView: View {
                 if !nonImageFiles.isEmpty {
                     VStack(alignment: .trailing, spacing: Spacing.xs) {
                         ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
-                            fileAttachmentCard(file: file)
+                            fileAttachmentCard(file: file, compact: false)
                         }
                     }
                     .frame(maxWidth: 280, alignment: .trailing)
@@ -2499,7 +2503,11 @@ struct ChatDetailView: View {
                     Spacer(minLength: 0)
                     LazyVGrid(columns: columns, alignment: .trailing, spacing: Spacing.sm) {
                         ForEach(Array(displayImageFiles.enumerated()), id: \.offset) { _, file in
-                            if let fileId = imageReference(for: file) {
+                            if file.isGeneratedImageFailurePlaceholder {
+                                GeneratedImageFailurePlaceholder()
+                                    .frame(width: thumbnailSize, height: thumbnailSize)
+                                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                            } else if let fileId = imageReference(for: file) {
                                 chatImageView(fileId: fileId, allowsEditing: false)
                                     .frame(width: thumbnailSize, height: thumbnailSize)
                                     .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
@@ -2513,7 +2521,7 @@ struct ChatDetailView: View {
                 HStack(spacing: Spacing.sm) {
                     Spacer()
                     ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
-                        fileAttachmentCard(file: file)
+                        fileAttachmentCard(file: file, compact: false)
                     }
                 }
             }
@@ -2571,7 +2579,7 @@ struct ChatDetailView: View {
         file.type == "image" || (file.contentType ?? "").hasPrefix("image/")
     }
 
-    private func fileAttachmentCard(file: ChatMessageFile) -> some View {
+    private func fileAttachmentCard(file: ChatMessageFile, compact: Bool) -> some View {
         let fileName = file.name ?? file.url ?? "File"
         let fileExt = (fileName as NSString).pathExtension.lowercased()
         let icon = fileIconName(for: fileExt)
@@ -2579,42 +2587,99 @@ struct ChatDetailView: View {
         return Button {
             previewingMessageFile = MessageFilePreviewItem(file: file)
         } label: {
-            HStack(spacing: Spacing.sm) {
-                Image(systemName: icon)
-                    .scaledFont(size: 15, weight: .semibold)
-                    .foregroundStyle(theme.brandPrimary)
-                    .frame(width: 30, height: 30)
-                    .background(theme.brandPrimary.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(fileName)
-                        .scaledFont(size: 13)
-                        .fontWeight(.medium)
-                        .foregroundStyle(theme.textPrimary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text(fileAttachmentSubtitle(for: file, fallbackExtension: fileExt))
-                        .scaledFont(size: 12, weight: .medium)
-                        .foregroundStyle(theme.textTertiary)
-                }
-
-                Spacer(minLength: 6)
-
-                Image(systemName: "chevron.right")
-                    .scaledFont(size: 11, weight: .semibold)
-                    .foregroundStyle(theme.textTertiary)
+            if compact {
+                compactFileAttachmentLabel(fileName: fileName, file: file, fileExt: fileExt, icon: icon)
+            } else {
+                regularFileAttachmentLabel(fileName: fileName, file: file, fileExt: fileExt, icon: icon)
             }
-            .padding(.horizontal, Spacing.sm)
-            .padding(.vertical, 8)
-            .background(theme.surfaceContainer.opacity(0.78))
-            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
-                    .strokeBorder(theme.cardBorder.opacity(0.4), lineWidth: 0.5)
-            )
         }
         .buttonStyle(.plain)
+    }
+
+    private func compactFileAttachmentLabel(
+        fileName: String,
+        file: ChatMessageFile,
+        fileExt: String,
+        icon: String
+    ) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .scaledFont(size: 14, weight: .semibold)
+                .foregroundStyle(theme.brandPrimary)
+                .frame(width: 26, height: 26)
+                .background(theme.brandPrimary.opacity(0.1))
+                .clipShape(Circle())
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(fileName)
+                    .scaledFont(size: 12, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(fileAttachmentSubtitle(for: file, fallbackExtension: fileExt))
+                    .scaledFont(size: 10, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .frame(maxWidth: 170, alignment: .leading)
+
+            Image(systemName: "chevron.right")
+                .scaledFont(size: 10, weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
+        }
+        .padding(.leading, 8)
+        .padding(.trailing, 10)
+        .padding(.vertical, 6)
+        .background(theme.surfaceContainer.opacity(0.78))
+        .clipShape(Capsule(style: .continuous))
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(0.4), lineWidth: 0.5)
+        )
+        .frame(maxWidth: 260, alignment: .leading)
+    }
+
+    private func regularFileAttachmentLabel(
+        fileName: String,
+        file: ChatMessageFile,
+        fileExt: String,
+        icon: String
+    ) -> some View {
+        HStack(spacing: Spacing.sm) {
+            Image(systemName: icon)
+                .scaledFont(size: 15, weight: .semibold)
+                .foregroundStyle(theme.brandPrimary)
+                .frame(width: 30, height: 30)
+                .background(theme.brandPrimary.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(fileName)
+                    .scaledFont(size: 13)
+                    .fontWeight(.medium)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(fileAttachmentSubtitle(for: file, fallbackExtension: fileExt))
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+            }
+
+            Spacer(minLength: 6)
+
+            Image(systemName: "chevron.right")
+                .scaledFont(size: 11, weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
+        }
+        .padding(.horizontal, Spacing.sm)
+        .padding(.vertical, 8)
+        .background(theme.surfaceContainer.opacity(0.78))
+        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(0.4), lineWidth: 0.5)
+        )
     }
 
     private func fileIconName(for ext: String) -> String {
@@ -2695,7 +2760,9 @@ struct ChatDetailView: View {
 
             LazyVGrid(columns: columns, spacing: Spacing.sm) {
                 ForEach(Array(imageFiles.enumerated()), id: \.element) { _, file in
-                    if let fileId = imageReference(for: file) {
+                    if file.isGeneratedImageFailurePlaceholder {
+                        GeneratedImageFailurePlaceholder()
+                    } else if let fileId = imageReference(for: file) {
                         chatImageView(fileId: fileId)
                             .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
                     }
@@ -2705,7 +2772,7 @@ struct ChatDetailView: View {
         if !nonImageFiles.isEmpty {
             VStack(alignment: .leading, spacing: Spacing.xs) {
                 ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
-                    fileAttachmentCard(file: file)
+                    fileAttachmentCard(file: file, compact: true)
                 }
             }
         }

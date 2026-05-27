@@ -142,6 +142,27 @@ struct ChatMessageFile: Codable, Hashable, Sendable {
     var displayURL: String? = nil
 }
 
+extension ChatMessageFile {
+    static let generatedImageFailureURLPrefix = "iexa-generated-image-failure:"
+    static let generatedImageFailureContentType = "application/x-iexa-generated-image-failure"
+
+    var isGeneratedImageFailurePlaceholder: Bool {
+        type == "image"
+            && (contentType == Self.generatedImageFailureContentType
+                || url?.hasPrefix(Self.generatedImageFailureURLPrefix) == true)
+    }
+
+    static func generatedImageFailurePlaceholder(index: Int) -> ChatMessageFile {
+        ChatMessageFile(
+            type: "image",
+            url: "\(generatedImageFailureURLPrefix)\(index)",
+            name: "生成失败 \(index)",
+            contentType: generatedImageFailureContentType,
+            displayURL: nil
+        )
+    }
+}
+
 struct ChatMessage: Identifiable, Hashable, Sendable {
     let id: String
     /// The original parent message ID from the server's history tree.
