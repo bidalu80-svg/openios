@@ -2790,9 +2790,9 @@ struct ChatDetailView: View {
             }
         }
         if !nonImageFiles.isEmpty {
-            VStack(alignment: .leading, spacing: Spacing.xs) {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
                 ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
-                    fileAttachmentCard(file: file, compact: true)
+                    fileAttachmentCard(file: file, compact: false)
                 }
             }
         }
@@ -5186,46 +5186,47 @@ private struct LocalAlpineWrittenFilesCard: View {
         Button {
             openPreview(for: file)
         } label: {
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
                 Image(systemName: "doc")
-                    .scaledFont(size: 24, weight: .semibold)
+                    .scaledFont(size: 14, weight: .semibold)
                     .foregroundStyle(theme.brandPrimary)
-                    .frame(width: 46, height: 46)
+                    .frame(width: 26, height: 26)
                     .background(theme.brandPrimary.opacity(theme.isDark ? 0.18 : 0.10))
-                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    .clipShape(Circle())
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 1) {
                     Text(file.fileName)
-                        .scaledFont(size: 17, weight: .semibold)
+                        .scaledFont(size: 12, weight: .semibold)
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text(contentType(for: file))
-                        .scaledFont(size: 14, weight: .semibold)
-                        .foregroundStyle(theme.textSecondary.opacity(0.88))
+                        .scaledFont(size: 10, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
-
-                Spacer(minLength: 8)
+                .frame(maxWidth: 170, alignment: .leading)
 
                 if loadingPaths.contains(file.path) {
                     ProgressView()
                         .controlSize(.mini)
                 } else {
                     Image(systemName: "chevron.right")
-                        .scaledFont(size: 23, weight: .semibold)
-                        .foregroundStyle(theme.textSecondary.opacity(0.70))
+                        .scaledFont(size: 10, weight: .semibold)
+                        .foregroundStyle(theme.textTertiary)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(theme.surfaceContainer.opacity(theme.isDark ? 0.74 : 0.96))
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding(.leading, 8)
+            .padding(.trailing, 10)
+            .padding(.vertical, 6)
+            .background(theme.surfaceContainer.opacity(theme.isDark ? 0.74 : 0.86))
+            .clipShape(Capsule(style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.48 : 0.62), lineWidth: 0.8)
+                Capsule(style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.46 : 0.42), lineWidth: 0.5)
             )
+            .frame(maxWidth: 260, alignment: .leading)
         }
         .buttonStyle(.plain)
         .disabled(loadingPaths.contains(file.path))
