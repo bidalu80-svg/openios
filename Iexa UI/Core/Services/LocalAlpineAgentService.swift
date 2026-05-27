@@ -702,6 +702,17 @@ actor LocalAlpineAgentService {
                 stepLines.append(writeResult.summary)
                 writeResult.writtenPaths.forEach { editedFilePaths.insert($0) }
                 writtenFiles.append(contentsOf: writeResult.writtenFiles)
+                let writeCommandResult = LocalAlpineCommandResult(
+                    command: "write_files",
+                    output: writeResult.summary,
+                    exitCode: writeResult.hadFailure ? 125 : 0,
+                    interactiveRequest: nil
+                )
+                commandResults.append(Self.commandResult(
+                    command: "write_files",
+                    cwd: effectiveCWD,
+                    result: writeCommandResult
+                ))
                 await emitTool(Self.toolCallResult(
                     context,
                     exitCode: writeResult.hadFailure ? 125 : 0,
@@ -710,17 +721,6 @@ actor LocalAlpineAgentService {
                     failed: writeResult.hadFailure
                 ))
                 if writeResult.hadFailure {
-                    let result = LocalAlpineCommandResult(
-                        command: "write_files",
-                        output: writeResult.summary,
-                        exitCode: 125,
-                        interactiveRequest: nil
-                    )
-                    commandResults.append(Self.commandResult(
-                        command: "write_files",
-                        cwd: effectiveCWD,
-                        result: result
-                    ))
                     shouldRunShellCommand = false
                     stopRemainingCommands = true
                 }
@@ -1366,18 +1366,33 @@ actor LocalAlpineAgentService {
             }
             let command: String
             let lower = path.lowercased()
+            let quotedPath = shellSingleQuotedStatic(path)
             if lower.hasSuffix(".py") || lower.hasSuffix(".pyw") {
-                command = "python3 -m py_compile \(shellSingleQuotedStatic(path)) && python3 \(shellSingleQuotedStatic(path))"
+                command = "python3 -m py_compile \(quotedPath) && python3 \(quotedPath)"
             } else if lower.hasSuffix(".lua") {
-                command = "if command -v lua >/dev/null 2>&1; then lua \(shellSingleQuotedStatic(path)); elif command -v lua5.4 >/dev/null 2>&1 || apk add --no-cache lua5.4; then lua5.4 \(shellSingleQuotedStatic(path)); else apk add --no-cache lua && lua \(shellSingleQuotedStatic(path)); fi"
+                command = "if command -v lua >/dev/null 2>&1; then lua \(quotedPath); elif command -v lua5.4 >/dev/null 2>&1 || apk add --no-cache lua5.4; then lua5.4 \(quotedPath); else apk add --no-cache lua && lua \(quotedPath); fi"
+            } else if lower.hasSuffix(".cpp") || lower.hasSuffix(".cc") || lower.hasSuffix(".cxx") {
+                command = "if command -v g++ >/dev/null 2>&1 || apk add --no-cache g++; then g++ \(quotedPath) -std=c++17 -O0 -o /tmp/iexa_verify_cpp && /tmp/iexa_verify_cpp; fi"
+            } else if lower.hasSuffix(".c") {
+                command = "if command -v gcc >/dev/null 2>&1 || apk add --no-cache gcc musl-dev; then gcc \(quotedPath) -O0 -o /tmp/iexa_verify_c && /tmp/iexa_verify_c; fi"
+            } else if lower.hasSuffix(".sh") {
+                command = "sh \(quotedPath)"
+            } else if lower.hasSuffix(".go") {
+                command = "if command -v go >/dev/null 2>&1 || apk add --no-cache go; then go run \(quotedPath); fi"
+            } else if lower.hasSuffix(".rs") {
+                command = "if command -v rustc >/dev/null 2>&1 || apk add --no-cache rust; then rustc \(quotedPath) -o /tmp/iexa_verify_rs && /tmp/iexa_verify_rs; fi"
+            } else if lower.hasSuffix(".rb") {
+                command = "if command -v ruby >/dev/null 2>&1 || apk add --no-cache ruby; then ruby \(quotedPath); fi"
+            } else if lower.hasSuffix(".php") {
+                command = "if command -v php >/dev/null 2>&1 || apk add --no-cache php-cli; then php \(quotedPath); fi"
             } else if lower.hasSuffix(".js") || lower.hasSuffix(".mjs") || lower.hasSuffix(".cjs") {
-                command = "node \(shellSingleQuotedStatic(path))"
+                command = "node \(quotedPath)"
             } else if lower.hasSuffix(".ts") {
-                command = "command -v npx >/dev/null 2>&1 && npx tsc --noEmit \(shellSingleQuotedStatic(path)) || cat \(shellSingleQuotedStatic(path)) >/dev/null"
+                command = "command -v npx >/dev/null 2>&1 && npx tsc --noEmit \(quotedPath) || cat \(quotedPath) >/dev/null"
             } else if lower.hasSuffix("package.json") {
                 command = "node -e \"const p=require('./package.json'); console.log(p.scripts||{})\" && { npm test -- --watch=false 2>/dev/null || npm run build 2>/dev/null || true; }"
             } else {
-                command = "test -e \(shellSingleQuotedStatic(path)) && ls -la \(shellSingleQuotedStatic(path))"
+                command = "test -e \(quotedPath) && ls -la \(quotedPath)"
             }
             return (command, "verify", path, [path], cwd)
         }
@@ -3600,9 +3615,9 @@ private enum LocalAlpineAgentFileSource: Equatable, Sendable {
 
     var isAllowedCodeWriteSource: Bool {
         switch self {
-        case .codeLines, .contentLines, .contentBase64, .codeBlock, .editFile, .patchFile:
+        case .content, .codeLines, .contentLines, .contentBase64, .codeBlock, .editFile, .patchFile:
             return true
-        case .content, .heredoc, .rejectedPythonPlainContent:
+        case .heredoc, .rejectedPythonPlainContent:
             return false
         }
     }

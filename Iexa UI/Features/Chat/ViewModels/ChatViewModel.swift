@@ -374,7 +374,7 @@ final class ChatViewModel {
     private var localAlpineActiveRunIdsByMessageId: [String: String] = [:]
     private var localAlpineLiveToolCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
     private let localAlpineAgentMaxSteps = 10
-    private let localAlpineContinuationMaxNoCommandRetries = 0
+    private let localAlpineContinuationMaxNoCommandRetries = 1
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     @ObservationIgnored private var localAlpineInputContinuation: CheckedContinuation<String?, Never>?
@@ -13490,6 +13490,11 @@ final class ChatViewModel {
                 content: rawContent,
                 error: nil
             )
+        } else if !isFinalSummary,
+                  parentNeedsFollowUp,
+                  let parentResultId,
+                  retryLocalAlpineContinuationAfterMissingTool(parentResultId: parentResultId, after: assistantMessageId) {
+            localAlpineContinuationTask = nil
         } else {
             localAlpineNoCommandContinuationRetries = 0
             localAlpineAgentStopRequested = true
@@ -13498,9 +13503,110 @@ final class ChatViewModel {
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
     }
 
-    private func retryLocalAlpineContinuationAfterMissingTool(parentId: String) -> Bool {
-        _ = parentId
-        return false
+    private func retryLocalAlpineContinuationAfterMissingTool(parentResultId: String, after assistantMessageId: String) -> Bool {
+        guard localAlpineNoCommandContinuationRetries < localAlpineContinuationMaxNoCommandRetries else {
+            appendLocalAlpineNoToolCallStopMessage(parentId: assistantMessageId)
+            return false
+        }
+        guard let executableContent = localAlpineFallbackExecutableContent(after: parentResultId) else {
+            return false
+        }
+
+        localAlpineNoCommandContinuationRetries += 1
+        let bridgeMessageId = appendAssistantResult(
+            parentId: assistantMessageId,
+            model: selectedModelId ?? "Local Alpine Agent",
+            content: "继续执行本地验证。",
+            metadata: [
+                "iexa_local_alpine_continuation": "true",
+                "iexa_local_alpine_auto_verify": parentResultId
+            ]
+        )
+        localAlpineAgentTask = Task { [weak self] in
+            await self?.executeLocalAlpineAgent(messageId: bridgeMessageId, content: executableContent)
+        }
+        return true
+    }
+
+    private func localAlpineFallbackExecutableContent(after resultMessageId: String) -> String? {
+        guard let message = conversation?.messages.first(where: { $0.id == resultMessageId }) else {
+            return nil
+        }
+        let latestUserText = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })?.content ?? ""
+        guard Self.localAlpineUserRequestNeedsVerificationAfterSetup(latestUserText) else {
+            return nil
+        }
+
+        let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(message.metadata?["iexa_local_alpine_command_results"])
+        let combinedCommands = commandResults
+            .map { $0.command.lowercased() }
+            .joined(separator: "\n")
+        guard !Self.localAlpineCommandsContainGoalVerification(combinedCommands) else {
+            return nil
+        }
+
+        let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(message.metadata?["iexa_local_alpine_written_files"])
+        guard let path = Self.localAlpineRunnableWrittenPath(from: writtenFiles, latestUserText: latestUserText) else {
+            return nil
+        }
+        return Self.localAlpineVerifyInstructionBlock(path: path)
+    }
+
+    private static func localAlpineRunnableWrittenPath(
+        from writtenFiles: [LocalAlpineWrittenFile],
+        latestUserText: String
+    ) -> String? {
+        let runnableFiles = writtenFiles.filter { localAlpinePathLooksRunnable($0.path) }
+        guard !runnableFiles.isEmpty else { return nil }
+        let normalizedUserText = latestUserText.lowercased()
+        if let mentioned = runnableFiles.last(where: { file in
+            normalizedUserText.contains(file.fileName.lowercased())
+                || normalizedUserText.contains(file.path.lowercased())
+        }) {
+            return localAlpineRuntimePathForVerification(mentioned.path)
+        }
+        return runnableFiles.last.map { localAlpineRuntimePathForVerification($0.path) }
+    }
+
+    private static func localAlpinePathLooksRunnable(_ path: String) -> Bool {
+        let lower = path.lowercased()
+        let runnableSuffixes = [
+            ".py", ".pyw", ".lua", ".js", ".mjs", ".cjs", ".ts",
+            ".cpp", ".cc", ".cxx", ".c", ".sh", ".go", ".rs", ".rb", ".php"
+        ]
+        return runnableSuffixes.contains { lower.hasSuffix($0) }
+    }
+
+    private static func localAlpineRuntimePathForVerification(_ path: String) -> String {
+        let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        guard !normalized.isEmpty else { return "/mnt/iexa" }
+        if normalized == "/mnt/iexa" || normalized.hasPrefix("/mnt/iexa/") {
+            return normalized
+        }
+        if normalized.hasPrefix("/") {
+            return "/mnt/iexa\(normalized)"
+        }
+        return normalized
+    }
+
+    private static func localAlpineVerifyInstructionBlock(path: String) -> String? {
+        let object: [String: Any] = [
+            "cwd": "/mnt/iexa",
+            "verify": ["path": path]
+        ]
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return """
+        ```iexa_alpine
+        \(json)
+        ```
+        """
     }
 
     private func localAlpineParentNeedsToolFollowUp(_ parentMessageId: String) -> Bool {
