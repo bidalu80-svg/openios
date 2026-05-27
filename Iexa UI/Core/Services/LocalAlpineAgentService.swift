@@ -1825,18 +1825,22 @@ actor LocalAlpineAgentService {
     }
 
     private nonisolated static func pathString(from dict: [String: Any]) -> String? {
-        ((dict["path"] as? String)
-            ?? (dict["file_path"] as? String)
-            ?? (dict["file"] as? String)
-            ?? (dict["name"] as? String)
-            ?? (dict["filename"] as? String)
-            ?? (dict["filepath"] as? String)
-            ?? (dict["filePath"] as? String)
-            ?? (dict["full_path"] as? String)
-            ?? firstString(in: dict["paths"])
-            ?? firstString(in: dict["files"])
-            ?? (dict["target"] as? String))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let pathKeys = [
+            "path", "file_path", "file", "name", "filename",
+            "filepath", "filePath", "full_path", "target"
+        ]
+        for key in pathKeys {
+            if let value = dict[key] as? String {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            }
+        }
+        for key in ["paths", "files"] {
+            if let value = firstString(in: dict[key]) {
+                return value
+            }
+        }
+        return nil
     }
 
     private nonisolated static func pathString(from object: Any) -> String? {
