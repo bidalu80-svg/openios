@@ -11765,12 +11765,15 @@ final class ChatViewModel {
                 let exit = result.exitCode.map(String.init) ?? "unknown"
                 let redactedCommand = redactedLocalAlpineInternalPaths(in: result.command)
                 let redactedOutput = redactedLocalAlpineInternalPaths(in: result.outputPreview)
+                let output = redactedOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "（无输出）"
+                    : clippedForSystemContext(redactedOutput, maxCharacters: 8_000)
                 lines.append("""
                 - command: \(redactedCommand)
                   cwd: \(result.cwd)
                   exit_code: \(exit)
                   output:
-\(indentForSystemContext(redactedOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : clippedForSystemContext(redactedOutput, maxCharacters: 8_000)))
+                \(indentForSystemContext(output))
                 """)
             }
         } else if !rawResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
