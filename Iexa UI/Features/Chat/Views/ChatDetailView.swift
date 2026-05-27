@@ -761,6 +761,9 @@ struct ChatDetailView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                     .frame(minHeight: 40)
+                    .background {
+                        modelSelectorPrincipalBackground
+                    }
                     .iexaToolbarGlass(cornerRadius: 22, compact: true)
                     .clipShape(Capsule(style: .continuous))
                 }
@@ -800,6 +803,23 @@ struct ChatDetailView: View {
         // Cap the model selector width so long names truncate
         // instead of pushing into trailing toolbar buttons.
         .frame(maxWidth: 220)
+    }
+
+    @ViewBuilder
+    private var modelSelectorPrincipalBackground: some View {
+        if #available(iOS 26.0, *) {
+            Capsule(style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    Capsule(style: .continuous)
+                        .fill(theme.isDark ? Color.white.opacity(0.10) : theme.cardBackground.opacity(0.22))
+                }
+                .overlay {
+                    Capsule(style: .continuous)
+                        .strokeBorder(Color.white.opacity(theme.isDark ? 0.18 : 0.45), lineWidth: 0.5)
+                }
+                .shadow(color: Color.black.opacity(theme.isDark ? 0.28 : 0.08), radius: 10, x: 0, y: 5)
+        }
     }
 
     // MARK: - Input Field Area
