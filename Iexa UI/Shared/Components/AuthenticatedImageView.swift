@@ -125,13 +125,13 @@ struct AuthenticatedImageView: View {
             }
 
             if let image = loadedImage {
-                HStack(spacing: 7) {
+                HStack(spacing: 4) {
                     if let onEdit {
                         Button {
                             onEdit(image)
                             Haptics.play(.light)
                         } label: {
-                            imageActionLabel(icon: "wand.and.stars", text: "编辑")
+                            imageActionLabel(icon: "wand.and.stars", accessibilityLabel: "编辑图片")
                         }
                         .buttonStyle(.plain)
                     }
@@ -139,26 +139,15 @@ struct AuthenticatedImageView: View {
                     Button {
                         Task { await saveImageToPhotos() }
                     } label: {
-                        HStack(spacing: 4) {
-                            if saveState == .saving {
-                                ProgressView()
-                                    .controlSize(.mini)
-                                    .tint(.white)
-                            } else {
-                                Image(systemName: saveIcon)
-                                    .scaledFont(size: 12, weight: .semibold)
-                            }
-                            Text(saveLabel)
-                                .scaledFont(size: 11, weight: .semibold)
-                        }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
-                        .background(.black.opacity(0.62), in: Capsule())
+                        imageActionLabel(
+                            icon: saveIcon,
+                            accessibilityLabel: saveLabel,
+                            isLoading: saveState == .saving
+                        )
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(8)
+                .padding(5)
             }
         }
         // Combine fileId + retryTrigger so that:
@@ -244,17 +233,25 @@ struct AuthenticatedImageView: View {
         }
     }
 
-    private func imageActionLabel(icon: String, text: String) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon)
-                .scaledFont(size: 12, weight: .semibold)
-            Text(text)
-                .scaledFont(size: 11, weight: .semibold)
+    private func imageActionLabel(
+        icon: String,
+        accessibilityLabel: String,
+        isLoading: Bool = false
+    ) -> some View {
+        Group {
+            if isLoading {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(.white)
+            } else {
+                Image(systemName: icon)
+                    .scaledFont(size: 12, weight: .semibold)
+            }
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
-        .background(.black.opacity(0.62), in: Capsule())
+        .frame(width: 28, height: 28)
+        .background(.black.opacity(0.58), in: Capsule())
+        .accessibilityLabel(accessibilityLabel)
     }
 
     private func loadImage() async {

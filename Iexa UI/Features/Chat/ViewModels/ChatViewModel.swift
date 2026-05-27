@@ -53,6 +53,11 @@ private struct LocalAlpineToolCapability {
 private enum GeneratedImageSlot {
     case image(imageReference: String, displayReference: String)
     case failure
+
+    var isFailure: Bool {
+        if case .failure = self { return true }
+        return false
+    }
 }
 
 struct ChatContextBudgetStatus: Sendable, Equatable {
@@ -96,6 +101,7 @@ final class ChatViewModel {
     // MARK: - Published State
 
     private static let chatWebSearchEnabledKey = "chatWebSearchEnabled"
+    private static let directImageGenerationMaxConcurrency = 3
 
     /// Isolated store for streaming content. Only the actively streaming
     /// message view observes this — all other message views read from
@@ -1641,15 +1647,29 @@ final class ChatViewModel {
         if let nested = dict["iexa_alpine"] ?? dict["commands"] {
             return localAlpineInstructionPreview(from: nested)
         }
+        if let runArray = dict["run"] as? [Any],
+           let preview = localAlpineInstructionPreview(from: runArray) {
+            return preview
+        }
+        for key in ["command", "cmd", "shell", "bash", "exec"] where dict[key] is [Any] {
+            if let preview = localAlpineInstructionPreview(from: dict[key] as Any) {
+                return preview
+            }
+        }
 
         var lines: [String] = []
         if let cwd = dict["cwd"] as? String, !cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lines.append("cwd: \(cwd.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
         lines.append(contentsOf: localAlpineWriteFilePreviews(from: dict))
-        if let command = (dict["command"] as? String) ?? (dict["cmd"] as? String),
+        if let command = localAlpineCommandString(from: dict),
            !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lines.append("command: \(command.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        if let op = localAlpineStringValue(dict["op"] ?? dict["operation"] ?? dict["type"]) {
+            lines.append("operation: \(op)")
+        } else if let tool = localAlpineStringValue(dict["tool"] ?? dict["function"] ?? dict["action"] ?? dict["name"]) {
+            lines.append("tool: \(tool)")
         }
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
@@ -1768,21 +1788,105 @@ final class ChatViewModel {
         }
 
         guard let dict = object as? [String: Any] else { return [] }
-        if let nested = dict["iexa_alpine"] ?? dict["commands"] {
+        if let nested = dict["iexa_alpine"] {
             return localAlpineCommands(from: nested)
         }
+        var nestedCommands = dict["commands"].map { localAlpineCommands(from: $0) } ?? []
+        if let runArray = dict["run"] as? [Any] {
+            nestedCommands.append(contentsOf: localAlpineCommands(from: runArray))
+        }
+        for key in ["command", "cmd", "shell", "bash", "exec"] where dict[key] is [Any] {
+            nestedCommands.append(contentsOf: localAlpineCommands(from: dict[key] as Any))
+        }
 
-        let command = ((dict["command"] as? String) ?? (dict["cmd"] as? String))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let command = localAlpineCommandString(from: dict)
         let writeFilePaths = Self.localAlpineWriteFilePaths(from: dict)
-        guard command?.isEmpty == false || !writeFilePaths.isEmpty else { return [] }
-        let cwd = (dict["cwd"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard command?.isEmpty == false || !writeFilePaths.isEmpty else { return nestedCommands }
+        let cwd = localAlpineCWDString(from: dict)
         return [ParsedLocalAlpineCommand(
             command: command ?? "",
             cwd: cwd?.isEmpty == false ? cwd! : "/mnt/iexa",
             hasWriteFiles: !writeFilePaths.isEmpty,
             writeFilePaths: writeFilePaths
-        )]
+        )] + nestedCommands
+    }
+
+    private static func localAlpineCommandString(from dict: [String: Any]) -> String? {
+        for key in ["command", "cmd", "shell", "bash", "exec", "run"] {
+            if dict[key] is [Any] {
+                continue
+            }
+            if let value = localAlpineCommandString(fromValue: dict[key]) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func localAlpineCommandString(fromValue value: Any?) -> String? {
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let array = value as? [Any] {
+            if array.contains(where: { $0 is [String: Any] }) {
+                return nil
+            }
+            let parts = array.compactMap { localAlpineStringValue($0) }
+            guard !parts.isEmpty, parts.count == array.count else { return nil }
+            return parts.map(localAlpineShellQuote).joined(separator: " ")
+        }
+        guard let dict = value as? [String: Any] else { return nil }
+        let args = localAlpineArgumentString(from: dict["args"] ?? dict["arguments"] ?? dict["argv"])
+        for key in ["command", "cmd", "shell", "bash", "exec", "run"] {
+            guard let command = localAlpineStringValue(dict[key]) else { continue }
+            return args.map { "\(command) \($0)" } ?? command
+        }
+        if let executable = localAlpineStringValue(dict["program"])
+            ?? localAlpineStringValue(dict["binary"])
+            ?? localAlpineStringValue(dict["executable"]) {
+            return [localAlpineShellQuote(executable), args].compactMap { $0 }.joined(separator: " ")
+        }
+        return nil
+    }
+
+    private static func localAlpineArgumentString(from value: Any?) -> String? {
+        if let string = localAlpineStringValue(value) {
+            return string
+        }
+        if let array = value as? [Any] {
+            let parts = array.compactMap { argument -> String? in
+                if let string = localAlpineStringValue(argument) { return localAlpineShellQuote(string) }
+                if let int = argument as? Int { return localAlpineShellQuote(String(int)) }
+                if let double = argument as? Double { return localAlpineShellQuote(String(double)) }
+                if let bool = argument as? Bool { return localAlpineShellQuote(bool ? "true" : "false") }
+                return nil
+            }
+            guard !parts.isEmpty, parts.count == array.count else { return nil }
+            return parts.joined(separator: " ")
+        }
+        return nil
+    }
+
+    private static func localAlpineStringValue(_ value: Any?) -> String? {
+        guard let string = value as? String else { return nil }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func localAlpineCWDString(from dict: [String: Any]) -> String? {
+        for key in ["cwd", "workdir", "working_dir", "directory", "dir"] {
+            if let value = localAlpineStringValue(dict[key]) {
+                return value
+            }
+        }
+        for key in ["command", "cmd", "shell", "bash", "exec", "run", "verify", "check"] {
+            if let nested = dict[key] as? [String: Any],
+               let value = localAlpineCWDString(from: nested) {
+                return value
+            }
+        }
+        return nil
     }
 
     private static func hasLocalAlpineWriteFiles(_ object: Any?) -> Bool {
@@ -4736,62 +4840,15 @@ final class ChatViewModel {
                                 isIndeterminate: true,
                                 force: true
                             )
-                            var generatedImageSlots: [GeneratedImageSlot] = []
-                            if !editImages.isEmpty {
-                                for prompt in imagePrompts {
-                                    do {
-                                        try Task.checkCancellation()
-                                        let imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                            try await manager.editImage(
-                                                prompt: prompt,
-                                                model: modelId,
-                                                images: editImages,
-                                                size: requestedImageSize
-                                            )
-                                        }
-                                        let displayReference = await self.localDisplayImageReference(
-                                            from: imageReference,
-                                            canvasSize: requestedCanvasSize
-                                        ) ?? imageReference
-                                        generatedImageSlots.append(.image(imageReference: imageReference, displayReference: displayReference))
-                                    } catch {
-                                        if Task.isCancelled || error is CancellationError { throw error }
-                                        generatedImageSlots.append(.failure)
-                                        self.logger.warning("One image edit request failed: \(error.localizedDescription)")
-                                    }
-                                }
-                            } else {
-                                guard !imagePrompt.isEmpty else {
-                                    throw APIError.unknown(
-                                        underlying: NSError(
-                                            domain: "ChatViewModel",
-                                            code: -1,
-                                            userInfo: [NSLocalizedDescriptionKey: "请输入图片生成提示词。"]
-                                        )
-                                    )
-                                }
-                                for prompt in imagePrompts {
-                                    do {
-                                        try Task.checkCancellation()
-                                        let imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                            try await manager.generateImage(
-                                                prompt: prompt,
-                                                model: modelId,
-                                                size: requestedImageSize
-                                            )
-                                        }
-                                        let displayReference = await self.localDisplayImageReference(
-                                            from: imageReference,
-                                            canvasSize: requestedCanvasSize
-                                        ) ?? imageReference
-                                        generatedImageSlots.append(.image(imageReference: imageReference, displayReference: displayReference))
-                                    } catch {
-                                        if Task.isCancelled || error is CancellationError { throw error }
-                                        generatedImageSlots.append(.failure)
-                                        self.logger.warning("One image generation request failed: \(error.localizedDescription)")
-                                    }
-                                }
-                            }
+                            let generatedImageSlots = try await self.generateDirectImageSlots(
+                                prompts: imagePrompts,
+                                modelId: modelId,
+                                requestedImageSize: requestedImageSize,
+                                requestedCanvasSize: requestedCanvasSize,
+                                editImages: editImages,
+                                manager: manager,
+                                originalPromptWasEmpty: imagePrompt.isEmpty
+                            )
                             if generatedImageSlots.isEmpty {
                                 throw APIError.unknown(
                                     underlying: NSError(
@@ -5763,7 +5820,18 @@ final class ChatViewModel {
                 || lower.hasSuffix(".js")
                 || lower.hasSuffix(".mjs")
                 || lower.hasSuffix(".cjs")
+                || lower.hasSuffix(".ts")
                 || lower.hasSuffix(".lua")
+                || lower.hasSuffix(".cpp")
+                || lower.hasSuffix(".cc")
+                || lower.hasSuffix(".cxx")
+                || lower.hasSuffix(".c")
+                || lower.hasSuffix(".sh")
+                || lower.hasSuffix(".go")
+                || lower.hasSuffix(".rs")
+                || lower.hasSuffix(".rb")
+                || lower.hasSuffix(".php")
+                || lower.hasSuffix(".java")
                 || lower.hasSuffix("package.json")
         }
     }
@@ -6794,62 +6862,15 @@ final class ChatViewModel {
                     isIndeterminate: true,
                     force: true
                 )
-                var generatedImageSlots: [GeneratedImageSlot] = []
-                if !editImages.isEmpty {
-                    for prompt in imagePrompts {
-                        do {
-                            try Task.checkCancellation()
-                            let imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                try await manager.editImage(
-                                    prompt: prompt,
-                                    model: modelId,
-                                    images: editImages,
-                                    size: requestedImageSize
-                                )
-                            }
-                            let displayReference = await self.localDisplayImageReference(
-                                from: imageReference,
-                                canvasSize: requestedCanvasSize
-                            ) ?? imageReference
-                            generatedImageSlots.append(.image(imageReference: imageReference, displayReference: displayReference))
-                        } catch {
-                            if Task.isCancelled || error is CancellationError { throw error }
-                            generatedImageSlots.append(.failure)
-                            self.logger.warning("One image edit request failed: \(error.localizedDescription)")
-                        }
-                    }
-                } else {
-                    guard !imagePrompt.isEmpty else {
-                        throw APIError.unknown(
-                            underlying: NSError(
-                                domain: "ChatViewModel",
-                                code: -1,
-                                userInfo: [NSLocalizedDescriptionKey: "请输入图片生成提示词。"]
-                            )
-                        )
-                    }
-                    for prompt in imagePrompts {
-                        do {
-                            try Task.checkCancellation()
-                            let imageReference = try await self.runImageRequestWithRateLimitRetry {
-                                try await manager.generateImage(
-                                    prompt: prompt,
-                                    model: modelId,
-                                    size: requestedImageSize
-                                )
-                            }
-                            let displayReference = await self.localDisplayImageReference(
-                                from: imageReference,
-                                canvasSize: requestedCanvasSize
-                            ) ?? imageReference
-                            generatedImageSlots.append(.image(imageReference: imageReference, displayReference: displayReference))
-                        } catch {
-                            if Task.isCancelled || error is CancellationError { throw error }
-                            generatedImageSlots.append(.failure)
-                            self.logger.warning("One image generation request failed: \(error.localizedDescription)")
-                        }
-                    }
-                }
+                let generatedImageSlots = try await self.generateDirectImageSlots(
+                    prompts: imagePrompts,
+                    modelId: modelId,
+                    requestedImageSize: requestedImageSize,
+                    requestedCanvasSize: requestedCanvasSize,
+                    editImages: editImages,
+                    manager: manager,
+                    originalPromptWasEmpty: imagePrompt.isEmpty
+                )
                 try Task.checkCancellation()
                 if generatedImageSlots.isEmpty {
                     throw APIError.unknown(
@@ -9673,6 +9694,153 @@ final class ChatViewModel {
         try await runMediaRequestWithRetry(maxAttempts: maxAttempts, operation: operation)
     }
 
+    private func generateDirectImageSlots(
+        prompts: [String],
+        modelId: String,
+        requestedImageSize: String,
+        requestedCanvasSize: String?,
+        editImages: [ImageEditSource],
+        manager: ConversationManager,
+        originalPromptWasEmpty: Bool
+    ) async throws -> [GeneratedImageSlot] {
+        guard !prompts.isEmpty else { return [] }
+        if editImages.isEmpty && originalPromptWasEmpty {
+            throw APIError.unknown(
+                underlying: NSError(
+                    domain: "ChatViewModel",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "请输入图片生成提示词。"]
+                )
+            )
+        }
+
+        let maxConcurrent = min(Self.directImageGenerationMaxConcurrency, prompts.count)
+        var iterator = prompts.enumerated().makeIterator()
+        var slots = Array(repeating: GeneratedImageSlot.failure, count: prompts.count)
+
+        try await withThrowingTaskGroup(of: (Int, Result<String, Error>).self) { group in
+            for _ in 0..<maxConcurrent {
+                guard let next = iterator.next() else { break }
+                let index = next.offset
+                let prompt = next.element
+                group.addTask { [manager, editImages] in
+                    let result = await Self.generateDirectImageReference(
+                        prompt: prompt,
+                        modelId: modelId,
+                        requestedImageSize: requestedImageSize,
+                        editImages: editImages,
+                        manager: manager
+                    )
+                    return (index, result)
+                }
+            }
+
+            while let (index, result) = try await group.next() {
+                switch result {
+                case .success(let imageReference):
+                    let displayReference = await localDisplayImageReference(
+                        from: imageReference,
+                        canvasSize: requestedCanvasSize
+                    ) ?? imageReference
+                    slots[index] = .image(imageReference: imageReference, displayReference: displayReference)
+                case .failure(let error):
+                    if Task.isCancelled || error is CancellationError {
+                        throw error
+                    }
+                    slots[index] = .failure
+                    self.logger.warning("One image generation request failed: \(error.localizedDescription)")
+                }
+
+                if let next = iterator.next() {
+                    let index = next.offset
+                    let prompt = next.element
+                    group.addTask { [manager, editImages] in
+                        let result = await Self.generateDirectImageReference(
+                            prompt: prompt,
+                            modelId: modelId,
+                            requestedImageSize: requestedImageSize,
+                            editImages: editImages,
+                            manager: manager
+                        )
+                        return (index, result)
+                    }
+                }
+            }
+        }
+
+        return slots
+    }
+
+    nonisolated private static func generateDirectImageReference(
+        prompt: String,
+        modelId: String,
+        requestedImageSize: String,
+        editImages: [ImageEditSource],
+        manager: ConversationManager
+    ) async -> Result<String, Error> {
+        do {
+            try Task.checkCancellation()
+            let imageReference: String
+            if editImages.isEmpty {
+                imageReference = try await runDirectImageRequestWithRetry {
+                    try await manager.generateImage(
+                        prompt: prompt,
+                        model: modelId,
+                        size: requestedImageSize
+                    )
+                }
+            } else {
+                imageReference = try await runDirectImageRequestWithRetry {
+                    try await manager.editImage(
+                        prompt: prompt,
+                        model: modelId,
+                        images: editImages,
+                        size: requestedImageSize
+                    )
+                }
+            }
+            return .success(imageReference)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    nonisolated private static func runDirectImageRequestWithRetry(
+        maxAttempts: Int = 3,
+        operation: @escaping @Sendable () async throws -> String
+    ) async throws -> String {
+        var lastError: Error?
+        for attempt in 0..<maxAttempts {
+            do {
+                return try await operation()
+            } catch {
+                lastError = error
+                guard directImageErrorIsRetryable(error),
+                      attempt < maxAttempts - 1 else { throw error }
+                let delay = min(18.0, 3.0 * pow(2.0, Double(attempt)))
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+        }
+        throw lastError ?? APIError.unknown(underlying: nil)
+    }
+
+    nonisolated private static func directImageErrorIsRetryable(_ error: Error) -> Bool {
+        if let apiError = error as? APIError,
+           case .httpError(let statusCode, let message, _) = apiError {
+            return statusCode == 429 || (message?.localizedCaseInsensitiveContains("too many") == true)
+        }
+        if error.localizedDescription.localizedCaseInsensitiveContains("too many requests") {
+            return true
+        }
+        let apiError = APIError.from(error)
+        guard apiError.isRetryable else { return false }
+        if case .networkError(let underlying) = apiError,
+           let urlError = underlying as? URLError {
+            return [.networkConnectionLost, .timedOut].contains(urlError.code)
+        }
+        return true
+    }
+
     private func runMediaRequestWithRetry(
         maxAttempts: Int = 3,
         operation: @escaping () async throws -> String
@@ -11994,14 +12162,27 @@ final class ChatViewModel {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content
         let effectiveModelId = selectedModelId ?? message.model ?? conversation?.model ?? ""
-        guard Self.contentContainsLocalAlpineInstruction(content) else {
-            return
-        }
         if let latestUserText,
            shouldKeepMediaGenerationRequestOffLocalAlpine(latestUserText, modelId: effectiveModelId) {
             return
         }
-        let executableContent = Self.normalizedLocalAlpineExecutableContent(from: content)
+        let usedCodeFenceFallback: Bool
+        let executableContent: String?
+        if Self.contentContainsLocalAlpineInstruction(content) {
+            executableContent = Self.normalizedLocalAlpineExecutableContent(from: content)
+            usedCodeFenceFallback = false
+        } else if let latestUserText,
+                  Self.localAlpineUserRequestRequiresHostExecution(latestUserText) {
+            let commands = Self.localAlpineCodeFenceWriteCommands(
+                from: content,
+                preferredPaths: Self.localAlpinePathCandidates(in: latestUserText),
+                latestUserText: latestUserText
+            )
+            executableContent = Self.localAlpineExecutableContent(from: commands)
+            usedCodeFenceFallback = executableContent != nil
+        } else {
+            return
+        }
         guard let executableContent else {
             return
         }
@@ -12012,6 +12193,15 @@ final class ChatViewModel {
             guard hasExecutableBlocks else {
                 self?.localAlpineAgentExecutedMessageIds.remove(messageId)
                 return
+            }
+            if usedCodeFenceFallback {
+                await MainActor.run {
+                    self?.updateAssistantMessage(
+                        id: messageId,
+                        content: "正在创建并验证本地代码...",
+                        isStreaming: false
+                    )
+                }
             }
             await self?.executeLocalAlpineAgent(messageId: messageId, content: executableContent)
         }
