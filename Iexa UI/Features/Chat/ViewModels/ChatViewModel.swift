@@ -378,6 +378,7 @@ final class ChatViewModel {
     private var localAlpineContinuationParentIds: Set<String> = []
     private var localAlpineFinishedContinuationMessageIds: Set<String> = []
     private var localAlpineContinuationRetryCounts: [String: Int] = [:]
+    private var localAlpineMissingToolCorrectionParentIds: Set<String> = []
     private var localAlpineContinuationWatchdogTask: Task<Void, Never>?
     private var localAlpineActiveRunIdsByMessageId: [String: String] = [:]
     private var localAlpineLiveToolCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
@@ -564,6 +565,9 @@ final class ChatViewModel {
     /// Debounces lifecycle snapshot persistence because UIKit can emit
     /// will-resign and did-enter-background back to back.
     @ObservationIgnored nonisolated(unsafe) private var lastLifecycleSnapshotPersistAt: Date = .distantPast
+    @ObservationIgnored private var localConversationAutosaveTask: Task<Void, Never>?
+    @ObservationIgnored private var lastLocalConversationAutosaveAt: Date = .distantPast
+    private let localConversationAutosaveInterval: TimeInterval = 1.5
 
     /// The current auth token for authenticated image requests (model avatars).
     var serverAuthToken: String? {
@@ -746,6 +750,36 @@ final class ChatViewModel {
             NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
         } catch {
             logger.error("Failed to persist lifecycle conversation snapshot: \(error.localizedDescription)")
+        }
+    }
+
+    private func scheduleLocalConversationAutosave(immediate: Bool = false) {
+        guard manager?.usesLocalConversationStore == true,
+              conversation != nil,
+              !isTemporaryChat
+        else { return }
+
+        if immediate {
+            localConversationAutosaveTask?.cancel()
+            localConversationAutosaveTask = nil
+        } else if localConversationAutosaveTask != nil {
+            return
+        }
+
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastLocalConversationAutosaveAt)
+        let delay = immediate || elapsed >= localConversationAutosaveInterval
+            ? 0
+            : UInt64((localConversationAutosaveInterval - elapsed) * 1_000_000_000)
+
+        localConversationAutosaveTask = Task { @MainActor [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: delay)
+            }
+            guard !Task.isCancelled else { return }
+            self?.lastLocalConversationAutosaveAt = Date()
+            await self?.persistLocalConversationIfNeeded()
+            self?.localConversationAutosaveTask = nil
         }
     }
 
@@ -1426,6 +1460,7 @@ final class ChatViewModel {
         - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, and `verify` for common list/search/check work. The host converts them into Alpine-safe bounded commands and records them as tool calls.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
         - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, or macOS-only utilities.
+        - Rootfs/environment/dependency checks: if the user asks whether Python/Lua/Node/C++ or dependencies exist, inspect the Alpine rootfs/runtime/toolchain directly with bounded `command -v`, `--version`, `apk info`, `python3 -m pip list`, `find /usr/lib /usr/local/lib`, or small module-list commands. Do not only search `/mnt/iexa` project dependency files unless the user specifically asks for project dependency files.
         - Service/process commands: prefer foreground commands and bounded verification. Do not assume OpenRC/system services are available unless a prior command proves it.
         - `command` is shell text only. For structured tools, use top-level keys such as `read_file`, `write_files`, `edit_file`, `patch_file`, `delete_file`, `delete_files`, `list_dir`, `glob`, `grep`, or `verify`.
         - Hard protocol rule: for any intermediate local-work step, pure prose means "stop and answer normally"; it will not be auto-upgraded into execution. Emit a real tool block only when you are intentionally requesting local execution.
@@ -1456,6 +1491,7 @@ final class ChatViewModel {
 
             First-turn bootstrap policy:
             - Do not spend a turn only restating that you will inspect the environment. If inspection is needed, emit the actual `iexa_alpine` block immediately.
+            - If the user asks for rootfs/system/runtime dependencies, check the Alpine rootfs directly (`apk info`, `command -v`, version commands, `/usr/lib`, Python site-packages, pip list). Do not limit the answer to `/mnt/iexa` project files.
             - If the user is asking a capability question, explanation, example, comparison, or "can this run" style question, answer normally and do not emit `iexa_alpine`.
             - If the task depends on unknown current files, first get a small workspace listing, then continue from that observation.
             - If the task depends on compilers or packages, use one focused probe only when the toolchain has not already been observed.
@@ -1492,15 +1528,24 @@ final class ChatViewModel {
             }
             if let command, !command.isEmpty {
                 lines.append("  command/request:")
-                lines.append(indentForSystemContext(clippedForSystemContext(command, maxCharacters: 1_500)))
+                lines.append(indentForSystemContext(clippedForSystemContext(
+                    redactedLocalAlpineInternalPaths(in: command),
+                    maxCharacters: 1_500
+                )))
             }
             if !content.isEmpty {
                 lines.append(message.isStreaming ? "  partial output:" : "  result:")
-                lines.append(indentForSystemContext(clippedForSystemContext(content, maxCharacters: 4_000)))
+                lines.append(indentForSystemContext(clippedForSystemContext(
+                    redactedLocalAlpineInternalPaths(in: content),
+                    maxCharacters: 4_000
+                )))
             }
             if let rawResult, !rawResult.isEmpty, rawResult != content {
                 lines.append("  raw result:")
-                lines.append(indentForSystemContext(clippedForSystemContext(rawResult, maxCharacters: 4_000)))
+                lines.append(indentForSystemContext(clippedForSystemContext(
+                    redactedLocalAlpineInternalPaths(in: rawResult),
+                    maxCharacters: 4_000
+                )))
             }
             if !commandResults.isEmpty {
                 lines.append("  command observations:")
@@ -1511,7 +1556,7 @@ final class ChatViewModel {
                     cwd: \(result.cwd)
                     exit_code: \(exit)
                     output:
-                    \(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : clippedForSystemContext(result.outputPreview, maxCharacters: 4_000))
+                    \(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : clippedForSystemContext(redactedLocalAlpineInternalPaths(in: result.outputPreview), maxCharacters: 4_000))
                     """))
                 }
             }
@@ -1528,9 +1573,11 @@ final class ChatViewModel {
             }
             let observationText = [content, rawResult].compactMap { $0 }.joined(separator: "\n")
             let normalizedObservation = normalizedLocalAlpineResultTextForFollowUpCheck(observationText)
+            let toolCalls = LocalAlpineToolCall.decodeMetadata(metadata["iexa_local_alpine_tool_calls"])
             let needsFollowUp = localAlpineResultNeedsFollowUp(
                 observationText,
                 commandResults: commandResults,
+                toolCalls: toolCalls,
                 latestUserText: latestUserGoal
             )
             let verdict: String
@@ -1566,6 +1613,7 @@ final class ChatViewModel {
         - Missing `iexa_alpine` on a `needs_next_tool_*` state is invalid. Use the structured tools (`read_file`, `write_files`, `edit_file`, `patch_file`, `list_dir`, `glob`, `grep`, `verify`, `command`) instead of prose.
         - If prior observations already prove a tool/package exists, do not repeat a generic environment probe. Move to the user's concrete task.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
+        - Treat `.iexa-terminal-scripts/command-*.sh` paths as internal one-shot host temp scripts. Never read, edit, verify, or mention them as user files.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
         - If the latest result contains Python IndentationError or SyntaxError, inspect the target project file, then emit the corrected content to the same original path through byte-preserving `iexa_alpine` JSON `write_files`, then run a bounded verification command. Keep the file body complete and exact when the Python write gate requires a full-file write; do not create a sibling replacement file and do not repeat only the same failed command.
         [/Local Alpine execution state]
@@ -1598,6 +1646,14 @@ final class ChatViewModel {
     private static func clippedForSystemContext(_ text: String, maxCharacters: Int) -> String {
         guard text.count > maxCharacters else { return text }
         return String(text.prefix(maxCharacters)) + "\n...（内容过长，已截断）"
+    }
+
+    private static func redactedLocalAlpineInternalPaths(in text: String) -> String {
+        text.replacingOccurrences(
+            of: #"(?i)(?:/mnt/iexa/)?\.iexa-terminal-scripts/command-[A-Za-z0-9-]+\.sh"#,
+            with: ".iexa-terminal-scripts/<internal-command-script>",
+            options: .regularExpression
+        )
     }
 
     private static func indentForSystemContext(_ text: String) -> String {
@@ -4349,6 +4405,8 @@ final class ChatViewModel {
         let currentAttachments = processedAttachments
         errorMessage = nil
 
+        await persistExplicitMemoryRequestIfNeeded(from: currentText)
+
         let normalizedLocalAlpineText = Self.normalizedLocalAlpineCommand(currentText)
         let shouldKeepMediaRoute = shouldKeepMediaGenerationRequestOffLocalAlpine(
             currentText,
@@ -4661,6 +4719,7 @@ final class ChatViewModel {
             conversation?.history.appendChildId(userMessage.id, to: pid)
         }
         conversation?.history.currentId = assistantMessageId
+        scheduleLocalConversationAutosave(immediate: true)
         // ────────────────────────────────────────────────────────────────────
 
         if !modelAttachmentContext.isEmpty {
@@ -5375,6 +5434,23 @@ final class ChatViewModel {
             return .setupDependency
         }
 
+        let environmentInspectionActions = [
+            "检查有没有", "有没有", "是否安装", "是否有", "能不能用", "可不可用",
+            "查一下", "看一下", "看看", "列一下", "列出",
+            "check whether", "check if", "is installed", "installed", "available",
+            "list installed", "what dependencies", "dependencies installed"
+        ]
+        let environmentInspectionObjects = [
+            "依赖", "环境", "包", "模块", "库", "rootfs", "系统", "运行时",
+            "python", "pip", "lua", "node", "npm",
+            "gcc", "g++", "clang", "make", "编译器", "解释器", "版本",
+            "dependency", "dependencies", "environment", "rootfs", "system", "runtime", "package", "packages",
+            "module", "modules", "library", "libraries", "compiler", "runtime", "version"
+        ]
+        if containsAnyPair(text, actions: environmentInspectionActions, objects: environmentInspectionObjects) {
+            return .inspectLocalState
+        }
+
         let executionTerms = [
             "执行", "运行", "帮我跑", "给我跑", "跑一下", "跑一遍", "跑这个", "跑这段", "跑上面",
             "跑脚本", "跑代码", "跑测试", "跑项目", "跑起来", "跑通", "测试", "验证", "调试",
@@ -5849,6 +5925,20 @@ final class ChatViewModel {
         return paths.first
     }
 
+    private static func localAlpineUserRequestWantsDeletion(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let deleteTerms = [
+            "删除", "删掉", "移除", "清理掉", "删了", "干掉",
+            "delete", "remove", "unlink"
+        ]
+        guard deleteTerms.contains(where: { lower.contains($0) }) else { return false }
+        let confirmationOnlyTerms = [
+            "要不要", "是否", "可以吗", "能不能", "能否", "可不可以",
+            "should i", "can i", "may i"
+        ]
+        return !confirmationOnlyTerms.contains { lower.contains($0) }
+    }
+
     private static func localAlpineMentionedLanguages(in text: String) -> [String] {
         let lower = text.lowercased()
         let languageTerms: [(String, [String])] = [
@@ -5906,6 +5996,10 @@ final class ChatViewModel {
         if body.hasPrefix("`"), body.hasSuffix("`"), body.count >= 2 {
             body = String(body.dropFirst().dropLast())
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if body.range(of: #"(?i)\bhttps?://"#, options: .regularExpression) != nil,
+           !localAlpineBodyLooksLikeCode(body) {
+            return nil
         }
         guard body.count <= 20_000 else { return nil }
         return body.isEmpty ? nil : body
@@ -6037,6 +6131,11 @@ final class ChatViewModel {
 
     private static func localAlpinePathCandidates(in text: String, limit: Int = 12) -> [String] {
         guard !text.isEmpty else { return [] }
+        let searchableText = text.replacingOccurrences(
+            of: #"(?i)\bhttps?://[^\s`"'“”‘’<>]+"#,
+            with: " ",
+            options: .regularExpression
+        )
         let extensions = "py|pyw|js|jsx|ts|tsx|mjs|cjs|html|htm|css|scss|sass|swift|kt|kts|java|c|cc|cpp|cxx|h|hpp|cs|go|rs|rb|php|sh|bash|zsh|fish|pl|lua|r|sql|json|jsonc|jsonl|yaml|yml|toml|xml|md|txt"
         let patterns = [
             #"`([^`]+(?:\.(?:\#(extensions))|package\.json|Makefile|Dockerfile))`"#,
@@ -6045,11 +6144,11 @@ final class ChatViewModel {
             #"((?:/mnt/iexa/|\.{0,2}/)?[A-Za-z0-9_.@+/\-]*(?:package\.json|Makefile|Dockerfile))"#
         ]
         var paths: [String] = []
-        let nsText = text as NSString
+        let nsText = searchableText as NSString
         let fullRange = NSRange(location: 0, length: nsText.length)
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
-            for match in regex.matches(in: text, range: fullRange) where match.numberOfRanges >= 2 {
+            for match in regex.matches(in: searchableText, range: fullRange) where match.numberOfRanges >= 2 {
                 let candidate = nsText.substring(with: match.range(at: 1))
                     .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "`\"'“”‘’，。；：、）)]}")))
                 guard !candidate.isEmpty,
@@ -6069,7 +6168,7 @@ final class ChatViewModel {
         let lower = path.lowercased()
         let ignoredFragments = [
             "/usr/lib/python", "/usr/local/lib/python", "/site-packages/", "/dist-packages/",
-            ".iexa_failed_writes/", ".iexa-write-"
+            ".iexa_failed_writes/", ".iexa-write-", ".iexa-terminal-scripts/"
         ]
         return !ignoredFragments.contains { lower.contains($0) }
     }
@@ -6823,6 +6922,7 @@ final class ChatViewModel {
         localAlpineContinuationParentIds.removeAll()
         localAlpineFinishedContinuationMessageIds.removeAll()
         localAlpineContinuationRetryCounts.removeAll()
+        localAlpineMissingToolCorrectionParentIds.removeAll()
         localAlpineActiveRunIdsByMessageId.removeAll()
         localAlpineLiveToolCallsByMessageId.removeAll()
     }
@@ -6839,6 +6939,7 @@ final class ChatViewModel {
         cancelLocalAlpineInput()
         localAlpineContinuationParentIds.removeAll()
         localAlpineContinuationRetryCounts.removeAll()
+        localAlpineMissingToolCorrectionParentIds.removeAll()
         localAlpineActiveRunIdsByMessageId.removeAll()
         localAlpineLiveToolCallsByMessageId.removeAll()
     }
@@ -6856,6 +6957,7 @@ final class ChatViewModel {
         localAlpineNoCommandContinuationRetries = 0
         localAlpineContinuationParentIds.removeAll()
         localAlpineContinuationRetryCounts.removeAll()
+        localAlpineMissingToolCorrectionParentIds.removeAll()
         localAlpineActiveRunIdsByMessageId.removeAll()
         localAlpineLiveToolCallsByMessageId.removeAll()
     }
@@ -9229,10 +9331,10 @@ final class ChatViewModel {
         }
     }
 
-    /// Whether the selected model supports the memory builtin tool.
-    /// Controls visibility of the memory toggle in ToolsMenuSheet.
+    /// Memory is local-first, so it does not depend on a provider/backend memory tool.
+    /// The app injects saved memories into the request context when enabled.
     var isMemoryAvailable: Bool {
-        isOpenAICompatibleProvider || (selectedModel?.supportsMemory ?? false)
+        true
     }
 
     /// Syncs the UI toggles (web search pill, selected tools) with the selected
@@ -9267,9 +9369,7 @@ final class ChatViewModel {
         codeInterpreterEnabled = defaults.contains("code_interpreter") && isTruthy("code_interpreter")
         suppressBuiltinFeatureTracking = false
 
-        // Memory is an account-level preference stored server-side (ui.memory).
-        // Fetch it once for all models (not just memory-capable ones) so the
-        // value is cached for when a capable model is selected later.
+        // Memory is local-first. Fetch the local setting once for all models.
         Task { await fetchMemorySettingFromServer() }
 
         // Reset and re-populate tool selections for this model.
@@ -9286,61 +9386,24 @@ final class ChatViewModel {
         }
     }
 
-    /// Fetches the user's memory preference from the server.
-    ///
-    /// Calls `GET /api/v1/users/user/settings` and reads `ui.memory`.
-    /// This is the same endpoint the web UI writes to when the user
-    /// toggles memory in Settings → Personalization. Fire-and-forget
-    /// — failure just leaves `memoryEnabled` at its last known value.
+    /// Fetches the user's local memory preference.
     func fetchMemorySettingFromServer() async {
-        if isOpenAICompatibleProvider, let manager {
-            let enabled = await LocalMemoryStore.shared.isEnabled(serverURL: manager.baseURL)
-            memoryEnabled = enabled
-            activeChatStore?.cachedMemorySetting = enabled
-            return
-        }
-        // Use session-level cache — avoids a redundant GET /api/v1/users/user/settings
-        // on every model load/switch. Cache is cleared by ActiveChatStore.clear()
-        // on logout or server switch, ensuring a fresh fetch each session.
         if let cached = activeChatStore?.cachedMemorySetting {
             memoryEnabled = cached
-            logger.debug("Memory setting from cache: \(cached)")
             return
         }
-        guard let apiClient = manager?.apiClient else { return }
-        do {
-            let settings = try await apiClient.getUserSettings()
-            if let ui = settings["ui"] as? [String: Any],
-               let memory = ui["memory"] as? Bool {
-                memoryEnabled = memory
-                activeChatStore?.cachedMemorySetting = memory
-                logger.debug("Memory setting fetched from server: \(memory)")
-            }
-        } catch {
-            logger.debug("Failed to fetch memory setting: \(error.localizedDescription)")
-        }
+        guard let manager else { return }
+        let enabled = await LocalMemoryStore.shared.isEnabled(serverURL: manager.baseURL)
+        memoryEnabled = enabled
+        activeChatStore?.cachedMemorySetting = enabled
     }
 
-    /// Persists the memory toggle state to the server user settings.
-    ///
-    /// Calls `POST /api/v1/users/user/settings/update` with `{"ui":{"memory":enabled}}`
-    /// so the web UI and app stay in sync. Fire-and-forget — the toggle
-    /// is already updated locally.
+    /// Persists the memory toggle state locally.
     func updateMemorySettingOnServer(enabled: Bool) {
-        guard let apiClient = manager?.apiClient else { return }
+        guard let manager else { return }
         Task {
-            do {
-                if self.isOpenAICompatibleProvider {
-                    await LocalMemoryStore.shared.setEnabled(enabled, serverURL: apiClient.baseURL)
-                } else {
-                    // Use merge helper so we only update `memory` without
-                    // overwriting `models`, `pinnedModels`, or any other ui keys.
-                    try await apiClient.mergeUserUISettings(["memory": enabled])
-                }
-                logger.debug("Memory setting saved to server: \(enabled)")
-            } catch {
-                logger.debug("Failed to save memory setting: \(error.localizedDescription)")
-            }
+            await LocalMemoryStore.shared.setEnabled(enabled, serverURL: manager.baseURL)
+            self.activeChatStore?.cachedMemorySetting = enabled
         }
     }
 
@@ -9528,10 +9591,9 @@ final class ChatViewModel {
     /// Builds chat features by merging user toggles with the model's admin-configured
     /// default features. Matches the Iexa native server web client's `setDefaults()` + `getFeatures()`.
     ///
-    /// Memory is based solely on the user's account setting (`memoryEnabled`), matching
-    /// the web client which sends `features.memory` based on `$user.settings.ui.memory`
-    /// without gating on per-model `builtinTools`. The server already knows which models
-    /// support memory and ignores the flag for models that don't.
+    /// Memory is local-first in the app: saved memories are injected into the
+    /// request context by `localMemorySystemContext()`, so we do not rely on a
+    /// provider/backend memory tool being available.
     private func buildChatFeatures() -> ChatCompletionRequest.ChatFeatures {
         var features = ChatCompletionRequest.ChatFeatures()
         let modelAllowsImageGeneration = selectedModel.map {
@@ -9558,12 +9620,7 @@ final class ChatViewModel {
         if codeInterpreterEnabled {
             features.codeInterpreter = true
         }
-        // Memory: send based on account-level setting only (matches web client).
-        // No gate on selectedModel?.supportsMemory — the server decides per-model
-        // whether to inject the memory tool; we just relay the user's preference.
-        if memoryEnabled {
-            features.memory = true
-        }
+        features.memory = false
 
         return features
     }
@@ -10721,15 +10778,65 @@ final class ChatViewModel {
     }
 
     private func localMemorySystemContext() async -> String? {
-        guard isOpenAICompatibleProvider, memoryEnabled, let manager else { return nil }
+        guard memoryEnabled, let manager else { return nil }
         guard await LocalMemoryStore.shared.isEnabled(serverURL: manager.baseURL) else { return nil }
-        let memories = await LocalMemoryStore.shared.list(serverURL: manager.baseURL)
-        guard !memories.isEmpty else { return nil }
-        let lines = memories.prefix(30).map { "- \($0.content)" }.joined(separator: "\n")
+        let memoryContents = await LocalMemoryStore.shared
+            .list(serverURL: manager.baseURL)
+            .map(\.content)
+        let trimmedMemories = memoryContents
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !trimmedMemories.isEmpty else { return nil }
+        let lines = trimmedMemories.prefix(30).map { "- \($0)" }.joined(separator: "\n")
         return """
         User memories to consider across conversations:
         \(lines)
         """
+    }
+
+    private func persistExplicitMemoryRequestIfNeeded(from text: String) async {
+        guard memoryEnabled,
+              let manager,
+              let memory = Self.explicitMemoryContent(from: text) else {
+            return
+        }
+        await LocalMemoryStore.shared.addIfAbsent(content: memory, serverURL: manager.baseURL)
+    }
+
+    private static func explicitMemoryContent(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowercased = trimmed.lowercased()
+        let questionMarkers = ["记得什么", "记住什么", "记忆是什么", "有哪些记忆", "查看记忆", "列出记忆", "what do you remember", "show memories", "list memories"]
+        if questionMarkers.contains(where: { lowercased.contains($0) }) {
+            return nil
+        }
+
+        let patterns = [
+            #"(?i)^\s*(?:请|帮我|麻烦你)?记住[：:，,\s]*(.+)$"#,
+            #"(?i)^\s*(?:请|帮我|麻烦你)?记一下[：:，,\s]*(.+)$"#,
+            #"(?i)^\s*以后(?:你)?(?:要)?记得[：:，,\s]*(.+)$"#,
+            #"(?i)^\s*(?:你)?(?:要)?记得[：:，,\s]*(.+)$"#,
+            #"(?i)^\s*remember(?:\s+that)?[：:,\s]+(.+)$"#,
+            #"(?i)^\s*please\s+remember(?:\s+that)?[：:,\s]+(.+)$"#,
+            #"(?i)^\s*keep\s+in\s+mind(?:\s+that)?[：:,\s]+(.+)$"#,
+            #"(?i)^\s*save\s+this\s+(?:as\s+)?memory[：:,\s]+(.+)$"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let nsText = trimmed as NSString
+            let range = NSRange(location: 0, length: nsText.length)
+            guard let match = regex.firstMatch(in: trimmed, range: range),
+                  match.numberOfRanges > 1 else { continue }
+            var memory = nsText.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’`，,。.!！ "))
+            if memory.count > 1_000 {
+                memory = String(memory.prefix(1_000))
+            }
+            return memory.count >= 2 ? memory : nil
+        }
+        return nil
     }
 
     private static func projectContinuitySystemContext() -> String {
@@ -11650,23 +11757,25 @@ final class ChatViewModel {
         ]
         if !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lines.append("request/command:")
-            lines.append(clippedForSystemContext(command, maxCharacters: 4_000))
+            lines.append(clippedForSystemContext(redactedLocalAlpineInternalPaths(in: command), maxCharacters: 4_000))
         }
         if !commandResults.isEmpty {
             lines.append("command_results:")
             for result in commandResults.suffix(6) {
                 let exit = result.exitCode.map(String.init) ?? "unknown"
+                let redactedCommand = redactedLocalAlpineInternalPaths(in: result.command)
+                let redactedOutput = redactedLocalAlpineInternalPaths(in: result.outputPreview)
                 lines.append("""
-                - command: \(result.command)
+                - command: \(redactedCommand)
                   cwd: \(result.cwd)
                   exit_code: \(exit)
                   output:
-                \(indentForSystemContext(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : clippedForSystemContext(result.outputPreview, maxCharacters: 8_000)))
+\(indentForSystemContext(redactedOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : clippedForSystemContext(redactedOutput, maxCharacters: 8_000)))
                 """)
             }
         } else if !rawResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lines.append("raw_output:")
-            lines.append(clippedForSystemContext(rawResult, maxCharacters: 10_000))
+            lines.append(clippedForSystemContext(redactedLocalAlpineInternalPaths(in: rawResult), maxCharacters: 10_000))
         }
         if !writtenFiles.isEmpty {
             lines.append("written_files:")
@@ -12353,6 +12462,259 @@ final class ChatViewModel {
         }
     }
 
+    @discardableResult
+    private func scheduleLocalAlpineMissingToolCorrectionIfNeeded(
+        messageId: String,
+        content: String,
+        error: ChatMessageError?
+    ) -> Bool {
+        guard error == nil else { return false }
+        guard terminalEnabled && selectedTerminalIsLocalAlpine else { return false }
+        guard !localAlpineAgentStopRequested else { return false }
+        guard !localAlpineAutoExecutionPaused else { return false }
+        guard !Self.contentContainsLocalAlpineInstruction(content) else { return false }
+        guard let message = conversation?.messages.first(where: { $0.id == messageId }),
+              message.role == .assistant,
+              message.metadata?["iexa_local_alpine_final_summary"] == nil,
+              message.metadata?["iexa_local_alpine_missing_tool_correction"] == nil else {
+            return false
+        }
+        guard let latestUserText = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })?.content,
+              Self.localAlpineUserRequestRequiresHostExecution(latestUserText) else {
+            return false
+        }
+        let effectiveModelId = selectedModelId ?? message.model ?? conversation?.model ?? ""
+        if shouldKeepMediaGenerationRequestOffLocalAlpine(latestUserText, modelId: effectiveModelId) {
+            return false
+        }
+        guard !localAlpineMissingToolCorrectionParentIds.contains(messageId) else {
+            return false
+        }
+        localAlpineMissingToolCorrectionParentIds.insert(messageId)
+        localAlpineContinuationParentIds.insert(messageId)
+        localAlpineContinuationTask?.cancel()
+        localAlpineContinuationTask = Task { [weak self] in
+            await self?.startLocalAlpineMissingToolCorrection(
+                parentId: messageId,
+                assistantContent: content,
+                latestUserText: latestUserText
+            )
+        }
+        return true
+    }
+
+    private func startLocalAlpineMissingToolCorrection(
+        parentId: String,
+        assistantContent: String,
+        latestUserText: String
+    ) async {
+        guard !localAlpineAgentStopRequested,
+              let manager,
+              let conversation,
+              conversation.messages.contains(where: { $0.id == parentId }),
+              let modelId = selectedModelId ?? conversation.model,
+              !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            localAlpineContinuationParentIds.remove(parentId)
+            return
+        }
+
+        let assistantMessageId = UUID().uuidString
+        let status = ChatStatusUpdate(
+            action: "local_alpine_agent",
+            description: "正在重新请求本地工具调用...",
+            done: false
+        )
+        let message = ChatMessage(
+            id: assistantMessageId,
+            role: .assistant,
+            content: "",
+            timestamp: .now,
+            model: modelId,
+            isStreaming: true,
+            statusHistory: [status],
+            metadata: [
+                "iexa_local_alpine_continuation": "true",
+                "iexa_local_alpine_missing_tool_correction": parentId
+            ]
+        )
+        let node = HistoryNode(
+            id: assistantMessageId,
+            parentId: parentId,
+            childrenIds: [],
+            role: .assistant,
+            content: "",
+            timestamp: message.timestamp,
+            model: modelId,
+            done: false,
+            statusHistory: [status]
+        )
+        self.conversation?.messages.append(message)
+        self.conversation?.history.addNode(node)
+        self.conversation?.history.appendChildId(assistantMessageId, to: parentId)
+        self.conversation?.history.currentId = assistantMessageId
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+
+        var apiMessages = await buildAPIMessagesAsync(includeLocalAlpineExecutionContext: true)
+        Self.appendLocalAlpineMissingToolCorrectionInstruction(
+            to: &apiMessages,
+            userGoal: latestUserText,
+            assistantContent: assistantContent
+        )
+
+        isStreaming = true
+        hasFinishedStreaming = false
+        selfInitiatedStream = true
+        activeTaskId = nil
+        sessionId = UUID().uuidString
+        beginStreamingBackgroundTaskIfNeeded()
+        streamingStore.beginStreaming(
+            messageId: assistantMessageId,
+            modelId: modelId,
+            initialStatusHistory: [status]
+        )
+        startLocalAlpineContinuationWatchdog(
+            assistantMessageId: assistantMessageId,
+            parentId: parentId,
+            modelId: modelId,
+            finalSummaryOnly: false
+        )
+
+        let effectiveChatId = conversationId ?? self.conversation?.id
+        let socket = socketService
+        var socketConnected = socket?.isConnected ?? false
+        if !isOpenAICompatibleProvider, let socket, !socketConnected {
+            socketConnected = await socket.ensureConnected(timeout: 8.0)
+        }
+        let socketSessionId = socket?.sid ?? sessionId
+        let usePollingFallback = !isOpenAICompatibleProvider && !socketConnected
+
+        if !isOpenAICompatibleProvider {
+            await syncToServerViaTree()
+            if socketConnected, let socket {
+                registerSocketHandlers(
+                    socket: socket,
+                    assistantMessageId: assistantMessageId,
+                    modelId: modelId,
+                    socketSessionId: socketSessionId,
+                    effectiveChatId: effectiveChatId
+                )
+            }
+        }
+
+        streamingTask = Task { [weak self] in
+            guard let self else { return }
+            let acc = ContentAccumulator()
+            var exactUsage: [String: Any]?
+
+            do {
+                var request = ChatCompletionRequest(
+                    model: modelId,
+                    messages: apiMessages,
+                    stream: true,
+                    chatId: effectiveChatId,
+                    sessionId: socketSessionId,
+                    messageId: assistantMessageId,
+                    parentId: parentId
+                )
+                await self.populateCommonRequestFields(&request)
+
+                if self.isOpenAICompatibleProvider {
+                    let sseStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                    for try await event in sseStream {
+                        if Task.isCancelled { break }
+                        if let usage = event.usage, !usage.isEmpty {
+                            exactUsage = usage
+                        }
+                        if let delta = event.contentDelta, !delta.isEmpty {
+                            acc.append(delta)
+                            self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                        }
+                        if event.isFinished { break }
+                    }
+                    if Task.isCancelled { return }
+                    await self.finishLocalAlpineContinuation(
+                        assistantMessageId: assistantMessageId,
+                        modelId: modelId,
+                        content: acc.content,
+                        usage: exactUsage
+                    )
+                    return
+                }
+
+                if request.isPipeModel {
+                    let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
+                    for try await event in sseStream {
+                        if Task.isCancelled { break }
+                        if let usage = event.usage, !usage.isEmpty {
+                            exactUsage = usage
+                        }
+                        if let delta = event.contentDelta, !delta.isEmpty {
+                            acc.append(delta)
+                            self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                        }
+                        if event.isFinished { break }
+                    }
+                    if Task.isCancelled { return }
+                    await self.finishLocalAlpineContinuation(
+                        assistantMessageId: assistantMessageId,
+                        modelId: modelId,
+                        content: acc.content,
+                        usage: exactUsage
+                    )
+                    return
+                }
+
+                let json = try await manager.sendMessageHTTP(request: request)
+                if let err = json["error"] as? String, !err.isEmpty {
+                    self.updateAssistantMessage(
+                        id: assistantMessageId,
+                        content: "",
+                        isStreaming: false,
+                        error: ChatMessageError(content: Self.cleanedProviderErrorMessage(err) ?? err)
+                    )
+                    self.cleanupStreaming()
+                    return
+                }
+                if let taskId = json["task_id"] as? String {
+                    self.activeTaskId = taskId
+                }
+                if usePollingFallback, let chatId = effectiveChatId {
+                    await self.pollLocalAlpineContinuation(
+                        chatId: chatId,
+                        assistantMessageId: assistantMessageId,
+                        modelId: modelId,
+                        socketSessionId: socketSessionId
+                    )
+                } else if usePollingFallback {
+                    self.updateAssistantMessage(
+                        id: assistantMessageId,
+                        content: "",
+                        isStreaming: false,
+                        error: ChatMessageError(content: "当前会话没有可轮询的 chatId，无法继续 Local Alpine Agent。")
+                    )
+                    self.cleanupStreaming()
+                } else {
+                    self.logger.info("Local Alpine missing-tool correction HTTP POST done - waiting for socket events")
+                }
+            } catch {
+                if !Task.isCancelled {
+                    let message = Self.localizedGenerationError(error)
+                    self.updateAssistantMessage(
+                        id: assistantMessageId,
+                        content: acc.content,
+                        isStreaming: false,
+                        error: ChatMessageError(content: message)
+                    )
+                    self.cleanupStreaming()
+                    await self.persistLocalConversationIfNeeded()
+                    NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                }
+            }
+        }
+    }
+
     private func scheduleLocalAlpineAgentIfNeeded(messageId: String, content: String, error: ChatMessageError?) {
         guard error == nil else { return }
         guard terminalEnabled && selectedTerminalIsLocalAlpine else { return }
@@ -12377,31 +12739,9 @@ final class ChatViewModel {
            shouldKeepMediaGenerationRequestOffLocalAlpine(latestUserText, modelId: effectiveModelId) {
             return
         }
-        let usedCodeFenceFallback: Bool
         let executableContent: String?
         if Self.contentContainsLocalAlpineInstruction(content) {
             executableContent = Self.normalizedLocalAlpineExecutableContent(from: content)
-            usedCodeFenceFallback = false
-        } else if let latestUserText,
-                  Self.localAlpineUserRequestRequiresHostExecution(latestUserText) {
-            let preferredPaths = Self.localAlpineUniquePaths(
-                Self.localAlpinePathCandidates(in: latestUserText)
-                    + Self.localAlpinePathCandidates(in: content)
-                    + recentLocalAlpinePathCandidates()
-            )
-            var commands = Self.localAlpineCodeFenceWriteCommands(
-                from: content,
-                preferredPaths: preferredPaths,
-                latestUserText: latestUserText
-            )
-            if commands.isEmpty {
-                commands = Self.localAlpineLiteralRewriteCommands(
-                    from: latestUserText,
-                    preferredPaths: preferredPaths
-                )
-            }
-            executableContent = Self.localAlpineExecutableContent(from: commands)
-            usedCodeFenceFallback = executableContent != nil
         } else {
             return
         }
@@ -12415,15 +12755,6 @@ final class ChatViewModel {
             guard hasExecutableBlocks else {
                 self?.localAlpineAgentExecutedMessageIds.remove(messageId)
                 return
-            }
-            if usedCodeFenceFallback {
-                await MainActor.run {
-                    self?.updateAssistantMessage(
-                        id: messageId,
-                        content: "正在创建并验证本地代码...",
-                        isStreaming: false
-                    )
-                }
             }
             await self?.executeLocalAlpineAgent(messageId: messageId, content: executableContent)
         }
@@ -13451,6 +13782,18 @@ final class ChatViewModel {
             localAlpineAgentStopRequested = true
         } else if result.interactiveRequest == nil,
                   !localAlpineAgentStopRequested,
+                  Self.localAlpineToolCallsShowCompletedGoal(
+                      result.toolCalls,
+                      commandResults: result.commandResults,
+                      latestUserText: conversation?.messages.last(where: {
+                          $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+                      })?.content
+                  ) {
+            if !scheduleLocalAlpineFinalSummary(after: resultMessageId) {
+                localAlpineAgentStopRequested = true
+            }
+        } else if result.interactiveRequest == nil,
+                  !localAlpineAgentStopRequested,
                   localAlpineResultNeedsFollowUp(after: resultMessageId) {
             scheduleLocalAlpineContinuationIfNeeded(after: resultMessageId, forceContinue: true)
         } else if result.interactiveRequest == nil,
@@ -13915,8 +14258,10 @@ final class ChatViewModel {
         }
         localAlpineFinishedContinuationMessageIds.insert(assistantMessageId)
 
-        let rawContent = content
-        let emittedLocalAlpineInstruction = Self.contentContainsLocalAlpineInstruction(rawContent)
+        let rawContent = isFinalSummary
+            ? Self.localAlpineFinalSummaryVisibleContent(from: content)
+            : content
+        let emittedLocalAlpineInstruction = !isFinalSummary && Self.contentContainsLocalAlpineInstruction(content)
         let doneDescription: String
         if isFinalSummary {
             doneDescription = "已整理本地 Alpine 回答"
@@ -14122,12 +14467,14 @@ final class ChatViewModel {
         guard let message = conversation?.messages.first(where: { $0.id == resultMessageId }) else { return false }
         let rawResult = message.metadata?["iexa_local_alpine_raw_result"] ?? message.content
         let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(message.metadata?["iexa_local_alpine_command_results"])
+        let toolCalls = LocalAlpineToolCall.decodeMetadata(message.metadata?["iexa_local_alpine_tool_calls"])
         let latestUserText = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content
         return Self.localAlpineResultNeedsFollowUp(
             rawResult,
             commandResults: commandResults,
+            toolCalls: toolCalls,
             latestUserText: latestUserText
         )
     }
@@ -14135,14 +14482,23 @@ final class ChatViewModel {
     private static func localAlpineResultNeedsFollowUp(
         _ text: String,
         commandResults: [LocalAlpineAgentCommandResult] = [],
+        toolCalls: [LocalAlpineToolCall] = [],
         latestUserText: String? = nil
     ) -> Bool {
         let normalized = normalizedLocalAlpineResultTextForFollowUpCheck(text)
         if normalized.contains("iexa_auto_repair_verified_success") {
             return false
         }
-        if commandResults.contains(where: { $0.failed }) {
+        if commandResults.contains(where: { $0.failed })
+            || toolCalls.contains(where: { $0.phase == .result && $0.failed }) {
             return true
+        }
+        if localAlpineToolCallsShowCompletedGoal(
+            toolCalls,
+            commandResults: commandResults,
+            latestUserText: latestUserText
+        ) {
+            return false
         }
         if let latestUserText,
            isLocalAlpineGoalActionRequest(latestUserText),
@@ -14158,6 +14514,36 @@ final class ChatViewModel {
             return false
         }
         return containsLocalAlpineFailureMarker(normalized)
+    }
+
+    private static func localAlpineToolCallsShowCompletedGoal(
+        _ toolCalls: [LocalAlpineToolCall],
+        commandResults: [LocalAlpineAgentCommandResult],
+        latestUserText: String?
+    ) -> Bool {
+        let completed = toolCalls.filter { $0.phase == .result && !$0.failed }
+        guard !completed.isEmpty else { return false }
+        let toolNames = Set(completed.map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
+        if !toolNames.isDisjoint(with: ["verify", "verify_absent", "test", "compile", "build", "run", "run_script"]) {
+            return true
+        }
+        let latestUserText = latestUserText ?? ""
+        if localAlpineUserRequestWantsDeletion(latestUserText),
+           toolNames.contains("delete_files") || toolNames.contains("delete_file") {
+            return true
+        }
+        let commandText = commandResults.map { $0.command.lowercased() }.joined(separator: "\n")
+        if localAlpineCommandsContainGoalVerification(commandText) {
+            return true
+        }
+        if localAlpineUserRequestWantsModification(latestUserText),
+           !toolNames.isDisjoint(with: ["write_files", "write_file", "edit_file", "patch_file"]) {
+            if localAlpineUserRequestWantsVerification(latestUserText) {
+                return localAlpineCommandsContainGoalVerification(commandText)
+            }
+            return true
+        }
+        return false
     }
 
     private static func isLocalAlpineGoalActionRequest(_ text: String) -> Bool {
@@ -14286,7 +14672,20 @@ final class ChatViewModel {
             #"(?m)(^|[;&|]\s*)head\b"#,
             #"(?m)(^|[;&|]\s*)tail\b"#,
             #"(?m)(^|[;&|]\s*)grep\b"#,
-            #"(?m)(^|[;&|]\s*)rg\b"#
+            #"(?m)(^|[;&|]\s*)rg\b"#,
+            #"(?m)(^|[;&|]\s*)command\s+-v\b"#,
+            #"(?m)(^|[;&|]\s*)which\b"#,
+            #"(?m)(^|[;&|]\s*)apk\s+info\b"#,
+            #"(?m)(^|[;&|]\s*)python3?\s+--version\b"#,
+            #"(?m)(^|[;&|]\s*)python3?\s+-m\s+pip\b"#,
+            #"(?m)(^|[;&|]\s*)pip3?\s+(?:--version|list|show|freeze)\b"#,
+            #"(?m)(^|[;&|]\s*)lua(?:5\.\d)?\s+-v\b"#,
+            #"(?m)(^|[;&|]\s*)node\s+--version\b"#,
+            #"(?m)(^|[;&|]\s*)npm\s+--version\b"#,
+            #"(?m)(^|[;&|]\s*)gcc\s+--version\b"#,
+            #"(?m)(^|[;&|]\s*)g\+\+\s+--version\b"#,
+            #"(?m)(^|[;&|]\s*)clang\s+--version\b"#,
+            #"(?m)(^|[;&|]\s*)make\s+--version\b"#
         ]
         return inspectionPatterns.contains {
             combinedCommands.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil
@@ -14525,6 +14924,41 @@ final class ChatViewModel {
         }
     }
 
+    private static func appendLocalAlpineMissingToolCorrectionInstruction(
+        to messages: inout [[String: Any]],
+        userGoal: String,
+        assistantContent: String
+    ) {
+        let instruction = """
+        [Local Alpine missing tool correction]
+        The user asked for a concrete local Alpine operation, but the previous assistant turn answered in prose without a usable `iexa_alpine` block. Correct that now.
+
+        User goal:
+        \(clippedForSystemContext(userGoal, maxCharacters: 1_500))
+
+        Previous assistant prose:
+        \(clippedForSystemContext(assistantContent, maxCharacters: 2_000))
+
+        Correction policy:
+        - Emit exactly one fenced Markdown block with language `iexa_alpine`.
+        - Do not ask for confirmation when the user already used imperative wording such as delete, modify, run, test, or execute.
+        - For deletes, use structured `delete_file`/`delete_files`, then verify absence in the same block.
+        - For modification, read the relevant file if needed, then use `edit_file`, `patch_file`, or `write_files` and verify when the user asked to run/test.
+        - Keep visible text before the block empty or one short progress sentence.
+        [/Local Alpine missing tool correction]
+        """
+        if !messages.isEmpty, messages[0]["role"] as? String == "system" {
+            var system = messages[0]
+            let existing = system["content"] as? String ?? ""
+            system["content"] = [existing, instruction]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: "\n\n")
+            messages[0] = system
+        } else {
+            messages.insert(["role": "system", "content": instruction], at: 0)
+        }
+    }
+
     private static func appendLocalAlpineFinalSummaryInstruction(to messages: inout [[String: Any]]) {
         let instruction = """
         [Local Alpine final summary]
@@ -14548,6 +14982,15 @@ final class ChatViewModel {
         } else {
             messages.insert(["role": "system", "content": instruction], at: 0)
         }
+    }
+
+    private static func localAlpineFinalSummaryVisibleContent(from content: String) -> String {
+        let visible = LocalAlpineAgentService.visibleContent(from: content)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !visible.isEmpty {
+            return visible
+        }
+        return "已完成本地操作。"
     }
 
     private func updateAssistantMessage(
@@ -14774,6 +15217,7 @@ final class ChatViewModel {
             statusHistory: statusHistory,
             error: error
         )
+        scheduleLocalConversationAutosave(immediate: !isStreaming || error != nil)
 
         if let completedAssistantContentForAgent {
             scheduleLocalNativeToolIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
@@ -14781,6 +15225,13 @@ final class ChatViewModel {
             if completedMessage.map(Self.isLocalAlpineAgentResult) != true,
                completedMessage?.metadata?["iexa_local_alpine_final_summary"] == nil {
                 scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
+                if localAlpineAgentExecutedMessageIds.contains(id) != true {
+                    _ = scheduleLocalAlpineMissingToolCorrectionIfNeeded(
+                        messageId: id,
+                        content: completedAssistantContentForAgent,
+                        error: error
+                    )
+                }
             }
             if completedMessage.map(Self.isLocalWorkspaceAgentResult) != true {
                 scheduleLocalWorkspaceAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
@@ -15340,10 +15791,16 @@ final class ChatViewModel {
     }
 
     private func persistLocalConversationIfNeeded() async {
-        guard let manager, manager.usesLocalConversationStore, let conversation else { return }
+        guard let manager, manager.usesLocalConversationStore else { return }
         guard !isTemporaryChat else { return }
+        _ = snapshotActiveStreamingMessageToConversation()
+        syncFlatMessagesToTreeNodes()
+        guard var conversation else { return }
+        conversation.updatedAt = Date()
+        self.conversation = conversation
         do {
             try await manager.saveConversation(conversation)
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
         } catch {
             logger.error("Failed to save local conversation: \(error.localizedDescription)")
         }

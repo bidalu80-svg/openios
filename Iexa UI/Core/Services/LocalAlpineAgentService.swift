@@ -1512,10 +1512,25 @@ actor LocalAlpineAgentService {
             return parseCommands(from: sequence)
 
         case "move_file", "rename_file":
-            guard let source = Self.stringValue(arguments["from"] ?? arguments["source"] ?? arguments["src"])
+            guard let source = Self.stringValue(
+                    arguments["from"]
+                        ?? arguments["source"]
+                        ?? arguments["src"]
+                        ?? arguments["old_path"]
+                        ?? arguments["oldPath"]
+                        ?? arguments["source_path"]
+                        ?? arguments["sourcePath"]
+                )
                     ?? Self.pathString(from: arguments),
                   let destination = Self.stringValue(
-                    arguments["to"] ?? arguments["dest"] ?? arguments["destination"] ?? arguments["new_path"] ?? arguments["newPath"]
+                    arguments["to"]
+                        ?? arguments["dest"]
+                        ?? arguments["dst"]
+                        ?? arguments["destination"]
+                        ?? arguments["target_path"]
+                        ?? arguments["targetPath"]
+                        ?? arguments["new_path"]
+                        ?? arguments["newPath"]
                   ) else {
                 return []
             }
@@ -1523,10 +1538,25 @@ actor LocalAlpineAgentService {
             return [LocalAlpineAgentCommand(command: command, cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa")]
 
         case "copy_file":
-            guard let source = Self.stringValue(arguments["from"] ?? arguments["source"] ?? arguments["src"])
+            guard let source = Self.stringValue(
+                    arguments["from"]
+                        ?? arguments["source"]
+                        ?? arguments["src"]
+                        ?? arguments["old_path"]
+                        ?? arguments["oldPath"]
+                        ?? arguments["source_path"]
+                        ?? arguments["sourcePath"]
+                )
                     ?? Self.pathString(from: arguments),
                   let destination = Self.stringValue(
-                    arguments["to"] ?? arguments["dest"] ?? arguments["destination"] ?? arguments["new_path"] ?? arguments["newPath"]
+                    arguments["to"]
+                        ?? arguments["dest"]
+                        ?? arguments["dst"]
+                        ?? arguments["destination"]
+                        ?? arguments["target_path"]
+                        ?? arguments["targetPath"]
+                        ?? arguments["new_path"]
+                        ?? arguments["newPath"]
                   ) else {
                 return []
             }
@@ -2026,9 +2056,21 @@ actor LocalAlpineAgentService {
         guard let dict = object as? [String: Any] else { return [] }
         let nestedFiles = parseEditRewriteFiles(from: Self.editFilesObject(from: dict))
         guard nestedFiles.isEmpty else { return nestedFiles }
-        guard let path = Self.pathString(from: dict),
-              let payload = Self.editRewritePayload(from: dict) else { return [] }
+        guard let path = Self.pathString(from: dict) else { return [] }
+        if let appendPayload = Self.editAppendPayload(from: dict) {
+            return [LocalAlpineAgentFile(path: path, content: appendPayload, source: .editFile, mode: .append)]
+        }
+        guard let payload = Self.editRewritePayload(from: dict) else { return [] }
         return [LocalAlpineAgentFile(path: path, content: payload, source: .editFile)]
+    }
+
+    private nonisolated static func editAppendPayload(from dict: [String: Any]) -> String? {
+        textPayload(
+            from: dict,
+            keys: ["append", "append_text", "appendText"],
+            lineKeys: ["append_lines", "appendLines"],
+            base64Keys: ["append_base64", "appendBase64"]
+        )
     }
 
     private nonisolated static func editRewritePayload(from dict: [String: Any]) -> String? {

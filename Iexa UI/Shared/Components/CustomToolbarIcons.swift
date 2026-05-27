@@ -9,8 +9,13 @@ private struct IexaToolbarGlassBackground: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
-            content
-                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            if compact && cornerRadius >= 20 {
+                content
+                    .glassEffect(.regular, in: Capsule(style: .continuous))
+            } else {
+                content
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            }
         } else {
             content
                 .background {

@@ -2751,6 +2751,9 @@ struct ChatDetailView: View {
         }
         if !imageFiles.isEmpty {
             let columnCount = imageFiles.count >= 5 ? 3 : 2
+            let generatedImageTileHeight: CGFloat = imageFiles.count == 1
+                ? 200
+                : (imageFiles.count >= 5 ? 92 : 130)
             let columns = imageFiles.count == 1
                 ? [GridItem(.flexible())]
                 : Array(
@@ -2762,6 +2765,9 @@ struct ChatDetailView: View {
                 ForEach(Array(imageFiles.enumerated()), id: \.element) { _, file in
                     if file.isGeneratedImageFailurePlaceholder {
                         GeneratedImageFailurePlaceholder()
+                            .frame(maxWidth: .infinity)
+                            .frame(height: generatedImageTileHeight)
+                            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
                     } else if let fileId = imageReference(for: file) {
                         chatImageView(fileId: fileId)
                             .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))

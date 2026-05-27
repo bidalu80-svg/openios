@@ -238,7 +238,7 @@ struct ChannelImageGrid: View {
         case 1:
             if imageFiles[0].isGeneratedImageFailurePlaceholder {
                 GeneratedImageFailurePlaceholder()
-                    .frame(maxWidth: 260, maxHeight: 260)
+                    .frame(width: 260, height: 200)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             } else if let fileId = imageFiles[0].url, !fileId.isEmpty {
                 AuthenticatedImageView(fileId: fileId, apiClient: apiClient)
@@ -250,7 +250,7 @@ struct ChannelImageGrid: View {
                 ForEach(Array(imageFiles.prefix(2).enumerated()), id: \.offset) { _, file in
                     if file.isGeneratedImageFailurePlaceholder {
                         GeneratedImageFailurePlaceholder()
-                            .frame(maxWidth: 140, maxHeight: 180)
+                            .frame(width: 138, height: 160)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     } else if let fileId = file.url, !fileId.isEmpty {
                         AuthenticatedImageView(fileId: fileId, apiClient: apiClient)
@@ -270,7 +270,8 @@ struct ChannelImageGrid: View {
                 ForEach(Array(imageFiles.prefix(9).enumerated()), id: \.offset) { index, file in
                     if file.isGeneratedImageFailurePlaceholder {
                         GeneratedImageFailurePlaceholder()
-                            .frame(maxHeight: columnCount == 3 ? 92 : 130)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: columnCount == 3 ? 92 : 130)
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     } else if let fileId = file.url, !fileId.isEmpty {
                         AuthenticatedImageView(fileId: fileId, apiClient: apiClient)
@@ -298,11 +299,15 @@ struct GeneratedImageFailurePlaceholder: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(theme.surfaceContainer.opacity(0.72))
+            .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.62 : 0.82))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(theme.fileCardBorder.opacity(theme.isDark ? 0.65 : 0.9), lineWidth: 0.75)
+            }
             .overlay {
                 VStack(spacing: Spacing.xs) {
                     Image(systemName: "exclamationmark.triangle")
-                        .scaledFont(size: 22, weight: .semibold)
+                        .scaledFont(size: 24, weight: .semibold)
                     Text("生成失败")
                         .scaledFont(size: 12, weight: .medium)
                 }

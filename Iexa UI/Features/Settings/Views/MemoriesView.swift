@@ -2,9 +2,8 @@ import SwiftUI
 
 /// Displays and manages the user's AI memories.
 ///
-/// Memories are persistent context that the AI uses across conversations.
+/// Memories are persistent local context that the AI uses across conversations.
 /// Users can view, add, edit, and delete memories from this screen.
-/// Matches the WebUI's Settings → Personalization → Memory section.
 struct MemoriesView: View {
     @Environment(\.theme) private var theme
     @Environment(AppDependencyContainer.self) private var dependencies
@@ -20,10 +19,6 @@ struct MemoriesView: View {
     @State private var isClearingAll = false
     @State private var memoryEnabled = false
     @State private var isLoadingMemoryToggle = false
-
-    private var usesLocalMemories: Bool {
-        dependencies.apiClient?.providerType != .iexa
-    }
 
     private var memoryServerURL: String {
         dependencies.apiClient?.baseURL ?? "local"
@@ -75,7 +70,7 @@ struct MemoriesView: View {
         ContentUnavailableView {
             Label("暂无记忆", systemImage: "brain")
         } description: {
-            Text("记忆可以让 AI 在不同对话中记住与你有关的重要信息。添加一条记忆即可开始使用。")
+            Text("记忆会保存在本机，让 AI 在不同对话中使用与你有关的重要信息。添加一条记忆即可开始使用。")
         } actions: {
             Button {
                 withAnimation { isAddingMemory = true }
@@ -104,7 +99,7 @@ struct MemoriesView: View {
             } header: {
                 Text("记忆")
             } footer: {
-                Text("开启后，AI 会在不同对话中记住与你有关的上下文。")
+                Text("开启后，AI 会在本机保存并跨对话使用这些上下文。")
             }
 
             // Add new memory section
@@ -165,7 +160,7 @@ struct MemoriesView: View {
                             .scaledFont(size: 20, weight: .semibold)
                             .foregroundStyle(theme.textPrimary)
                         
-                        Text("记忆可以让 AI 在不同对话中记住与你有关的重要信息。")
+                        Text("记忆会保存在本机，让 AI 在不同对话中使用这些重要信息。")
                             .scaledFont(size: 14)
                             .foregroundStyle(theme.textSecondary)
                             .multilineTextAlignment(.center)
@@ -292,135 +287,68 @@ struct MemoriesView: View {
     // MARK: - Actions
 
     private func loadMemories() async {
-        guard let api = dependencies.apiClient else {
-            isLoading = false
-            return
-        }
         isLoading = true
         errorMessage = nil
 
-        do {
-            if usesLocalMemories {
-                memories = await LocalMemoryStore.shared
-                    .list(serverURL: memoryServerURL)
-                    .map(\.dictionary)
-            } else {
-                memories = try await api.getMemories()
-            }
-        } catch {
-            errorMessage = "加载记忆失败。"
-        }
+        memories = await LocalMemoryStore.shared
+            .list(serverURL: memoryServerURL)
+            .map(\.dictionary)
 
         isLoading = false
     }
 
     private func addMemory() async {
-        guard let api = dependencies.apiClient else { return }
         let text = newMemoryText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
-        do {
-            let newMemory: [String: Any]
-            if usesLocalMemories {
-                newMemory = await LocalMemoryStore.shared
-                    .add(content: text, serverURL: memoryServerURL)
-                    .dictionary
-            } else {
-                newMemory = try await api.addMemory(content: text)
-            }
-            withAnimation {
+        let newMemory = await LocalMemoryStore.shared
+            .addIfAbsent(content: text, serverURL: memoryServerURL)
+            .dictionary
+        withAnimation {
+            if !memories.contains(where: { ($0["id"] as? String) == (newMemory["id"] as? String) }) {
                 memories.insert(newMemory, at: 0)
-                newMemoryText = ""
-                isAddingMemory = false
             }
-        } catch {
-            errorMessage = "添加记忆失败。"
+            newMemoryText = ""
+            isAddingMemory = false
         }
     }
 
     private func updateMemory(id: String) async {
-        guard let api = dependencies.apiClient else { return }
         let text = editText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
-        do {
-            let updated: [String: Any]
-            if usesLocalMemories {
-                guard let local = await LocalMemoryStore.shared
-                    .update(id: id, content: text, serverURL: memoryServerURL) else { return }
-                updated = local.dictionary
-            } else {
-                updated = try await api.updateMemory(id: id, content: text)
-            }
-            if let idx = memories.firstIndex(where: { ($0["id"] as? String) == id }) {
-                memories[idx] = updated
-            }
-            withAnimation { editingMemoryId = nil }
-        } catch {
-            errorMessage = "更新记忆失败。"
+        guard let local = await LocalMemoryStore.shared
+            .update(id: id, content: text, serverURL: memoryServerURL) else { return }
+        let updated = local.dictionary
+        if let idx = memories.firstIndex(where: { ($0["id"] as? String) == id }) {
+            memories[idx] = updated
         }
+        withAnimation { editingMemoryId = nil }
     }
 
     private func deleteMemory(id: String) async {
-        guard let api = dependencies.apiClient else { return }
-
-        do {
-            if usesLocalMemories {
-                await LocalMemoryStore.shared.delete(id: id, serverURL: memoryServerURL)
-            } else {
-                try await api.deleteMemory(id: id)
-            }
-            withAnimation {
-                memories.removeAll { ($0["id"] as? String) == id }
-            }
-        } catch {
-            errorMessage = "删除记忆失败。"
+        await LocalMemoryStore.shared.delete(id: id, serverURL: memoryServerURL)
+        withAnimation {
+            memories.removeAll { ($0["id"] as? String) == id }
         }
     }
 
     private func clearAllMemories() async {
-        guard let api = dependencies.apiClient else { return }
         isClearingAll = true
-
-        do {
-            if usesLocalMemories {
-                await LocalMemoryStore.shared.deleteAll(serverURL: memoryServerURL)
-            } else {
-                try await api.resetMemories()
-            }
-            withAnimation { memories.removeAll() }
-        } catch {
-            errorMessage = "清空记忆失败。"
-        }
-
+        await LocalMemoryStore.shared.deleteAll(serverURL: memoryServerURL)
+        withAnimation { memories.removeAll() }
         isClearingAll = false
     }
 
     private func loadMemoryToggle() async {
-        guard let api = dependencies.apiClient else { return }
         isLoadingMemoryToggle = true
-        if usesLocalMemories {
-            memoryEnabled = await LocalMemoryStore.shared.isEnabled(serverURL: memoryServerURL)
-        } else {
-            if let settings = try? await api.getUserSettings(),
-               let ui = settings["ui"] as? [String: Any],
-               let enabled = ui["memory"] as? Bool {
-                memoryEnabled = enabled
-            }
-        }
+        memoryEnabled = await LocalMemoryStore.shared.isEnabled(serverURL: memoryServerURL)
         isLoadingMemoryToggle = false
     }
 
     private func updateMemoryToggle(_ enabled: Bool) async {
-        guard let api = dependencies.apiClient else { return }
         isLoadingMemoryToggle = true
-        if usesLocalMemories {
-            await LocalMemoryStore.shared.setEnabled(enabled, serverURL: memoryServerURL)
-        } else {
-            // Use merge helper so we ONLY update `memory` without overwriting
-            // `models`, `pinnedModels`, or any other ui keys.
-            try? await api.mergeUserUISettings(["memory": enabled])
-        }
+        await LocalMemoryStore.shared.setEnabled(enabled, serverURL: memoryServerURL)
         isLoadingMemoryToggle = false
         // Notify all active ChatViewModels so they update immediately
         // without waiting for the next server fetch on model switch/reload.

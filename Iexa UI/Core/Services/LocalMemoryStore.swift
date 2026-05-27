@@ -30,6 +30,19 @@ actor LocalMemoryStore {
         return memory
     }
 
+    @discardableResult
+    func addIfAbsent(content: String, serverURL: String) async -> LocalMemory {
+        let normalizedContent = Self.normalized(content)
+        var memories = await loadAll(serverURL: serverURL)
+        if let existing = memories.first(where: { Self.normalized($0.content) == normalizedContent }) {
+            return existing
+        }
+        let memory = LocalMemory(content: content)
+        memories.insert(memory, at: 0)
+        await saveAll(memories, serverURL: serverURL)
+        return memory
+    }
+
     func update(id: String, content: String, serverURL: String) async -> LocalMemory? {
         var memories = await loadAll(serverURL: serverURL)
         guard let index = memories.firstIndex(where: { $0.id == id }) else { return nil }
@@ -105,5 +118,12 @@ actor LocalMemoryStore {
             hash &*= 1099511628211
         }
         return String(hash, radix: 16)
+    }
+
+    private static func normalized(_ content: String) -> String {
+        content
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
     }
 }
