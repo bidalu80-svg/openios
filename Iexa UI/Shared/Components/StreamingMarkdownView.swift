@@ -217,7 +217,11 @@ struct StreamingMarkdownView: View {
             return result
         }
 
-        result.append(streamingCodeSegment(language: recoveredBlock.language, code: recoveredBlock.content))
+        result.append(streamingCodeSegment(
+            language: recoveredBlock.language,
+            code: recoveredBlock.content,
+            preceding: before
+        ))
         return result
     }
 
@@ -260,11 +264,21 @@ struct StreamingMarkdownView: View {
         return ParsedBlock(language: "text", content: content)
     }
 
-    private func streamingCodeSegment(language: String, code: String) -> ContentSegment {
-        codeSegmentForFence(language: language, code: code, isStreamingBlock: true)
+    private func streamingCodeSegment(language: String, code: String, preceding: String = "") -> ContentSegment {
+        codeSegmentForFence(
+            language: language,
+            code: code,
+            isStreamingBlock: true,
+            preceding: preceding
+        )
     }
 
-    private func codeSegmentForFence(language: String, code: String, isStreamingBlock: Bool) -> ContentSegment {
+    private func codeSegmentForFence(
+        language: String,
+        code: String,
+        isStreamingBlock: Bool,
+        preceding: String = ""
+    ) -> ContentSegment {
         let normalizedLanguage = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
         if Self.isHiddenInternalToolBlock(language: normalizedLanguage, code: code) {
@@ -292,7 +306,8 @@ struct StreamingMarkdownView: View {
             return .python(code)
         }
         if Self.isPlainTextFence(language: normalizedLanguage),
-           !Self.looksLikeSourceCode(code) {
+           !Self.looksLikeSourceCode(code),
+           !Self.shouldPreservePlainTextFenceAsCode(code: code, preceding: preceding) {
             return .markdown(code)
         }
         if !normalizedLanguage.isEmpty {
@@ -824,9 +839,11 @@ struct StreamingMarkdownView: View {
         }
 
         let proseLeadWords = [
-            "关键", "说明", "建议", "注意", "总结", "备注", "解析", "修复", "执行", "结果", "下一步",
-            "但", "如果", "不过", "另外", "因此", "所以", "当前", "这里", "上面", "下面",
-            "key", "notes", "note", "summary", "explanation", "recommendation", "next",
+            "关键", "说明", "建议", "注意", "总结", "备注", "解析", "修复", "执行", "运行", "输出", "结果", "效果", "方式", "下一步",
+            "示例", "预期", "命令", "使用", "保存", "文件", "代码", "之后", "最终", "测试", "如下", "例如",
+            "但", "如果", "不过", "另外", "因此", "所以", "当前", "这里", "上面", "下面", "这个", "下面这个",
+            "key", "notes", "note", "summary", "explanation", "recommendation", "next", "example",
+            "output", "result", "results", "stdout", "stderr", "command", "usage", "expected", "then", "after",
             "but", "if", "however", "also", "therefore", "so", "because"
         ]
         let lowered = trimmed.lowercased()
@@ -961,13 +978,14 @@ struct StreamingMarkdownView: View {
     /// Parses code blocks (chart/html/mermaid/svg/python) from a text chunk that
     /// has already had markdown images extracted.
     private func parseCodeBlocks(_ text: String) -> [ContentSegment] {
-        guard text.contains("```") else { return [.markdown(text)] }
+        let parseText = normalizedInlineFenceOpenersAfterProse(in: text)
+        guard parseText.contains("```") else { return [.markdown(parseText)] }
 
         var units: [EitherContent] = []
         var removedInternalToolBlock = false
-        var remaining = text[text.startIndex...]
+        var remaining = parseText[parseText.startIndex...]
 
-        while let openRange = remaining.range(of: "```") {
+        while let openRange = findOpeningFence(in: remaining) {
             let afterOpen = remaining[openRange.upperBound...]
             guard let newlineIdx = afterOpen.firstIndex(of: "\n") else {
                 let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
@@ -978,13 +996,13 @@ struct StreamingMarkdownView: View {
                 if Self.isHiddenInternalToolBlock(language: rawLanguage, code: "") {
                     removedInternalToolBlock = true
                     if units.isEmpty { return [] }
-                    return collapseParsedUnits(units, fallback: text)
+                    return collapseParsedUnits(units, fallback: parseText)
                 }
                 units.append(.segment(.codeBlock(
                     language: rawLanguage.isEmpty ? "text" : rawLanguage,
                     code: ""
                 )))
-                return collapseParsedUnits(units, fallback: text)
+                return collapseParsedUnits(units, fallback: parseText)
             }
             let rawLanguage = afterOpen[afterOpen.startIndex..<newlineIdx]
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -999,7 +1017,7 @@ struct StreamingMarkdownView: View {
                 if Self.isHiddenInternalToolBlock(language: rawLanguage, code: unclosedCode) {
                     removedInternalToolBlock = true
                     if units.isEmpty { return [] }
-                    return collapseParsedUnits(units, fallback: text)
+                    return collapseParsedUnits(units, fallback: parseText)
                 }
                 if !unclosedCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     units.append(.segment(codeSegmentForFence(
@@ -1008,7 +1026,7 @@ struct StreamingMarkdownView: View {
                         isStreamingBlock: isStreaming
                     )))
                 }
-                return collapseParsedUnits(units, fallback: text)
+                return collapseParsedUnits(units, fallback: parseText)
             }
             let rawCodeContent = String(remaining[contentStart..<closeRange.lowerBound])
             let recoveredFence = recoveredMalformedFence(language: rawLanguage, content: rawCodeContent)
@@ -1031,11 +1049,22 @@ struct StreamingMarkdownView: View {
             let isSVG = lang == "svg" && looksLikeSVG(codeContent)
             let isPython = pythonLanguageTags.contains(lang)
             let isCompactModule = shouldRenderCompactCodeModule(language: lang, code: codeContent)
+            let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
+            let isPlainTextFence = Self.isPlainTextFence(language: lang)
+            let preservePlainTextFence = isPlainTextFence
+                && Self.shouldPreservePlainTextFenceAsCode(code: codeContent, preceding: preceding)
             let isStandardCodeBlock = normalizedBlock != nil
-                && !(Self.isPlainTextFence(language: lang) && !Self.looksLikeSourceCode(codeContent))
+                && (!isPlainTextFence || Self.looksLikeSourceCode(codeContent) || preservePlainTextFence)
 
-            if isChart || isHTML || isLinkedWebAsset || isMermaid || isSVG || isPython || isCompactModule || isStandardCodeBlock {
-                let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
+            if isPlainTextFence && !Self.looksLikeSourceCode(codeContent) && !preservePlainTextFence {
+                if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    units.append(.markdown(preceding))
+                }
+                if !codeContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    units.append(.markdown(codeContent))
+                }
+                remaining = normalizedFenceTail(remaining[closeRange.upperBound...])
+            } else if isChart || isHTML || isLinkedWebAsset || isMermaid || isSVG || isPython || isCompactModule || isStandardCodeBlock {
                 if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     units.append(.markdown(preceding))
                 }
@@ -1059,11 +1088,11 @@ struct StreamingMarkdownView: View {
                     )))
                 }
                 else { units.append(.block(ParsedBlock(language: lang, content: codeContent))) }
-                remaining = remaining[closeRange.upperBound...]
+                remaining = normalizedFenceTail(remaining[closeRange.upperBound...])
             } else {
                 let blockEnd = closeRange.upperBound
                 units.append(.markdown(String(remaining[remaining.startIndex..<blockEnd])))
-                remaining = remaining[blockEnd...]
+                remaining = normalizedFenceTail(remaining[blockEnd...])
             }
         }
 
@@ -1077,7 +1106,34 @@ struct StreamingMarkdownView: View {
         if units.isEmpty && removedInternalToolBlock {
             return []
         }
-        return collapseParsedUnits(units, fallback: text)
+        return collapseParsedUnits(units, fallback: parseText)
+    }
+
+    private func normalizedInlineFenceOpenersAfterProse(in text: String) -> String {
+        guard text.contains("```") else { return text }
+
+        let lines = text.components(separatedBy: "\n")
+        let repaired = lines.map { line -> String in
+            guard let fence = line.range(of: "```") else { return line }
+            let afterFence = line[fence.upperBound...]
+            guard !afterFence.contains("```") else { return line }
+
+            let beforeFence = line[line.startIndex..<fence.lowerBound]
+            let beforeTrimmed = beforeFence.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !beforeTrimmed.isEmpty,
+                  Self.isLikelyDirtyClosingFenceSuffix(beforeFence) else {
+                return line
+            }
+
+            let rawLanguage = afterFence.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard rawLanguage.isEmpty || rawLanguage.count <= 32 else { return line }
+            let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+-#.")
+            guard rawLanguage.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return line }
+
+            return beforeTrimmed + "\n```" + rawLanguage
+        }
+
+        return repaired.joined(separator: "\n")
     }
 
     private func findOpeningFence(in text: Substring) -> Range<String.Index>? {
@@ -1091,6 +1147,23 @@ struct StreamingMarkdownView: View {
             cursor = candidate.upperBound
         }
         return nil
+    }
+
+    private func normalizedFenceTail(_ tail: Substring) -> Substring {
+        guard !tail.isEmpty else { return tail }
+        let lineEnd = tail.firstIndex(where: { $0 == "\n" || $0 == "\r" }) ?? tail.endIndex
+        let firstLine = tail[tail.startIndex..<lineEnd]
+        guard let inlineFence = firstLine.range(of: "```") else { return tail }
+
+        let beforeFence = firstLine[firstLine.startIndex..<inlineFence.lowerBound]
+        let beforeTrimmed = beforeFence.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !beforeTrimmed.isEmpty,
+              Self.isLikelyDirtyClosingFenceSuffix(beforeFence) else {
+            return tail
+        }
+
+        let repaired = String(beforeFence) + "\n" + String(tail[inlineFence.lowerBound..<tail.endIndex])
+        return repaired[repaired.startIndex...]
     }
 
     private func findClosingFence(
@@ -1329,6 +1402,21 @@ struct StreamingMarkdownView: View {
         let lines = trimmed.components(separatedBy: .newlines)
         let indentedLines = lines.filter { $0.hasPrefix("    ") || $0.hasPrefix("\t") }.count
         return lines.count >= 3 && indentedLines >= 2
+    }
+
+    private static func shouldPreservePlainTextFenceAsCode(code: String, preceding: String) -> Bool {
+        guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        let context = preceding
+            .suffix(120)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !context.isEmpty else { return false }
+        let outputSignals = [
+            "运行输出", "输出内容", "输出结果", "运行结果", "执行结果", "实际输出",
+            "关键输出", "示例输出", "预期输出", "输出类似", "输出大致", "输出是", "结果是",
+            "output", "result", "results", "stdout", "stderr", "expected output", "sample output"
+        ]
+        return outputSignals.contains { context.contains($0) }
     }
 
     private func isRecognizedCodeLanguage(_ language: String) -> Bool {
