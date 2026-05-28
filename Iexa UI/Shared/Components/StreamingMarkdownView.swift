@@ -143,7 +143,7 @@ struct StreamingMarkdownView: View {
             let vizState = VizMarkerParser.streamingParse(renderContent)
             switch vizState {
             case .noMarkers:
-                break   // fall through to streaming code-block detection below
+                break   // fall through to code-block detection below
 
             case .streaming(let proseBeforeMarker, let vizContent):
                 let _ = vizLog.debug("StreamingMarkdownView: .streaming — proseLen=\(proseBeforeMarker.count), vizLen=\(vizContent.count)")
@@ -162,25 +162,18 @@ struct StreamingMarkdownView: View {
                 }
                 return result
             }
-
-            // ── Streaming code-block detection ────────────────────────────────
-            // If the model is mid-way through an unclosed fenced code block,
-            // render it through the same native code-block component used after
-            // completion. This prevents MarkdownView from temporarily showing
-            // its own code view with line numbers and different indentation.
-            if let streamingSeg = resolveStreamingCodeBlock(renderContent) {
-                return streamingSeg
-            }
-
-            // No incomplete special block found — but there may be a *complete* block
-            // (opening AND closing fence both arrived) while post-block prose is still
-            // streaming. Use parseSpecialBlocks so HTML/SVG/chart blocks already closed
-            // render as previews instead of flashing to raw code text until streaming ends.
-            return parseSpecialBlocks(renderContent)
-
-        } else {
-            return parseSpecialBlocks(renderContent)
         }
+
+        // Use the same unfinished-fence recovery in streaming and completed states
+        // so a message does not reparse into loose Markdown when generation ends.
+        if let streamingSeg = resolveStreamingCodeBlock(renderContent) {
+            return streamingSeg
+        }
+
+        // No incomplete special block found — but there may be a complete block
+        // (opening AND closing fence both arrived). Keep the existing final parser
+        // for HTML/SVG/chart previews and normal fenced code blocks.
+        return parseSpecialBlocks(renderContent)
     }
 
     /// Detects an incomplete (unclosed) special code block in `text` during
@@ -840,10 +833,12 @@ struct StreamingMarkdownView: View {
 
         let proseLeadWords = [
             "关键", "说明", "建议", "注意", "总结", "备注", "解析", "修复", "执行", "运行", "输出", "结果", "效果", "方式", "下一步",
-            "示例", "预期", "命令", "使用", "保存", "文件", "代码", "之后", "最终", "测试", "如下", "例如",
+            "示例", "预期", "命令", "使用", "保存", "文件", "代码", "之后", "最终", "测试", "如下", "例如", "比如",
+            "然后", "接着", "继续", "再", "访问", "返回", "会返回", "得到", "打开", "查看",
             "但", "如果", "不过", "另外", "因此", "所以", "当前", "这里", "上面", "下面", "这个", "下面这个",
             "key", "notes", "note", "summary", "explanation", "recommendation", "next", "example",
             "output", "result", "results", "stdout", "stderr", "command", "usage", "expected", "then", "after",
+            "visit", "open", "returns", "return", "response",
             "but", "if", "however", "also", "therefore", "so", "because"
         ]
         let lowered = trimmed.lowercased()
@@ -1121,19 +1116,41 @@ struct StreamingMarkdownView: View {
             let beforeFence = line[line.startIndex..<fence.lowerBound]
             let beforeTrimmed = beforeFence.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !beforeTrimmed.isEmpty,
-                  Self.isLikelyDirtyClosingFenceSuffix(beforeFence) else {
+                  Self.shouldSplitInlineFenceOpener(beforeFence) else {
                 return line
             }
 
             let rawLanguage = afterFence.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard rawLanguage.isEmpty || rawLanguage.count <= 32 else { return line }
-            let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+-#.")
-            guard rawLanguage.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return line }
+            guard let fenceInfo = splitInlineFenceInfo(rawLanguage) else { return line }
 
-            return beforeTrimmed + "\n```" + rawLanguage
+            if let inlineCode = fenceInfo.inlineCode {
+                return beforeTrimmed + "\n```" + fenceInfo.language + "\n" + inlineCode
+            }
+            return beforeTrimmed + "\n```" + fenceInfo.language
         }
 
         return repaired.joined(separator: "\n")
+    }
+
+    private func splitInlineFenceInfo(_ rawFenceInfo: String) -> (language: String, inlineCode: String?)? {
+        let trimmed = rawFenceInfo.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return ("", nil) }
+
+        let parts = trimmed.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        guard let first = parts.first else { return ("", nil) }
+
+        let language = displayLanguage(forFenceInfo: String(first))
+        guard !language.isEmpty || String(first).isEmpty else { return nil }
+
+        if parts.count == 1 {
+            guard language.count <= 32 else { return nil }
+            return (language, nil)
+        }
+
+        guard isRecognizedCodeLanguage(language) else { return nil }
+        let inlineCode = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard looksLikeInlineFenceCode(inlineCode) else { return nil }
+        return (language, inlineCode)
     }
 
     private func findOpeningFence(in text: Substring) -> Range<String.Index>? {
@@ -1158,7 +1175,7 @@ struct StreamingMarkdownView: View {
         let beforeFence = firstLine[firstLine.startIndex..<inlineFence.lowerBound]
         let beforeTrimmed = beforeFence.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !beforeTrimmed.isEmpty,
-              Self.isLikelyDirtyClosingFenceSuffix(beforeFence) else {
+              Self.shouldSplitInlineFenceOpener(beforeFence) else {
             return tail
         }
 
@@ -1375,10 +1392,31 @@ struct StreamingMarkdownView: View {
         let codeSignals = [
             "(", ")", "{", "}", "[", "]", "=", ";", "&&", "||", "|", "<", ">",
             "import ", "from ", "def ", "class ", "function ", "const ", "let ", "var ",
-            "local ", "print", "echo ", "cat ", "python", "node ", "npm ", "pip ",
+            "package ", "func ", "type ", "struct ", "local ", "print", "echo ", "cat ", "python", "node ", "npm ", "pip ",
             "curl ", "wget ", "apk ", "swift ", "go ", "cargo ", "ruby ", "php "
         ]
         return codeSignals.contains { lowered.contains($0) }
+    }
+
+    private static func shouldSplitInlineFenceOpener(_ prefix: Substring) -> Bool {
+        let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if isLikelyDirtyClosingFenceSuffix(prefix) {
+            return true
+        }
+
+        let lowered = trimmed.lowercased()
+        let inlineOpenSignals = [
+            "例如", "比如", "如下", "运行方式", "执行方式", "使用方式",
+            "命令", "示例", "访问", "返回", "会返回", "然后", "接着",
+            "for example", "like this", "run", "command", "usage",
+            "visit", "open", "returns", "response"
+        ]
+        if inlineOpenSignals.contains(where: { lowered.contains($0) }) {
+            return true
+        }
+
+        return trimmed.hasSuffix(":") || trimmed.hasSuffix("：")
     }
 
     private static func isPlainTextFence(language: String) -> Bool {
@@ -1429,7 +1467,12 @@ struct StreamingMarkdownView: View {
             "tsx", "jsx", "html", "css", "scss", "python", "py", "ruby", "rb",
             "go", "rust", "rs", "c", "cpp", "c++", "objc", "objective-c",
             "php", "lua", "sql", "dockerfile", "makefile", "json", "jsonc",
-            "markdown", "md", "text", "txt"
+            "markdown", "md", "text", "txt", "dart", "r", "scala", "groovy",
+            "gradle", "perl", "pl", "haskell", "hs", "elixir", "ex", "exs",
+            "erlang", "erl", "clojure", "clj", "fsharp", "fs", "ocaml", "ml",
+            "matlab", "julia", "jl", "racket", "scheme", "lisp", "vue", "svelte",
+            "csharp", "cs", "solidity", "sol", "graphql", "gql", "proto", "protobuf",
+            "bat", "cmd", "diff", "patch", "regex", "vim", "vimscript"
         ]
         return languages.contains(normalized)
     }

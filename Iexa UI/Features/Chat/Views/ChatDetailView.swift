@@ -4142,22 +4142,6 @@ private struct ImageGenerationGradientCanvas: View {
             )
 
             let shortEdge = min(size.width, size.height)
-            drawFlowBand(
-                in: &context,
-                size: size,
-                colorA: Color(red: 1.00, green: 0.48, blue: 0.76),
-                colorB: Color(red: 0.44, green: 0.74, blue: 1.00),
-                offset: 0.08,
-                opacity: isDark ? 0.26 : 0.22
-            )
-            drawFlowBand(
-                in: &context,
-                size: size,
-                colorA: Color(red: 1.00, green: 0.82, blue: 0.42),
-                colorB: Color(red: 0.54, green: 0.98, blue: 0.80),
-                offset: 0.58,
-                opacity: isDark ? 0.22 : 0.18
-            )
             drawPatch(
                 in: &context,
                 size: size,
@@ -4235,40 +4219,6 @@ private struct ImageGenerationGradientCanvas: View {
         return CGPoint(
             x: size.width * CGFloat(x + 0.18 * sin(angle) + 0.07 * cos(angle * 1.7)),
             y: size.height * CGFloat(y + 0.14 * cos(angle * 0.8) + 0.05 * sin(angle * 1.3))
-        )
-    }
-
-    private func drawFlowBand(
-        in context: inout GraphicsContext,
-        size: CGSize,
-        colorA: Color,
-        colorB: Color,
-        offset: Double,
-        opacity: Double
-    ) {
-        let angle = time * 1.65 + offset * .pi * 2
-        let centerX = size.width * CGFloat(0.50 + 0.34 * sin(angle))
-        let centerY = size.height * CGFloat(0.50 + 0.18 * cos(angle * 0.72))
-        let bandWidth = max(size.width, size.height) * 0.62
-        let bandRect = CGRect(
-            x: centerX - bandWidth * 0.5,
-            y: centerY - size.height * 0.72,
-            width: bandWidth,
-            height: size.height * 1.44
-        )
-        let path = Path(roundedRect: bandRect, cornerRadius: bandWidth * 0.5)
-        context.fill(
-            path,
-            with: .linearGradient(
-                Gradient(colors: [
-                    colorA.opacity(0.0),
-                    colorA.opacity(opacity),
-                    colorB.opacity(opacity * 0.72),
-                    colorB.opacity(0.0)
-                ]),
-                startPoint: CGPoint(x: bandRect.minX, y: bandRect.minY),
-                endPoint: CGPoint(x: bandRect.maxX, y: bandRect.maxY)
-            )
         )
     }
 
