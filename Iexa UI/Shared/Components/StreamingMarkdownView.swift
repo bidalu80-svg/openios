@@ -100,7 +100,7 @@ struct StreamingMarkdownView: View {
                 let safeText = Self.sanitizedMarkdownTextForDisplay(text)
                 if !safeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     MarkdownView(safeText, theme: scaledTheme)
-                        .codeAutoScroll(true)
+                        .codeAutoScroll(isStreaming)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
@@ -291,6 +291,10 @@ struct StreamingMarkdownView: View {
         if pythonLanguageTags.contains(normalizedLanguage) {
             return .python(code)
         }
+        if Self.isPlainTextFence(language: normalizedLanguage),
+           !Self.looksLikeSourceCode(code) {
+            return .markdown(code)
+        }
         if !normalizedLanguage.isEmpty {
             return .codeBlock(
                 language: normalizedLanguage,
@@ -347,7 +351,7 @@ struct StreamingMarkdownView: View {
             let safeText = Self.sanitizedMarkdownTextForDisplay(text)
             if !safeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 MarkdownView(safeText, theme: scaledTheme)
-                    .codeAutoScroll(true)
+                    .codeAutoScroll(isStreaming)
                     .fixedSize(horizontal: false, vertical: true)
             }
         case .chart(let code):
@@ -1028,6 +1032,7 @@ struct StreamingMarkdownView: View {
             let isPython = pythonLanguageTags.contains(lang)
             let isCompactModule = shouldRenderCompactCodeModule(language: lang, code: codeContent)
             let isStandardCodeBlock = normalizedBlock != nil
+                && !(Self.isPlainTextFence(language: lang) && !Self.looksLikeSourceCode(codeContent))
 
             if isChart || isHTML || isLinkedWebAsset || isMermaid || isSVG || isPython || isCompactModule || isStandardCodeBlock {
                 let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
@@ -1301,6 +1306,29 @@ struct StreamingMarkdownView: View {
             "curl ", "wget ", "apk ", "swift ", "go ", "cargo ", "ruby ", "php "
         ]
         return codeSignals.contains { lowered.contains($0) }
+    }
+
+    private static func isPlainTextFence(language: String) -> Bool {
+        let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.isEmpty || normalized == "text" || normalized == "txt" || normalized == "markdown" || normalized == "md"
+    }
+
+    private static func looksLikeSourceCode(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let lowered = trimmed.lowercased()
+        let codeSignals = [
+            "function ", "const ", "let ", "var ", "def ", "class ", "import ", "from ",
+            "return ", "if ", "else", "for ", "while ", "switch ", "case ", "struct ",
+            "func ", "local ", "print(", "console.", "#include", "using namespace",
+            "<html", "<script", "<style", "{", "}", "=>", "&&", "||", "==", ":="
+        ]
+        if codeSignals.contains(where: { lowered.contains($0) }) {
+            return true
+        }
+        let lines = trimmed.components(separatedBy: .newlines)
+        let indentedLines = lines.filter { $0.hasPrefix("    ") || $0.hasPrefix("\t") }.count
+        return lines.count >= 3 && indentedLines >= 2
     }
 
     private func isRecognizedCodeLanguage(_ language: String) -> Bool {
