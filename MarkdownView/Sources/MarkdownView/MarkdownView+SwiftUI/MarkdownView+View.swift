@@ -6,7 +6,6 @@
 //
 
 import MarkdownParser
-import Foundation
 import SwiftUI
 
 public struct MarkdownView: View {
@@ -57,7 +56,6 @@ public struct MarkdownView: View {
 
     public var body: some View {
         GeometryReader { proxy in
-            let effectiveHeight = currentLayoutHeight(for: proxy.size.width)
             ZStack(alignment: .topLeading) {
                 MarkdownViewRepresentable(
                     contentSource: contentSource,
@@ -70,48 +68,21 @@ public struct MarkdownView: View {
                 )
                 .frame(
                     width: proxy.size.width,
-                    height: effectiveHeight,
+                    height: measuredHeight,
                     alignment: .topLeading
                 )
             }
         }
-        .frame(height: currentLayoutHeight())
+        .frame(height: measuredHeight)
         .onReceive(NotificationCenter.default.publisher(for: .markdownCitationIconDidUpdate)) { _ in
             guard !codeBlockAutoScroll, containsCitationLink else { return }
             citationIconRefreshToken &+= 1
         }
-        .transaction { transaction in
-            transaction.animation = nil
-            transaction.disablesAnimations = true
-        }
-    }
-
-    private func currentLayoutHeight(for width: CGFloat? = nil) -> CGFloat {
-        if measuredHeight > 1 {
-            return measuredHeight
-        }
-        return estimatedInitialHeight(for: width)
-    }
-
-    private func estimatedInitialHeight(for width: CGFloat?) -> CGFloat {
-        let text: String
-        switch contentSource {
-        case .text(let value):
-            text = value
-        case .preprocessed:
-            return 28
-        }
-
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return 1 }
-
-        let availableWidth = max(width ?? 260, 120)
-        let estimatedCharsPerLine = max(Int(availableWidth / 13), 8)
-        let visualLineCount = trimmed.components(separatedBy: .newlines).reduce(0) { total, line in
-            let count = line.trimmingCharacters(in: .whitespaces).count
-            return total + max(1, Int(ceil(Double(max(count, 1)) / Double(estimatedCharsPerLine))))
-        }
-        return min(max(CGFloat(visualLineCount) * 24 + 8, 28), 900)
+        // Animate height growth smoothly so the layout expands with a gentle easeOut
+        // rather than jumping. Only applies when measuredHeight actually grows (new lines)
+        // — this is the correct place because measuredHeight @State lives here and is
+        // set via DispatchQueue.main.async, bypassing any .animation() applied outside.
+        .animation(.easeOut(duration: 0.15), value: measuredHeight)
     }
 
     private var containsCitationLink: Bool {

@@ -100,7 +100,7 @@ struct StreamingMarkdownView: View {
                 let safeText = Self.sanitizedMarkdownTextForDisplay(text)
                 if !safeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     MarkdownView(safeText, theme: scaledTheme)
-                        .codeAutoScroll(isStreaming)
+                        .codeAutoScroll(true)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
@@ -347,7 +347,7 @@ struct StreamingMarkdownView: View {
             let safeText = Self.sanitizedMarkdownTextForDisplay(text)
             if !safeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 MarkdownView(safeText, theme: scaledTheme)
-                    .codeAutoScroll(isStreaming)
+                    .codeAutoScroll(true)
                     .fixedSize(horizontal: false, vertical: true)
             }
         case .chart(let code):
