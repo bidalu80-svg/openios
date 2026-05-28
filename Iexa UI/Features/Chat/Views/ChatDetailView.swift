@@ -1459,14 +1459,20 @@ struct ChatDetailView: View {
     private func messageRow(message: ChatMessage, index: Int) -> some View {
         let lastVisibleMessageId = viewModel.messages.last(where: { shouldRenderMessageInChat($0) })?.id
         let isLastAssistant = message.role == .assistant && message.id == lastVisibleMessageId
+        let isLocalAlpineResult = isLocalAlpineResultMessage(message)
         let userTextIsEmpty = message.role == .user
             && activeUserDisplayContent(for: message).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let hasVisibleAssistantContent = message.role != .assistant || assistantMessageHasVisibleContent(message)
+        let hasVisibleAssistantContent = isLocalAlpineResult || message.role != .assistant || assistantMessageHasVisibleContent(message)
+        let hasVisibleBubbleContent = message.role != .assistant || assistantMessageHasVisibleTextContent(message)
+        let hasAssistantActionSurface = hasVisibleBubbleContent
+            || message.error != nil
+            || !message.files.isEmpty
+            || !message.sources.isEmpty
 
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 0) {
 
             // ── Assistant header (avatar + model name) ──
-            if message.role == .assistant && !isLocalAlpineResultMessage(message) && hasVisibleAssistantContent {
+            if message.role == .assistant && !isLocalAlpineResult && hasVisibleAssistantContent {
                 assistantHeader(for: message)
             }
 
@@ -1486,7 +1492,9 @@ struct ChatDetailView: View {
             }
 
             // ── Message bubble / content ──
-            if !userTextIsEmpty && hasVisibleAssistantContent {
+            if isLocalAlpineResult {
+                messageBubble(for: message, isLastAssistant: isLastAssistant)
+            } else if !userTextIsEmpty && hasVisibleAssistantContent && hasVisibleBubbleContent {
                 messageBubble(for: message, isLastAssistant: isLastAssistant)
             }
 
@@ -1532,7 +1540,11 @@ struct ChatDetailView: View {
             }
 
             // ── Assistant action bar (always visible) ──
-            if message.role == .assistant && !message.isStreaming && hasVisibleAssistantContent {
+            if message.role == .assistant
+                && !isLocalAlpineResult
+                && !message.isStreaming
+                && hasVisibleAssistantContent
+                && hasAssistantActionSurface {
                 assistantActionBar(for: message)
                     .padding(.horizontal, Spacing.screenPadding)
                     .padding(.top, Spacing.xs)
@@ -1673,11 +1685,14 @@ struct ChatDetailView: View {
     }
 
     private func shouldRenderMessageInChat(_ message: ChatMessage) -> Bool {
-        if isLocalNativeResultMessage(message) || isLocalAlpineResultMessage(message) {
+        if isLocalNativeResultMessage(message) {
             return false
         }
         if message.metadata?["iexa_local_alpine_hidden_correction_parent"] == "true" {
             return false
+        }
+        if isLocalAlpineResultMessage(message) {
+            return true
         }
         if message.role == .assistant {
             return assistantMessageHasVisibleContent(message)
@@ -1699,11 +1714,15 @@ struct ChatDetailView: View {
     private func assistantMessageHasVisibleContent(_ message: ChatMessage) -> Bool {
         if message.error != nil { return true }
         if !message.files.isEmpty || !message.sources.isEmpty { return true }
+        if assistantMessageHasVisibleTextContent(message) { return true }
+        return message.isStreaming && !assistantMessageContainsHiddenExecutionBlock(message)
+    }
+
+    private func assistantMessageHasVisibleTextContent(_ message: ChatMessage) -> Bool {
         let raw = assistantRawDisplayContent(for: message)
         let visible = Self.stripInternalExecutionBlocks(from: raw)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !visible.isEmpty { return true }
-        return message.isStreaming && !assistantMessageContainsHiddenExecutionBlock(message)
+        return !visible.isEmpty
     }
 
     private func assistantMessageContainsHiddenExecutionBlock(_ message: ChatMessage) -> Bool {
@@ -1731,7 +1750,7 @@ struct ChatDetailView: View {
         return message.content
     }
 
-    private static let hiddenInternalExecutionTokens: [String] = [
+    fileprivate static let hiddenInternalExecutionTokens: [String] = [
         "iexa_alpine",
         "local_alpine_exec",
         "iexa_workspace",
@@ -1740,8 +1759,9 @@ struct ChatDetailView: View {
         "iexa_memory"
     ]
 
-    private static func stripInternalExecutionBlocks(from content: String) -> String {
+    fileprivate static func stripInternalExecutionBlocks(from content: String) -> String {
         var result = content
+        result = normalizeApostropheFenceMarkers(result)
         result = stripHiddenFencedBlocks(from: result)
 
         let tagPatterns = [
@@ -1756,26 +1776,71 @@ struct ChatDetailView: View {
             )
         }
         return result
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func stripHiddenFencedBlocks(from content: String) -> String {
+    fileprivate static func normalizeApostropheFenceMarkers(_ content: String) -> String {
+        guard content.contains("'''") else { return content }
+        return content.replacingOccurrences(
+            of: #"(?m)^([ \t]*)'''([A-Za-z0-9_+.-]*)[ \t]*$"#,
+            with: "$1```$2",
+            options: .regularExpression
+        )
+    }
+
+    fileprivate static func stripHiddenFencedBlocks(from content: String) -> String {
+        var result = content
+        result = stripUnclosedHiddenFencedBlocks(from: result)
+
         guard let regex = try? NSRegularExpression(
             pattern: #"```([^\n`]*)\n([\s\S]*?)```"#,
             options: [.caseInsensitive]
-        ) else { return content }
-        let nsContent = content as NSString
-        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
-        guard !matches.isEmpty else { return content }
+        ) else { return result }
+        let nsContent = result as NSString
+        let matches = regex.matches(in: result, range: NSRange(location: 0, length: nsContent.length))
+        guard !matches.isEmpty else { return result }
 
-        var result = content
         for match in matches.reversed() where match.numberOfRanges >= 3 {
             let language = nsContent.substring(with: match.range(at: 1)).lowercased()
             let body = nsContent.substring(with: match.range(at: 2)).lowercased()
-            let shouldHide = hiddenInternalExecutionTokens.contains { token in
-                language.contains(token) || body.contains("\"\(token)\"") || body.contains("`\(token)`")
-            }
-            if shouldHide, let range = Range(match.range, in: result) {
+            if shouldHideInternalExecutionFence(language: language, body: body),
+               let range = Range(match.range, in: result) {
                 result.removeSubrange(range)
+            }
+        }
+        return result
+    }
+
+    fileprivate static func shouldHideInternalExecutionFence(language: String, body: String) -> Bool {
+        let normalizedLanguage = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if hiddenInternalExecutionTokens.contains(where: { normalizedLanguage.contains($0) }) {
+            return true
+        }
+
+        let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard trimmedBody.hasPrefix("{") || trimmedBody.hasPrefix("[") else {
+            return false
+        }
+        return hiddenInternalExecutionTokens.contains { token in
+            trimmedBody.contains("\"\(token)\"") || trimmedBody.contains("`\(token)`")
+        }
+    }
+
+    fileprivate static func stripUnclosedHiddenFencedBlocks(from content: String) -> String {
+        var result = content
+        for token in hiddenInternalExecutionTokens {
+            let escaped = NSRegularExpression.escapedPattern(for: token)
+            let patterns = [
+                #"(?is)```[^\n`]*"# + escaped + #"[^\n`]*\n[\s\S]*?(?:```|$)"#,
+                #"(?is)```(?:json|text)?[ \t]*\n\s*\{[\s\S]*?""# + escaped + #""[\s\S]*?(?:```|$)"#
+            ]
+            for pattern in patterns {
+                result = result.replacingOccurrences(
+                    of: pattern,
+                    with: "",
+                    options: [.regularExpression, .caseInsensitive]
+                )
             }
         }
         return result
@@ -4536,15 +4601,17 @@ private struct IsolatedAssistantMessage: View {
         // Note: soft breaks are now handled natively by MarkdownView (renders
         // \n as line breaks instead of spaces), so no convertSoftBreaksToHard needed.
         let displayContent: String = {
-            if isActivelyStreaming { return rawContent }
-            let resolved = Self.resolveRelativeURLs(rawContent, baseURL: serverBaseURL)
+            let contentWithoutInternalBlocks = ChatDetailView.stripInternalExecutionBlocks(from: rawContent)
+            if isActivelyStreaming { return contentWithoutInternalBlocks }
+            let resolved = Self.resolveRelativeURLs(contentWithoutInternalBlocks, baseURL: serverBaseURL)
+            let withoutInternalBlocks = ChatDetailView.stripInternalExecutionBlocks(from: resolved)
             let preferDomain = UserDefaults.standard.object(forKey: "citationShowDomain") as? Bool ?? true
-            return Self.preprocessCitations(resolved, sources: effectiveSources, preferDomain: preferDomain)
+            return Self.preprocessCitations(withoutInternalBlocks, sources: effectiveSources, preferDomain: preferDomain)
         }()
 
         let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
 
-        if effectiveIsStreaming && rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if effectiveIsStreaming && displayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if message.metadata?["iexa_local_alpine_result"] == "true"
                 || (message.model == "Local Alpine" && message.statusHistory.contains(where: {
                     $0.action?.lowercased() == "local_alpine"

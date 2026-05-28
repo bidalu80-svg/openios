@@ -139,7 +139,8 @@ extension MarkdownViewRepresentableBase {
             coordinator.lastHeightMeasureTime = now
         }
 
-        let size = view.boundingSize(for: width)
+        let forceLayout = !isStreaming || heightBinding.wrappedValue <= 1
+        let size = view.boundingSize(for: width, forceLayout: forceLayout)
         let height = ceil(size.height)
         let current = heightBinding.wrappedValue
 

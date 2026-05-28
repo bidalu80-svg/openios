@@ -88,9 +88,21 @@ import MarkdownParser
             textView.intrinsicContentSize
         }
 
-        public func boundingSize(for width: CGFloat) -> CGSize {
+        public func boundingSize(for width: CGFloat, forceLayout: Bool = false) -> CGSize {
             textView.preferredMaxLayoutWidth = width
-            return textView.intrinsicContentSize
+            textView.invalidateIntrinsicContentSize()
+            invalidateIntrinsicContentSize()
+            if forceLayout || textView.bounds.width != width {
+                let height = max(textView.intrinsicContentSize.height, textView.bounds.height, 1)
+                bounds.size = CGSize(width: width, height: height)
+                textView.frame = CGRect(x: 0, y: 0, width: width, height: height)
+                setNeedsLayout()
+                textView.setNeedsLayout()
+                layoutIfNeeded()
+                textView.layoutIfNeeded()
+            }
+            let measured = textView.intrinsicContentSize
+            return CGSize(width: measured.width, height: max(measured.height, 1))
         }
 
         public func setMarkdownManually(_ content: PreprocessedContent) {
@@ -218,9 +230,21 @@ import MarkdownParser
             textView.intrinsicContentSize
         }
 
-        public func boundingSize(for width: CGFloat) -> CGSize {
+        public func boundingSize(for width: CGFloat, forceLayout: Bool = false) -> CGSize {
             textView.preferredMaxLayoutWidth = width
-            return textView.intrinsicContentSize
+            textView.invalidateIntrinsicContentSize()
+            invalidateIntrinsicContentSize()
+            if forceLayout || textView.bounds.width != width {
+                let height = max(textView.intrinsicContentSize.height, textView.bounds.height, 1)
+                frame.size = CGSize(width: width, height: height)
+                textView.frame = CGRect(x: 0, y: 0, width: width, height: height)
+                needsLayout = true
+                textView.needsLayout = true
+                layoutSubtreeIfNeeded()
+                textView.layoutSubtreeIfNeeded()
+            }
+            let measured = textView.intrinsicContentSize
+            return CGSize(width: measured.width, height: max(measured.height, 1))
         }
 
         public func setMarkdownManually(_ content: PreprocessedContent) {
