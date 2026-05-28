@@ -37,7 +37,7 @@ final class KeychainService: Sendable {
             kSecAttrService as String: serviceName,
             kSecAttrAccount as String: account,
             kSecValueData as String: tokenData,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
 
         let status = SecItemAdd(addQuery as CFDictionary, nil)
@@ -106,7 +106,7 @@ final class KeychainService: Sendable {
             kSecAttrService as String: serviceName,
             kSecAttrAccount as String: account,
             kSecValueData as String: tokenData,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
 
         let status = SecItemAdd(addQuery as CFDictionary, nil)
