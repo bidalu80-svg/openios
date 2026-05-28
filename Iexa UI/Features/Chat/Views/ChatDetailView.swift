@@ -1535,6 +1535,7 @@ struct ChatDetailView: View {
                 assistantActionBar(for: message)
                     .padding(.horizontal, Spacing.screenPadding)
                     .padding(.top, Spacing.xs)
+                    .padding(.bottom, Spacing.sm)
                     // Popover must live at the row level (not inside the ForEach action bar)
                     // so that every message gets its own independent popover anchor.
                     // Attaching it inside assistantActionBar (which is called inside ForEach)
@@ -2308,6 +2309,8 @@ struct ChatDetailView: View {
 
             Spacer()
         }
+        .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// Compact action icon for the always-visible action bar.

@@ -101,6 +101,7 @@ struct StreamingMarkdownView: View {
                 if !safeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     MarkdownView(safeText, theme: scaledTheme)
                         .codeAutoScroll(true)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
                 VStack(alignment: .leading, spacing: 8) {
@@ -134,7 +135,7 @@ struct StreamingMarkdownView: View {
         // Keep raw content for structural parsing so fenced code blocks preserve
         // exact bytes (especially Python indentation). Markdown-only segments are
         // sanitized later at render time in `segmentView`.
-        let renderContent = content
+        let renderContent = Self.normalizedApostropheFenceMarkers(content)
         guard !renderContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
 
         if isStreaming {
@@ -205,12 +206,15 @@ struct StreamingMarkdownView: View {
             rawPartialContent = ""
         }
 
-        let recoveredBlock = recoveredStreamingCodeBlock(language: rawLanguage, content: rawPartialContent)
-
         var result: [ContentSegment] = []
         let before = String(text[text.startIndex..<openRange.lowerBound])
         if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             result.append(contentsOf: parseSpecialBlocks(before))
+        }
+
+        let recoveredBlock = recoveredStreamingCodeBlock(language: rawLanguage, content: rawPartialContent)
+        if Self.isHiddenInternalToolBlock(language: recoveredBlock.language, code: recoveredBlock.content) {
+            return result
         }
 
         result.append(streamingCodeSegment(language: recoveredBlock.language, code: recoveredBlock.content))
@@ -263,6 +267,9 @@ struct StreamingMarkdownView: View {
     private func codeSegmentForFence(language: String, code: String, isStreamingBlock: Bool) -> ContentSegment {
         let normalizedLanguage = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
+        if Self.isHiddenInternalToolBlock(language: normalizedLanguage, code: code) {
+            return .markdown("")
+        }
         if chartLanguageTags.contains(normalizedLanguage), looksLikeChartJSON(code) {
             return .chart(code)
         }
@@ -341,6 +348,7 @@ struct StreamingMarkdownView: View {
             if !safeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 MarkdownView(safeText, theme: scaledTheme)
                     .codeAutoScroll(true)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         case .chart(let code):
             if let spec = tryParseChart(code: code) {
@@ -567,6 +575,15 @@ struct StreamingMarkdownView: View {
     private static func normalizedDataImageReference(_ raw: String) -> String {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+    }
+
+    private static func normalizedApostropheFenceMarkers(_ text: String) -> String {
+        guard text.contains("'''") else { return text }
+        return text.replacingOccurrences(
+            of: #"(?m)^([ \t]*)'''([A-Za-z0-9_+.-]*)[ \t]*$"#,
+            with: "$1```$2",
+            options: .regularExpression
+        )
     }
 
     private static func sanitizedMarkdownTextForDisplay(_ text: String) -> String {
@@ -869,6 +886,10 @@ struct StreamingMarkdownView: View {
         }
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if Self.isHiddenInternalToolBlock(language: "json", code: trimmed),
+           looksLikeStandaloneJSON(trimmed) {
+            return []
+        }
         if shouldRenderCompactCodeModule(language: "json", code: trimmed),
            looksLikeStandaloneJSON(trimmed) {
             return [.codeModule(language: "json", code: trimmed)]
@@ -939,6 +960,7 @@ struct StreamingMarkdownView: View {
         guard text.contains("```") else { return [.markdown(text)] }
 
         var units: [EitherContent] = []
+        var removedInternalToolBlock = false
         var remaining = text[text.startIndex...]
 
         while let openRange = remaining.range(of: "```") {
@@ -949,6 +971,11 @@ struct StreamingMarkdownView: View {
                     units.append(.markdown(preceding))
                 }
                 let rawLanguage = String(afterOpen).trimmingCharacters(in: .whitespacesAndNewlines)
+                if Self.isHiddenInternalToolBlock(language: rawLanguage, code: "") {
+                    removedInternalToolBlock = true
+                    if units.isEmpty { return [] }
+                    return collapseParsedUnits(units, fallback: text)
+                }
                 units.append(.segment(.codeBlock(
                     language: rawLanguage.isEmpty ? "text" : rawLanguage,
                     code: ""
@@ -965,6 +992,11 @@ struct StreamingMarkdownView: View {
                     units.append(.markdown(preceding))
                 }
                 let unclosedCode = String(searchArea)
+                if Self.isHiddenInternalToolBlock(language: rawLanguage, code: unclosedCode) {
+                    removedInternalToolBlock = true
+                    if units.isEmpty { return [] }
+                    return collapseParsedUnits(units, fallback: text)
+                }
                 if !unclosedCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     units.append(.segment(codeSegmentForFence(
                         language: rawLanguage.isEmpty ? "text" : rawLanguage,
@@ -978,6 +1010,15 @@ struct StreamingMarkdownView: View {
             let recoveredFence = recoveredMalformedFence(language: rawLanguage, content: rawCodeContent)
             let lang = displayLanguage(forFenceInfo: recoveredFence.language)
             let codeContent = recoveredFence.content
+            if Self.isHiddenInternalToolBlock(language: lang, code: codeContent) {
+                removedInternalToolBlock = true
+                let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
+                if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    units.append(.markdown(preceding))
+                }
+                remaining = remaining[closeRange.upperBound...]
+                continue
+            }
             let normalizedBlock = normalizedCodeBlock(language: lang, content: codeContent)
             let isChart = chartLanguageTags.contains(lang) && looksLikeChartJSON(codeContent)
             let isHTML = lang == "html" && codeContent.contains("<") && codeContent.contains(">") && codeContent.count >= 10
@@ -1028,6 +1069,9 @@ struct StreamingMarkdownView: View {
             }
         }
 
+        if units.isEmpty && removedInternalToolBlock {
+            return []
+        }
         return collapseParsedUnits(units, fallback: text)
     }
 
@@ -1308,8 +1352,36 @@ struct StreamingMarkdownView: View {
             || (t.hasPrefix("[") && t.hasSuffix("]"))
     }
 
+    private static func isHiddenInternalToolBlock(language: String, code: String) -> Bool {
+        let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let hiddenTokens = [
+            "iexa_alpine",
+            "local_alpine_exec",
+            "iexa_workspace",
+            "iexa_native",
+            "local_native_exec",
+            "iexa_memory"
+        ]
+        if hiddenTokens.contains(where: { normalized.contains($0) }) {
+            return true
+        }
+
+        let loweredCode = code.lowercased()
+        return hiddenTokens.contains { token in
+            loweredCode.contains("\"\(token)\"")
+                || loweredCode.contains("`\(token)`")
+                || loweredCode.contains("<\(token)>")
+                || loweredCode.contains("</\(token)>")
+                || loweredCode.contains("to=\(token)")
+                || loweredCode.contains("to = \(token)")
+        }
+    }
+
     private func shouldRenderCompactCodeModule(language: String, code: String) -> Bool {
         let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !Self.isHiddenInternalToolBlock(language: normalized, code: code) else {
+            return false
+        }
         if normalized.contains("iexa_workspace")
             || normalized.contains("iexa_alpine")
             || normalized.contains("local_alpine_exec")
