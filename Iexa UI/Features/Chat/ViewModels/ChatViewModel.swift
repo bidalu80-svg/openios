@@ -1382,6 +1382,10 @@ final class ChatViewModel {
         message.metadata?["iexa_local_alpine_protocol_correction"] == "true"
     }
 
+    private static func isLocalAlpineHiddenCorrectionParent(_ message: ChatMessage) -> Bool {
+        message.metadata?["iexa_local_alpine_hidden_correction_parent"] == "true"
+    }
+
     private static func isLocalNativeToolResult(_ message: ChatMessage) -> Bool {
         message.metadata?["iexa_local_native_result"] == "true"
             || message.model == "Local Native"
@@ -1460,7 +1464,7 @@ final class ChatViewModel {
         - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, and `verify` for common list/search/check work. The host converts them into Alpine-safe bounded commands and records them as tool calls.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
         - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, or macOS-only utilities.
-        - Rootfs/environment/dependency checks: if the user asks whether Python/Lua/Node/C++ or dependencies exist, inspect the Alpine rootfs/runtime/toolchain directly with bounded `command -v`, `--version`, `apk info`, `python3 -m pip list`, `find /usr/lib /usr/local/lib`, or small module-list commands. Do not only search `/mnt/iexa` project dependency files unless the user specifically asks for project dependency files.
+        - Rootfs/environment/dependency checks: if the user asks whether Python/Lua/Node/C++ or dependencies exist, inspect the running Alpine rootfs/runtime/toolchain directly with bounded `command -v`, `--version`, `apk info`, `python3 -m pip list`, `find /usr/lib /usr/local/lib`, or small module-list commands. Do not invent `/mnt/iexa/rootfs`; `/mnt/iexa` is only the workspace mount. Do not only search `/mnt/iexa` project dependency files unless the user specifically asks for project dependency files.
         - Service/process commands: prefer foreground commands and bounded verification. Do not assume OpenRC/system services are available unless a prior command proves it.
         - `command` is shell text only. For structured tools, use top-level keys such as `read_file`, `write_files`, `edit_file`, `patch_file`, `delete_file`, `delete_files`, `list_dir`, `glob`, `grep`, or `verify`.
         - Hard protocol rule: for any intermediate local-work step, pure prose means "stop and answer normally"; it will not be auto-upgraded into execution. Emit a real tool block only when you are intentionally requesting local execution.
@@ -1470,6 +1474,7 @@ final class ChatViewModel {
         - Python writes: `.py`/`.pyw` must use `write_files.code_lines` or `content_base64`; localized Python repairs should prefer `read_file` then same-path `edit_file`/`patch_file`.
         - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
         - Tool loop: one assistant turn emits at most one `iexa_alpine` block; the next turn must read the returned stdout/stderr/exit code before deciding whether to continue.
+        - Tool-call turn output: when emitting an `iexa_alpine` block, do not append success claims, guessed stdout, file contents, or final summaries after the block. The host will return the real Local Alpine observation in the next turn.
         - Visible preface: prefer no prose before the block. If needed, write one short progress sentence only. Never ask the user to send back local execution results; the host app returns results automatically.
         """
     }
@@ -1492,11 +1497,14 @@ final class ChatViewModel {
             First-turn bootstrap policy:
             - Do not spend a turn only restating that you will inspect the environment. If inspection is needed, emit the actual `iexa_alpine` block immediately.
             - If the user asks for rootfs/system/runtime dependencies, check the Alpine rootfs directly (`apk info`, `command -v`, version commands, `/usr/lib`, Python site-packages, pip list). Do not limit the answer to `/mnt/iexa` project files.
+            - Treat imperative shorthand as local work in this mode: write/create/run/test/check/read/list/modify/change/replace/delete/rerun/continue and 写/创建/运行/跑/测试/检查/看下/读/改/换/删/再跑/继续 mean emit `iexa_alpine` when they refer to code, files, dependencies, runtime, terminal, or prior Local Alpine work.
+            - If demo details are missing, choose safe defaults and execute: `example.com` or `example.org` for crawler URLs, `test.lua`/`main.cpp`/`simple_spider.py` for demo filenames, and small hello/test input data.
             - If the user is asking a capability question, explanation, example, comparison, or "can this run" style question, answer normally and do not emit `iexa_alpine`.
             - If the task depends on unknown current files, first get a small workspace listing, then continue from that observation.
             - If the task depends on compilers or packages, use one focused probe only when the toolchain has not already been observed.
             - If the user asked to write/create/build/run code, combine file creation plus compile/run verification in the first useful tool call when practical. Do not stop after a dependency probe if the required tools are present.
             - If the user gave an explicit simple file operation target, combine the operation with a minimal `pwd`/`ls` verification instead of running a separate bootstrap.
+            - Do not ask for confirmation for explicit operations bounded to `/mnt/iexa`; user wording such as delete/remove/modify/run/test/read/check is already confirmation. Ask only for paths outside `/mnt/iexa` or multiple unsafe targets.
             - Only treat run/test/build/fix/install/read/write/delete/search as an operation request when the user asks you to actually perform it. If the wording is asking for advice or feasibility, do not use the tool.
             - For "run this code" follow-ups, use the latest runnable code block, write it under `/mnt/iexa`, run the matching interpreter/compiler, and summarize the real output.
             - Do not ask the user how to operate the environment. Use one fenced `iexa_alpine` block as the first tool_use.
@@ -5411,7 +5419,8 @@ final class ChatViewModel {
 
         let mutationTerms = [
             "修改", "编辑", "改一下", "修复代码", "替换", "删除", "清理", "重命名",
-            "复制", "移动", "保存", "改成", "加上", "补上", "删掉", "移除",
+            "复制", "移动", "保存", "改成", "换成", "换个", "换一个", "更换",
+            "加上", "补上", "删掉", "删了", "移除",
             "modify", "edit", "patch", "replace",
             "delete", "remove", "clean", "rename", "copy", "move", "save"
         ]
@@ -5457,8 +5466,10 @@ final class ChatViewModel {
             "修复", "修一下", "帮我修", "修这个", "解决", "编译", "构建", "执行脚本", "运行脚本",
             "帮我做", "给我做", "做一下", "处理一下", "搞一下", "弄一下", "实现", "优化",
             "完善", "新增", "补齐", "完成这个", "直接做", "你来做",
+            "继续", "继续执行", "继续跑", "继续做", "重跑", "重新跑", "再跑",
             "run", "execute", "test", "verify", "debug", "fix", "compile",
-            "build", "implement", "optimize", "complete", "run script", "execute script"
+            "build", "implement", "optimize", "complete", "continue", "rerun",
+            "run script", "execute script"
         ]
         if containsAny(text, executionTerms) {
             return .executeOrVerify
@@ -10958,11 +10969,16 @@ final class ChatViewModel {
         - Package manager: `apk`. Check first with `apk info -e <pkg>` or `command -v <tool>`; install only packages proven missing with `apk add --no-cache <pkg>`.
         - Unsupported command families here: `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, and macOS-only utilities. Translate those intentions to Alpine/BusyBox equivalents.
         - Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, and `/var` are system paths. Inspect them when useful; do not edit them except through package-manager operations or explicit user requests.
+        - Do not check `/mnt/iexa/rootfs` unless the user explicitly created that folder; the Local Alpine commands already execute inside the Alpine rootfs.
 
         Tool-selection policy:
         - Use the tool only for explicit operation requests that require current local state or mutation: read/list/search files, create/edit/delete/rename/move/copy files, install dependencies, run/test/build/compile/debug/fix code, inspect the Alpine environment, fetch/scrape a URL from the local shell, or verify real output.
         - Do not use the tool for ordinary conversation, explanations, design discussion, capability/feasibility questions, dependency advice, code samples the user did not ask you to write/run, or questions about what the previous error means. Answer normally in those cases.
         - For any intermediate local-work step, emit one `iexa_alpine` block only when you intentionally want the host to run it. If you answer with prose only, the host treats it as a normal final answer and will not synthesize or execute anything.
+        - Treat imperative shorthand as execution requests here: 写/创建/运行/跑/测试/检查/看下/读/改/换/删/再跑/继续 and write/create/run/test/check/read/modify/change/delete/rerun/continue should operate on `/mnt/iexa` or the latest relevant Local Alpine file/command when the context points there.
+        - For follow-ups like "this", "it", "这个", "它", "删了", "换一个", "再跑", or "继续", infer the latest written file or executed command from the Local Alpine observation instead of asking the user to restate it.
+        - If a demo request omits a URL, filename, or sample input, choose safe defaults and proceed: `example.com`/`example.org` for network demos and simple names like `test.lua`, `main.cpp`, or `simple_spider.py`.
+        - Do not ask for confirmation for explicit `/mnt/iexa` deletes, edits, reads, checks, runs, or reruns. Ask only when the target is outside `/mnt/iexa`, destructive across many files, or genuinely unknown.
         - If the user asks you to write/run/fix/check a project or script, operate under `/mnt/iexa`, verify with a bounded command, and then summarize the real result.
         - For existing source files, read the target first and prefer same-path `edit_file`/`patch_file`; use `write_files` for new files or large same-path rewrites. For deletes, use `delete_file`/`delete_files` instead of shell `rm`; set `recursive:true` only when deleting a directory.
         - Prefer structured `list_dir`, `glob`, `grep`, and `verify` wrappers over ad-hoc `find`/`grep`/run syntax when they fit.
@@ -12047,6 +12063,9 @@ final class ChatViewModel {
             if isLocalAlpineResult && Self.isLocalAlpineProtocolCorrectionMessage(message) {
                 continue
             }
+            if Self.isLocalAlpineHiddenCorrectionParent(message) {
+                continue
+            }
             if isLocalAlpineResult {
                 // Local Alpine results are represented once in the structured execution-state
                 // system section above. Re-sending every result as a separate system message
@@ -12494,6 +12513,16 @@ final class ChatViewModel {
         }
         guard !localAlpineMissingToolCorrectionParentIds.contains(messageId) else {
             return false
+        }
+        if let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) {
+            var metadata = conversation?.messages[index].metadata ?? [:]
+            metadata["iexa_local_alpine_hidden_correction_parent"] = "true"
+            conversation?.messages[index].metadata = metadata
+            conversation?.history.updateNode(id: messageId) { node in
+                var nodeMetadata = node.metadata ?? [:]
+                nodeMetadata["iexa_local_alpine_hidden_correction_parent"] = "true"
+                node.metadata = nodeMetadata
+            }
         }
         localAlpineMissingToolCorrectionParentIds.insert(messageId)
         localAlpineContinuationParentIds.insert(messageId)
@@ -14944,9 +14973,12 @@ final class ChatViewModel {
 
         Correction policy:
         - Emit exactly one fenced Markdown block with language `iexa_alpine`.
-        - Do not ask for confirmation when the user already used imperative wording such as delete, modify, run, test, or execute.
+        - Do not ask for confirmation when the user already used imperative wording such as read, check, delete, modify, change, replace, run, rerun, test, or execute.
+        - Resolve "this/it/这个/它/删了/换一个/再跑/继续" from the latest Local Alpine observation and recent written files.
+        - For reads/checks, use `read_file`, `list_dir`, `grep`, `verify`, or bounded `command` as appropriate.
         - For deletes, use structured `delete_file`/`delete_files`, then verify absence in the same block.
         - For modification, read the relevant file if needed, then use `edit_file`, `patch_file`, or `write_files` and verify when the user asked to run/test.
+        - Do not append guessed success, stdout, file contents, or final summaries after the `iexa_alpine` block.
         - Keep visible text before the block empty or one short progress sentence.
         [/Local Alpine missing tool correction]
         """

@@ -80,6 +80,7 @@ struct ChatMessageBubble<Content: View>: View {
             content()
                 .foregroundStyle(theme.chatBubbleAssistantText)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 24)
             if showTimestamp, let ts = timestamp {
                 Text(ts, style: .time)
                     .scaledFont(size: 11)

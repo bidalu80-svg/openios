@@ -1220,6 +1220,14 @@ actor LocalAlpineAgentService {
            !convertedCommands.isEmpty {
             return leadingCommands + convertedCommands + nestedCommands
         }
+        if let shellCommand,
+           let convertedCommands = Self.commandsByConvertingStructuredToolShellCommand(
+            from: shellCommand,
+            cwd: Self.cwdString(from: dict)
+           ),
+           !convertedCommands.isEmpty {
+            return leadingCommands + convertedCommands + nestedCommands
+        }
         let generatedInput = Self.dictionaryByRemovingArrayOnlyToolWrappers(from: dict)
         if let generatedToolCommand = Self.generatedShellCommand(from: generatedInput, shellCommand: shellCommand) {
             return leadingCommands + [LocalAlpineAgentCommand(
@@ -1666,6 +1674,99 @@ actor LocalAlpineAgentService {
         }
     }
 
+    private nonisolated static func commandsByConvertingStructuredToolShellCommand(
+        from command: String,
+        cwd: String?
+    ) -> [LocalAlpineAgentCommand]? {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.range(of: #"[;&|`$<>]"#, options: .regularExpression) == nil,
+              !trimmed.contains("\n"),
+              let words = shellLikeWords(from: trimmed),
+              words.count >= 2 else {
+            return nil
+        }
+
+        let tool = words[0].lowercased()
+        let path = words[1]
+        switch tool {
+        case "read_file", "read_files", "open_file":
+            return [LocalAlpineAgentCommand(command: nil, cwd: cwd, readFiles: [
+                LocalAlpineReadFileRequest(path: path)
+            ])]
+        case "delete_file", "delete_files", "remove_file", "remove_files":
+            return [LocalAlpineAgentCommand(command: nil, cwd: cwd, deleteFiles: [
+                LocalAlpineDeleteFileRequest(path: path, recursive: false, missingOK: true)
+            ])]
+        case "verify_absent", "verify_missing", "ensure_absent":
+            return [LocalAlpineAgentCommand(
+                command: "test ! -e \(shellSingleQuotedStatic(path)) && printf '%s absent\\n' \(shellSingleQuotedStatic(path))",
+                cwd: cwd,
+                shellToolName: "verify_absent",
+                shellToolDetail: path,
+                shellToolFilePaths: [path]
+            )]
+        case "list_dir", "list_directory":
+            return [LocalAlpineAgentCommand(
+                command: "pwd && find \(shellSingleQuotedStatic(path)) -maxdepth 2 -mindepth 1 -print | sed -n '1,200p'",
+                cwd: cwd,
+                shellToolName: "list_dir",
+                shellToolDetail: path,
+                shellToolFilePaths: [path]
+            )]
+        default:
+            return nil
+        }
+    }
+
+    private nonisolated static func shellLikeWords(from command: String) -> [String]? {
+        var words: [String] = []
+        var current = ""
+        var quote: Character?
+        var escaping = false
+
+        for character in command {
+            if escaping {
+                current.append(character)
+                escaping = false
+                continue
+            }
+            if character == "\\" {
+                escaping = true
+                continue
+            }
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                } else {
+                    current.append(character)
+                }
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character
+                continue
+            }
+            if character.isWhitespace {
+                if !current.isEmpty {
+                    words.append(current)
+                    current.removeAll(keepingCapacity: true)
+                }
+                continue
+            }
+            current.append(character)
+        }
+
+        guard quote == nil else { return nil }
+        if escaping {
+            current.append("\\")
+        }
+        if !current.isEmpty {
+            words.append(current)
+        }
+        return words
+    }
+
     private nonisolated static func shellToolClassification(
         for command: String,
         fallbackName: String?,
@@ -1803,6 +1904,9 @@ actor LocalAlpineAgentService {
         if dict["verify"] != nil || dict["check"] != nil
             || selector == "verify" || selector == "check" {
             let object = dict["verify"] ?? dict["check"] ?? dict
+            if let checks = verifyChecksShellCommand(from: object) {
+                return (checks.command, "verify", checks.detail, checks.filePaths, cwd)
+            }
             if let objectDict = object as? [String: Any],
                let command = shellCommandString(from: objectDict)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1820,8 +1924,17 @@ actor LocalAlpineAgentService {
                 let command = "test ! -e \(shellSingleQuotedStatic(path)) && printf '%s absent\\n' \(shellSingleQuotedStatic(path))"
                 return (command, "verify_absent", path, [path], cwd)
             }
+            if let dictObject = object as? [String: Any],
+               verifyObjectExpectsPresence(dictObject),
+               let path = pathString(from: dictObject) {
+                let command = "test -e \(shellSingleQuotedStatic(path)) && printf '%s exists\\n' \(shellSingleQuotedStatic(path))"
+                return (command, "verify_exists", path, [path], cwd)
+            }
             guard let path = pathString(from: object) else {
                 return ("pwd && find . -maxdepth 2 -type f | sed -n '1,120p'", "verify", "workspace", [], cwd)
+            }
+            guard pathLooksLikeRunnableOrFilesystemTarget(path) else {
+                return nil
             }
             let deletedPathKeys = Set(pathStrings(from: deleteFilesObject(from: dict)).map(normalizedPathKey))
             if !deletedPathKeys.isEmpty,
@@ -1900,6 +2013,70 @@ actor LocalAlpineAgentService {
         }
 
         return nil
+    }
+
+    private nonisolated static func verifyChecksShellCommand(
+        from object: Any
+    ) -> (command: String, detail: String, filePaths: [String])? {
+        guard let dict = object as? [String: Any],
+              let checksObject = dict["checks"] ?? dict["checklist"] ?? dict["items"] else {
+            return nil
+        }
+
+        let checks = (checksObject as? [Any]) ?? [checksObject]
+        var commands: [String] = []
+        var details: [String] = []
+        var filePaths: [String] = []
+
+        for check in checks {
+            guard let checkDict = check as? [String: Any] else {
+                if let path = pathString(from: check),
+                   pathLooksLikeRunnableOrFilesystemTarget(path) {
+                    commands.append("test -e \(shellSingleQuotedStatic(path)) && printf '%s exists\\n' \(shellSingleQuotedStatic(path))")
+                    details.append(path)
+                    filePaths.append(path)
+                }
+                continue
+            }
+
+            if let command = shellCommandString(from: checkDict)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !command.isEmpty,
+               !["verify", "check"].contains(command.lowercased()) {
+                commands.append(command)
+                details.append(oneLine(command))
+                continue
+            }
+
+            if let absentPath = absentPathString(from: checkDict) {
+                commands.append("test ! -e \(shellSingleQuotedStatic(absentPath)) && printf '%s absent\\n' \(shellSingleQuotedStatic(absentPath))")
+                details.append(absentPath)
+                filePaths.append(absentPath)
+                continue
+            }
+
+            if verifyObjectExpectsPresence(checkDict),
+               let path = pathString(from: checkDict) {
+                commands.append("test -e \(shellSingleQuotedStatic(path)) && printf '%s exists\\n' \(shellSingleQuotedStatic(path))")
+                details.append(path)
+                filePaths.append(path)
+                continue
+            }
+
+            if let path = pathString(from: checkDict),
+               pathLooksLikeRunnableOrFilesystemTarget(path) {
+                commands.append("test -e \(shellSingleQuotedStatic(path)) && printf '%s exists\\n' \(shellSingleQuotedStatic(path))")
+                details.append(path)
+                filePaths.append(path)
+            }
+        }
+
+        guard !commands.isEmpty else { return nil }
+        return (
+            commands.joined(separator: "\n"),
+            details.prefix(3).joined(separator: ", "),
+            Array(Set(filePaths))
+        )
     }
 
     private nonisolated static func cwdString(from dict: [String: Any]) -> String? {
@@ -2199,6 +2376,23 @@ actor LocalAlpineAgentService {
         return []
     }
 
+    private nonisolated static func pathLooksLikeRunnableOrFilesystemTarget(_ path: String) -> Bool {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.contains("\n"),
+              !trimmed.contains(" ") else {
+            return false
+        }
+        let normalized = trimmed.replacingOccurrences(of: "\\", with: "/")
+        if normalized == "." || normalized == "/" || normalized.hasPrefix("/") || normalized.hasPrefix("./") || normalized.hasPrefix("../") {
+            return true
+        }
+        if normalized.contains("/") {
+            return true
+        }
+        return pathLooksLikeFileTarget(normalized)
+    }
+
     private nonisolated static func pathDirectory(for path: String) -> String {
         let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\\", with: "/")
@@ -2217,7 +2411,7 @@ actor LocalAlpineAgentService {
 
     private nonisolated static func absentPathString(from object: Any) -> String? {
         if let dict = object as? [String: Any] {
-            if let type = stringValue(dict["type"] ?? dict["check"] ?? dict["kind"])?.lowercased(),
+            if let type = stringValue(dict["type"] ?? dict["check"] ?? dict["kind"] ?? dict["expect"] ?? dict["expected"])?.lowercased(),
                ["not_exists", "not_exist", "missing", "absent", "deleted", "removed"].contains(type),
                let path = pathString(from: dict) {
                 return path
@@ -2233,6 +2427,17 @@ actor LocalAlpineAgentService {
             }
         }
         return nil
+    }
+
+    private nonisolated static func verifyObjectExpectsPresence(_ dict: [String: Any]) -> Bool {
+        if let exists = boolValue(dict["exists"] ?? dict["present"] ?? dict["should_exist"] ?? dict["shouldExist"]) {
+            return exists
+        }
+        let value = stringValue(dict["type"] ?? dict["check"] ?? dict["kind"] ?? dict["expect"] ?? dict["expected"])?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard let value else { return false }
+        return ["exists", "exist", "present", "file_exists", "is_file", "installed"].contains(value)
     }
 
     private nonisolated static func normalizedPathKey(_ path: String) -> String {
@@ -4376,12 +4581,11 @@ actor LocalAlpineAgentService {
             return cleanedVisibleProtocolNoise(from: content)
         }
 
-        let mutable = NSMutableString(string: content)
-        for range in mergedRanges(removalRanges).sorted(by: { $0.location > $1.location }) {
-            mutable.replaceCharacters(in: range, with: "")
+        if let firstToolRange = mergedRanges(removalRanges).min(by: { $0.location < $1.location }) {
+            let prefix = nsContent.substring(with: NSRange(location: 0, length: max(0, firstToolRange.location)))
+            return cleanedVisibleToolPreface(from: prefix)
         }
-
-        return cleanedVisibleToolPreface(from: mutable as String)
+        return ""
     }
 
     nonisolated private static func cleanedVisibleToolPreface(from content: String) -> String {
