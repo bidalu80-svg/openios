@@ -364,13 +364,6 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
-            COPY_PHASE_STRIP=YES \
-            DEAD_CODE_STRIPPING=YES \
-            DEPLOYMENT_POSTPROCESSING=YES \
-            GCC_SYMBOLS_PRIVATE_EXTERN=YES \
-            STRIP_INSTALLED_PRODUCT=YES \
-            STRIP_SWIFT_SYMBOLS=YES \
-            SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO \
             archive
           APP_BINARY="$RUNNER_TEMP/Iexa.xcarchive/Products/Applications/Iexa.app/Iexa"
           if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
@@ -401,13 +394,6 @@ jobs:
             -destination 'generic/platform=iOS' \
             TARGET_BUILD_DIR="$RUNNER_TEMP/unsigned-build-app" \
             BUILT_PRODUCTS_DIR="$RUNNER_TEMP/unsigned-build-app" \
-            COPY_PHASE_STRIP=YES \
-            DEAD_CODE_STRIPPING=YES \
-            DEPLOYMENT_POSTPROCESSING=YES \
-            GCC_SYMBOLS_PRIVATE_EXTERN=YES \
-            STRIP_INSTALLED_PRODUCT=YES \
-            STRIP_SWIFT_SYMBOLS=YES \
-            SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
