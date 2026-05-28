@@ -885,6 +885,19 @@ actor LocalAlpineTerminalService {
         return components.isEmpty ? "/" : "/" + components.joined(separator: "/")
     }
 
+    private func isSharedWorkspaceRuntimePath(_ rawPath: String) -> Bool {
+        let path = normalizedAbsoluteRuntimePath(rawPath)
+        return path == "/mnt/iexa" || path.hasPrefix("/mnt/iexa/")
+    }
+
+    private func openPreviewFileName(for rawPath: String) -> String {
+        let path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        let name = URL(fileURLWithPath: path).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty || name == "." || name == ".." ? "preview" : name
+    }
+
     private func runtimeLikelyStarted(from result: LocalAlpineCommandResult) -> Bool {
         let output = result.output.lowercased()
         let bootFailureMarkers = [
