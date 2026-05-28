@@ -1395,7 +1395,7 @@ final class ChatViewModel {
         LocalAlpineToolCapability(
             name: "read_file",
             description: "Read workspace/rootfs files without shell text parsing.",
-            arguments: ["path", "start_line?", "line_count?", "max_bytes?"]
+            arguments: ["path", "start_line?", "line_count?", "max_bytes?", "Minis alias: file_read"]
         ),
         LocalAlpineToolCapability(
             name: "edit_file",
@@ -1410,17 +1410,17 @@ final class ChatViewModel {
         LocalAlpineToolCapability(
             name: "write_files",
             description: "Create files or perform complete same-path rewrites.",
-            arguments: ["path/file_path", "code_lines/content_lines/content_base64", "aliases: write_file/create_file/create_files"]
+            arguments: ["path/file_path", "code_lines/content_lines/content_base64", "aliases: write_file/create_file/create_files/file_write"]
         ),
         LocalAlpineToolCapability(
             name: "delete_file",
             description: "Delete workspace files with structured tool events; directories require recursive:true.",
-            arguments: ["path", "recursive?", "missing_ok?", "aliases: delete_files/remove_file/remove_files"]
+            arguments: ["path", "recursive?", "missing_ok?", "aliases: delete_files/remove_file/remove_files/file_delete"]
         ),
         LocalAlpineToolCapability(
             name: "list_dir",
             description: "List a directory and bounded child paths using Alpine-safe commands.",
-            arguments: ["path?", "max_depth?", "hidden?"]
+            arguments: ["path?", "max_depth?", "hidden?", "aliases: file_list/directory_list"]
         ),
         LocalAlpineToolCapability(
             name: "glob",
@@ -1430,7 +1430,7 @@ final class ChatViewModel {
         LocalAlpineToolCapability(
             name: "grep",
             description: "Search text recursively with bounded output.",
-            arguments: ["pattern/query/text", "path?", "include?", "case_sensitive?", "aliases: search_files"]
+            arguments: ["pattern/query/text", "path?", "include?", "case_sensitive?", "aliases: search_files/file_search"]
         ),
         LocalAlpineToolCapability(
             name: "verify",
@@ -1440,7 +1440,12 @@ final class ChatViewModel {
         LocalAlpineToolCapability(
             name: "command",
             description: "Run one bounded shell command for list/search/run/install/build/test/verify.",
-            arguments: ["command/cmd/shell/bash/exec/run", "cwd/workdir/working_dir/directory/dir?"]
+            arguments: ["command/cmd/shell/bash/exec/run/shell_execute", "cwd/workdir/working_dir/directory/dir?"]
+        ),
+        LocalAlpineToolCapability(
+            name: "browser_use",
+            description: "Fetch an HTTP/HTTPS URL from the Alpine shell with bounded output.",
+            arguments: ["url/href/link", "aliases: web_fetch/fetch_url/open_url"]
         )
     ]
 
@@ -1460,13 +1465,14 @@ final class ChatViewModel {
           ```
         - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
-        - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, or `run`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`.
-        - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, and `verify` for common list/search/check work. The host converts them into Alpine-safe bounded commands and records them as tool calls.
+        - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`.
+        - Minis-compatible aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
+        - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
         - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, or macOS-only utilities.
         - Rootfs/environment/dependency checks: if the user asks whether Python/Lua/Node/C++ or dependencies exist, inspect the running Alpine rootfs/runtime/toolchain directly with bounded `command -v`, `--version`, `apk info`, `python3 -m pip list`, `find /usr/lib /usr/local/lib`, or small module-list commands. Do not invent `/mnt/iexa/rootfs`; `/mnt/iexa` is only the workspace mount. Do not only search `/mnt/iexa` project dependency files unless the user specifically asks for project dependency files.
         - Service/process commands: prefer foreground commands and bounded verification. Do not assume OpenRC/system services are available unless a prior command proves it.
-        - `command` is shell text only. For structured tools, use top-level keys such as `read_file`, `write_files`, `edit_file`, `patch_file`, `delete_file`, `delete_files`, `list_dir`, `glob`, `grep`, or `verify`.
+        - `command`/`shell_execute` is shell text only. For structured tools, use top-level keys such as `read_file`, `file_read`, `write_files`, `file_write`, `edit_file`, `patch_file`, `delete_file`, `delete_files`, `list_dir`, `glob`, `grep`, `verify`, or `browser_use`.
         - Hard protocol rule: for any intermediate local-work step, pure prose means "stop and answer normally"; it will not be auto-upgraded into execution. Emit a real tool block only when you are intentionally requesting local execution.
         - JSON tool capabilities:
         \(capabilities)

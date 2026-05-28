@@ -251,17 +251,17 @@ struct LocalAlpineToolDisplay: Hashable, Sendable {
 enum LocalAlpineToolDisplayRegistry {
     static func display(for toolName: String) -> LocalAlpineToolDisplay {
         switch toolName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "read_file", "read_files", "read":
+        case "read_file", "read_files", "read", "file_read":
             return LocalAlpineToolDisplay(icon: "doc.text", title: "读取文件")
         case "edit_file", "edit_files", "replace_file", "edit":
             return LocalAlpineToolDisplay(icon: "square.and.pencil", title: "编辑文件")
         case "patch_file", "patch_files", "apply_patch", "patch":
             return LocalAlpineToolDisplay(icon: "doc.on.doc", title: "应用补丁")
-        case "write_files", "write_file", "write":
+        case "write_files", "write_file", "write", "file_write":
             return LocalAlpineToolDisplay(icon: "doc.badge.plus", title: "写入文件")
-        case "delete_file", "delete_files", "remove_file", "remove_files", "delete", "rm":
+        case "delete_file", "delete_files", "remove_file", "remove_files", "delete", "rm", "file_delete":
             return LocalAlpineToolDisplay(icon: "trash", title: "删除文件")
-        case "list_dir", "list", "ls":
+        case "list_dir", "list", "ls", "file_list", "directory_list":
             return LocalAlpineToolDisplay(icon: "folder", title: "列出目录")
         case "glob", "find_files":
             return LocalAlpineToolDisplay(icon: "doc.text.magnifyingglass", title: "匹配文件")
@@ -279,9 +279,9 @@ enum LocalAlpineToolDisplayRegistry {
             return LocalAlpineToolDisplay(icon: "play.circle", title: "运行脚本")
         case "install_dependency", "install":
             return LocalAlpineToolDisplay(icon: "shippingbox", title: "安装依赖")
-        case "network_fetch", "fetch":
+        case "network_fetch", "fetch", "browser_use", "web_fetch":
             return LocalAlpineToolDisplay(icon: "network", title: "网络请求")
-        case "command", "shell", "bash", "exec":
+        case "command", "shell", "bash", "exec", "shell_execute":
             return LocalAlpineToolDisplay(icon: "terminal.fill", title: "运行命令")
         case "diagnostic":
             return LocalAlpineToolDisplay(icon: "magnifyingglass", title: "诊断")
@@ -1318,32 +1318,41 @@ actor LocalAlpineAgentService {
         merged.removeValue(forKey: "type")
         let arguments = merged
         switch op {
-        case "bash", "shell", "sh", "exec", "run", "command":
+        case "bash", "shell", "sh", "exec", "run", "command", "shell_execute":
             if Self.shellCommandString(from: merged) == nil {
                 if op == "run" {
                     merged["run"] = arguments
                 } else {
-                    merged["command"] = dict["command"] ?? dict["cmd"] ?? dict["shell"] ?? dict["run"]
+                    merged["command"] = dict["command"]
+                        ?? dict["cmd"]
+                        ?? dict["shell"]
+                        ?? dict["run"]
+                        ?? dict["shell_execute"]
+                        ?? dict["input"]
+                        ?? dict["value"]
+                        ?? dict["args"]
                 }
             }
-        case "read", "read_file", "read_files", "cat", "open_file":
+        case "read", "read_file", "read_files", "cat", "open_file", "file_read":
             merged["read_file"] = arguments
-        case "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files":
+        case "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write":
             merged["write_file"] = arguments
         case "edit", "edit_file", "edit_files", "replace_file":
             merged["edit_file"] = arguments
         case "patch", "patch_file", "patch_files", "apply_patch":
             merged["patch_file"] = arguments
-        case "delete", "delete_file", "delete_files", "remove_file", "remove_files", "rm", "rmdir":
+        case "delete", "delete_file", "delete_files", "remove_file", "remove_files", "rm", "rmdir", "file_delete":
             merged["delete_file"] = arguments
-        case "list", "list_dir", "list_directory", "ls":
+        case "list", "list_dir", "list_directory", "ls", "file_list", "directory_list":
             merged["list_dir"] = arguments
-        case "grep", "search", "search_files":
+        case "grep", "search", "search_files", "file_search":
             merged["grep"] = arguments
         case "glob", "find", "glob/find", "find_files":
             merged["glob"] = arguments
         case "verify", "check":
             merged["verify"] = arguments
+        case "browser_use", "browser", "browse", "web_fetch", "fetch_url", "open_url":
+            merged["browser_use"] = arguments
         default:
             return nil
         }
@@ -1351,7 +1360,7 @@ actor LocalAlpineAgentService {
     }
 
     private nonisolated static func shellCommandString(from dict: [String: Any]) -> String? {
-        for key in ["command", "cmd", "shell", "bash", "exec", "run"] {
+        for key in ["command", "cmd", "shell", "bash", "exec", "run", "shell_execute"] {
             if let command = stringValue(dict[key]) {
                 if ["cmd", "command", "run"].contains(command.lowercased()),
                    let argsCommand = shellCommandString(fromValue: dict["args"] ?? dict["arguments"] ?? dict["argv"]) {
@@ -1395,7 +1404,7 @@ actor LocalAlpineAgentService {
         merged.removeValue(forKey: "input")
         merged.removeValue(forKey: "parameters")
         switch tool {
-        case "bash", "shell", "sh", "exec", "run", "command":
+        case "bash", "shell", "sh", "exec", "run", "command", "shell_execute":
             if Self.shellCommandString(from: merged) == nil {
                 if tool == "run" {
                     merged["run"] = arguments
@@ -1404,27 +1413,30 @@ actor LocalAlpineAgentService {
                         ?? arguments["cmd"]
                         ?? arguments["shell"]
                         ?? arguments["run"]
+                        ?? arguments["shell_execute"]
                         ?? arguments["value"]
                 }
             }
-        case "read", "read_file", "read_files", "cat", "open_file":
+        case "read", "read_file", "read_files", "cat", "open_file", "file_read":
             merged["read_file"] = arguments["value"] ?? arguments
-        case "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files":
+        case "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write":
             merged["write_file"] = arguments
         case "edit", "edit_file", "edit_files", "replace_file":
             merged["edit_file"] = arguments
         case "patch", "patch_file", "patch_files", "apply_patch":
             merged["patch_file"] = arguments
-        case "delete", "delete_file", "delete_files", "remove_file", "remove_files", "rm", "rmdir":
+        case "delete", "delete_file", "delete_files", "remove_file", "remove_files", "rm", "rmdir", "file_delete":
             merged["delete_file"] = arguments["value"] ?? arguments
-        case "list", "list_dir", "list_directory", "ls":
+        case "list", "list_dir", "list_directory", "ls", "file_list", "directory_list":
             merged["list_dir"] = arguments["value"] ?? arguments
-        case "grep", "search", "search_files":
+        case "grep", "search", "search_files", "file_search":
             merged["grep"] = arguments
         case "glob", "find", "glob/find", "find_files":
             merged["glob"] = arguments
         case "verify", "check":
             merged["verify"] = arguments
+        case "browser_use", "browser", "browse", "web_fetch", "fetch_url", "open_url":
+            merged["browser_use"] = arguments
         default:
             return nil
         }
@@ -1449,18 +1461,19 @@ actor LocalAlpineAgentService {
     }
 
     private static let knownStructuredToolNames: Set<String> = [
-        "bash", "shell", "sh", "exec", "run", "command",
-        "read", "read_file", "read_files", "cat", "open_file",
-        "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files",
+        "bash", "shell", "sh", "exec", "run", "command", "shell_execute",
+        "read", "read_file", "read_files", "cat", "open_file", "file_read",
+        "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write",
         "edit", "edit_file", "edit_files", "replace_file",
         "patch", "patch_file", "patch_files", "apply_patch",
-        "delete", "delete_file", "delete_files", "remove_file", "remove_files", "delete_dir", "remove_dir", "rm", "rmdir",
-        "list", "list_dir", "list_directory", "ls",
-        "grep", "search", "search_files",
+        "delete", "delete_file", "delete_files", "remove_file", "remove_files", "delete_dir", "remove_dir", "rm", "rmdir", "file_delete",
+        "list", "list_dir", "list_directory", "ls", "file_list", "directory_list",
+        "grep", "search", "search_files", "file_search",
         "append", "append_file", "append_and_read",
         "move_file", "rename_file", "copy_file", "mkdir",
         "glob", "find", "glob/find", "find_files",
-        "verify", "check"
+        "verify", "check",
+        "browser_use", "browser", "browse", "web_fetch", "fetch_url", "open_url"
     ]
 
     private func parseSpecialToolShape(
@@ -1594,7 +1607,7 @@ actor LocalAlpineAgentService {
             return parts.map(shellSingleQuotedStatic).joined(separator: " ")
         }
         guard let dict = value as? [String: Any] else { return nil }
-        let commandKeys = ["command", "cmd", "shell", "bash", "exec", "run"]
+        let commandKeys = ["command", "cmd", "shell", "bash", "exec", "run", "shell_execute"]
         let args = shellArgumentsString(from: dict["args"] ?? dict["arguments"] ?? dict["argv"])
         for key in commandKeys {
             if let command = stringValue(dict[key]) {
@@ -1816,6 +1829,29 @@ actor LocalAlpineAgentService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         let cwd = cwdString(from: dict)
+
+        if dict["browser_use"] != nil || dict["browser"] != nil || dict["browse"] != nil
+            || dict["web_fetch"] != nil || dict["fetch_url"] != nil || dict["open_url"] != nil
+            || selector == "browser_use" || selector == "browser" || selector == "browse"
+            || selector == "web_fetch" || selector == "fetch_url" || selector == "open_url" {
+            let object = dict["browser_use"] ?? dict["browser"] ?? dict["browse"]
+                ?? dict["web_fetch"] ?? dict["fetch_url"] ?? dict["open_url"] ?? dict
+            guard let url = urlString(from: object) ?? urlString(from: dict) else {
+                return nil
+            }
+            let quotedURL = shellSingleQuotedStatic(url)
+            let command = """
+            if command -v curl >/dev/null 2>&1 || apk add --no-cache curl >/dev/null 2>&1; then
+              curl -L --max-time 25 --silent --show-error \(quotedURL) | sed -n '1,160p'
+            elif command -v wget >/dev/null 2>&1; then
+              wget -qO- \(quotedURL) | sed -n '1,160p'
+            else
+              printf 'browser_use unavailable: curl/wget not installed\\n' >&2
+              exit 127
+            fi
+            """
+            return (command, "browser_use", url, [], cwd)
+        }
 
         if let shellCommand,
            let path = runnablePathFromNaturalRunCommand(shellCommand) {
@@ -2086,7 +2122,7 @@ actor LocalAlpineAgentService {
                 return value
             }
         }
-        for key in ["command", "cmd", "shell", "bash", "exec", "run", "verify", "check"] {
+        for key in ["command", "cmd", "shell", "bash", "exec", "run", "shell_execute", "verify", "check", "browser_use"] {
             if let nested = dict[key] as? [String: Any],
                let value = cwdString(from: nested) {
                 return value
@@ -2100,7 +2136,7 @@ actor LocalAlpineAgentService {
     }
 
     private nonisolated static func readFilesObject(from dict: [String: Any]) -> Any? {
-        dict["read_file"] ?? dict["read_files"] ?? dict["read"] ?? dict["open_file"] ?? dict["cat"]
+        dict["read_file"] ?? dict["read_files"] ?? dict["read"] ?? dict["open_file"] ?? dict["cat"] ?? dict["file_read"]
     }
 
     private func parseReadFiles(from object: Any?) -> [LocalAlpineReadFileRequest] {
@@ -2299,7 +2335,7 @@ actor LocalAlpineAgentService {
     }
 
     private nonisolated static func deleteFilesObject(from dict: [String: Any]) -> Any? {
-        dict["delete_file"] ?? dict["delete_files"] ?? dict["remove_file"] ?? dict["remove_files"] ?? dict["delete"] ?? dict["rm"] ?? dict["unlink"]
+        dict["delete_file"] ?? dict["delete_files"] ?? dict["remove_file"] ?? dict["remove_files"] ?? dict["delete"] ?? dict["rm"] ?? dict["unlink"] ?? dict["file_delete"]
     }
 
     private func parseDeleteFiles(from object: Any?) -> [LocalAlpineDeleteFileRequest] {
@@ -2374,6 +2410,38 @@ actor LocalAlpineAgentService {
             return [path]
         }
         return []
+    }
+
+    private nonisolated static func urlString(from object: Any) -> String? {
+        if let url = stringValue(object),
+           isHTTPURL(url) {
+            return url
+        }
+        guard let dict = object as? [String: Any] else { return nil }
+        for key in ["url", "href", "link", "uri", "address"] {
+            if let url = stringValue(dict[key]),
+               isHTTPURL(url) {
+                return url
+            }
+        }
+        for key in ["urls", "links"] {
+            if let array = dict[key] as? [Any],
+               let url = array.compactMap({ stringValue($0) }).first(where: { isHTTPURL($0) }) {
+                return url
+            }
+        }
+        for key in ["browser_use", "browser", "browse", "web_fetch", "fetch_url", "open_url", "input", "arguments", "args"] {
+            if let nested = dict[key],
+               let url = urlString(from: nested) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func isHTTPURL(_ value: String) -> Bool {
+        let lowercased = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://")
     }
 
     private nonisolated static func pathLooksLikeRunnableOrFilesystemTarget(_ path: String) -> Bool {
@@ -2594,6 +2662,7 @@ actor LocalAlpineAgentService {
         }
         return dict["write_files"] ?? dict["write_file"] ?? dict["create_file"] ?? dict["create_files"]
             ?? dict["save_file"] ?? dict["save_files"] ?? dict["files"]
+            ?? dict["file_write"]
     }
 
     private func parseWriteFiles(from object: Any?) -> [LocalAlpineAgentFile] {

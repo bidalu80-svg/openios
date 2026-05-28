@@ -41,6 +41,90 @@ struct LocalAlpineSessionStartResult: Sendable {
     let message: String?
 }
 
+struct LocalAlpineOpenRequest: Identifiable, Hashable, Sendable {
+    let id = UUID()
+    let target: String
+
+    var webURL: URL? {
+        guard let url = URL(string: target),
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https", "about"].contains(scheme) else {
+            return nil
+        }
+        return url
+    }
+}
+
+enum LocalAlpineOpenMarkerParser {
+    private static let escape = Character("\u{001B}")
+    private static let bell = Character("\u{0007}")
+    private static let stTerminator = "\u{001B}\\"
+    private static let oscPrefix = "]1337;"
+    private static let keys = ["IexaOpenURL=", "MinisOpenURL="]
+
+    static func extract(from text: String) -> (cleaned: String, requests: [LocalAlpineOpenRequest]) {
+        guard text.contains("\u{001B}]1337;") || text.contains("]1337;IexaOpenURL=") || text.contains("]1337;MinisOpenURL=") else {
+            return (text, [])
+        }
+
+        var cleaned = ""
+        var requests: [LocalAlpineOpenRequest] = []
+        var cursor = text.startIndex
+
+        while cursor < text.endIndex {
+            guard let escapeIndex = text[cursor...].firstIndex(of: escape) else {
+                cleaned.append(contentsOf: text[cursor...])
+                break
+            }
+
+            cleaned.append(contentsOf: text[cursor..<escapeIndex])
+            let afterEscape = text.index(after: escapeIndex)
+            guard afterEscape < text.endIndex, text[afterEscape] == "]" else {
+                cleaned.append(text[escapeIndex])
+                cursor = afterEscape
+                continue
+            }
+
+            guard text[afterEscape...].hasPrefix(oscPrefix),
+                  let terminatorRange = oscTerminatorRange(in: text, from: afterEscape) else {
+                cleaned.append(text[escapeIndex])
+                cursor = afterEscape
+                continue
+            }
+
+            let payloadStart = text.index(afterEscape, offsetBy: oscPrefix.count)
+            let payload = String(text[payloadStart..<terminatorRange.lowerBound])
+            if let target = openTarget(from: payload) {
+                requests.append(LocalAlpineOpenRequest(target: target))
+            } else {
+                cleaned.append(contentsOf: text[escapeIndex..<terminatorRange.upperBound])
+            }
+            cursor = terminatorRange.upperBound
+        }
+
+        return (cleaned, requests)
+    }
+
+    private static func oscTerminatorRange(in text: String, from start: String.Index) -> Range<String.Index>? {
+        var candidates: [Range<String.Index>] = []
+        if let bellIndex = text[start...].firstIndex(of: bell) {
+            candidates.append(bellIndex..<text.index(after: bellIndex))
+        }
+        if let stRange = text[start...].range(of: stTerminator) {
+            candidates.append(stRange)
+        }
+        return candidates.min { $0.lowerBound < $1.lowerBound }
+    }
+
+    private static func openTarget(from payload: String) -> String? {
+        for key in keys where payload.hasPrefix(key) {
+            let target = String(payload.dropFirst(key.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return target.isEmpty ? nil : target
+        }
+        return nil
+    }
+}
+
 actor LocalAlpineTerminalService {
     static let shared = LocalAlpineTerminalService()
 
@@ -146,6 +230,7 @@ actor LocalAlpineTerminalService {
         do {
             runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
             try ensureResolverConfiguration(in: runtimeRootFSURL)
+            try ensureOpenBridgeConfiguration(in: runtimeRootFSURL)
         } catch {
             return LocalAlpineSessionStartResult(
                 sessionID: nil,
@@ -271,6 +356,36 @@ actor LocalAlpineTerminalService {
         return data
     }
 
+    func materializePreviewURL(for request: LocalAlpineOpenRequest) async throws -> URL {
+        let rawTarget = request.target.trimmingCharacters(in: .whitespacesAndNewlines)
+        let path: String
+        if let fileURL = URL(string: rawTarget),
+           fileURL.isFileURL {
+            path = fileURL.path
+        } else {
+            path = rawTarget
+        }
+
+        guard !path.isEmpty else {
+            throw LocalAlpineError.invalidPath(request.target)
+        }
+
+        let data: Data
+        if isSharedWorkspaceRuntimePath(path) {
+            data = try await readFile(path: path)
+        } else {
+            data = try await readRootFSFile(path: path)
+        }
+
+        let tempDir = fileManager.temporaryDirectory
+            .appendingPathComponent("local_alpine_previews", isDirectory: true)
+        try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let fileName = try sanitizedFileName(openPreviewFileName(for: path))
+        let fileURL = tempDir.appendingPathComponent(fileName)
+        try data.write(to: fileURL, options: .atomic)
+        return fileURL
+    }
+
     func writeFile(data: Data, fileName: String, destinationPath: String) async throws {
         let root = try ensureSharedWorkspaceDirectory()
         let directory = try resolve(path: destinationPath, root: root, allowRoot: true)
@@ -381,6 +496,7 @@ actor LocalAlpineTerminalService {
         do {
             runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
             try ensureResolverConfiguration(in: runtimeRootFSURL)
+            try ensureOpenBridgeConfiguration(in: runtimeRootFSURL)
         } catch {
             return LocalAlpineCommandResult(
                 command: trimmed,
@@ -477,6 +593,7 @@ actor LocalAlpineTerminalService {
         do {
             runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
             try ensureResolverConfiguration(in: runtimeRootFSURL)
+            try ensureOpenBridgeConfiguration(in: runtimeRootFSURL)
         } catch {
             return LocalAlpineCommandResult(
                 command: trimmed,
@@ -615,6 +732,84 @@ actor LocalAlpineTerminalService {
 
         try fileManager.createDirectory(at: etcURL, withIntermediateDirectories: true)
         try resolver.write(to: resolvURL, atomically: true, encoding: .utf8)
+    }
+
+    private func ensureOpenBridgeConfiguration(in runtimeRootFSURL: URL) throws {
+        guard runtimeRootFSURL.pathExtension == "fakefs" else { return }
+
+        let dataURL = runtimeRootFSURL.appendingPathComponent("data", isDirectory: true)
+        let binURL = dataURL.appendingPathComponent("usr/local/bin", isDirectory: true)
+        try fileManager.createDirectory(at: binURL, withIntermediateDirectories: true)
+
+        let bridgeScript = """
+        #!/bin/sh
+        ESC=$(printf '\\033')
+        BEL=$(printf '\\007')
+
+        emit_open_marker() {
+          printf '%s]1337;IexaOpenURL=%s%s\\n' "$ESC" "$1" "$BEL"
+        }
+
+        normalize_target() {
+          case "$1" in
+            http://*|https://*|about:*|file://*|/*)
+              printf '%s\\n' "$1"
+              ;;
+            *)
+              resolved=$(readlink -f "$1" 2>/dev/null || true)
+              if [ -n "$resolved" ]; then
+                printf '%s\\n' "$resolved"
+              else
+                printf '%s\\n' "$1"
+              fi
+              ;;
+          esac
+        }
+
+        if [ "$#" -eq 0 ]; then
+          printf 'Usage: iexa-open <url-or-path>\\n' >&2
+          exit 1
+        fi
+
+        for arg in "$@"; do
+          target=$(normalize_target "$arg")
+          case "$target" in
+            http://*|https://*|about:*|file://*|/*)
+              emit_open_marker "$target"
+              printf 'Opened in Iexa preview: %s\\n' "$target"
+              ;;
+            *)
+              printf 'iexa-open: not a URL or path: %s\\n' "$arg" >&2
+              ;;
+          esac
+        done
+
+        exit 0
+        """
+        try writeExecutableText(bridgeScript, to: binURL.appendingPathComponent("iexa-open"))
+
+        let wrapperScript = """
+        #!/bin/sh
+        exec /usr/local/bin/iexa-open "$@"
+        """
+        for name in ["xdg-open", "sensible-browser", "www-browser", "x-www-browser", "gnome-open", "kde-open", "open"] {
+            try writeExecutableText(wrapperScript, to: binURL.appendingPathComponent(name))
+        }
+
+        let profileURL = dataURL.appendingPathComponent("etc/profile.d", isDirectory: true)
+        try fileManager.createDirectory(at: profileURL, withIntermediateDirectories: true)
+        let profile = """
+        export BROWSER=/usr/local/bin/iexa-open
+        export PAGER=${PAGER:-less}
+        export UV_LINK_MODE=${UV_LINK_MODE:-symlink}
+
+        """
+        try profile.write(to: profileURL.appendingPathComponent("iexa-open.sh"), atomically: true, encoding: .utf8)
+    }
+
+    private func writeExecutableText(_ text: String, to url: URL) throws {
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
     }
 
     private func resolve(path rawPath: String, root: URL, allowRoot: Bool) throws -> URL {
