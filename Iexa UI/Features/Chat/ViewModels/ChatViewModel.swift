@@ -4909,7 +4909,7 @@ final class ChatViewModel {
 
         // Assistant placeholder
         let assistantMessageId = UUID().uuidString
-        let isDirectImageGenerationPlaceholder = isOpenAICompatibleProvider
+        let isDirectImageGenerationPlaceholder = canUseDirectImageEndpointProvider
             && shouldUseDirectImageGeneration(modelId: modelId)
             && !shouldPreferChatNativeImageGeneration(modelId: modelId)
         conversation?.messages.append(ChatMessage(
@@ -6802,6 +6802,32 @@ final class ChatViewModel {
         )
         defer { progressHeartbeat.cancel() }
 
+        let directToolRunId = UUID().uuidString
+        let directToolCallId = UUID().uuidString
+        let directToolDisplay = LocalAlpineToolDisplayRegistry.display(for: "command")
+        let directStartedAtMs = Int64((Date().timeIntervalSince1970 * 1_000).rounded())
+        let directToolDetail = Self.localAlpineCommandPreview(from: command)
+        let directStartCall = LocalAlpineToolCall(
+            id: directToolCallId,
+            runId: directToolRunId,
+            name: "command",
+            phase: .start,
+            title: directToolDisplay.title,
+            detail: directToolDetail,
+            cwd: "/mnt/iexa",
+            command: command,
+            exitCode: nil,
+            outputPreview: nil,
+            filePaths: [],
+            startedAtMs: directStartedAtMs,
+            completedAtMs: nil,
+            failed: false
+        )
+        applyLocalAlpineToolEvent(
+            LocalAlpineToolEvent(runId: directToolRunId, call: directStartCall),
+            messageId: assistantMessageId
+        )
+
         var result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
         while let request = result.interactiveRequest {
             updateAssistantMessage(
@@ -6848,27 +6874,30 @@ final class ChatViewModel {
             exitCode: result.exitCode,
             outputPreview: String(result.output.prefix(8_000))
         )
-        let directToolRunId = UUID().uuidString
-        let directToolDisplay = LocalAlpineToolDisplayRegistry.display(for: "command")
-        let directNowMs = Int64((Date().timeIntervalSince1970 * 1_000).rounded())
+        let directCompletedAtMs = Int64((Date().timeIntervalSince1970 * 1_000).rounded())
         let directToolCall = LocalAlpineToolCall(
-            id: UUID().uuidString,
+            id: directToolCallId,
             runId: directToolRunId,
             name: "command",
             phase: .result,
             title: directToolDisplay.title,
-            detail: Self.localAlpineCommandPreview(from: command),
+            detail: directToolDetail,
             cwd: "/mnt/iexa",
             command: command,
             exitCode: result.exitCode,
             outputPreview: String(result.output.prefix(4_000)),
             filePaths: [],
-            startedAtMs: directNowMs,
-            completedAtMs: directNowMs,
+            startedAtMs: directStartedAtMs,
+            completedAtMs: directCompletedAtMs,
             failed: result.exitCode != 0 || result.interactiveRequest != nil
+        )
+        applyLocalAlpineToolEvent(
+            LocalAlpineToolEvent(runId: directToolRunId, call: directToolCall),
+            messageId: assistantMessageId
         )
         if let index = conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) {
             var metadata = conversation?.messages[index].metadata ?? [:]
+            conversation?.messages[index].isStreaming = false
             metadata["iexa_local_alpine_raw_result"] = result.output
             metadata["iexa_local_alpine_tool_run_id"] = directToolRunId
             if let toolCalls = LocalAlpineToolCall.metadataString(for: [directToolCall]) {
@@ -10022,11 +10051,21 @@ final class ChatViewModel {
         return model.supportsImageGeneration
     }
 
+    private var canUseDirectImageEndpointProvider: Bool {
+        guard let providerType = currentProviderType else { return false }
+        return providerType != .anthropic
+    }
+
+    private var canUseDirectVideoEndpointProvider: Bool {
+        guard let providerType = currentProviderType else { return false }
+        return providerType != .iexa && providerType != .anthropic
+    }
+
     private func canStartIndependentDirectMediaGeneration(modelId: String) -> Bool {
-        isOpenAICompatibleProvider
-            && (shouldUseDirectVideoGeneration(modelId: modelId)
-                || (shouldUseDirectImageGeneration(modelId: modelId)
-                    && !shouldPreferChatNativeImageGeneration(modelId: modelId)))
+        (canUseDirectVideoEndpointProvider && shouldUseDirectVideoGeneration(modelId: modelId))
+            || (canUseDirectImageEndpointProvider
+                && shouldUseDirectImageGeneration(modelId: modelId)
+                && !shouldPreferChatNativeImageGeneration(modelId: modelId))
     }
 
     private func shouldUseDirectImageGeneration(modelId: String) -> Bool {
@@ -10036,7 +10075,7 @@ final class ChatViewModel {
             "gpt-image", "dall-e", "dalle", "flux", "sdxl",
             "stable-diffusion", "midjourney", "mj-", "minimax-image",
             "qwen-image", "imagen", "seedream", "jimeng", "kolors",
-            "grok-imagine", "imagine-image", "image-lite",
+            "grok-imagine", "imagine-image", "image-lite", "plus-image",
             "image-01", "image-02", "image-03", "image-generation"
         ]
         let chatModelTokens = [
@@ -10044,7 +10083,14 @@ final class ChatViewModel {
             "qwen-plus", "qwen-max", "grok-4", "grok-3", "mini",
             "chat", "reasoning", "vision", "vl", "ocr"
         ]
-        if directEndpointTokens.contains(where: { haystack.contains($0) }) {
+        let endpointStyleImageName = haystack
+            .split(whereSeparator: \.isWhitespace)
+            .contains { token in
+                token.hasSuffix("-image")
+                    || token.hasSuffix("_image")
+                    || token.hasSuffix(".image")
+            }
+        if directEndpointTokens.contains(where: { haystack.contains($0) }) || endpointStyleImageName {
             return true
         }
         if chatModelTokens.contains(where: { haystack.contains($0) }) {
@@ -10067,9 +10113,16 @@ final class ChatViewModel {
             "gpt-image", "dall-e", "dalle", "flux", "sdxl",
             "stable-diffusion", "midjourney", "mj-",
             "minimax-image", "qwen-image", "seedream", "jimeng",
-            "kolors", "grok-imagine", "imagine-image", "image-lite"
+            "kolors", "grok-imagine", "imagine-image", "image-lite", "plus-image"
         ]
-        if directEndpointModels.contains(where: { haystack.contains($0) }) {
+        let endpointStyleImageName = haystack
+            .split(whereSeparator: \.isWhitespace)
+            .contains { token in
+                token.hasSuffix("-image")
+                    || token.hasSuffix("_image")
+                    || token.hasSuffix(".image")
+            }
+        if directEndpointModels.contains(where: { haystack.contains($0) }) || endpointStyleImageName {
             return false
         }
 

@@ -552,6 +552,48 @@ final class APIClient: @unchecked Sendable {
         "/image/generate"
     ]
 
+    private var imageGenerationPaths: [String] {
+        switch providerType {
+        case .iexa:
+            return [
+                "/api/v1/images/generations",
+                "/images/generations",
+                "/image/generations",
+                "/images/generate",
+                "/image/generate"
+            ]
+        case .openAICompatible, .gemini, .anthropic:
+            return [
+                "/images/generations",
+                "/image/generations",
+                "/images/generate",
+                "/image/generate",
+                "/api/v1/images/generations"
+            ]
+        }
+    }
+
+    private var imageEditPaths: [String] {
+        switch providerType {
+        case .iexa:
+            return [
+                "/api/v1/images/edits",
+                "/images/edits",
+                "/image/edits",
+                "/images/edit",
+                "/image/edit"
+            ]
+        case .openAICompatible, .gemini, .anthropic:
+            return [
+                "/images/edits",
+                "/image/edits",
+                "/images/edit",
+                "/image/edit",
+                "/api/v1/images/edits"
+            ]
+        }
+    }
+
     private static func imageGenerationProbeBody() -> [String: Any] {
         [
             "prompt": "",
@@ -797,11 +839,7 @@ final class APIClient: @unchecked Sendable {
             model: model,
             size: size
         )
-        let paths = [
-            "/images/generations",
-            "/image/generations",
-            "/images/generate",
-            "/image/generate",
+        let paths = imageGenerationPaths + [
             responsesPath,
             chatCompletionsPath
         ]
@@ -983,7 +1021,7 @@ final class APIClient: @unchecked Sendable {
     private func shouldTryNextImageEndpoint(after error: Error) -> Bool {
         switch APIError.from(error) {
         case .httpError(let statusCode, _, _):
-            return [400, 404, 405, 422].contains(statusCode)
+            return [400, 404, 405, 415, 422, 500, 501, 503].contains(statusCode)
         case .responseDecoding:
             return true
         default:
@@ -1090,6 +1128,40 @@ final class APIClient: @unchecked Sendable {
         }
 
         var lastError: Error?
+        for path in imageEditPaths {
+            for requestBody in imageEditJSONBodyVariants(
+                prompt: prompt,
+                model: model,
+                size: size,
+                images: editImages
+            ) {
+                do {
+                    let payload = try await requestAnyJSON(
+                        path: path,
+                        method: .post,
+                        body: requestBody,
+                        timeout: 300
+                    )
+                    if let imageReference = firstImageReference(in: payload) {
+                        return imageReference
+                    }
+                    lastError = APIError.responseDecoding(
+                        underlying: NSError(
+                            domain: "APIClient",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "JSON 改图接口没有返回图片地址。"]
+                        ),
+                        data: nil
+                    )
+                } catch {
+                    guard shouldTryNextImageEndpoint(after: error) else {
+                        throw error
+                    }
+                    lastError = error
+                }
+            }
+        }
+
         let multipartVariants: [[NetworkManager.MultipartUploadFile]] = [
             editImages.map {
                 NetworkManager.MultipartUploadFile(
@@ -1117,36 +1189,38 @@ final class APIClient: @unchecked Sendable {
             ]
         ]
 
-        for files in multipartVariants {
-            do {
-                let json = try await network.uploadMultipart(
-                    path: "/images/edits",
-                    files: files,
-                    additionalFields: [
-                        "model": model,
-                        "prompt": prompt,
-                        "n": "1",
-                        "size": size
-                    ],
-                    timeout: 300
-                )
+        for path in imageEditPaths {
+            for files in multipartVariants {
+                do {
+                    let json = try await network.uploadMultipart(
+                        path: path,
+                        files: files,
+                        additionalFields: [
+                            "model": model,
+                            "prompt": prompt,
+                            "n": "1",
+                            "size": size
+                        ],
+                        timeout: 300
+                    )
 
-                if let imageReference = firstImageReference(in: json) {
-                    return imageReference
+                    if let imageReference = firstImageReference(in: json) {
+                        return imageReference
+                    }
+                    lastError = APIError.responseDecoding(
+                        underlying: NSError(
+                            domain: "APIClient",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
+                        ),
+                        data: nil
+                    )
+                } catch {
+                    guard shouldTryNextImageEndpoint(after: error) else {
+                        throw error
+                    }
+                    lastError = error
                 }
-                lastError = APIError.responseDecoding(
-                    underlying: NSError(
-                        domain: "APIClient",
-                        code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
-                    ),
-                    data: nil
-                )
-            } catch {
-                guard shouldTryNextImageEndpoint(after: error) else {
-                    throw error
-                }
-                lastError = error
             }
         }
 
@@ -1180,6 +1254,61 @@ final class APIClient: @unchecked Sendable {
                 ),
                 data: nil
             )
+        }
+    }
+
+    private func imageEditJSONBodyVariants(
+        prompt: String,
+        model: String,
+        size: String,
+        images: [ImageEditSource]
+    ) -> [[String: Any]] {
+        let encodedImages = images.prefix(3).map { image in
+            let dataURL = "data:\(mimeType(for: image.fileName));base64,\(image.data.base64EncodedString())"
+            return (
+                url: dataURL,
+                object: [
+                    "type": "image_url",
+                    "url": dataURL
+                ] as [String: Any]
+            )
+        }
+        guard let first = encodedImages.first else { return [] }
+
+        var variants: [[String: Any]] = []
+        if encodedImages.count > 1 {
+            variants.append([
+                "model": model,
+                "prompt": prompt,
+                "images": encodedImages.map { $0.object }
+            ])
+        }
+
+        variants.append(contentsOf: [
+            [
+                "model": model,
+                "prompt": prompt,
+                "image": first.object
+            ],
+            [
+                "model": model,
+                "prompt": prompt,
+                "image": first.url
+            ],
+            [
+                "model": model,
+                "prompt": prompt,
+                "image_url": first.url
+            ]
+        ])
+
+        let trimmedSize = size.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSize.isEmpty, trimmedSize != "auto" else {
+            return variants
+        }
+
+        return variants + variants.map { body in
+            body.merging(["size": trimmedSize]) { _, new in new }
         }
     }
 

@@ -518,7 +518,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
         path.replacingOccurrences(of: "\\", with: "/")
     }
 
-    init?(message: ChatMessage) {
+    init?(message: ChatMessage, liveToolCalls: [LocalAlpineToolCall] = []) {
         if message.metadata?["iexa_local_alpine_final_summary"] != nil
             || message.metadata?["iexa_local_alpine_continuation"] == "true"
             || message.metadata?["iexa_local_alpine_missing_tool_correction"] != nil
@@ -531,7 +531,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
         let metadata = message.metadata
         let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata?["iexa_local_alpine_written_files"])
         let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata?["iexa_local_alpine_command_results"])
-        let toolCalls = LocalAlpineToolCall.decodeMetadata(metadata?["iexa_local_alpine_tool_calls"])
+        let persistedToolCalls = LocalAlpineToolCall.decodeMetadata(metadata?["iexa_local_alpine_tool_calls"])
+        let toolCalls = Self.mergedToolCalls(persisted: persistedToolCalls, live: liveToolCalls)
         let parsed = ParsedLocalAlpineResult(content: message.content, metadata: metadata)
         let visibleCommands = commandResults.filter {
             $0.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "write_files"
@@ -566,6 +567,27 @@ private struct AgentActivityItem: Identifiable, Hashable {
             commandResults: visibleCommands,
             statusHistory: message.statusHistory
         )
+    }
+
+    private static func mergedToolCalls(
+        persisted: [LocalAlpineToolCall],
+        live: [LocalAlpineToolCall]
+    ) -> [LocalAlpineToolCall] {
+        guard !live.isEmpty else { return persisted }
+        var merged = persisted
+        for call in live {
+            if let index = merged.firstIndex(where: { $0.id == call.id }) {
+                merged[index] = call
+            } else {
+                merged.append(call)
+            }
+        }
+        return merged.sorted {
+            if $0.startedAtMs == $1.startedAtMs {
+                return $0.id < $1.id
+            }
+            return $0.startedAtMs < $1.startedAtMs
+        }
     }
 
     static func mergedTurn(id: String, items: [AgentActivityItem]) -> AgentActivityItem? {
@@ -722,7 +744,7 @@ struct ChatDetailView: View {
     private var recentAgentActivityItems: [AgentActivityItem] {
         viewModel.messages
             .suffix(40)
-            .compactMap(AgentActivityItem.init(message:))
+            .compactMap { activityItem(for: $0) }
     }
 
     private var transcriptMessages: [ChatMessage] {
@@ -733,7 +755,14 @@ struct ChatDetailView: View {
         if message.metadata?["iexa_local_alpine_final_summary"] != nil {
             return mergedLocalAlpineTurnActivity(through: message)
         }
-        return AgentActivityItem(message: message)
+        return activityItem(for: message)
+    }
+
+    private func activityItem(for message: ChatMessage) -> AgentActivityItem? {
+        AgentActivityItem(
+            message: message,
+            liveToolCalls: viewModel.localAlpineLiveToolCalls(for: message.id)
+        )
     }
 
     private func mergedLocalAlpineTurnActivity(through message: ChatMessage) -> AgentActivityItem? {
@@ -746,11 +775,11 @@ struct ChatDetailView: View {
         guard startIndex < endIndex else { return nil }
 
         let turnItems = viewModel.messages[startIndex..<endIndex]
-            .compactMap(AgentActivityItem.init(message:))
+            .compactMap { activityItem(for: $0) }
         return AgentActivityItem.mergedTurn(id: "inline-\(message.id)", items: turnItems)
     }
 
-    private func hasVisibleLocalAlpineFinalSummary(after message: ChatMessage) -> Bool {
+    private func hasLocalAlpineFinalSummary(after message: ChatMessage, requireRenderableContent: Bool) -> Bool {
         guard let index = viewModel.messages.firstIndex(where: { $0.id == message.id }) else {
             return false
         }
@@ -760,8 +789,10 @@ struct ChatDetailView: View {
         for later in viewModel.messages[start...] {
             if later.role == .user { return false }
             guard later.metadata?["iexa_local_alpine_final_summary"] != nil else { continue }
-            if later.isStreaming
-                || later.error != nil
+            if !requireRenderableContent {
+                return true
+            }
+            if later.error != nil
                 || !later.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return true
             }
@@ -769,9 +800,16 @@ struct ChatDetailView: View {
         return false
     }
 
+    private func hasVisibleLocalAlpineFinalSummary(after message: ChatMessage) -> Bool {
+        hasLocalAlpineFinalSummary(after: message, requireRenderableContent: true)
+    }
+
     private func localAlpineFallbackContent(for message: ChatMessage) -> String {
         guard isLocalAlpineResultMessage(message) else { return "" }
-        guard !hasVisibleLocalAlpineFinalSummary(after: message) else { return "" }
+        guard !hasLocalAlpineFinalSummary(after: message, requireRenderableContent: false) else { return "" }
+        if activityItem(for: message)?.hasConcreteSteps == true {
+            return ""
+        }
         return message.content.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -790,7 +828,7 @@ struct ChatDetailView: View {
             let start = recentMessages.index(after: lastUserIndex)
             return start < recentMessages.endIndex ? recentMessages[start...] : []
         }()
-        let turnItems = currentTurnMessages.compactMap(AgentActivityItem.init(message:))
+        let turnItems = currentTurnMessages.compactMap { activityItem(for: $0) }
 
         if let merged = AgentActivityItem.mergedTurn(
             id: "turn-\(recentMessages.last?.id ?? "latest")",
@@ -800,7 +838,7 @@ struct ChatDetailView: View {
             return Date().timeIntervalSince(merged.timestamp) < 180 ? merged : nil
         }
 
-        let items = recentMessages.reversed().compactMap(AgentActivityItem.init(message:))
+        let items = recentMessages.reversed().compactMap { activityItem(for: $0) }
         guard let item = items.first(where: { $0.hasConcreteSteps }) ?? items.first else {
             return nil
         }
@@ -845,7 +883,7 @@ struct ChatDetailView: View {
             if hasVisibleLocalAlpineFinalSummary(after: message) {
                 return true
             }
-            let hasVisibleActivity = AgentActivityItem(message: message)?.hasConcreteSteps == true
+            let hasVisibleActivity = activityItem(for: message)?.hasConcreteSteps == true
             if hasVisibleActivity {
                 return false
             }
@@ -853,8 +891,7 @@ struct ChatDetailView: View {
                 && messageHasProcessOnlyStatus(message)
         }
         if metadata["iexa_local_alpine_final_summary"] != nil {
-            return !message.isStreaming
-                && message.error == nil
+            return message.error == nil
                 && message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         if metadata["iexa_local_alpine_continuation"] == "true",
@@ -5907,6 +5944,10 @@ private struct AgentInlineStepsView: View {
             VStack(alignment: .leading, spacing: 7) {
                 ForEach(visibleSteps, id: \.id) { step in
                     AgentActivityStepPill(step: step)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .move(edge: .top)),
+                            removal: .opacity
+                        ))
                 }
 
                 if item.steps.count > visibleSteps.count {
@@ -5923,6 +5964,10 @@ private struct AgentInlineStepsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .buttonStyle(.plain)
+        .animation(MicroAnimation.snappy, value: visibleSteps.map(\.id))
+        .transaction { transaction in
+            transaction.animation = MicroAnimation.snappy
+        }
         .accessibilityLabel("查看步骤")
     }
 }
