@@ -99,10 +99,16 @@ struct ChatDetailView: View {
     @State private var isScrolledUp = false
     /// Last known contentOffset.y — used to detect user-initiated upward drags.
     @State private var lastScrollOffset: CGFloat = 0
+    /// Cached distance from the scroll viewport bottom to the content bottom.
+    /// Tracks "near bottom" state so IME/layout changes can re-pin only when
+    /// the user was already following the latest message.
+    @State private var distanceFromBottom: CGFloat = 0
     /// Cached scroll content height — updated via a separate onScrollGeometryChange.
     @State private var viewState_contentHeight: CGFloat = 0
     /// Cached scroll container height — updated via a separate onScrollGeometryChange.
     @State private var viewState_containerHeight: CGFloat = 0
+    /// Last time a layout/IME correction repinned the transcript.
+    @State private var lastLayoutRepinTime: Date = .distantPast
     /// Timestamp of the last *programmatic* scroll-to-bottom.
     /// Used both as a streaming throttle guard (prevent pump-scroll more than 10hz)
     /// and as a suppressor to prevent the offset-change handler from falsely
@@ -1206,19 +1212,10 @@ struct ChatDetailView: View {
                     scrollPosition.scrollTo(edge: .bottom)
                 }
             } else if keyboard.isVisible {
-                // Keyboard is open — dismiss it first so its collapsing
-                // animation doesn't fight the scroll animation. After a
-                // short delay (keyboard starts collapsing), flow the
-                // content up with a spring.
-                UIApplication.shared.sendAction(
-                    #selector(UIResponder.resignFirstResponder),
-                    to: nil, from: nil, for: nil)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    lastProgrammaticScrollTime = Date()
-                    withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
-                        scrollPosition.scrollTo(edge: .bottom)
-                    }
-                }
+                // Keep the keyboard in place. Collapsing it while a new turn is
+                // inserted forces the transcript through two large relayouts,
+                // which is exactly where long chats can flash blank.
+                repinToLatestMessageIfFollowing(after: 0.08)
             } else {
                 // Keyboard already hidden (follow-ups, etc.) — scroll now.
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
@@ -1232,7 +1229,7 @@ struct ChatDetailView: View {
         .onChange(of: viewModel.isStreaming) { _, streaming in
             if streaming && !isScrolledUp {
                 // Already at bottom — ensure auto-scroll stays active.
-                scrollPosition.scrollTo(edge: .bottom)
+                scrollToLatestMessageWithoutAnimation(anchor: .bottom)
             }
         }
         // Resume auto-scroll: when the user scrolls back to the bottom
@@ -1245,18 +1242,18 @@ struct ChatDetailView: View {
         }
         .onChange(of: keyboard.height) { _, height in
             guard height > 1, !viewModel.messages.isEmpty else { return }
+            let wasFollowingBottom = !isScrolledUp || distanceFromBottom <= 140
+            guard wasFollowingBottom else { return }
             isScrolledUp = false
-            lastProgrammaticScrollTime = Date()
-            scrollToBottomWithoutAnimation()
-            DispatchQueue.main.async {
-                lastProgrammaticScrollTime = Date()
-                scrollToBottomWithoutAnimation()
-            }
-            let settleDelay = max(0.1, keyboard.animationDuration + 0.05)
-            DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) {
-                lastProgrammaticScrollTime = Date()
-                scrollToBottomWithoutAnimation()
-            }
+
+            // Opening the keyboard should not force the transcript to the
+            // bottom. With the last-turn spacer that can align blank spacer
+            // space into the viewport, making the conversation look empty
+            // until the user drags. Repin to the last real message instead
+            // of the ScrollView's edge while the keyboard is visible.
+            let settleDelay = max(0.12, keyboard.animationDuration + 0.08)
+            repinToLatestMessageIfFollowing(after: settleDelay)
+            repinToLatestMessageIfFollowing(after: settleDelay + 0.18)
         }
     }
 
@@ -1286,6 +1283,7 @@ struct ChatDetailView: View {
         } action: { _, newOffset in
             let distanceFromBottom = max(0,
                 viewState_contentHeight - newOffset.y - viewState_containerHeight)
+            self.distanceFromBottom = distanceFromBottom
             if distanceFromBottom <= 100 {
                 // User scrolled very close to the bottom — re-engage auto-scroll.
                 if isScrolledUp { isScrolledUp = false }
@@ -1326,12 +1324,29 @@ struct ChatDetailView: View {
             CGSize(width: geo.contentSize.height, height: geo.containerSize.height)
         } action: { oldSize, newSize in
             let oldContentHeight = viewState_contentHeight
-            if abs(newSize.width - viewState_contentHeight) > 1 {
+            let contentChanged = abs(newSize.width - viewState_contentHeight) > 1
+            let containerChanged = abs(newSize.height - viewState_containerHeight) > 1
+            if contentChanged {
                 viewState_contentHeight = newSize.width
             }
-            if abs(newSize.height - viewState_containerHeight) > 1 {
+            if containerChanged {
                 viewState_containerHeight = newSize.height
             }
+
+            // Correct IME and layout drift whenever the user is still near
+            // the bottom. If keyboard/layout changes move the viewport over
+            // blank spacer space, snap back to the latest real message after
+            // the new geometry is known.
+            if (contentChanged || containerChanged),
+               keyboard.height > 1,
+               !isScrolledUp {
+                let now = Date()
+                if now.timeIntervalSince(lastLayoutRepinTime) > 0.08 {
+                    lastLayoutRepinTime = now
+                    repinToLatestMessageIfFollowing(after: 0.01)
+                }
+            }
+
             // Smooth scroll-to-bottom during active streaming:
             // When the content height grows (new tokens pushed layout taller)
             // and the user hasn't scrolled up, animate to the bottom so new
@@ -1341,8 +1356,12 @@ struct ChatDetailView: View {
                 let now = Date()
                 if now.timeIntervalSince(lastProgrammaticScrollTime) > 0.2 {
                     lastProgrammaticScrollTime = now
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        scrollPosition.scrollTo(edge: .bottom)
+                    if keyboard.height > 1 {
+                        scrollToLatestMessageWithoutAnimation(anchor: .bottom)
+                    } else {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            scrollPosition.scrollTo(edge: .bottom)
+                        }
                     }
                 }
             }
@@ -1408,10 +1427,15 @@ struct ChatDetailView: View {
 
     private var lastTurnMinHeight: CGFloat {
         let containerHeight = max(viewState_containerHeight, 0)
-        guard keyboard.height > 1 else { return containerHeight }
+        guard containerHeight > 1 else { return 0 }
 
-        let keyboardAdjustedHeight = max(containerHeight - keyboard.height, 0)
-        return max(keyboardAdjustedHeight, min(containerHeight, 220))
+        // ChatGPT-style last-turn fill is useful while reading with the
+        // keyboard hidden. When the keyboard is visible, the viewport is
+        // already constrained and the spacer can align blank space into view.
+        if keyboard.height > 1 {
+            return 0
+        }
+        return containerHeight
     }
 
     private func scrollToBottomWithoutAnimation() {
@@ -1419,6 +1443,31 @@ struct ChatDetailView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             scrollPosition.scrollTo(edge: .bottom)
+        }
+    }
+
+    private func scrollToLatestMessageWithoutAnimation(anchor: UnitPoint = .bottom) {
+        guard let lastMessageId = viewModel.messages.last(where: { !isLocalNativeResultMessage($0) })?.id else {
+            scrollToBottomWithoutAnimation()
+            return
+        }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollPosition.scrollTo(id: lastMessageId, anchor: anchor)
+        }
+    }
+
+    private func repinToLatestMessageIfFollowing(after delay: TimeInterval = 0) {
+        let action = {
+            guard !viewModel.messages.isEmpty, !isScrolledUp else { return }
+            lastProgrammaticScrollTime = Date()
+            scrollToLatestMessageWithoutAnimation(anchor: .bottom)
+        }
+        if delay <= 0 {
+            DispatchQueue.main.async(execute: action)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
         }
     }
 

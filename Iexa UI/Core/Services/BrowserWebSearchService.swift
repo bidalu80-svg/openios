@@ -31,7 +31,6 @@ final class BrowserWebSearchService: NSObject {
         }
 
         var items: [WebSearchResultItem] = []
-        var docs: [WebSearchDocument] = []
         var seenLinks = Set<String>()
 
         for query in normalizedQueries.prefix(3) {
@@ -43,9 +42,6 @@ final class BrowserWebSearchService: NSObject {
                     continue
                 }
                 items.append(item)
-                if docs.count < 4, let doc = await fetchDocument(for: item) {
-                    docs.append(doc)
-                }
                 if items.count >= 8 { break }
             }
             if items.count >= 8 { break }
@@ -53,7 +49,6 @@ final class BrowserWebSearchService: NSObject {
 
         if let githubItems = await githubSearchTask?.value, !githubItems.isEmpty {
             var githubCollected: [WebSearchResultItem] = []
-            var githubDocs: [WebSearchDocument] = []
 
             for item in githubItems {
                 guard let link = item.link?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -62,19 +57,15 @@ final class BrowserWebSearchService: NSObject {
                     continue
                 }
                 githubCollected.append(item)
-                if githubDocs.count < 4, let doc = await fetchDocument(for: item) {
-                    githubDocs.append(doc)
-                }
                 if githubCollected.count >= 8 { break }
             }
 
             if !githubCollected.isEmpty {
                 items = Array((githubCollected + items).prefix(8))
             }
-            if !githubDocs.isEmpty {
-                docs = Array((githubDocs + docs).prefix(4))
-            }
         }
+
+        let docs = await fetchDocuments(for: Array(items.prefix(4)))
 
         guard !items.isEmpty || !docs.isEmpty else { return WebSearchResponse() }
         let filenames = items.compactMap(\.link)
@@ -92,30 +83,30 @@ final class BrowserWebSearchService: NSObject {
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
         let timestamp = Int(Date().timeIntervalSince1970)
         let needsFreshness = Self.searchNeedsFreshness(query)
-        let pages: [SearchPage] = [
-            SearchPage(url: "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)", timeout: 9, settleDelay: 600_000_000, resultLimit: 2),
-            SearchPage(url: "https://www.so.com/s?q=\(encoded)&ie=utf-8&_=\(timestamp)", timeout: 9, settleDelay: 600_000_000, resultLimit: 2),
-            SearchPage(url: "https://www.sogou.com/web?query=\(encoded)&ie=utf8&_=\(timestamp)", timeout: 10, settleDelay: 900_000_000, resultLimit: 2),
-            SearchPage(url: "https://quark.sm.cn/s?q=\(encoded)", timeout: 7, settleDelay: 600_000_000, resultLimit: 2),
-            SearchPage(url: "https://metaso.cn/?q=\(encoded)", timeout: 10, settleDelay: 1_200_000_000, resultLimit: 1),
-            SearchPage(url: "https://so.toutiao.com/search?keyword=\(encoded)&pd=information&dvpf=pc&_=\(timestamp)", timeout: 10, settleDelay: 900_000_000, resultLimit: 1),
+        var pages: [SearchPage] = [
             SearchPage(
                 url: needsFreshness
                     ? "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&filters=ex1%3a%22ez1%22&_=\(timestamp)"
                     : "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&_=\(timestamp)",
-                timeout: 10,
-                settleDelay: 700_000_000,
-                resultLimit: 1
+                timeout: 5,
+                settleDelay: 350_000_000,
+                resultLimit: 3
             ),
+            SearchPage(url: "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)", timeout: 5, settleDelay: 350_000_000, resultLimit: 3),
+            SearchPage(url: "https://www.so.com/s?q=\(encoded)&ie=utf-8&_=\(timestamp)", timeout: 5, settleDelay: 350_000_000, resultLimit: 2),
             SearchPage(
                 url: needsFreshness
                     ? "https://duckduckgo.com/html/?q=\(encoded)&df=d"
                     : "https://duckduckgo.com/html/?q=\(encoded)",
-                timeout: 8,
-                settleDelay: 700_000_000,
-                resultLimit: 1
-            )
+                timeout: 5,
+                settleDelay: 350_000_000,
+                resultLimit: 2
+            ),
+            SearchPage(url: "https://www.sogou.com/web?query=\(encoded)&ie=utf8&_=\(timestamp)", timeout: 6, settleDelay: 450_000_000, resultLimit: 1)
         ]
+        if needsFreshness {
+            pages.append(SearchPage(url: "https://so.toutiao.com/search?keyword=\(encoded)&pd=information&dvpf=pc&_=\(timestamp)", timeout: 6, settleDelay: 450_000_000, resultLimit: 1))
+        }
 
         var pageBuckets: [[WebSearchResultItem]] = []
         var seenLinks = Set<String>()
@@ -145,6 +136,10 @@ final class BrowserWebSearchService: NSObject {
             }
             if !pageItems.isEmpty {
                 pageBuckets.append(pageItems)
+                let collectedCount = pageBuckets.reduce(0) { $0 + $1.count }
+                if collectedCount >= 8 || (pageBuckets.count >= 3 && collectedCount >= 6) {
+                    break
+                }
             }
         }
 
@@ -166,6 +161,30 @@ final class BrowserWebSearchService: NSObject {
         return collected
     }
 
+    private func fetchDocuments(for items: [WebSearchResultItem]) async -> [WebSearchDocument] {
+        guard !items.isEmpty else { return [] }
+
+        let fetched = await withTaskGroup(of: (Int, WebSearchDocument?).self) { group in
+            for (index, item) in items.prefix(4).enumerated() {
+                group.addTask {
+                    (index, await Self.fastDocument(for: item))
+                }
+            }
+
+            var values: [(Int, WebSearchDocument)] = []
+            for await (index, document) in group {
+                if let document {
+                    values.append((index, document))
+                }
+            }
+            return values
+        }
+
+        return fetched
+            .sorted { $0.0 < $1.0 }
+            .map(\.1)
+    }
+
     private func fetchDocument(for item: WebSearchResultItem) async -> WebSearchDocument? {
         guard let rawLink = item.link,
               let url = URL(string: rawLink),
@@ -175,17 +194,17 @@ final class BrowserWebSearchService: NSObject {
         }
 
         if Self.isGitHubRepositoryURL(url) {
-            return summaryDocument(for: item)
+            return Self.summaryDocument(for: item)
         }
 
         guard await load(url: url, timeout: 16) else {
-            return summaryDocument(for: item)
+            return Self.summaryDocument(for: item)
         }
         try? await Task.sleep(nanoseconds: 800_000_000)
 
         guard let snapshot = await evaluatePageSnapshot(),
               !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return summaryDocument(for: item)
+            return Self.summaryDocument(for: item)
         }
 
         var sections: [String] = []
@@ -218,7 +237,7 @@ final class BrowserWebSearchService: NSObject {
         return WebSearchDocument(content: sections.joined(separator: "\n"), metadata: metadata)
     }
 
-    private func summaryDocument(for item: WebSearchResultItem) -> WebSearchDocument? {
+    private nonisolated static func summaryDocument(for item: WebSearchResultItem) -> WebSearchDocument? {
         var lines: [String] = []
         if let title = item.title, !title.isEmpty { lines.append("Title: \(title)") }
         if let link = item.link, !link.isEmpty { lines.append("URL: \(link)") }
@@ -234,6 +253,155 @@ final class BrowserWebSearchService: NSObject {
                 "searched_at": ISO8601DateFormatter().string(from: Date())
             ]
         )
+    }
+
+    private nonisolated static func firstHTMLCapture(_ pattern: String, in html: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return nil
+        }
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        guard let match = regex.firstMatch(in: html, options: [], range: range),
+              match.numberOfRanges > 1,
+              let captureRange = Range(match.range(at: 1), in: html) else {
+            return nil
+        }
+        return String(html[captureRange])
+    }
+
+    private nonisolated static func decodeHTMLEntities(_ value: String) -> String {
+        guard !value.isEmpty else { return value }
+        var decoded = value
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&#160;", with: " ")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#34;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&apos;", with: "'")
+
+        let numericPattern = #"&#x?([0-9A-Fa-f]+);"#
+        if let regex = try? NSRegularExpression(pattern: numericPattern) {
+            let source = decoded
+            var result = ""
+            var current = source.startIndex
+            for match in regex.matches(in: source, range: NSRange(source.startIndex..<source.endIndex, in: source)) {
+                guard let fullRange = Range(match.range(at: 0), in: source),
+                      let valueRange = Range(match.range(at: 1), in: source) else {
+                    continue
+                }
+                result += String(source[current..<fullRange.lowerBound])
+                let token = String(source[valueRange])
+                let isHex = source[fullRange].lowercased().hasPrefix("&#x")
+                let scalarValue = UInt32(token, radix: isHex ? 16 : 10)
+                if let scalarValue, let scalar = UnicodeScalar(scalarValue) {
+                    result += String(Character(scalar))
+                } else {
+                    result += String(source[fullRange])
+                }
+                current = fullRange.upperBound
+            }
+            result += String(source[current..<source.endIndex])
+            decoded = result
+        }
+        return decoded
+    }
+
+    private nonisolated static func cleanHTMLText(_ value: String) -> String {
+        decodeHTMLEntities(value)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private nonisolated static func plainText(fromHTML html: String) -> String {
+        var text = html
+            .replacingOccurrences(of: #"(?is)<script\b[^>]*>.*?</script>"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?is)<style\b[^>]*>.*?</style>"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?is)<noscript\b[^>]*>.*?</noscript>"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?is)<!--.*?-->"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)</(p|div|section|article|main|header|footer|aside|li|ul|ol|h[1-6]|br|tr|table)>"#, with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: #"(?is)<[^>]+>"#, with: " ", options: .regularExpression)
+
+        text = decodeHTMLEntities(text)
+        let lines = text
+            .components(separatedBy: .newlines)
+            .map(cleanHTMLText)
+            .filter { $0.count > 1 }
+        return lines
+            .joined(separator: "\n")
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private nonisolated static func fastDocument(for item: WebSearchResultItem) async -> WebSearchDocument? {
+        guard let rawLink = item.link,
+              let url = URL(string: rawLink),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              !isBlockedDocumentURL(url),
+              !isGitHubRepositoryURL(url) else {
+            return summaryDocument(for: item)
+        }
+
+        var request = URLRequest(url: url, timeoutInterval: 5)
+        request.cachePolicy = .returnCacheDataElseLoad
+        request.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else {
+                return summaryDocument(for: item)
+            }
+            let limitedData = Data(data.prefix(1_500_000))
+            guard let html = String(data: limitedData, encoding: .utf8)
+                    ?? String(data: limitedData, encoding: .isoLatin1) else {
+                return summaryDocument(for: item)
+            }
+            let title = firstHTMLCapture(#"(?is)<title[^>]*>(.*?)</title>"#, in: html)
+                .map(decodeHTMLEntities)
+                .map(cleanHTMLText)
+                .flatMap { $0.isEmpty ? nil : $0 }
+                ?? item.title
+                ?? rawLink
+            let description = firstHTMLCapture(#"(?is)<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["'][^>]*>"#, in: html)
+                ?? firstHTMLCapture(#"(?is)<meta[^>]+content=["']([^"']+)["'][^>]+name=["']description["'][^>]*>"#, in: html)
+                ?? item.snippet
+                ?? ""
+            let text = plainText(fromHTML: html)
+            guard text.count >= 160 else {
+                return summaryDocument(for: item)
+            }
+
+            var sections = [
+                "Title: \(title)",
+                "URL: \(rawLink)"
+            ]
+            let cleanedDescription = cleanHTMLText(decodeHTMLEntities(description))
+            if !cleanedDescription.isEmpty {
+                sections.append("Description: \(cleanedDescription)")
+            }
+            sections.append("Content excerpt:\n\(String(text.prefix(4_000)))")
+
+            var metadata = [
+                "title": title,
+                "source": rawLink,
+                "link": rawLink,
+                "provider": "urlsession_web_page",
+                "searched_at": ISO8601DateFormatter().string(from: Date())
+            ]
+            if !cleanedDescription.isEmpty {
+                metadata["search_snippet"] = cleanedDescription
+            }
+            return WebSearchDocument(content: sections.joined(separator: "\n"), metadata: metadata)
+        } catch {
+            return summaryDocument(for: item)
+        }
     }
 
     private func load(url: URL, timeout: TimeInterval) async -> Bool {
@@ -548,7 +716,7 @@ final class BrowserWebSearchService: NSObject {
         ].contains { normalized.contains($0) }
     }
 
-    private static func isBlockedDocumentURL(_ url: URL) -> Bool {
+    private nonisolated static func isBlockedDocumentURL(_ url: URL) -> Bool {
         let host = url.host?.lowercased() ?? ""
         let absolute = url.absoluteString.lowercased()
         let lowValuePathTokens = [
@@ -587,7 +755,7 @@ final class BrowserWebSearchService: NSObject {
         return blockedExt.contains { path.hasSuffix($0) }
     }
 
-    private static func isLowValueSearchResult(_ item: WebSearchResultItem) -> Bool {
+    private nonisolated static func isLowValueSearchResult(_ item: WebSearchResultItem) -> Bool {
         let value = [
             item.title ?? "",
             item.link ?? "",
@@ -637,7 +805,7 @@ final class BrowserWebSearchService: NSObject {
         return triggers.contains { normalized.contains($0) }
     }
 
-    private static func isGitHubRepositoryURL(_ url: URL) -> Bool {
+    private nonisolated static func isGitHubRepositoryURL(_ url: URL) -> Bool {
         guard let host = url.host?.lowercased(),
               host == "github.com" || host.hasSuffix(".github.com") else {
             return false

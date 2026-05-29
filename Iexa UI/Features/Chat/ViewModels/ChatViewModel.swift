@@ -415,6 +415,9 @@ final class ChatViewModel {
     /// Guards against flooding syncForExternalStream with duplicate fetch tasks
     /// when many socket tokens arrive before the first fetch completes.
     private var isSyncingExternalStream: Bool = false
+    /// Raw text for passive socket streams. The visible message content is
+    /// sanitized on every event so huge inline image payloads never enter SwiftUI.
+    private var externalRawContentByMessageId: [String: String] = [:]
     private(set) var sessionId: String = UUID().uuidString
     private let logger = Logger(subsystem: "com.openui", category: "ChatViewModel")
     private let webLinkContextResolver = WebLinkContextResolver()
@@ -4149,13 +4152,22 @@ final class ChatViewModel {
                 logger.info("External stream: first token for message \(msgId)")
             }
             if let index = conversation?.messages.firstIndex(where: { $0.id == msgId }) {
+                let previousRawContent = externalRawContentByMessageId[msgId]
+                    ?? conversation?.messages[index].content
+                    ?? ""
+                let rawContent: String
                 if isReplace {
                     // Full content replacement (message, chat:message, replace, chat:completion fallback)
-                    conversation?.messages[index].content = contentDelta
+                    rawContent = contentDelta
                 } else {
                     // Delta/token append (chat:message:delta, chat:completion choices.delta)
-                    conversation?.messages[index].content += contentDelta
+                    rawContent = previousRawContent + contentDelta
                 }
+                externalRawContentByMessageId[msgId] = rawContent
+                let displayContent = Self.safeAssistantDisplayContent(
+                    Self.cleanedProviderCitationArtifacts(rawContent)
+                )
+                conversation?.messages[index].content = displayContent
                 conversation?.messages[index].isStreaming = true
                 triggerStreamingHaptic()
             }
@@ -4163,14 +4175,18 @@ final class ChatViewModel {
             // Also check for done signal within content events (chat:completion
             // can carry both content AND done:true in the same event)
             if type == "chat:completion", let payload, payload["done"] as? Bool == true {
-                let finalContent = conversation?.messages.first(where: { $0.id == msgId })?.content ?? ""
+                let finalContent = externalRawContentByMessageId[msgId]
+                    ?? conversation?.messages.first(where: { $0.id == msgId })?.content
+                    ?? ""
                 isExternallyStreaming = false
                 isStreaming = false
                 isSyncingExternalStream = false
                 if let index = conversation?.messages.firstIndex(where: { $0.id == msgId }) {
+                    attachInlineImages(from: finalContent, to: index)
                     conversation?.messages[index].isStreaming = false
                 }
                 normalizeAssistantGeneratedMedia(messageId: msgId)
+                externalRawContentByMessageId[msgId] = nil
                 let normalizedContent = conversation?.messages
                     .first(where: { $0.id == msgId })?.content ?? finalContent
                 let chatId = conversationId ?? conversation?.id
@@ -4193,15 +4209,18 @@ final class ChatViewModel {
         // Handle done signal (when no content in the event)
         if type == "chat:completion", let payload, payload["done"] as? Bool == true {
             let finalContent = messageId.flatMap { id in
-                conversation?.messages.first(where: { $0.id == id })?.content
+                externalRawContentByMessageId[id]
+                    ?? conversation?.messages.first(where: { $0.id == id })?.content
             } ?? ""
             isExternallyStreaming = false
             isStreaming = false
             isSyncingExternalStream = false
             if let msgId = messageId,
                let index = conversation?.messages.firstIndex(where: { $0.id == msgId }) {
+                attachInlineImages(from: finalContent, to: index)
                 conversation?.messages[index].isStreaming = false
                 normalizeAssistantGeneratedMedia(messageId: msgId)
+                externalRawContentByMessageId[msgId] = nil
             }
             // Final sync to pick up complete content, files, sources
             let chatId = conversationId ?? conversation?.id
@@ -4230,6 +4249,7 @@ final class ChatViewModel {
             if let msgId = messageId,
                let index = conversation?.messages.firstIndex(where: { $0.id == msgId }) {
                 conversation?.messages[index].isStreaming = false
+                externalRawContentByMessageId[msgId] = nil
             }
             return
         }
@@ -10411,17 +10431,30 @@ final class ChatViewModel {
 
     private static func writeGeneratedImageToCache(dataURL: String) -> String? {
         guard let data = imageData(fromDataURL: dataURL) else { return nil }
+        let contentType = imageContentType(for: dataURL)
+        let fileExtension = fileExtension(forImageContentType: contentType)
         let baseDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         let directory = baseDirectory.appendingPathComponent("iexa-generated-images", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let fileURL = directory.appendingPathComponent("\(UUID().uuidString).png")
-            try data.write(to: fileURL, options: [.atomic])
+            let fileURL = directory.appendingPathComponent("\(stableImageHash(data)).\(fileExtension)")
+            if !FileManager.default.fileExists(atPath: fileURL.path) {
+                try data.write(to: fileURL, options: [.atomic])
+            }
             return fileURL.absoluteString
         } catch {
             return nil
         }
+    }
+
+    private static func stableImageHash(_ data: Data) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in data {
+            hash ^= UInt64(byte)
+            hash = hash &* 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
     }
 
     private static func resizedImageDataURL(from dataURL: String, canvasSize: String?) -> String? {
@@ -15574,6 +15607,7 @@ final class ChatViewModel {
 
     private static func safeAssistantDisplayContent(_ text: String) -> String {
         guard text.range(of: "data:image/", options: .caseInsensitive) != nil
+            || text.range(of: "image:data/", options: .caseInsensitive) != nil
             || text.range(of: "data:video/", options: .caseInsensitive) != nil
             || text.range(of: "data:audio/", options: .caseInsensitive) != nil
             || text.range(of: "base64", options: .caseInsensitive) != nil else {
@@ -15614,10 +15648,9 @@ final class ChatViewModel {
     }
 
     private func attachInlineImages(from rawContent: String, to messageIndex: Int) {
-        let extractedImages = Self.extractInlineImageReferences(from: rawContent)
-        guard !extractedImages.isEmpty else { return }
         guard conversation?.messages.indices.contains(messageIndex) == true else { return }
 
+        let extractedImages = Self.extractInlineImageReferences(from: rawContent)
         var merged = conversation?.messages[messageIndex].files ?? []
         var appended = false
         for image in extractedImages {
@@ -15626,15 +15659,25 @@ final class ChatViewModel {
                 appended = true
             }
         }
-        guard appended else { return }
 
-        conversation?.messages[messageIndex].files = merged
+        let cleanedContent = Self.cleanedAssistantContentAfterImageExtraction(rawContent)
+        let previousContent = conversation?.messages[messageIndex].content ?? ""
+        let contentChanged = cleanedContent != previousContent
+        guard appended || contentChanged else { return }
+
+        if appended {
+            conversation?.messages[messageIndex].files = merged
+        }
+        if contentChanged {
+            conversation?.messages[messageIndex].content = cleanedContent
+        }
         let messageId = conversation?.messages[messageIndex].id
         let messageContent = conversation?.messages[messageIndex].content
+        let messageFiles = conversation?.messages[messageIndex].files ?? merged
         if let messageId {
             conversation?.history.updateNode(id: messageId) { node in
                 node.content = messageContent ?? node.content
-                node.files = merged
+                node.files = messageFiles
                 node.done = true
             }
         }
@@ -15940,10 +15983,13 @@ final class ChatViewModel {
         }
 
         addMatches(#"!?\[[^\]]*\]\(\s*(data:image/[^)\s]+)(?:\s+["'][^)]*["'])?\s*\)"#)
+        addMatches(#"!?\[[^\]]*\]\(\s*(image:data/[^)\s]+)(?:\s+["'][^)]*["'])?\s*\)"#)
         addMatches(#"!?\[[^\]]*\]\(\s*(https?://[^)\s]+)(?:\s+["'][^)]*["'])?\s*\)"#)
         addMatches(#"<img[^>]+src=["'](data:image/[^"']+)["']"#)
+        addMatches(#"<img[^>]+src=["'](image:data/[^"']+)["']"#)
         addMatches(#"<img[^>]+src=["'](https?://[^"']+)["']"#)
         addMatches(#"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,})"#)
+        addMatches(#"(image:data/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,})"#)
         addMatches(#"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_\-\s]{128,})""#)
         addMatches(#"(?:"url"|"image_url"|"display_url"|"download_url"|"image")\s*:\s*"(https?:\\?/\\?/[^"]+)""#)
         addMatches(#"(https?://[^\s"'<>`)]+)"#)
@@ -15951,8 +15997,9 @@ final class ChatViewModel {
         return results.compactMap { value -> String? in
             let trimmed = sanitizedImageReferenceCandidate(value)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("data:image/") {
-                let compact = trimmed.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            let normalizedDataImage = normalizedImageDataURI(trimmed)
+            if let normalizedDataImage {
+                let compact = normalizedDataImage.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
                 return writeGeneratedImageToCache(dataURL: compact)
             }
             if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
@@ -15975,6 +16022,17 @@ final class ChatViewModel {
             candidate.removeLast()
         }
         return candidate
+    }
+
+    private static func normalizedImageDataURI(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("data:image/") {
+            return trimmed
+        }
+        if trimmed.hasPrefix("image:data/") {
+            return "data:image/" + String(trimmed.dropFirst("image:data/".count))
+        }
+        return nil
     }
 
     private static func looksLikeBase64Image(_ value: String) -> Bool {
@@ -16102,10 +16160,16 @@ final class ChatViewModel {
         let patterns = [
             #"!?\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
             #"!?\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
+            #"!?\[[^\]]*\]\(\s*image:data/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
+            #"!?\[[^\]]*\]\(\s*image:data/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
+            #"(?m)^\s*!?\[[^\]]*\]\(\s*$"#,
+            #"!?\[[^\]]*\]\(\s*$"#,
             #"\!\[[^\]]*\]\(\s*https?://[^)\s]+(?:\s+["'][^)]*["'])?\s*\)"#,
             #"<img[^>]+src=["']data:image/[^"']+["'][^>]*>"#,
+            #"<img[^>]+src=["']image:data/[^"']+["'][^>]*>"#,
             #"<img[^>]+src=["']https?://[^"']+["'][^>]*>"#,
             #"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,}"#,
+            #"image:data/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,}"#,
             #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"[A-Za-z0-9+/=_\-\s]{128,}""#,
             #"(?:"url"|"image_url"|"display_url"|"download_url"|"image")\s*:\s*"https?:\\?/\\?/[^"]+""#
         ]

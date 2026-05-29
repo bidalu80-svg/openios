@@ -468,21 +468,21 @@ struct StreamingMarkdownView: View {
 
     private static let directDataImagePattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,})"#,
+            pattern: #"((?:data:image|image:data)/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,})"#,
             options: [.caseInsensitive]
         )
     }()
 
     private static let dataImageMarkdownPattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"!?\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
+            pattern: #"!?\[[^\]]*\]\(\s*(?:data:image|image:data)/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
             options: [.caseInsensitive]
         )
     }()
 
     private static let partialDataImageMarkdownPattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"!?\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
+            pattern: #"!?\[[^\]]*\]\(\s*(?:data:image|image:data)/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
             options: [.caseInsensitive]
         )
     }()
@@ -490,6 +490,13 @@ struct StreamingMarkdownView: View {
     private static let partialMarkdownImagePattern: NSRegularExpression? = {
         try? NSRegularExpression(
             pattern: #"!?\[[^\]]*\]\([^)]*$"#,
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static let orphanMarkdownImagePattern: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"(?m)^\s*!?\[[^\]]*\]\(\s*$"#,
             options: [.caseInsensitive]
         )
     }()
@@ -586,15 +593,19 @@ struct StreamingMarkdownView: View {
         if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
             return URL(string: trimmed)
         }
-        if trimmed.hasPrefix("data:image/") {
-            return URL(string: trimmed)
+        if trimmed.hasPrefix("data:image/") || trimmed.hasPrefix("image:data/") {
+            return nil
         }
         return nil
     }
 
     private static func normalizedDataImageReference(_ raw: String) -> String {
-        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+        if trimmed.hasPrefix("image:data/") {
+            return "data:image/" + String(trimmed.dropFirst("image:data/".count))
+        }
+        return trimmed
     }
 
     private static func normalizedApostropheFenceMarkers(_ text: String) -> String {
@@ -626,7 +637,16 @@ struct StreamingMarkdownView: View {
             )
         }
         if let pattern = partialMarkdownImagePattern,
-           cleaned.lowercased().contains("data:image/") {
+           (cleaned.lowercased().contains("data:image/")
+            || cleaned.lowercased().contains("image:data/")) {
+            cleaned = pattern.stringByReplacingMatches(
+                in: cleaned,
+                options: [],
+                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                withTemplate: ""
+            )
+        }
+        if let pattern = orphanMarkdownImagePattern {
             cleaned = pattern.stringByReplacingMatches(
                 in: cleaned,
                 options: [],
@@ -1965,7 +1985,7 @@ private struct KaTeXWebView: UIViewRepresentable {
 enum InlineDataPayloadSanitizer {
     private static let inlineDataURIPattern: NSRegularExpression? = {
         try? NSRegularExpression(
-            pattern: #"data:((?:image|audio|video)/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/=_\-\s]{256,})"#,
+            pattern: #"(?:(data:((?:image|audio|video)/[A-Za-z0-9.+-]+))|(image:data/([A-Za-z0-9.+-]+)));base64,([A-Za-z0-9+/=_\-\s]{256,})"#,
             options: [.caseInsensitive]
         )
     }()
@@ -1984,6 +2004,7 @@ enum InlineDataPayloadSanitizer {
     static func sanitizedDisplayText(_ text: String) -> String {
         guard text.range(of: "base64", options: .caseInsensitive) != nil
             || text.range(of: "data:image", options: .caseInsensitive) != nil
+            || text.range(of: "image:data", options: .caseInsensitive) != nil
             || text.range(of: "data:video", options: .caseInsensitive) != nil
             || text.range(of: "data:audio", options: .caseInsensitive) != nil else {
             return text
@@ -1996,7 +2017,7 @@ enum InlineDataPayloadSanitizer {
                 in: cleaned,
                 options: [],
                 range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
-                withTemplate: "data:$1;base64,<已隐藏超长Base64内容>"
+                withTemplate: "<已隐藏超长Base64内容>"
             )
         }
 
