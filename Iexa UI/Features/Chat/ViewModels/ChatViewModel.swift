@@ -1313,11 +1313,13 @@ final class ChatViewModel {
     private static func isRenderableImageReference(_ value: String?) -> Bool {
         guard let value, !value.isEmpty else { return false }
         if value.hasPrefix("data:image/")
+            || value.hasPrefix("image:data/")
             || value.hasPrefix("file://")
             || value.hasPrefix("http://")
             || value.hasPrefix("https://") {
             return true
         }
+        guard value.utf8.count <= 4_096 else { return false }
         let lower = value.lowercased()
         return [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif", ".svg"].contains { lower.contains($0) }
     }
@@ -1336,15 +1338,20 @@ final class ChatViewModel {
         local: [ChatMessageFile],
         incoming: [ChatMessageFile]
     ) -> [ChatMessageFile] {
-        let localDisplayImages = local.filter { file in
+        let localFiles = sanitizedMessageFiles(local)
+        let incomingFiles = sanitizedMessageFiles(incoming)
+        let localDisplayImages = localFiles.filter { file in
             isImageFile(file)
                 && (file.displayURL?.hasPrefix("data:image/") == true
+                    || file.displayURL?.hasPrefix("image:data/") == true
                     || file.displayURL?.hasPrefix("file://") == true
-                    || file.url?.hasPrefix("data:image/") == true)
+                    || file.url?.hasPrefix("data:image/") == true
+                    || file.url?.hasPrefix("image:data/") == true
+                    || file.url?.hasPrefix("file://") == true)
         }
-        guard !localDisplayImages.isEmpty else { return incoming }
+        guard !localDisplayImages.isEmpty else { return incomingFiles }
 
-        var merged = incoming
+        var merged = incomingFiles
         for image in localDisplayImages {
             let displayURL = image.displayURL ?? image.url
             if let name = image.name,
@@ -1367,12 +1374,13 @@ final class ChatViewModel {
     }
 
     private static func serverPersistableFiles(_ files: [ChatMessageFile]) -> [ChatMessageFile] {
-        files.compactMap { file in
+        sanitizedMessageFiles(files).compactMap { file in
             if isLocalOnlyFileReference(file.url) {
                 return nil
             }
             if isImageFile(file)
                 && (file.url?.hasPrefix("data:image/") == true
+                    || file.url?.hasPrefix("image:data/") == true
                     || file.url?.hasPrefix("file://") == true) {
                 return nil
             }
@@ -1380,6 +1388,95 @@ final class ChatViewModel {
             persistable.displayURL = nil
             return persistable
         }
+    }
+
+    private static func sanitizedMessageFiles(_ files: [ChatMessageFile]) -> [ChatMessageFile] {
+        files.compactMap(sanitizedMessageFile)
+    }
+
+    private static func sanitizedMessageForDisplay(_ message: ChatMessage) -> ChatMessage {
+        var sanitized = message
+        if sanitized.role == .assistant {
+            sanitized.content = safeAssistantDisplayContent(
+                cleanedProviderCitationArtifacts(sanitized.content)
+            )
+        }
+        sanitized.files = sanitizedMessageFiles(sanitized.files)
+        sanitized.versions = sanitized.versions.map(sanitizedMessageVersionForDisplay)
+        return sanitized
+    }
+
+    private static func sanitizedConversationForDisplay(_ conversation: Conversation) -> Conversation {
+        var sanitized = conversation
+        sanitized.messages = sanitized.messages.map(sanitizedMessageForDisplay)
+        sanitized.history.nodes = sanitized.history.nodes.mapValues(sanitizedHistoryNodeForDisplay)
+        return sanitized
+    }
+
+    private static func sanitizedHistoryNodeForDisplay(_ node: HistoryNode) -> HistoryNode {
+        var sanitized = node
+        if sanitized.role == .assistant {
+            sanitized.content = safeAssistantDisplayContent(
+                cleanedProviderCitationArtifacts(sanitized.content)
+            )
+        }
+        sanitized.files = sanitizedMessageFiles(sanitized.files)
+        return sanitized
+    }
+
+    private static func sanitizedMessageVersionForDisplay(_ version: ChatMessageVersion) -> ChatMessageVersion {
+        var sanitized = version
+        sanitized.content = safeAssistantDisplayContent(
+            cleanedProviderCitationArtifacts(sanitized.content)
+        )
+        sanitized.files = sanitizedMessageFiles(sanitized.files)
+        return sanitized
+    }
+
+    private static func sanitizedMessageFile(_ file: ChatMessageFile) -> ChatMessageFile? {
+        var sanitized = file
+
+        if let url = sanitized.url {
+            sanitized.url = safeMessageFileReference(url, isImage: isImageFile(sanitized))
+        }
+        if let displayURL = sanitized.displayURL {
+            sanitized.displayURL = safeMessageFileReference(displayURL, isImage: isImageFile(sanitized))
+        }
+
+        if isImageFile(sanitized),
+           sanitized.displayURL == nil,
+           let url = sanitized.url,
+           url.hasPrefix("file://") {
+            sanitized.displayURL = url
+        }
+
+        if sanitized.url == nil && sanitized.displayURL == nil {
+            return nil
+        }
+        return sanitized
+    }
+
+    private static func safeMessageFileReference(_ value: String, isImage: Bool) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if isImage, let dataURI = normalizedImageDataURI(trimmed) {
+            return writeGeneratedImageToCache(dataURL: dataURI.replacingOccurrences(
+                of: #"\s+"#,
+                with: "",
+                options: .regularExpression
+            ))
+        }
+
+        if trimmed.hasPrefix("data:") || trimmed.hasPrefix("image:data/") {
+            return nil
+        }
+
+        if trimmed.utf8.count > 4_096 {
+            return nil
+        }
+
+        return trimmed
     }
 
     private func inlineImageDataURL(data: Data, fileName: String) -> String {
@@ -2784,7 +2881,7 @@ final class ChatViewModel {
             // Always use server data as the source of truth.
             // Versions are now stored as sibling messages on the server,
             // so server-fetched data already contains them.
-            conversation = fetched
+            conversation = Self.sanitizedConversationForDisplay(fetched)
             // Populate tasks from the server conversation
             tasks = fetched.tasks
             // Always adopt the last-used model for existing chats.
@@ -2793,7 +2890,7 @@ final class ChatViewModel {
             // This ensures returning to a chat uses the model from the most
             // recent response, even if it was changed mid-conversation from
             // the web UI or another client.
-            if let lastAssistantModel = fetched.messages.last(where: { $0.role == .assistant })?.model,
+            if let lastAssistantModel = conversation?.messages.last(where: { $0.role == .assistant })?.model,
                !lastAssistantModel.isEmpty {
                 selectedModelId = lastAssistantModel
             } else if let conversationModel = fetched.model, !conversationModel.isEmpty {
@@ -3037,7 +3134,8 @@ final class ChatViewModel {
         }
 
         // Phase 2: Update existing messages in-place and insert new ones
-        for (serverIdx, serverMsg) in serverMessages.enumerated() {
+        for (serverIdx, rawServerMsg) in serverMessages.enumerated() {
+            let serverMsg = Self.sanitizedMessageForDisplay(rawServerMsg)
             if let localIdx = conversation!.messages.firstIndex(where: { $0.id == serverMsg.id }) {
                 // Message exists locally — update only changed fields in-place
                 let local = conversation!.messages[localIdx]
@@ -10422,8 +10520,8 @@ final class ChatViewModel {
     }
 
     private func localDisplayImageReference(from imageReference: String, canvasSize: String? = nil) async -> String? {
-        if imageReference.hasPrefix("data:image/") {
-            let resized = Self.resizedImageDataURL(from: imageReference, canvasSize: canvasSize) ?? imageReference
+        if let normalized = Self.normalizedImageDataURI(imageReference) {
+            let resized = Self.resizedImageDataURL(from: normalized, canvasSize: canvasSize) ?? normalized
             return Self.writeGeneratedImageToCache(dataURL: resized)
         }
         return nil
@@ -10491,16 +10589,27 @@ final class ChatViewModel {
         imageReference: String,
         displayReference: String
     ) {
-        let contentType = Self.imageContentType(for: displayReference)
-        let safeURL = imageReference.hasPrefix("data:image/") ? displayReference : imageReference
+        let normalizedImageData = Self.normalizedImageDataURI(imageReference)
+        let normalizedDisplayData = Self.normalizedImageDataURI(displayReference)
+        let localDisplayReference = (normalizedDisplayData ?? normalizedImageData).flatMap {
+            Self.writeGeneratedImageToCache(dataURL: $0.replacingOccurrences(
+                of: #"\s+"#,
+                with: "",
+                options: .regularExpression
+            ))
+        }
+        let resolvedDisplayReference = localDisplayReference ?? displayReference
+        let contentType = Self.imageContentType(for: normalizedDisplayData ?? normalizedImageData ?? resolvedDisplayReference)
+        let safeURL = normalizedImageData != nil ? resolvedDisplayReference : imageReference
         let fileName = Self.imageFileName(for: displayReference, contentType: contentType)
-        let file = ChatMessageFile(
+        let rawFile = ChatMessageFile(
             type: "image",
             url: safeURL,
             name: fileName,
             contentType: contentType,
-            displayURL: displayReference
+            displayURL: resolvedDisplayReference
         )
+        guard let file = Self.sanitizedMessageFile(rawFile) else { return }
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
         if conversation?.messages[index].files.contains(where: {
             $0.url == file.url || $0.displayURL == file.displayURL
@@ -10546,6 +10655,12 @@ final class ChatViewModel {
             let afterPrefix = lower.dropFirst("data:".count)
             if let semicolon = afterPrefix.firstIndex(of: ";") {
                 return String(afterPrefix[..<semicolon])
+            }
+        }
+        if lower.hasPrefix("image:data/") {
+            let afterPrefix = lower.dropFirst("image:data/".count)
+            if let semicolon = afterPrefix.firstIndex(of: ";") {
+                return "image/\(afterPrefix[..<semicolon])"
             }
         }
         if lower.contains(".png") { return "image/png" }
@@ -15659,6 +15774,7 @@ final class ChatViewModel {
                 appended = true
             }
         }
+        merged = Self.sanitizedMessageFiles(merged)
 
         let cleanedContent = Self.cleanedAssistantContentAfterImageExtraction(rawContent)
         let previousContent = conversation?.messages[messageIndex].content ?? ""
@@ -15929,6 +16045,14 @@ final class ChatViewModel {
         populateFilesFromToolResults(messageId: messageId)
 
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        let currentFiles = conversation!.messages[index].files
+        let sanitizedFiles = Self.sanitizedMessageFiles(currentFiles)
+        if sanitizedFiles != currentFiles {
+            conversation?.messages[index].files = sanitizedFiles
+            conversation?.history.updateNode(id: messageId) { node in
+                node.files = sanitizedFiles
+            }
+        }
         let message = conversation!.messages[index]
         guard message.role == .assistant else { return }
 
@@ -16051,6 +16175,7 @@ final class ChatViewModel {
     }
 
     private static func isLikelyImageURL(_ value: String) -> Bool {
+        guard value.utf8.count <= 4_096 else { return false }
         guard let url = URL(string: value),
               let host = url.host?.lowercased() else { return false }
         let lower = value.lowercased()

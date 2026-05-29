@@ -1194,8 +1194,8 @@ final class APIClient: @unchecked Sendable {
                let reference = firstImageReference(in: json) {
                 return reference
             }
-            if trimmed.hasPrefix("data:image/") {
-                return trimmed
+            if let dataImage = normalizedImageDataURI(trimmed) {
+                return dataImage
             }
             if (trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")),
                isLikelyImageURL(trimmed) {
@@ -1264,8 +1264,8 @@ final class APIClient: @unchecked Sendable {
     private func explicitImageReference(_ raw: String, allowsOpaqueImageURL: Bool = false) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        if trimmed.hasPrefix("data:image/") {
-            return trimmed
+        if let dataImage = normalizedImageDataURI(trimmed) {
+            return dataImage
         }
         if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
             return (allowsOpaqueImageURL || isLikelyImageURL(trimmed)) ? trimmed : nil
@@ -1281,11 +1281,11 @@ final class APIClient: @unchecked Sendable {
 
     private func firstImageReferenceInText(_ text: String) -> String? {
         let patterns = [
-            #"!\[[^\]]*\]\((data:image/[^)\s]+)\)"#,
+            #"!\[[^\]]*\]\(((?:data:image|image:data)/[^)\s]+)\)"#,
             #"!\[[^\]]*\]\((https?://[^)\s]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^)\s]*)?)\)"#,
-            #"<img[^>]+src=["'](data:image/[^"']+)["']"#,
+            #"<img[^>]+src=["']((?:data:image|image:data)/[^"']+)["']"#,
             #"<img[^>]+src=["'](https?://[^"']+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^"']*)?)["']"#,
-            #"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{128,})"#,
+            #"((?:data:image|image:data)/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]{128,})"#,
             #"(https?://[^\s"'<>]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^\s"'<>]+)?)"#,
             #"(https?://assets\.grok\.com/[^\s"'<>]+)"#,
             #"(?:"url"|"image_url"|"imageUrl"|"imageURL"|"download_url"|"output_url")\s*:\s*"(https?://[^"]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^"]*)?)""#,
@@ -1300,8 +1300,8 @@ final class APIClient: @unchecked Sendable {
                   match.numberOfRanges > 1 else { continue }
             let value = nsText.substring(with: match.range(at: 1))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if value.hasPrefix("data:image/") {
-                return value
+            if let dataImage = normalizedImageDataURI(value) {
+                return dataImage
             }
             if value.hasPrefix("http://") || value.hasPrefix("https://") {
                 if isLikelyImageURL(value) {
@@ -1318,6 +1318,7 @@ final class APIClient: @unchecked Sendable {
     }
 
     private func isLikelyImageURL(_ value: String) -> Bool {
+        guard value.utf8.count <= 4_096 else { return false }
         guard let url = URL(string: value),
               let host = url.host?.lowercased() else { return false }
         let lower = value.lowercased()
@@ -1336,6 +1337,17 @@ final class APIClient: @unchecked Sendable {
         }
         let imagePathHints = ["/image", "/images", "/generated", "/media", "/asset", "/assets", "/file", "/files"]
         return imagePathHints.contains(where: { lower.contains($0) })
+    }
+
+    private func normalizedImageDataURI(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("data:image/") {
+            return trimmed
+        }
+        if trimmed.hasPrefix("image:data/") {
+            return "data:image/" + String(trimmed.dropFirst("image:data/".count))
+        }
+        return nil
     }
 
     private func firstVideoReference(in value: Any?) -> String? {

@@ -2625,8 +2625,17 @@ struct ChatDetailView: View {
     private func imageReference(for file: ChatMessageFile) -> String? {
         let candidates = [file.displayURL, file.url].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
         for candidate in candidates where !candidate.isEmpty {
-            if candidate.hasPrefix("data:image/")
-                || candidate.hasPrefix("file://")
+            if candidate.hasPrefix("data:image/") {
+                guard candidate.utf8.count <= 80_000 else { continue }
+                return candidate
+            }
+            if candidate.hasPrefix("image:data/") {
+                continue
+            }
+            guard candidate.utf8.count <= 4_096 else {
+                continue
+            }
+            if candidate.hasPrefix("file://")
                 || candidate.hasPrefix("http://")
                 || candidate.hasPrefix("https://") {
                 return candidate
