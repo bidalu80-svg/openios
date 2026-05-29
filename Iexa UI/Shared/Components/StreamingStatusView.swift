@@ -38,7 +38,7 @@ struct StreamingStatusView: View {
             EmptyView()
         } else if isLocalAlpineStatus {
             localAlpineActivityRow
-        } else if isLocalAlpineAgentStatus {
+        } else if isLocalAlpineAgentStatus || isLocalAlpineToolStatus {
             localAlpineAgentActivityRow
         } else if isWebSearchStatus {
             webSearchCard
@@ -95,6 +95,10 @@ struct StreamingStatusView: View {
 
     private var isLocalAlpineAgentStatus: Bool {
         latestStatus?.action?.lowercased() == "local_alpine_agent"
+    }
+
+    private var isLocalAlpineToolStatus: Bool {
+        latestStatus?.action?.lowercased() == "local_alpine_tool"
     }
 
     private var isWebSearchStatus: Bool {
@@ -663,24 +667,33 @@ struct StreamingStatusView: View {
         let isDone = latest?.done == true
         let title = latest.map(resolveStatusDescription(for:))
             ?? "正在整理本地 Alpine 输出"
+        let failed = localAlpineDidFail(title)
+        let color: Color = failed ? .orange : (isDone ? theme.success : theme.brandPrimary)
 
-        return HStack(spacing: 7) {
-            Image(systemName: isDone ? "checkmark.circle" : "terminal")
-                .scaledFont(size: 12, weight: .semibold)
-                .foregroundStyle(isDone ? theme.textTertiary : theme.brandPrimary)
+        return HStack(spacing: 9) {
+            ZStack {
+                Circle()
+                    .fill(color.opacity(theme.isDark ? 0.18 : 0.11))
+                    .frame(width: 26, height: 26)
+                Image(systemName: isDone ? (failed ? "exclamationmark" : "checkmark") : "terminal.fill")
+                    .scaledFont(size: 12, weight: .bold)
+                    .foregroundStyle(color)
+            }
 
-            if isDone {
-                Text(title)
-                    .scaledFont(size: 12, weight: .medium)
-                    .foregroundStyle(theme.textTertiary)
-                    .lineLimit(1)
-            } else {
+            if !isDone {
                 ShimmerText(text: title, theme: theme)
                     .lineLimit(1)
+                    .truncationMode(.tail)
+            } else {
+                Text(title)
+                    .scaledFont(size: 13, weight: .semibold)
+                    .foregroundStyle(failed ? .orange : theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
         }
         .padding(.horizontal, Spacing.screenPadding)
-        .padding(.vertical, 4)
+        .padding(.vertical, Spacing.xs)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

@@ -25,10 +25,149 @@ private struct AgentActivityItem: Identifiable, Hashable {
     let hasFailure: Bool
     let toolCalls: [LocalAlpineToolCall]
 
-    init?(message: ChatMessage) {
-        guard message.metadata?["iexa_local_alpine_result"] == "true"
+    var isActive: Bool {
+        isStreaming || toolCalls.contains { $0.isRunning }
+    }
+
+    var completedStepCount: Int {
+        let completedTools = toolCalls.filter { !$0.isRunning }.count
+        if completedTools > 0 { return completedTools }
+        return max(commandCount + fileCount, isActive ? 0 : 1)
+    }
+
+    var totalStepCount: Int {
+        max(toolCalls.count, commandCount + fileCount, 1)
+    }
+
+    var currentStepTitle: String {
+        if let running = toolCalls.last(where: { $0.isRunning }) {
+            return Self.displayTitle(for: running)
+        }
+        if let latest = toolCalls.last {
+            return Self.displayTitle(for: latest)
+        }
+        return summary
+    }
+
+    var currentStepDetail: String {
+        if let running = toolCalls.last(where: { $0.isRunning }) {
+            return running.displayDetail
+        }
+        if let latest = toolCalls.last {
+            return latest.displayDetail
+        }
+        var parts: [String] = []
+        if commandCount > 0 { parts.append("\(commandCount) 条命令") }
+        if fileCount > 0 { parts.append("\(fileCount) 个文件") }
+        return parts.isEmpty ? "查看完整 Agent 记录" : parts.joined(separator: " · ")
+    }
+
+    var currentToolCall: LocalAlpineToolCall? {
+        toolCalls.last(where: { $0.isRunning }) ?? toolCalls.last
+    }
+
+    var currentStepIndex: Int {
+        guard let currentToolCall,
+              let index = toolCalls.firstIndex(where: { $0.id == currentToolCall.id }) else {
+            return min(max(completedStepCount, 1), totalStepCount)
+        }
+        return index + 1
+    }
+
+    var currentStepPreview: String {
+        guard let currentToolCall else { return currentStepDetail }
+        if let output = currentToolCall.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !output.isEmpty {
+            return Self.previewSnippet(output)
+        }
+        return Self.previewSnippet(currentToolCall.displayDetail)
+    }
+
+    static func previewSnippet(_ text: String, limit: Int = 220) -> String {
+        var result = ""
+        result.reserveCapacity(min(limit + 3, 256))
+        var emitted = 0
+        var lastWasSpace = true
+
+        for scalar in text.unicodeScalars {
+            let isSpace = scalar.value == 9
+                || scalar.value == 10
+                || scalar.value == 11
+                || scalar.value == 12
+                || scalar.value == 13
+                || scalar.value == 32
+            if isSpace {
+                guard !lastWasSpace, emitted < limit else { continue }
+                result.append(" ")
+                emitted += 1
+                lastWasSpace = true
+                continue
+            }
+
+            guard emitted < limit else {
+                result.append("...")
+                return result
+            }
+            result.unicodeScalars.append(scalar)
+            emitted += 1
+            lastWasSpace = false
+        }
+
+        if result.last == " " {
+            result.removeLast()
+        }
+        return result
+    }
+
+    static func displayTitle(for call: LocalAlpineToolCall) -> String {
+        let display = LocalAlpineToolDisplayRegistry.display(for: call.name)
+        let haystack = [
+            call.name,
+            call.title,
+            call.detail,
+            call.command ?? "",
+            call.outputPreview ?? ""
+        ].joined(separator: " ").lowercased()
+
+        if haystack.contains("get_readable") || haystack.contains("readable") {
+            return "读取搜索结果摘要"
+        }
+        if haystack.contains("web_search")
+            || haystack.contains("browser search")
+            || haystack.contains("search query")
+            || haystack.contains("搜索") {
+            return call.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "搜索网页"
+                : call.detail
+        }
+        if haystack.contains("fetch ")
+            || haystack.contains("navigate ")
+            || haystack.contains("browser:")
+            || haystack.contains("http://")
+            || haystack.contains("https://") {
+            return "读取网页内容"
+        }
+        return call.failed ? "\(display.title)失败" : display.title
+    }
+
+    static func isActivityMessage(_ message: ChatMessage) -> Bool {
+        if message.metadata?["iexa_local_alpine_result"] == "true"
+            || message.metadata?["iexa_local_alpine_tool_calls"] != nil
             || message.content.hasPrefix("Local Alpine 执行结果")
-            || message.model == "Local Alpine" else {
+            || message.model == "Local Alpine"
+            || message.model == "Local Alpine Agent" {
+            return true
+        }
+        return message.statusHistory.contains { status in
+            let action = status.action?.lowercased() ?? ""
+            return action == "local_alpine"
+                || action == "local_alpine_agent"
+                || action == "local_alpine_tool"
+        }
+    }
+
+    init?(message: ChatMessage) {
+        guard Self.isActivityMessage(message) else {
             return nil
         }
         let metadata = message.metadata
@@ -173,16 +312,32 @@ struct ChatDetailView: View {
 
     private var hasRecentAgentActivity: Bool {
         viewModel.messages.suffix(30).contains { message in
-            message.metadata?["iexa_local_alpine_result"] == "true"
-                || message.content.hasPrefix("Local Alpine 执行结果")
-                || message.model == "Local Alpine"
+            AgentActivityItem.isActivityMessage(message)
         }
     }
 
-    private func refreshAgentActivitySnapshot() {
-        agentActivitySnapshot = viewModel.messages
+    private var recentAgentActivityItems: [AgentActivityItem] {
+        viewModel.messages
             .suffix(40)
             .compactMap(AgentActivityItem.init(message:))
+    }
+
+    private var latestVisibleAgentActivity: AgentActivityItem? {
+        guard let item = viewModel.messages.suffix(40).reversed().compactMap(AgentActivityItem.init(message:)).first else {
+            return nil
+        }
+        if item.isActive || viewModel.isStreaming { return item }
+        return Date().timeIntervalSince(item.timestamp) < 180 ? item : nil
+    }
+
+    private func refreshAgentActivitySnapshot() {
+        agentActivitySnapshot = recentAgentActivityItems
+    }
+
+    private func openAgentTaskPanel() {
+        Haptics.play(.light)
+        refreshAgentActivitySnapshot()
+        showAgentTaskPanel = true
     }
 
     private func resetTokenUsageTotals() {
@@ -692,9 +847,7 @@ struct ChatDetailView: View {
                 .accessibilityLabel("Chat parameters")
                 if hasRecentAgentActivity {
                     Button {
-                        Haptics.play(.light)
-                        refreshAgentActivitySnapshot()
-                        showAgentTaskPanel = true
+                        openAgentTaskPanel()
                     } label: {
                         Image(systemName: "checklist")
                             .scaledFont(size: 15, weight: .semibold)
@@ -1188,6 +1341,18 @@ struct ChatDetailView: View {
         .overlay(alignment: .bottomTrailing) {
             scrollToBottomFAB
         }
+        .overlay(alignment: .bottom) {
+            if let item = latestVisibleAgentActivity {
+                AgentStepFloatingBar(
+                    item: item,
+                    taskCount: item.totalStepCount,
+                    onTap: openAgentTaskPanel
+                )
+                .padding(.horizontal, 28)
+                .padding(.bottom, isScrolledUp ? 58 : 12)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
         .onAppear {
             // Snap instantly to bottom on chat open.
             scrollPosition.scrollTo(edge: .bottom)
@@ -1541,11 +1706,17 @@ struct ChatDetailView: View {
             }
 
             // ── Streaming status indicators ──
-            if message.role == .assistant && !isLocalAlpineResultMessage(message) {
+            if message.role == .assistant
+                && !isLocalAlpineResultMessage(message)
+                && !hasAgentToolPreview(for: message) {
                 IsolatedStreamingStatus(
                     streamingStore: viewModel.streamingStore,
                     message: message
                 )
+            }
+
+            if message.role == .assistant && !isLocalAlpineResultMessage(message) {
+                agentStepPreview(for: message)
             }
 
             // ── Message bubble / content ──
@@ -1728,6 +1899,19 @@ struct ChatDetailView: View {
             || (message.model == "Local Alpine" && message.statusHistory.contains {
                 $0.action?.lowercased() == "local_alpine"
             })
+    }
+
+    private func hasAgentToolPreview(for message: ChatMessage) -> Bool {
+        AgentActivityItem(message: message)?.toolCalls.isEmpty == false
+    }
+
+    @ViewBuilder
+    private func agentStepPreview(for message: ChatMessage) -> some View {
+        if let item = AgentActivityItem(message: message), !item.toolCalls.isEmpty {
+            AgentInlineStepsView(item: item, onTap: openAgentTaskPanel)
+                .padding(.horizontal, Spacing.screenPadding)
+                .padding(.top, Spacing.xs)
+        }
     }
 
     private func isLocalNativeResultMessage(_ message: ChatMessage) -> Bool {
@@ -4836,22 +5020,38 @@ private struct LocalAlpineResultCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 8) {
             Button {
                 withAnimation(MicroAnimation.snappy) {
                     isExpanded.toggle()
                 }
             } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: "terminal.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(statusColor)
+                HStack(spacing: 10) {
+                    ZStack {
+                        Circle()
+                            .fill(statusColor.opacity(theme.isDark ? 0.18 : 0.12))
+                            .frame(width: 26, height: 26)
 
-                    Text(statusText)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(parsed.hasNonZeroExit ? .orange : .secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                        Image(systemName: isStreaming ? "terminal" : (parsed.hasNonZeroExit ? "exclamationmark" : "checkmark"))
+                            .scaledFont(size: 12, weight: .bold)
+                            .foregroundStyle(statusColor)
+                    }
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(statusText)
+                            .scaledFont(size: 13, weight: .semibold)
+                            .foregroundStyle(parsed.hasNonZeroExit ? .orange : theme.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+
+                        if !statusDetail.isEmpty && isStreaming {
+                            Text(statusDetail)
+                                .scaledFont(size: 11, weight: .medium)
+                                .foregroundStyle(theme.textTertiary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                    }
 
                     Spacer(minLength: 4)
 
@@ -4862,9 +5062,15 @@ private struct LocalAlpineResultCard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.34 : 0.72))
+            )
 
             if !toolCalls.isEmpty || !writtenFiles.isEmpty || !executableCommandResults.isEmpty {
-                activityLedger
+                inlineStepPills
             }
 
             if !writtenFiles.isEmpty {
@@ -4878,44 +5084,33 @@ private struct LocalAlpineResultCard: View {
                 LocalAlpineCodeSection(title: "输出", text: parsed.outputText, maxHeight: 240)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 3)
     }
 
-    private var activityLedger: some View {
+    private var inlineStepPills: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !toolCalls.isEmpty {
-                ForEach(toolCalls, id: \.id) { call in
-                    let display = LocalAlpineToolDisplayRegistry.display(for: call.name)
-                    let lineDelta = call.displayLineDelta.trimmingCharacters(in: .whitespacesAndNewlines)
-                    activityRow(
-                        icon: call.failed ? "exclamationmark.circle.fill" : display.icon,
-                        tint: call.failed ? .orange : (call.isRunning ? theme.brandPrimary : theme.textTertiary),
-                        label: call.statusDescription,
-                        value: call.displayDetail,
-                        lineDelta: lineDelta,
-                        detail: activityDetail(for: call)
-                    )
+                ForEach(Array(toolCalls.suffix(4)), id: \.id) { call in
+                    AgentToolStepPill(call: call, detail: activityDetail(for: call))
                 }
             } else {
                 ForEach(Array(writtenFiles.prefix(4).enumerated()), id: \.offset) { _, file in
-                    activityRow(
+                    AgentFallbackStepPill(
                         icon: "square.and.pencil",
-                        tint: theme.brandPrimary,
-                        label: "已编辑",
+                        title: "已编辑文件",
                         value: file.path,
-                        lineDelta: "",
-                        detail: "\(file.lineCount) 行 · \(file.byteCount) B"
+                        detail: "\(file.lineCount) 行 · \(file.byteCount) B",
+                        tint: theme.brandPrimary
                     )
                 }
 
                 ForEach(Array(executableCommandResults.prefix(5).enumerated()), id: \.offset) { _, result in
-                    activityRow(
+                    AgentFallbackStepPill(
                         icon: result.failed ? "exclamationmark.circle.fill" : "terminal.fill",
-                        tint: result.failed ? .orange : theme.textTertiary,
-                        label: result.failed ? "运行出错" : "运行完成",
+                        title: result.failed ? "运行出错" : "运行完成",
                         value: oneLineCommand(result.command),
-                        lineDelta: "",
-                        detail: "退出码 \(result.exitCode.map(String.init) ?? "unknown") · \(result.cwd)"
+                        detail: "退出码 \(result.exitCode.map(String.init) ?? "unknown") · \(result.cwd)",
+                        tint: result.failed ? .orange : theme.textTertiary
                     )
                 }
             }
@@ -4927,12 +5122,6 @@ private struct LocalAlpineResultCard: View {
                     .padding(.leading, 22)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.30 : 0.50))
-        )
     }
 
     private func activityDetail(for call: LocalAlpineToolCall) -> String {
@@ -4953,55 +5142,155 @@ private struct LocalAlpineResultCard: View {
         return parts.joined(separator: " · ")
     }
 
-    private func activityRow(
-        icon: String,
-        tint: Color,
-        label: String,
-        value: String,
-        lineDelta: String = "",
-        detail: String
-    ) -> some View {
-        HStack(alignment: .top, spacing: 7) {
-            Image(systemName: icon)
-                .scaledFont(size: 11, weight: .semibold)
-                .foregroundStyle(tint)
-                .frame(width: 15, height: 15)
-
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(alignment: .firstTextBaseline, spacing: 5) {
-                    Text(label)
-                        .scaledFont(size: 11, weight: .semibold)
-                        .foregroundStyle(theme.textSecondary)
-                        .lineLimit(1)
-                    Text(value)
-                        .scaledFont(size: 11, weight: .medium, design: .monospaced)
-                        .foregroundStyle(theme.textPrimary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if !lineDelta.isEmpty {
-                        Text(lineDelta)
-                            .scaledFont(size: 11, weight: .semibold, design: .monospaced)
-                            .foregroundStyle(lineDelta.contains("-") ? .orange : .green)
-                            .lineLimit(1)
-                    }
-                }
-                Text(detail)
-                    .scaledFont(size: 10, weight: .medium)
-                    .foregroundStyle(theme.textTertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-
-            Spacer(minLength: 0)
-        }
-    }
-
     private func oneLineCommand(_ command: String) -> String {
         command
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+}
+
+private struct AgentToolStepPill: View {
+    let call: LocalAlpineToolCall
+    var detail: String = ""
+
+    @Environment(\.theme) private var theme
+
+    private var display: LocalAlpineToolDisplay {
+        LocalAlpineToolDisplayRegistry.display(for: call.name)
+    }
+
+    private var title: String {
+        AgentActivityItem.displayTitle(for: call)
+    }
+
+    private var tint: Color {
+        if call.failed { return .orange }
+        return call.isRunning ? theme.brandPrimary : theme.success
+    }
+
+    private var iconName: String {
+        if call.failed { return "exclamationmark.circle.fill" }
+        if title.contains("搜索") || title.contains("网页") || title.contains("摘要") {
+            return "globe"
+        }
+        if call.isRunning { return display.icon }
+        return "checkmark.circle.fill"
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            ZStack {
+                Circle()
+                    .fill(tint.opacity(theme.isDark ? 0.20 : 0.13))
+                    .frame(width: 25, height: 25)
+                Image(systemName: iconName)
+                    .scaledFont(size: 13, weight: .semibold)
+                    .foregroundStyle(tint)
+            }
+
+            Text(title)
+                .scaledFont(size: 14, weight: .semibold)
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            if !call.displayLineDelta.isEmpty {
+                Text(call.displayLineDelta)
+                    .scaledFont(size: 11, weight: .bold, design: .monospaced)
+                    .foregroundStyle(call.displayLineDelta.contains("-") ? .orange : .green)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 14)
+        .frame(height: 45)
+        .fixedSize(horizontal: true, vertical: false)
+        .background(
+            Capsule(style: .continuous)
+                .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.78))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.24 : 0.42), lineWidth: 0.7)
+        )
+    }
+}
+
+private struct AgentFallbackStepPill: View {
+    let icon: String
+    let title: String
+    let value: String
+    let detail: String
+    let tint: Color
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(spacing: 9) {
+            ZStack {
+                Circle()
+                    .fill(tint.opacity(theme.isDark ? 0.20 : 0.13))
+                    .frame(width: 25, height: 25)
+                Image(systemName: icon)
+                    .scaledFont(size: 13, weight: .semibold)
+                    .foregroundStyle(tint)
+            }
+
+            Text(title)
+                .scaledFont(size: 14, weight: .semibold)
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 14)
+        .frame(height: 45)
+        .fixedSize(horizontal: true, vertical: false)
+        .background(
+            Capsule(style: .continuous)
+                .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.78))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.24 : 0.42), lineWidth: 0.7)
+        )
+    }
+}
+
+private struct AgentInlineStepsView: View {
+    let item: AgentActivityItem
+    let onTap: () -> Void
+
+    @Environment(\.theme) private var theme
+
+    private var visibleCalls: [LocalAlpineToolCall] {
+        Array(item.toolCalls.suffix(3))
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(visibleCalls, id: \.id) { call in
+                    AgentToolStepPill(call: call)
+                }
+
+                if item.toolCalls.count > visibleCalls.count {
+                    HStack(spacing: 6) {
+                        Image(systemName: "ellipsis")
+                            .scaledFont(size: 11, weight: .bold)
+                        Text("还有 \(item.toolCalls.count - visibleCalls.count) 个步骤")
+                            .scaledFont(size: 11, weight: .semibold)
+                    }
+                    .foregroundStyle(theme.textTertiary)
+                    .padding(.leading, 12)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("查看 Agent 步骤")
+    }
 }
 
 private struct AgentTaskPanelView: View {
@@ -5116,61 +5405,182 @@ private struct AgentTaskCard: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 9) {
-            Image(systemName: statusIcon)
-                .scaledFont(size: 14, weight: .semibold)
-                .foregroundStyle(statusColor)
-                .frame(width: 20, height: 20)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text(item.summary)
-                    .scaledFont(size: 14, weight: .semibold)
-                    .foregroundStyle(theme.textPrimary)
-                    .lineLimit(2)
-
-                HStack(spacing: 8) {
-                    Text(item.timestamp.formatted(date: .omitted, time: .shortened))
-                    if item.commandCount > 0 {
-                        Label("\(item.commandCount)", systemImage: "terminal.fill")
-                    }
-                    if item.fileCount > 0 {
-                        Label("\(item.fileCount)", systemImage: "square.and.pencil")
-                    }
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(statusColor.opacity(theme.isDark ? 0.18 : 0.12))
+                        .frame(width: 30, height: 30)
+                    Image(systemName: statusIcon)
+                        .scaledFont(size: 15, weight: .semibold)
+                        .foregroundStyle(statusColor)
                 }
-                .scaledFont(size: 11, weight: .medium)
-                .foregroundStyle(theme.textTertiary)
 
-                if !item.toolCalls.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(item.toolCalls.prefix(4)), id: \.id) { call in
-                            let display = LocalAlpineToolDisplayRegistry.display(for: call.name)
-                            HStack(spacing: 5) {
-                                Image(systemName: call.failed ? "exclamationmark.circle.fill" : display.icon)
-                                    .scaledFont(size: 10, weight: .semibold)
-                                    .foregroundStyle(call.failed ? .orange : (call.isRunning ? theme.brandPrimary : theme.textTertiary))
-                                    .frame(width: 12, height: 12)
-                                Text(call.displayDetail)
-                                    .scaledFont(size: 11, weight: .medium, design: .monospaced)
-                                    .foregroundStyle(theme.textSecondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                        }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.currentStepTitle)
+                        .scaledFont(size: 15, weight: .semibold)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(2)
+
+                    Text(item.currentStepDetail)
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 0)
+
+                Text("\(item.completedStepCount)/\(item.totalStepCount)")
+                    .scaledFont(size: 12, weight: .semibold, design: .rounded)
+                    .foregroundStyle(statusColor)
+                    .padding(.horizontal, 8)
+                    .frame(height: 24)
+                    .background(statusColor.opacity(theme.isDark ? 0.14 : 0.10))
+                    .clipShape(Capsule(style: .continuous))
+            }
+
+            HStack(spacing: 8) {
+                Text(item.timestamp.formatted(date: .omitted, time: .shortened))
+                if item.commandCount > 0 {
+                    Label("\(item.commandCount)", systemImage: "terminal.fill")
+                }
+                if item.fileCount > 0 {
+                    Label("\(item.fileCount)", systemImage: "square.and.pencil")
+                }
+            }
+            .scaledFont(size: 11, weight: .medium)
+            .foregroundStyle(theme.textTertiary)
+
+            if !item.toolCalls.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(item.toolCalls.prefix(4)), id: \.id) { call in
+                        AgentToolStepPill(call: call)
                     }
                 }
             }
-
-            Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
-        .padding(12)
+        .padding(13)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.surfaceContainer.opacity(theme.isDark ? 0.72 : 0.96))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.97))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.45 : 0.62), lineWidth: 0.8)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.30 : 0.45), lineWidth: 0.7)
         )
+    }
+}
+
+private struct AgentStepFloatingBar: View {
+    let item: AgentActivityItem
+    let taskCount: Int
+    let onTap: () -> Void
+
+    @Environment(\.theme) private var theme
+
+    private var tint: Color {
+        if item.hasFailure { return .orange }
+        return item.isActive ? theme.brandPrimary : theme.success
+    }
+
+    private var icon: String {
+        if item.hasFailure { return "exclamationmark.circle.fill" }
+        return item.isActive ? "progress.indicator" : "checkmark.circle.fill"
+    }
+
+    private var pageText: String {
+        "\(max(item.currentStepIndex, 1))/\(max(item.totalStepCount, 1))"
+    }
+
+    private var previewTitle: String {
+        item.currentToolCall?.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? item.currentToolCall?.name ?? "agent"
+            : "agent"
+    }
+
+    private var previewText: String {
+        let text = AgentActivityItem.previewSnippet(item.currentStepPreview, limit: 160)
+        return text.isEmpty ? item.currentStepTitle : text
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Button(action: onTap) {
+                HStack(spacing: 9) {
+                    Image(systemName: icon)
+                        .scaledFont(size: 18, weight: .bold)
+                        .foregroundStyle(tint)
+                        .frame(width: 25, height: 25)
+
+                    Text(item.currentStepTitle)
+                        .scaledFont(size: 15, weight: .semibold)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    Spacer(minLength: 10)
+
+                    Image(systemName: "chevron.left")
+                        .scaledFont(size: 15, weight: .bold)
+                        .foregroundStyle(theme.textPrimary)
+
+                    Text(pageText)
+                        .scaledFont(size: 13, weight: .semibold, design: .rounded)
+                        .foregroundStyle(theme.textSecondary)
+                        .monospacedDigit()
+
+                    Image(systemName: "chevron.right")
+                        .scaledFont(size: 15, weight: .bold)
+                        .foregroundStyle(theme.textTertiary)
+                }
+                .padding(.leading, 78)
+                .padding(.trailing, 16)
+                .frame(height: 56)
+                .frame(maxWidth: .infinity)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.28 : 0.42), lineWidth: 0.7)
+                )
+                .shadow(color: .black.opacity(theme.isDark ? 0.25 : 0.12), radius: 18, x: 0, y: 8)
+            }
+            .buttonStyle(.plain)
+
+            AgentToolPreviewPop(previewTitle: previewTitle, previewText: previewText)
+                .frame(width: 118, height: 76)
+                .offset(x: 16, y: -60)
+        }
+        .accessibilityLabel("Agent 步骤 \(taskCount)")
+    }
+}
+
+private struct AgentToolPreviewPop: View {
+    let previewTitle: String
+    let previewText: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(previewTitle)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.82))
+                .lineLimit(1)
+
+            Text(previewText)
+                .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Color(red: 0.30, green: 0.63, blue: 1.0))
+                .lineLimit(5)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.black.opacity(0.88))
+        )
+        .shadow(color: .black.opacity(0.22), radius: 8, x: 0, y: 4)
     }
 }
 

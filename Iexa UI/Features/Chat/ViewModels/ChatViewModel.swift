@@ -15721,18 +15721,39 @@ final class ChatViewModel {
     }
 
     private static func safeAssistantDisplayContent(_ text: String) -> String {
-        guard text.range(of: "data:image/", options: .caseInsensitive) != nil
-            || text.range(of: "image:data/", options: .caseInsensitive) != nil
-            || text.range(of: "data:video/", options: .caseInsensitive) != nil
-            || text.range(of: "data:audio/", options: .caseInsensitive) != nil
-            || text.range(of: "base64", options: .caseInsensitive) != nil else {
-            return text
+        let withoutLocalToolEcho = cleanedLocalAlpineMissingToolEchoes(text)
+        guard withoutLocalToolEcho.range(of: "data:image/", options: .caseInsensitive) != nil
+            || withoutLocalToolEcho.range(of: "image:data/", options: .caseInsensitive) != nil
+            || withoutLocalToolEcho.range(of: "data:video/", options: .caseInsensitive) != nil
+            || withoutLocalToolEcho.range(of: "data:audio/", options: .caseInsensitive) != nil
+            || withoutLocalToolEcho.range(of: "base64", options: .caseInsensitive) != nil else {
+            return withoutLocalToolEcho
         }
-        return transformProseOutsideFencedCode(in: text) { prose in
+        return transformProseOutsideFencedCode(in: withoutLocalToolEcho) { prose in
             InlineDataPayloadSanitizer.sanitizedDisplayText(
                 cleanedAssistantInlineImagePayloads(prose)
             )
         }
+    }
+
+    private static func cleanedLocalAlpineMissingToolEchoes(_ text: String) -> String {
+        guard text.range(of: "iexa_alpine", options: .caseInsensitive) != nil else { return text }
+        var cleaned = text.replacingOccurrences(
+            of: #"(?i)(?:\s*tool\s+iexa_alpine\s+does\s+not\s+exists?\.?){1,}"#,
+            with: "\n",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"(?i)\biexa_alpine\s+does\s+not\s+exists?\.?"#,
+            with: "\n",
+            options: .regularExpression
+        )
+        guard cleaned != text else { return text }
+        cleaned = cleaned
+            .replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "正在切换到 Iexa 本地 Agent..." : cleaned
     }
 
     private static func cleanedInternalPromptArtifacts(_ text: String) -> String {
