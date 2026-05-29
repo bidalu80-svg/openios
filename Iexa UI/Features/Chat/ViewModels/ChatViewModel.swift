@@ -21,6 +21,8 @@ extension Notification.Name {
     /// Posted after a response completes so app-wide token counters can accumulate
     /// across chats without resetting on new conversations.
     static let chatTokenUsageDidAccumulate = Notification.Name("chatTokenUsageDidAccumulate")
+    /// Posted by Agent step previews when the user wants to jump into the terminal/file panel.
+    static let openIexaTerminalBrowser = Notification.Name("openIexaTerminalBrowser")
 }
 
 private struct LocalAlpineAgentCommandFailure {
@@ -1482,6 +1484,10 @@ final class ChatViewModel {
     private func inlineImageDataURL(data: Data, fileName: String) -> String {
         let capped = FileAttachmentService.downsampleForUpload(data: data)
         return "data:image/jpeg;base64,\(capped.base64EncodedString())"
+    }
+
+    private func inlineImageDisplayReference(dataURL: String) -> String {
+        Self.safeMessageFileReference(dataURL, isImage: true) ?? dataURL
     }
 
     private func inlineTextContext(for attachment: ChatAttachment, data: Data) -> String {
@@ -4657,12 +4663,13 @@ final class ChatViewModel {
         for attachment in currentAttachments {
             if isOpenAICompatibleProvider, let data = attachment.data, attachment.type == .image {
                 let dataURL = attachment.displayDataURL ?? inlineImageDataURL(data: data, fileName: attachment.name)
+                let displayURL = inlineImageDisplayReference(dataURL: dataURL)
                 inlineImageFiles.append(ChatMessageFile(
                     type: "image",
                     url: dataURL,
                     name: attachment.name,
                     contentType: "image/jpeg",
-                    displayURL: dataURL
+                    displayURL: displayURL
                 ))
             } else if let fileId = attachment.uploadedFileId {
                 // Already uploaded + processed — build rich web-UI-format ref
@@ -4689,21 +4696,24 @@ final class ChatViewModel {
                 if isImage,
                    let dataURL = attachment.displayDataURL
                     ?? attachment.data.map({ inlineImageDataURL(data: $0, fileName: attachment.name) }) {
+                    let displayURL = inlineImageDisplayReference(dataURL: dataURL)
                     inlineImageFiles.append(ChatMessageFile(
                         type: "image",
                         url: fileId,
                         name: attachment.name,
                         contentType: contentType,
-                        displayURL: dataURL
+                        displayURL: displayURL
                     ))
                 }
             } else if let data = attachment.data, attachment.type == .image {
                 let dataURL = inlineImageDataURL(data: data, fileName: attachment.name)
+                let displayURL = inlineImageDisplayReference(dataURL: dataURL)
                 inlineImageFiles.append(ChatMessageFile(
                     type: "image",
                     url: dataURL,
                     name: attachment.name,
-                    contentType: "image/jpeg"
+                    contentType: "image/jpeg",
+                    displayURL: displayURL
                 ))
             } else if let data = attachment.data, canSendAttachmentInline(attachment) {
                 inlineTextSnippets.append(inlineTextContext(for: attachment, data: data))
@@ -4763,12 +4773,14 @@ final class ChatViewModel {
                         "content_type": contentType
                     ])
                     if isImage {
+                        let dataURL = inlineImageDataURL(data: data, fileName: attachment.name)
+                        let displayURL = inlineImageDisplayReference(dataURL: dataURL)
                         inlineImageFiles.append(ChatMessageFile(
                             type: "image",
                             url: fileId,
                             name: attachment.name,
                             contentType: contentType,
-                            displayURL: inlineImageDataURL(data: data, fileName: attachment.name)
+                            displayURL: displayURL
                         ))
                     }
                 } catch {

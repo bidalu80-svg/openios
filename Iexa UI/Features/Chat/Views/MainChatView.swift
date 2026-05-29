@@ -1228,6 +1228,16 @@ struct MainChatView: View {
                 }
                 router.presentVoiceCall(viewModel: voiceCallVM)
             }
+            .onReceive(NotificationCenter.default.publisher(for: .openIexaTerminalBrowser)) { _ in
+                guard activeChannelId == nil else { return }
+                showSettings = false
+                showNotes = false
+                showChannels = false
+                showCreateChannel = false
+                showCreateFolderSheet = false
+                showExportShareSheet = false
+                openFileBrowserAnimated()
+            }
             .onReceive(NotificationCenter.default.publisher(for: .conversationListNeedsRefresh)) { _ in
                 Task {
                     if dependencies.conversationManager?.usesLocalConversationStore == true {

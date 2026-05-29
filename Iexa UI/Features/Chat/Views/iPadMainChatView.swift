@@ -253,6 +253,15 @@ struct iPadMainChatView: View {
             }
             router.presentVoiceCall(viewModel: voiceCallVM)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .openIexaTerminalBrowser)) { _ in
+            guard activeChannelId == nil else { return }
+            configureTerminalBrowserIfNeeded()
+            terminalBrowserVM.refresh()
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                showTerminalBrowser = true
+            }
+            Haptics.play(.light)
+        }
         .onChange(of: activeChannelId) { _, newId in
             // When entering a channel, the server marks it as read via GET /channels/{id}.
             // Refresh the channel list after a short delay to clear the unread badge.
