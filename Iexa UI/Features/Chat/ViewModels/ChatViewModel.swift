@@ -8377,7 +8377,7 @@ final class ChatViewModel {
         return didUpdate
     }
 
-    private static func reasoningDelta(from value: Any?) -> String? {
+    nonisolated private static func reasoningDelta(from value: Any?) -> String? {
         guard let value else { return nil }
 
         if let text = value as? String {

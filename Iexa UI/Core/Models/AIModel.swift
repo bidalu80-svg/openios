@@ -155,7 +155,7 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
         if LocalModelCapabilityRegistry.explicitlyDisablesImageGeneration(for: self) {
             return false
         }
-        resolvedCapabilities.supportsImageGeneration
+        return resolvedCapabilities.supportsImageGeneration
     }
 
     var supportsImageInput: Bool {
@@ -330,15 +330,14 @@ enum LocalModelCapabilityRegistry {
         applyCapabilities(model.capabilities, to: &capability)
         scanRawModelItem(model.rawModelItem, into: &capability)
 
-        let haystack = ([model.id, model.name, model.description ?? "", model.connectionType ?? ""]
-            + model.tags
-            + model.toolIds
-            + model.defaultFeatureIds
-            + model.actionIds
-            + model.actions.map(\.id)
-            + model.actions.map(\.name))
-            .joined(separator: " ")
-            .lowercased()
+        var haystackParts = [model.id, model.name, model.description ?? "", model.connectionType ?? ""]
+        haystackParts.append(contentsOf: model.tags)
+        haystackParts.append(contentsOf: model.toolIds)
+        haystackParts.append(contentsOf: model.defaultFeatureIds)
+        haystackParts.append(contentsOf: model.actionIds)
+        haystackParts.append(contentsOf: model.actions.map(\.id))
+        haystackParts.append(contentsOf: model.actions.map(\.name))
+        let haystack = haystackParts.joined(separator: " ").lowercased()
         if AIModel.imageGenerationHintTokens.contains(where: { haystack.contains($0) })
             && !AIModel.imageGenerationNegativeTokens.contains(where: { haystack.contains($0) }) {
             capability.outputModalities.insert("image")
