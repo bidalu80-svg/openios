@@ -9,6 +9,7 @@ struct SourcesDetailSheet: View {
 
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    @State private var previewWebURL: WebPreviewURL?
 
     var body: some View {
         NavigationStack {
@@ -39,6 +40,10 @@ struct SourcesDetailSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .sheet(item: $previewWebURL) { item in
+            InAppWebPreviewSheet(url: item.url)
+                .themed()
+        }
     }
 
     // MARK: - Source Row
@@ -49,7 +54,7 @@ struct SourcesDetailSheet: View {
 
         return Button {
             if let url, let parsed = URL(string: url) {
-                UIApplication.shared.open(parsed)
+                previewWebURL = WebPreviewURL(url: parsed)
             }
         } label: {
             HStack(spacing: Spacing.sm) {

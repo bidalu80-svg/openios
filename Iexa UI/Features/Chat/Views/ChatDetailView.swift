@@ -637,6 +637,7 @@ struct ChatDetailView: View {
     @Environment(AppRouter.self) private var router
     @Environment(\.theme) private var theme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.scenePhase) private var scenePhase
 
     private let logger = Logger(subsystem: "com.openui", category: "ChatDetailView")
 
@@ -854,6 +855,13 @@ struct ChatDetailView: View {
         Haptics.play(.light)
         refreshAgentActivitySnapshot()
         showAgentTaskPanel = true
+    }
+
+    private func collapseTransientAgentViewsForBackground() {
+        showAgentTaskPanel = false
+        agentFloatingFilePreview = nil
+        agentFloatingStepPreview = nil
+        agentFloatingLoadingPath = nil
     }
 
     @MainActor
@@ -1154,6 +1162,7 @@ struct ChatDetailView: View {
         // and keep the speakingMessageId state in sync with actual playback.
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             viewModel.persistLifecycleConversationSnapshot()
+            collapseTransientAgentViewsForBackground()
             if speakingMessageId != nil || ttsGeneratingMessageId != nil {
                 dependencies.textToSpeechService.stop()
                 speakingMessageId = nil
@@ -1162,9 +1171,14 @@ struct ChatDetailView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
             viewModel.persistLifecycleConversationSnapshot()
+            collapseTransientAgentViewsForBackground()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             viewModel.restoreLifecycleConversationSnapshot()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase != .active else { return }
+            collapseTransientAgentViewsForBackground()
         }
         .onReceive(NotificationCenter.default.publisher(for: .chatTokenUsageDidAccumulate)) { notification in
             tokenUsageInputTotal += notification.userInfo?["input"] as? Int ?? 0
@@ -5000,6 +5014,7 @@ private struct ChatAmbientBackgroundView: View {
 
 private struct ImageGenerationPlaceholderView: View {
     @Environment(\.theme) private var theme
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isActive = false
 
@@ -5025,8 +5040,11 @@ private struct ImageGenerationPlaceholderView: View {
         .frame(maxWidth: 340)
         .padding(.top, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { isActive = true }
+        .onAppear { isActive = scenePhase == .active }
         .onDisappear { isActive = false }
+        .onChange(of: scenePhase) { _, phase in
+            isActive = phase == .active
+        }
     }
 }
 
@@ -5037,7 +5055,7 @@ private struct DynamicImageGenerationGradient: View {
     var body: some View {
         Group {
             if isActive {
-                TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
                     ImageGenerationGradientCanvas(
                         isDark: isDark,
                         time: Self.animationTime(for: timeline.date)
@@ -5200,6 +5218,7 @@ private struct ImageGenerationTitleShimmer: View {
     let text: String
 
     @Environment(\.theme) private var theme
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var shimmerPhase: CGFloat = -1
 
@@ -5207,7 +5226,7 @@ private struct ImageGenerationTitleShimmer: View {
         titleText
             .foregroundStyle(theme.textPrimary.opacity(theme.isDark ? 0.82 : 0.72))
             .overlay {
-                if reduceMotion {
+                if reduceMotion || scenePhase != .active {
                     titleText.foregroundStyle(theme.textPrimary)
                 } else {
                     GeometryReader { geometry in
@@ -5235,10 +5254,13 @@ private struct ImageGenerationTitleShimmer: View {
             .minimumScaleFactor(0.82)
             .accessibilityLabel(Text(text))
             .onAppear {
-                guard !reduceMotion else { return }
-                shimmerPhase = -1
-                withAnimation(.linear(duration: 1.85).repeatForever(autoreverses: false)) {
-                    shimmerPhase = 1
+                startShimmerIfNeeded()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    startShimmerIfNeeded()
+                } else {
+                    shimmerPhase = -1
                 }
             }
     }
@@ -5246,6 +5268,17 @@ private struct ImageGenerationTitleShimmer: View {
     private var titleText: some View {
         Text(text)
             .scaledFont(size: 18, weight: .semibold, context: .content)
+    }
+
+    private func startShimmerIfNeeded() {
+        guard !reduceMotion, scenePhase == .active else {
+            shimmerPhase = -1
+            return
+        }
+        shimmerPhase = -1
+        withAnimation(.linear(duration: 1.85).repeatForever(autoreverses: false)) {
+            shimmerPhase = 1
+        }
     }
 }
 
@@ -6429,11 +6462,12 @@ private struct AgentActivityStepPill: View {
 
 private struct AgentStepWaitingDots: View {
     let tint: Color
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
-            if reduceMotion {
+            if reduceMotion || scenePhase != .active {
                 dots(progress: 0.2)
             } else {
                 TimelineView(.animation) { timeline in

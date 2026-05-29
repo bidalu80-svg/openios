@@ -65,7 +65,7 @@ final class BrowserWebSearchService: NSObject {
             }
         }
 
-        let docs = await fetchDocuments(for: Array(items.prefix(2)))
+        let docs = await fetchDocuments(for: Array(items.prefix(4)))
 
         guard !items.isEmpty || !docs.isEmpty else { return WebSearchResponse() }
         let filenames = items.compactMap(\.link)
@@ -165,7 +165,7 @@ final class BrowserWebSearchService: NSObject {
         guard !items.isEmpty else { return [] }
 
         let fetched = await withTaskGroup(of: (Int, WebSearchDocument?).self) { group in
-            for (index, item) in items.prefix(2).enumerated() {
+            for (index, item) in items.prefix(4).enumerated() {
                 group.addTask {
                     (index, await Self.fastDocument(for: item))
                 }
