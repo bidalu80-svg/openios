@@ -64,6 +64,10 @@ private struct AgentActivityStep: Identifiable, Hashable {
             || command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             || outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
+
+    var isLocalStatusPlaceholder: Bool {
+        kind == .status && id.hasPrefix("local-status-")
+    }
 }
 
 private struct AgentActivityItem: Identifiable, Hashable {
@@ -576,6 +580,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 guard seenStepIds.insert(key).inserted else { continue }
                 mergedSteps.append(step)
             }
+        }
+        if mergedSteps.contains(where: { !$0.isLocalStatusPlaceholder }) {
+            mergedSteps.removeAll { $0.isLocalStatusPlaceholder }
         }
 
         let fileCount = activeOrConcreteItems.reduce(0) { $0 + $1.fileCount }
