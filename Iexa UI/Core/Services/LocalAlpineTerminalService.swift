@@ -1037,7 +1037,7 @@ actor LocalAlpineTerminalService {
             exitCode: Int?
         ) -> LocalAlpineCommandResult {
             let cleaned = cleanedOutputAndCollectOpenRequests(rawOutput)
-            LocalAlpineCommandResult(
+            return LocalAlpineCommandResult(
                 command: originalCommand,
                 output: cleaned,
                 exitCode: exitCode,
