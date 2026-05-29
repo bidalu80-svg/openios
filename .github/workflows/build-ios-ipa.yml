@@ -364,6 +364,16 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/Iexa.xcarchive" \
+            COPY_PHASE_STRIP=YES \
+            DEAD_CODE_STRIPPING=YES \
+            DEBUG_INFORMATION_FORMAT=dwarf \
+            DEPLOYMENT_POSTPROCESSING=YES \
+            ENABLE_NS_ASSERTIONS=NO \
+            ENABLE_TESTABILITY=NO \
+            GCC_SYMBOLS_PRIVATE_EXTERN=YES \
+            STRIP_INSTALLED_PRODUCT=YES \
+            STRIP_SWIFT_SYMBOLS=YES \
+            SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO \
             archive
           APP_BINARY="$RUNNER_TEMP/Iexa.xcarchive/Products/Applications/Iexa.app/Iexa"
           if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
@@ -394,6 +404,16 @@ jobs:
             -destination 'generic/platform=iOS' \
             TARGET_BUILD_DIR="$RUNNER_TEMP/unsigned-build-app" \
             BUILT_PRODUCTS_DIR="$RUNNER_TEMP/unsigned-build-app" \
+            COPY_PHASE_STRIP=YES \
+            DEAD_CODE_STRIPPING=YES \
+            DEBUG_INFORMATION_FORMAT=dwarf \
+            DEPLOYMENT_POSTPROCESSING=YES \
+            ENABLE_NS_ASSERTIONS=NO \
+            ENABLE_TESTABILITY=NO \
+            GCC_SYMBOLS_PRIVATE_EXTERN=YES \
+            STRIP_INSTALLED_PRODUCT=YES \
+            STRIP_SWIFT_SYMBOLS=YES \
+            SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -408,9 +428,7 @@ jobs:
           rm -rf "$APP_PATH/PlugIns"
           rm -rf "$APP_PATH/Extensions"
           APP_BINARY="$APP_PATH/Iexa"
-          echo "Unsigned app binary before strip: $(stat -f%z "$APP_BINARY") bytes"
-          xcrun strip -S "$APP_BINARY"
-          echo "Unsigned app binary after strip:  $(stat -f%z "$APP_BINARY") bytes"
+          bash scripts/harden-ios-app.sh "$APP_PATH"
           if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
             echo "::error::Local Alpine iSH runtime was not linked into the unsigned app"
             exit 1
