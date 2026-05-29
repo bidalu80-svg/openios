@@ -13,6 +13,21 @@ struct LocalAlpineCommandResult: Sendable {
     let output: String
     let exitCode: Int?
     let interactiveRequest: LocalAlpineInteractiveRequest?
+    let openRequests: [LocalAlpineOpenRequest]
+
+    init(
+        command: String,
+        output: String,
+        exitCode: Int?,
+        interactiveRequest: LocalAlpineInteractiveRequest?,
+        openRequests: [LocalAlpineOpenRequest] = []
+    ) {
+        self.command = command
+        self.output = output
+        self.exitCode = exitCode
+        self.interactiveRequest = interactiveRequest
+        self.openRequests = openRequests
+    }
 }
 
 struct LocalAlpineInteractiveRequest: Identifiable, Sendable {
@@ -60,10 +75,10 @@ enum LocalAlpineOpenMarkerParser {
     private static let bell = Character("\u{0007}")
     private static let stTerminator = "\u{001B}\\"
     private static let oscPrefix = "]1337;"
-    private static let keys = ["IexaOpenURL=", "MinisOpenURL="]
+    private static let keys = ["IexaOpenURL="]
 
     static func extract(from text: String) -> (cleaned: String, requests: [LocalAlpineOpenRequest]) {
-        guard text.contains("\u{001B}]1337;") || text.contains("]1337;IexaOpenURL=") || text.contains("]1337;MinisOpenURL=") else {
+        guard text.contains("\u{001B}]1337;") || text.contains("]1337;IexaOpenURL=") else {
             return (text, [])
         }
 
@@ -359,7 +374,9 @@ actor LocalAlpineTerminalService {
     func materializePreviewURL(for request: LocalAlpineOpenRequest) async throws -> URL {
         let rawTarget = request.target.trimmingCharacters(in: .whitespacesAndNewlines)
         let path: String
-        if let fileURL = URL(string: rawTarget),
+        if let bridgedPath = openBridgeRuntimePath(from: rawTarget) {
+            path = bridgedPath
+        } else if let fileURL = URL(string: rawTarget),
            fileURL.isFileURL {
             path = fileURL.path
         } else {
@@ -370,13 +387,12 @@ actor LocalAlpineTerminalService {
             throw LocalAlpineError.invalidPath(request.target)
         }
 
-        let data: Data
         if isSharedWorkspaceRuntimePath(path) {
-            data = try await readFile(path: path)
-        } else {
-            data = try await readRootFSFile(path: path)
+            let root = try ensureSharedWorkspaceDirectory()
+            return try resolve(path: path, root: root, allowRoot: false)
         }
 
+        let data = try await readRootFSFile(path: path)
         let tempDir = fileManager.temporaryDirectory
             .appendingPathComponent("local_alpine_previews", isDirectory: true)
         try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -384,6 +400,28 @@ actor LocalAlpineTerminalService {
         let fileURL = tempDir.appendingPathComponent(fileName)
         try data.write(to: fileURL, options: .atomic)
         return fileURL
+    }
+
+    private func openBridgeRuntimePath(from rawTarget: String) -> String? {
+        guard let url = URL(string: rawTarget),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "iexa" else {
+            return nil
+        }
+
+        let host = (url.host ?? "").lowercased()
+        let decodedPath = url.path.removingPercentEncoding ?? url.path
+        let path = decodedPath.isEmpty ? "/" : decodedPath
+
+        switch host {
+        case "", "workspace", "shared", "mnt", "iexa":
+            return normalizedRuntimePath(path)
+        case "root", "rootfs":
+            return path.hasPrefix("/") ? path : "/\(path)"
+        default:
+            let combined = path == "/" ? "/\(host)" : "/\(host)\(path)"
+            return normalizedRuntimePath(combined)
+        }
     }
 
     func writeFile(data: Data, fileName: String, destinationPath: String) async throws {
@@ -529,7 +567,14 @@ actor LocalAlpineTerminalService {
         if runtimeLikelyStarted(from: result) {
             nativeRuntimeStarted = true
         }
-        return LocalAlpineCommandResult(command: trimmed, output: result.output, exitCode: result.exitCode, interactiveRequest: nil)
+        return resultByExtractingOpenMarkers(
+            LocalAlpineCommandResult(
+                command: trimmed,
+                output: result.output,
+                exitCode: result.exitCode,
+                interactiveRequest: nil
+            )
+        )
     }
 
     func executeStreaming(
@@ -635,6 +680,20 @@ actor LocalAlpineTerminalService {
         let result = await execute(command: trimmed, cwd: cwd, cwdIsRuntimePath: cwdIsRuntimePath)
         await onOutput(result.output)
         return result
+    }
+
+    private func resultByExtractingOpenMarkers(_ result: LocalAlpineCommandResult) -> LocalAlpineCommandResult {
+        let parsed = LocalAlpineOpenMarkerParser.extract(from: result.output)
+        guard !parsed.requests.isEmpty || parsed.cleaned != result.output else {
+            return result
+        }
+        return LocalAlpineCommandResult(
+            command: result.command,
+            output: parsed.cleaned,
+            exitCode: result.exitCode,
+            interactiveRequest: result.interactiveRequest,
+            openRequests: result.openRequests + parsed.requests
+        )
     }
 
     private func bundledRootFSURL() -> URL? {
@@ -752,7 +811,7 @@ actor LocalAlpineTerminalService {
 
         normalize_target() {
           case "$1" in
-            http://*|https://*|about:*|file://*|/*)
+            http://*|https://*|about:*|file://*|iexa://*|/*)
               printf '%s\\n' "$1"
               ;;
             *)
@@ -774,7 +833,7 @@ actor LocalAlpineTerminalService {
         for arg in "$@"; do
           target=$(normalize_target "$arg")
           case "$target" in
-            http://*|https://*|about:*|file://*|/*)
+            http://*|https://*|about:*|file://*|iexa://*|/*)
               emit_open_marker "$target"
               printf 'Opened in Iexa preview: %s\\n' "$target"
               ;;
@@ -962,6 +1021,30 @@ actor LocalAlpineTerminalService {
         var rawOutput = ""
         var lastVisibleOutput = ""
         var emptyPollsAfterExit = 0
+        var openTargets = Set<String>()
+        var openRequests: [LocalAlpineOpenRequest] = []
+
+        func cleanedOutputAndCollectOpenRequests(_ output: String) -> String {
+            let parsed = LocalAlpineOpenMarkerParser.extract(from: output)
+            for request in parsed.requests where openTargets.insert(request.target).inserted {
+                openRequests.append(request)
+            }
+            return parsed.cleaned.replacingOccurrences(of: "\u{0007}", with: "")
+        }
+
+        func commandResult(
+            rawOutput: String,
+            exitCode: Int?
+        ) -> LocalAlpineCommandResult {
+            let cleaned = cleanedOutputAndCollectOpenRequests(rawOutput)
+            LocalAlpineCommandResult(
+                command: originalCommand,
+                output: cleaned,
+                exitCode: exitCode,
+                interactiveRequest: nil,
+                openRequests: openRequests
+            )
+        }
 
         while !Task.isCancelled {
             let chunk = LocalAlpineNativeRuntime.shared.readSessionOutput(sessionID: sessionID)
@@ -969,36 +1052,22 @@ actor LocalAlpineTerminalService {
                 rawOutput += chunk
                 emptyPollsAfterExit = 0
                 let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
-                if parsed.visibleOutput != lastVisibleOutput {
-                    lastVisibleOutput = parsed.visibleOutput
-                    await onOutput(parsed.visibleOutput)
+                let visibleOutput = trimTrailingNewlines(cleanedOutputAndCollectOpenRequests(parsed.visibleOutput))
+                if visibleOutput != lastVisibleOutput {
+                    lastVisibleOutput = visibleOutput
+                    await onOutput(visibleOutput)
                 }
                 if parsed.finished {
-                    return LocalAlpineCommandResult(
-                        command: originalCommand,
-                        output: parsed.rawOutput,
-                        exitCode: parsed.exitCode ?? 0,
-                        interactiveRequest: nil
-                    )
+                    return commandResult(rawOutput: parsed.rawOutput, exitCode: parsed.exitCode ?? 0)
                 }
             } else if !LocalAlpineNativeRuntime.shared.writeSessionInput(sessionID: sessionID, input: "") {
                 let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
-                return LocalAlpineCommandResult(
-                    command: originalCommand,
-                    output: parsed.rawOutput,
-                    exitCode: parsed.exitCode ?? 130,
-                    interactiveRequest: nil
-                )
+                return commandResult(rawOutput: parsed.rawOutput, exitCode: parsed.exitCode ?? 130)
             } else if rawOutput.contains("[process exited]") {
                 emptyPollsAfterExit += 1
                 if emptyPollsAfterExit >= 3 {
                     let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
-                    return LocalAlpineCommandResult(
-                        command: originalCommand,
-                        output: parsed.rawOutput,
-                        exitCode: parsed.exitCode ?? 130,
-                        interactiveRequest: nil
-                    )
+                    return commandResult(rawOutput: parsed.rawOutput, exitCode: parsed.exitCode ?? 130)
                 }
             }
             try? await Task.sleep(nanoseconds: 80_000_000)
@@ -1006,12 +1075,7 @@ actor LocalAlpineTerminalService {
 
         _ = LocalAlpineNativeRuntime.shared.interruptSession(sessionID: sessionID)
         let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
-        return LocalAlpineCommandResult(
-            command: originalCommand,
-            output: parsed.rawOutput,
-            exitCode: parsed.exitCode ?? 130,
-            interactiveRequest: nil
-        )
+        return commandResult(rawOutput: parsed.rawOutput, exitCode: parsed.exitCode ?? 130)
     }
 
     private func parseStreamingCommandOutput(
@@ -1055,7 +1119,6 @@ actor LocalAlpineTerminalService {
     private func sanitizedTerminalLine(_ line: String) -> String {
         line
             .replacingOccurrences(of: "\u{001B}\\[[0-9;?]*[ -/]*[@-~]", with: "", options: .regularExpression)
-            .replacingOccurrences(of: "\u{0007}", with: "")
             .replacingOccurrences(of: "\u{0008}", with: "")
     }
 

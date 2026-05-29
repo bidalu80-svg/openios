@@ -3,6 +3,7 @@ import SwiftUI
 import Photos
 import MarkdownView
 import Charts
+import WebKit
 import os.log
 
 private let vizLog = Logger(subsystem: "com.openui", category: "VizPipeline")
@@ -289,6 +290,9 @@ struct StreamingMarkdownView: View {
         if normalizedLanguage == "mermaid" {
             return .mermaid(code)
         }
+        if mathLanguageTags.contains(normalizedLanguage) {
+            return .math(code, displayMode: true)
+        }
         if shouldRenderCompactCodeModule(language: normalizedLanguage, code: code) {
             return .codeModule(
                 language: normalizedLanguage,
@@ -380,6 +384,8 @@ struct StreamingMarkdownView: View {
             CompactCodeModuleView(code: code, language: language)
         case .codeBlock(let language, let code):
             StandardCodeBlockView(code: code, language: language, isStreaming: isStreaming)
+        case .math(let latex, let displayMode):
+            KaTeXFormulaView(latex: latex, displayMode: displayMode, textColor: textColor)
         case .markdownImage(let imageURL, let altText, let linkURL):
             MarkdownInlineImageView(
                 imageURL: imageURL,
@@ -409,6 +415,7 @@ struct StreamingMarkdownView: View {
     ]
 
     private let pythonLanguageTags: Set<String> = ["python", "python3", "py"]
+    private let mathLanguageTags: Set<String> = ["math", "latex", "tex", "katex"]
 
     private enum ContentSegment {
         case markdown(String)
@@ -421,6 +428,7 @@ struct StreamingMarkdownView: View {
         case python(String)
         case codeModule(language: String, code: String)
         case codeBlock(language: String, code: String)
+        case math(String, displayMode: Bool)
         case markdownImage(imageURL: URL, altText: String, linkURL: URL?)
         case visualization(String)
     }
@@ -974,7 +982,7 @@ struct StreamingMarkdownView: View {
     /// has already had markdown images extracted.
     private func parseCodeBlocks(_ text: String) -> [ContentSegment] {
         let parseText = normalizedInlineFenceOpenersAfterProse(in: text)
-        guard parseText.contains("```") else { return [.markdown(parseText)] }
+        guard parseText.contains("```") else { return parseMathSegments(parseText) }
 
         var units: [EitherContent] = []
         var removedInternalToolBlock = false
@@ -1043,6 +1051,7 @@ struct StreamingMarkdownView: View {
             let isMermaid = lang == "mermaid" && codeContent.trimmingCharacters(in: .whitespacesAndNewlines).count >= 5
             let isSVG = lang == "svg" && looksLikeSVG(codeContent)
             let isPython = pythonLanguageTags.contains(lang)
+            let isMath = mathLanguageTags.contains(lang)
             let isCompactModule = shouldRenderCompactCodeModule(language: lang, code: codeContent)
             let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
             let isPlainTextFence = Self.isPlainTextFence(language: lang)
@@ -1059,11 +1068,12 @@ struct StreamingMarkdownView: View {
                     units.append(.markdown(codeContent))
                 }
                 remaining = normalizedFenceTail(remaining[closeRange.upperBound...])
-            } else if isChart || isHTML || isLinkedWebAsset || isMermaid || isSVG || isPython || isCompactModule || isStandardCodeBlock {
+            } else if isChart || isHTML || isLinkedWebAsset || isMermaid || isSVG || isPython || isMath || isCompactModule || isStandardCodeBlock {
                 if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     units.append(.markdown(preceding))
                 }
                 if isChart { units.append(.segment(.chart(codeContent))) }
+                else if isMath { units.append(.segment(.math(codeContent, displayMode: true))) }
                 else if isCompactModule {
                     units.append(.segment(.codeModule(
                         language: lang,
@@ -1102,6 +1112,171 @@ struct StreamingMarkdownView: View {
             return []
         }
         return collapseParsedUnits(units, fallback: parseText)
+    }
+
+    private func parseMathSegments(_ text: String) -> [ContentSegment] {
+        guard text.contains("$$") || text.contains("\\[") || text.contains("$") || text.contains("\\(") else {
+            return text.isEmpty ? [] : [.markdown(text)]
+        }
+
+        var segments: [ContentSegment] = []
+        var cursor = text.startIndex
+
+        func appendMarkdown(_ markdown: String) {
+            guard !markdown.isEmpty else { return }
+            segments.append(contentsOf: parseStandaloneInlineMathSegments(markdown))
+        }
+
+        while let match = nextDisplayMathRange(in: text, from: cursor) {
+            if cursor < match.range.lowerBound {
+                appendMarkdown(String(text[cursor..<match.range.lowerBound]))
+            }
+
+            let latex = match.latex.trimmingCharacters(in: .whitespacesAndNewlines)
+            if latex.isEmpty {
+                appendMarkdown(String(text[match.range]))
+            } else {
+                segments.append(.math(latex, displayMode: true))
+            }
+            cursor = match.range.upperBound
+        }
+
+        if cursor < text.endIndex {
+            appendMarkdown(String(text[cursor..<text.endIndex]))
+        }
+
+        return segments.isEmpty ? [.markdown(text)] : segments
+    }
+
+    private func parseStandaloneInlineMathSegments(_ text: String) -> [ContentSegment] {
+        var segments: [ContentSegment] = []
+        var markdown = ""
+        let lines = text.components(separatedBy: "\n")
+
+        func flushMarkdown() {
+            guard !markdown.isEmpty else { return }
+            segments.append(.markdown(markdown))
+            markdown = ""
+        }
+
+        for index in lines.indices {
+            let line = lines[index]
+            let suffix = index < lines.count - 1 ? "\n" : ""
+            if let math = standaloneInlineMath(in: line) {
+                flushMarkdown()
+                segments.append(.math(math.latex, displayMode: math.displayMode))
+            } else {
+                markdown += line + suffix
+            }
+        }
+        flushMarkdown()
+
+        return segments.isEmpty ? [.markdown(text)] : segments
+    }
+
+    private func standaloneInlineMath(in line: String) -> (latex: String, displayMode: Bool)? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if trimmed.hasPrefix("$"),
+           trimmed.hasSuffix("$"),
+           !trimmed.hasPrefix("$$"),
+           !trimmed.hasSuffix("$$"),
+           trimmed.count > 2 {
+            let latex = String(trimmed.dropFirst().dropLast())
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return latex.isEmpty ? nil : (latex, false)
+        }
+
+        if trimmed.hasPrefix("\\("),
+           trimmed.hasSuffix("\\)"),
+           trimmed.count > 4 {
+            let start = trimmed.index(trimmed.startIndex, offsetBy: 2)
+            let end = trimmed.index(trimmed.endIndex, offsetBy: -2)
+            let latex = String(trimmed[start..<end])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return latex.isEmpty ? nil : (latex, false)
+        }
+
+        return nil
+    }
+
+    private func nextDisplayMathRange(
+        in text: String,
+        from start: String.Index
+    ) -> (range: Range<String.Index>, latex: String)? {
+        let dollar = nextPairedMathDelimiter(open: "$$", close: "$$", in: text, from: start, honorEscapes: true)
+        let bracket = nextPairedMathDelimiter(open: "\\[", close: "\\]", in: text, from: start, honorEscapes: false)
+
+        switch (dollar, bracket) {
+        case (.some(let lhs), .some(let rhs)):
+            return lhs.range.lowerBound <= rhs.range.lowerBound ? lhs : rhs
+        case (.some(let match), .none), (.none, .some(let match)):
+            return match
+        case (.none, .none):
+            return nil
+        }
+    }
+
+    private func nextPairedMathDelimiter(
+        open: String,
+        close: String,
+        in text: String,
+        from start: String.Index,
+        honorEscapes: Bool
+    ) -> (range: Range<String.Index>, latex: String)? {
+        var cursor = start
+        while cursor < text.endIndex,
+              let openRange = text.range(of: open, range: cursor..<text.endIndex) {
+            if honorEscapes && Self.isEscaped(openRange.lowerBound, in: text) {
+                cursor = openRange.upperBound
+                continue
+            }
+
+            guard let closeRange = firstMathMarkerRange(
+                of: close,
+                in: text,
+                from: openRange.upperBound,
+                honorEscapes: honorEscapes
+            ) else {
+                return nil
+            }
+
+            return (
+                openRange.lowerBound..<closeRange.upperBound,
+                String(text[openRange.upperBound..<closeRange.lowerBound])
+            )
+        }
+        return nil
+    }
+
+    private func firstMathMarkerRange(
+        of marker: String,
+        in text: String,
+        from start: String.Index,
+        honorEscapes: Bool
+    ) -> Range<String.Index>? {
+        var cursor = start
+        while cursor < text.endIndex,
+              let range = text.range(of: marker, range: cursor..<text.endIndex) {
+            if !honorEscapes || !Self.isEscaped(range.lowerBound, in: text) {
+                return range
+            }
+            cursor = range.upperBound
+        }
+        return nil
+    }
+
+    private static func isEscaped(_ index: String.Index, in text: String) -> Bool {
+        var slashCount = 0
+        var cursor = index
+        while cursor > text.startIndex {
+            let previous = text.index(before: cursor)
+            guard text[previous] == "\\" else { break }
+            slashCount += 1
+            cursor = previous
+        }
+        return slashCount % 2 == 1
     }
 
     private func normalizedInlineFenceOpenersAfterProse(in text: String) -> String {
@@ -1225,7 +1400,7 @@ struct StreamingMarkdownView: View {
     }
 
     private func collapseParsedUnits(_ units: [EitherContent], fallback text: String) -> [ContentSegment] {
-        guard !units.isEmpty else { return [.markdown(text)] }
+        guard !units.isEmpty else { return parseMathSegments(text) }
 
         var segments: [ContentSegment] = []
         var index = 0
@@ -1262,7 +1437,7 @@ struct StreamingMarkdownView: View {
         while index < units.count {
             switch units[index] {
             case .markdown(let markdown):
-                segments.append(.markdown(markdown))
+                segments.append(contentsOf: parseMathSegments(markdown))
                 index += 1
             case .segment(let segment):
                 segments.append(segment)
@@ -1310,7 +1485,7 @@ struct StreamingMarkdownView: View {
             }
         }
 
-        return segments.isEmpty ? [.markdown(text)] : segments
+        return segments.isEmpty ? parseMathSegments(text) : segments
     }
 
     private func normalizedCodeBlock(language: String, content: String) -> ParsedBlock? {
@@ -1579,6 +1754,211 @@ struct StreamingMarkdownView: View {
     private func tryParseChart(code: String) -> USpec? {
         guard let data = code.data(using: .utf8) else { return nil }
         return try? parseUSpec(from: data)
+    }
+}
+
+private struct KaTeXFormulaView: View {
+    let latex: String
+    let displayMode: Bool
+    let textColor: SwiftUI.Color?
+
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var contentHeight: CGFloat = 28
+
+    var body: some View {
+        KaTeXWebView(
+            html: html,
+            baseURL: Self.resourceDirectory(),
+            contentHeight: $contentHeight
+        )
+        .frame(maxWidth: .infinity, alignment: displayMode ? .center : .leading)
+        .frame(height: max(contentHeight, displayMode ? 44 : 28))
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityLabel(latex)
+    }
+
+    private var html: String {
+        let encodedLatex = Data(latex.utf8).base64EncodedString()
+        let display = displayMode ? "true" : "false"
+        let color = Self.cssColor(textColor, scheme: colorScheme)
+        let align = displayMode ? "center" : "left"
+
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <link rel="stylesheet" href="katex.min.css">
+        <script src="katex.min.js"></script>
+        <script src="mhchem.min.js"></script>
+        <style>
+        html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+        html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+        body { color: \(color); font: 17px/1.35 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+        #math { display: inline-block; max-width: 100%; padding: 2px 0; text-align: \(align); }
+        #wrap { width: 100%; text-align: \(align); }
+        .fallback { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; opacity: 0.82; }
+        .katex-display { margin: 0; overflow-x: auto; overflow-y: hidden; }
+        </style>
+        </head>
+        <body>
+        <div id="wrap"><span id="math"></span></div>
+        <script>
+        function decodeBase64(value) {
+          var bytes = Uint8Array.from(atob(value), function(c) { return c.charCodeAt(0); });
+          return new TextDecoder('utf-8').decode(bytes);
+        }
+        function reportHeight() {
+          requestAnimationFrame(function() {
+            requestAnimationFrame(function() {
+              var height = Math.max(
+                document.body.scrollHeight,
+                document.documentElement.scrollHeight,
+                document.getElementById('math').getBoundingClientRect().height
+              );
+              window.webkit.messageHandlers.heightHandler.postMessage(Math.ceil(height) + 2);
+            });
+          });
+        }
+        (function() {
+          var latex = decodeBase64('\(encodedLatex)');
+          var el = document.getElementById('math');
+          try {
+            if (!window.katex) { throw new Error('KaTeX unavailable'); }
+            katex.render(latex, el, {
+              displayMode: \(display),
+              throwOnError: true,
+              strict: false,
+              trust: false,
+              output: 'html'
+            });
+          } catch (error) {
+            el.className = 'fallback';
+            el.textContent = latex;
+          }
+          if (document.fonts && document.fonts.ready) {
+            document.fonts.ready.then(reportHeight);
+          } else {
+            reportHeight();
+          }
+        })();
+        </script>
+        </body>
+        </html>
+        """
+    }
+
+    private static func resourceDirectory() -> URL? {
+        for subdirectory in ["Resources/katex", "katex"] {
+            if let url = Bundle.main.url(
+                forResource: "katex.min",
+                withExtension: "js",
+                subdirectory: subdirectory
+            ) {
+                return url.deletingLastPathComponent()
+            }
+        }
+        return Bundle.main.url(forResource: "katex.min", withExtension: "js")?.deletingLastPathComponent()
+    }
+
+    private static func cssColor(_ color: SwiftUI.Color?, scheme: ColorScheme) -> String {
+        let uiColor: UIColor
+        if let color {
+            uiColor = UIColor(color)
+        } else {
+            uiColor = scheme == .dark ? .white : .black
+        }
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        guard uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else {
+            return scheme == .dark ? "#ffffff" : "#111111"
+        }
+        return "rgba(\(Int(red * 255)), \(Int(green * 255)), \(Int(blue * 255)), \(alpha))"
+    }
+}
+
+private struct KaTeXWebView: UIViewRepresentable {
+    let html: String
+    let baseURL: URL?
+    @Binding var contentHeight: CGFloat
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(contentHeight: $contentHeight)
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.userContentController.add(context.coordinator, name: "heightHandler")
+
+        let prefs = WKWebpagePreferences()
+        prefs.allowsContentJavaScript = true
+        config.defaultWebpagePreferences = prefs
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.bounces = false
+        webView.scrollView.showsVerticalScrollIndicator = false
+        webView.scrollView.showsHorizontalScrollIndicator = false
+        webView.navigationDelegate = context.coordinator
+        webView.allowsLinkPreview = false
+
+        context.coordinator.lastHTML = html
+        webView.loadHTMLString(html, baseURL: baseURL)
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        guard context.coordinator.lastHTML != html else { return }
+        context.coordinator.lastHTML = html
+        webView.loadHTMLString(html, baseURL: baseURL)
+    }
+
+    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "heightHandler")
+    }
+
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+        @Binding var contentHeight: CGFloat
+        var lastHTML: String?
+
+        init(contentHeight: Binding<CGFloat>) {
+            _contentHeight = contentHeight
+        }
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage
+        ) {
+            let numericHeight: CGFloat?
+            if let height = message.body as? CGFloat {
+                numericHeight = height
+            } else if let height = message.body as? Double {
+                numericHeight = CGFloat(height)
+            } else if let height = message.body as? Int {
+                numericHeight = CGFloat(height)
+            } else {
+                numericHeight = nil
+            }
+
+            guard let numericHeight, numericHeight > 0 else { return }
+            DispatchQueue.main.async {
+                self.contentHeight = min(max(numericHeight, 24), 600)
+            }
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            decisionHandler(navigationAction.navigationType == .other ? .allow : .cancel)
+        }
     }
 }
 

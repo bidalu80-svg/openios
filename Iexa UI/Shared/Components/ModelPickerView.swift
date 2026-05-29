@@ -1,5 +1,40 @@
 import SwiftUI
 
+private struct ModelPickerCapabilityBadge: Hashable {
+    let icon: String
+    let text: String
+}
+
+private func modelPickerCapabilityBadges(for model: AIModel) -> [ModelPickerCapabilityBadge] {
+    var badges: [ModelPickerCapabilityBadge] = []
+    if let context = model.resolvedContextLength, context > 0 {
+        let text: String
+        if context >= 1_000_000 {
+            text = "\(context / 1_000_000)M"
+        } else if context >= 1_000 {
+            text = "\(context / 1_000)K"
+        } else {
+            text = "\(context)"
+        }
+        badges.append(ModelPickerCapabilityBadge(icon: "rectangle.expand.vertical", text: text))
+    }
+    if model.supportsImageGeneration {
+        badges.append(ModelPickerCapabilityBadge(icon: "photo.on.rectangle.angled", text: "生图"))
+    } else if model.supportsImageInput {
+        badges.append(ModelPickerCapabilityBadge(icon: "eye", text: "视觉"))
+    }
+    if model.supportsReasoning {
+        badges.append(ModelPickerCapabilityBadge(icon: "brain.head.profile", text: "推理"))
+    }
+    if model.supportsToolCalling {
+        badges.append(ModelPickerCapabilityBadge(icon: "wrench.and.screwdriver", text: "工具"))
+    }
+    if model.supportsStructuredOutput {
+        badges.append(ModelPickerCapabilityBadge(icon: "curlybraces.square", text: "JSON"))
+    }
+    return badges
+}
+
 // MARK: - Model Picker View
 
 /// A floating popup that appears above the chat input when the user types `@`.
@@ -157,8 +192,12 @@ struct ModelPickerView: View {
                             .lineLimit(1)
 
                         if model.functionCallingMode == "native" {
-                            Text("⚡ Native Tools")
-                                .scaledFont(size: 10, weight: .semibold)
+                            HStack(spacing: 3) {
+                                Image(systemName: "bolt.fill")
+                                    .scaledFont(size: 8, weight: .bold)
+                                Text("Native")
+                                    .scaledFont(size: 10, weight: .semibold)
+                            }
                                 .foregroundStyle(theme.brandPrimary)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
@@ -173,6 +212,8 @@ struct ModelPickerView: View {
                             .foregroundStyle(theme.textTertiary)
                             .lineLimit(1)
                     }
+
+                    modelCapabilityRow(model)
                 }
 
                 Spacer(minLength: 0)
@@ -182,6 +223,25 @@ struct ModelPickerView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(ModelRowButtonStyle(theme: theme))
+    }
+
+    @ViewBuilder
+    private func modelCapabilityRow(_ model: AIModel) -> some View {
+        let badges = modelPickerCapabilityBadges(for: model)
+        if !badges.isEmpty {
+            HStack(spacing: 8) {
+                ForEach(badges, id: \.self) { badge in
+                    HStack(spacing: 3) {
+                        Image(systemName: badge.icon)
+                            .scaledFont(size: 9, weight: .medium)
+                        Text(badge.text)
+                            .scaledFont(size: 10, weight: .medium)
+                    }
+                    .foregroundStyle(theme.textTertiary)
+                }
+            }
+            .lineLimit(1)
+        }
     }
 }
 

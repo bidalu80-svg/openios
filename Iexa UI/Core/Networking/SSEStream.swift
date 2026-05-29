@@ -179,6 +179,44 @@ enum SSEEvent: Sendable {
         return nil
     }
 
+    /// Extracts reasoning/thinking deltas from compatible provider chunks.
+    var reasoningDelta: String? {
+        guard case .json(let json) = self else { return nil }
+
+        if let type = json["type"] as? String,
+           [
+            "response.reasoning_text.delta",
+            "response.reasoning.delta",
+            "response.output_reasoning.delta"
+           ].contains(type),
+           let delta = json["delta"] as? String,
+           !delta.isEmpty {
+            return delta
+        }
+
+        if let choices = json["choices"] as? [[String: Any]],
+           let first = choices.first {
+            if let delta = first["delta"] as? [String: Any],
+               let reasoning = Self.renderReasoning(delta) {
+                return reasoning
+            }
+            if let message = first["message"] as? [String: Any],
+               let reasoning = Self.renderReasoning(message) {
+                return reasoning
+            }
+        }
+
+        if json["type"] as? String == "content_block_delta",
+           let delta = json["delta"] as? [String: Any],
+           ["thinking_delta", "reasoning_delta"].contains(delta["type"] as? String ?? ""),
+           let text = (delta["thinking"] as? String) ?? (delta["text"] as? String),
+           !text.isEmpty {
+            return text
+        }
+
+        return Self.renderReasoning(json)
+    }
+
     /// Extracts usage statistics from the final streaming chunk.
     var usage: [String: Any]? {
         guard case .json(let json) = self else { return nil }
@@ -235,6 +273,34 @@ enum SSEEvent: Sendable {
 
         if let array = value as? [Any] {
             let rendered = array.compactMap { renderContent($0) }.joined()
+            return rendered.isEmpty ? nil : rendered
+        }
+
+        return nil
+    }
+
+    private static func renderReasoning(_ value: Any?) -> String? {
+        guard let value else { return nil }
+
+        if let text = value as? String {
+            return text.isEmpty ? nil : text
+        }
+
+        if let dict = value as? [String: Any] {
+            for key in [
+                "reasoning_content", "reasoningContent",
+                "reasoning", "thinking", "think",
+                "thought", "thoughts"
+            ] {
+                if let rendered = renderReasoning(dict[key]) {
+                    return rendered
+                }
+            }
+            return nil
+        }
+
+        if let array = value as? [Any] {
+            let rendered = array.compactMap { renderReasoning($0) }.joined()
             return rendered.isEmpty ? nil : rendered
         }
 

@@ -34,6 +34,8 @@ final class TerminalBrowserViewModel {
     /// Pending stdin prompt for an interactive Local Alpine command.
     var pendingInteractiveRequest: LocalAlpineInteractiveRequest?
     var pendingInteractiveInput: String = ""
+    /// Local Alpine preview marker waiting for the UI to present it.
+    var pendingOpenRequest: LocalAlpineOpenRequest?
 
     /// Whether the new folder alert is showing.
     var showNewFolderAlert: Bool = false
@@ -95,6 +97,7 @@ final class TerminalBrowserViewModel {
         isTerminalExpanded = false
         pendingInteractiveRequest = nil
         pendingInteractiveInput = ""
+        pendingOpenRequest = nil
         pendingInteractiveEntryIndex = nil
         showNewFolderAlert = false
         newFolderName = ""
@@ -259,6 +262,7 @@ final class TerminalBrowserViewModel {
             if usesLocalAlpine {
                 let result = await LocalAlpineTerminalService.shared.execute(command: trimmed, cwd: currentPath)
                 commandHistory[entryIndex].output = result.output
+                enqueueOpenRequests(result.openRequests)
                 if let request = result.interactiveRequest {
                     pendingInteractiveInput = request.defaultValue
                     pendingInteractiveRequest = request
@@ -358,6 +362,7 @@ final class TerminalBrowserViewModel {
             stdinInput: input
         )
         commandHistory[entryIndex].output = result.output
+        enqueueOpenRequests(result.openRequests)
         if let nextRequest = result.interactiveRequest {
             pendingInteractiveInput = nextRequest.defaultValue
             pendingInteractiveRequest = nextRequest
@@ -372,6 +377,12 @@ final class TerminalBrowserViewModel {
         isExecutingCommand = false
     }
 
+    func consumePendingOpenRequest(_ request: LocalAlpineOpenRequest) {
+        if pendingOpenRequest?.id == request.id {
+            pendingOpenRequest = nil
+        }
+    }
+
     func cancelPendingInteractiveCommand() {
         if let entryIndex = pendingInteractiveEntryIndex,
            commandHistory.indices.contains(entryIndex) {
@@ -383,6 +394,11 @@ final class TerminalBrowserViewModel {
         pendingInteractiveInput = ""
         pendingInteractiveEntryIndex = nil
         isExecutingCommand = false
+    }
+
+    private func enqueueOpenRequests(_ requests: [LocalAlpineOpenRequest]) {
+        guard let request = requests.last else { return }
+        pendingOpenRequest = request
     }
 }
 

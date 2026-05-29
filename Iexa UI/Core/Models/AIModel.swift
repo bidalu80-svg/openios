@@ -152,32 +152,48 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
     /// as a fallback for models whose identifiers do not literally contain
     /// `gpt-image-2` or another single hardcoded name.
     var supportsImageGeneration: Bool {
-        if defaultFeatureIds.contains("image_generation") { return true }
-        if builtinTools["image_generation"] == true { return true }
-        if let value = capabilities?["image_generation"]?.lowercased() {
-            if ["1", "true", "yes", "enabled"].contains(value) {
-                return true
-            }
-            if ["0", "false", "no", "disabled"].contains(value) {
-                return false
-            }
+        if LocalModelCapabilityRegistry.explicitlyDisablesImageGeneration(for: self) {
+            return false
         }
-
-        let haystack = ([id, name] + toolIds + actionIds + actions.map(\.id))
-            .joined(separator: " ")
-            .lowercased()
-        return Self.imageGenerationHintTokens.contains(where: { haystack.contains($0) })
-            && !Self.imageGenerationNegativeTokens.contains(where: { haystack.contains($0) })
+        resolvedCapabilities.supportsImageGeneration
     }
 
-    private static let imageGenerationHintTokens: [String] = [
+    var supportsImageInput: Bool {
+        isMultimodal || resolvedCapabilities.supportsImageInput
+    }
+
+    var supportsImageOutput: Bool {
+        resolvedCapabilities.supportsImageOutput
+    }
+
+    var supportsReasoning: Bool {
+        resolvedCapabilities.supportsReasoning == true
+    }
+
+    var supportsToolCalling: Bool {
+        resolvedCapabilities.supportsToolCalling == true || functionCallingMode == "native"
+    }
+
+    var supportsStructuredOutput: Bool {
+        resolvedCapabilities.supportsStructuredOutput == true
+    }
+
+    var resolvedContextLength: Int? {
+        LocalModelCapabilityRegistry.contextLength(for: self, modelId: id)
+    }
+
+    var resolvedCapabilities: LocalModelCapability {
+        LocalModelCapabilityRegistry.capability(for: self)
+    }
+
+    fileprivate static let imageGenerationHintTokens: [String] = [
         "image", "img", "dall-e", "dalle", "gpt-image", "imagen",
         "flux", "sdxl", "stable-diffusion", "midjourney", "mj-",
         "banana", "nano-banana", "grok-imagine", "grok imagine",
         "seedream", "qwen-image", "jimeng", "kolors", "minimax-image"
     ]
 
-    private static let imageGenerationNegativeTokens: [String] = [
+    fileprivate static let imageGenerationNegativeTokens: [String] = [
         "vision", "ocr", "vl", "video", "videos", "veo", "sora",
         "wan", "kling", "hailuo", "runway", "luma", "pika", "vidu",
         "seedance", "text-to-video", "image-to-video", "i2v", "t2v",
@@ -257,5 +273,298 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
         var components = URLComponents(string: "\(normalizedBase)/api/v1/models/model/profile/image")
         components?.queryItems = [URLQueryItem(name: "id", value: id)]
         return components?.url
+    }
+}
+
+struct LocalModelCapability: Hashable, Sendable {
+    var inputModalities: Set<String> = ["text"]
+    var outputModalities: Set<String> = ["text"]
+    var endpointTypes: Set<String> = []
+    var contextLength: Int?
+    var supportsToolCalling: Bool?
+    var supportsReasoning: Bool?
+    var supportsStructuredOutput: Bool?
+
+    var supportsImageInput: Bool {
+        inputModalities.contains("image") || inputModalities.contains("vision")
+    }
+
+    var supportsImageOutput: Bool {
+        outputModalities.contains("image")
+            || endpointTypes.contains("images")
+            || endpointTypes.contains("image_generation")
+    }
+
+    var supportsImageGeneration: Bool {
+        supportsImageOutput
+            || endpointTypes.contains("image")
+            || endpointTypes.contains("image_generations")
+    }
+}
+
+enum LocalModelCapabilityRegistry {
+    static func explicitlyDisablesImageGeneration(for model: AIModel) -> Bool {
+        if let value = model.capabilities?["image_generation"],
+           truthy(value) == false {
+            return true
+        }
+        return false
+    }
+
+    static func capability(for model: AIModel) -> LocalModelCapability {
+        var capability = LocalModelCapability()
+        capability.contextLength = contextLength(for: model, modelId: model.id)
+
+        if model.isMultimodal {
+            capability.inputModalities.insert("image")
+        }
+        if model.defaultFeatureIds.contains("image_generation")
+            || model.builtinTools["image_generation"] == true {
+            capability.outputModalities.insert("image")
+            capability.endpointTypes.insert("image_generation")
+        }
+        if model.functionCallingMode == "native" || !model.toolIds.isEmpty {
+            capability.supportsToolCalling = true
+        }
+
+        applyCapabilities(model.capabilities, to: &capability)
+        scanRawModelItem(model.rawModelItem, into: &capability)
+
+        let haystack = ([model.id, model.name, model.description ?? "", model.connectionType ?? ""]
+            + model.tags
+            + model.toolIds
+            + model.defaultFeatureIds
+            + model.actionIds
+            + model.actions.map(\.id)
+            + model.actions.map(\.name))
+            .joined(separator: " ")
+            .lowercased()
+        if AIModel.imageGenerationHintTokens.contains(where: { haystack.contains($0) })
+            && !AIModel.imageGenerationNegativeTokens.contains(where: { haystack.contains($0) }) {
+            capability.outputModalities.insert("image")
+            capability.endpointTypes.insert("image_generation")
+        }
+        if haystack.contains("reasoning") || haystack.contains("think") || haystack.contains("o3") || haystack.contains("o4") {
+            capability.supportsReasoning = true
+        }
+        return capability
+    }
+
+    static func contextLength(for model: AIModel?, modelId: String?) -> Int? {
+        if let explicit = model?.contextLength, explicit > 0 {
+            return explicit
+        }
+        if let rawContext = scanContextLength(in: model?.rawModelItem), rawContext > 0 {
+            return rawContext
+        }
+
+        var parts: [String] = []
+        if let modelId, !modelId.isEmpty { parts.append(modelId) }
+        if let model {
+            parts.append(model.id)
+            parts.append(model.name)
+            if let description = model.description, !description.isEmpty {
+                parts.append(description)
+            }
+        }
+        let raw = parts.joined(separator: " ").lowercased()
+        if raw.contains("1m") || raw.contains("1000k") { return 1_000_000 }
+        if raw.contains("512k") { return 512_000 }
+        if raw.contains("256k") { return 256_000 }
+        if raw.contains("200k") { return 200_000 }
+        if raw.contains("128k") { return 128_000 }
+        if raw.contains("96k") { return 96_000 }
+        if raw.contains("64k") { return 64_000 }
+        if raw.contains("32k") { return 32_000 }
+        if raw.contains("16k") { return 16_000 }
+        if raw.contains("8k") { return 8_000 }
+        if raw.contains("4k") { return 4_000 }
+        if raw.contains("claude-3") || raw.contains("claude-sonnet") || raw.contains("claude-opus") {
+            return 200_000
+        }
+        if raw.contains("gemini-1.5") || raw.contains("gemini-2") {
+            return 1_000_000
+        }
+        if raw.contains("gpt-4.1") || raw.contains("gpt-5") || raw.contains("gpt-4o") || raw.contains("o3") || raw.contains("o4") {
+            return 128_000
+        }
+        if raw.contains("qwen") || raw.contains("grok") || raw.contains("deepseek") {
+            return 128_000
+        }
+        return nil
+    }
+
+    private static func applyCapabilities(_ capabilities: [String: String]?, to capability: inout LocalModelCapability) {
+        guard let capabilities else { return }
+        for (key, value) in capabilities {
+            applyCapabilityValue(key: key, value: value, to: &capability)
+        }
+    }
+
+    private static func scanRawModelItem(_ raw: [String: Any]?, into capability: inout LocalModelCapability) {
+        guard let raw else { return }
+        scanDictionary(raw, into: &capability, depth: 0)
+    }
+
+    private static func scanDictionary(_ dict: [String: Any], into capability: inout LocalModelCapability, depth: Int) {
+        guard depth <= 4 else { return }
+        for (key, value) in dict {
+            let normalizedKey = normalizeToken(key)
+            if ["input_modalities", "inputmodalities", "inputs", "modalities_input"].contains(normalizedKey) {
+                addModalities(from: value, to: &capability.inputModalities)
+            } else if ["output_modalities", "outputmodalities", "outputs", "modalities_output"].contains(normalizedKey) {
+                addModalities(from: value, to: &capability.outputModalities)
+            } else if ["modalities", "supported_modalities", "supportedmodalities"].contains(normalizedKey) {
+                addModalities(from: value, to: &capability.inputModalities)
+                addModalities(from: value, to: &capability.outputModalities)
+            } else if ["supported_endpoint_types", "supportedendpoints", "endpoint_types", "endpoints"].contains(normalizedKey) {
+                addModalities(from: value, to: &capability.endpointTypes)
+            } else {
+                applyCapabilityValue(key: key, value: value, to: &capability)
+            }
+
+            if let nested = value as? [String: Any] {
+                scanDictionary(nested, into: &capability, depth: depth + 1)
+            } else if let nestedArray = value as? [[String: Any]] {
+                for nested in nestedArray.prefix(12) {
+                    scanDictionary(nested, into: &capability, depth: depth + 1)
+                }
+            }
+        }
+    }
+
+    private static func applyCapabilityValue(key: String, value: Any, to capability: inout LocalModelCapability) {
+        let normalizedKey = normalizeToken(key)
+        let truth = truthy(value)
+        switch normalizedKey {
+        case "image_generation", "imagegeneration", "image_output", "imageoutput", "output_image", "outputimage", "images":
+            if truth != false {
+                capability.outputModalities.insert("image")
+                capability.endpointTypes.insert("image_generation")
+            }
+        case "vision", "image_input", "imageinput", "input_image", "inputimage", "multimodal":
+            if truth != false {
+                capability.inputModalities.insert("image")
+            }
+        case "tool_calling", "toolcalling", "tool_calls", "toolcalls", "function_calling", "functioncalling":
+            if let truth { capability.supportsToolCalling = truth }
+        case "reasoning", "thinking":
+            if let truth { capability.supportsReasoning = truth }
+        case "structured_output", "structuredoutput", "structured_outputs", "structuredoutputs", "json_schema", "jsonschema":
+            if let truth { capability.supportsStructuredOutput = truth }
+        case "interleaved":
+            if let field = (value as? [String: Any])?["field"] as? String,
+               !field.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                capability.supportsReasoning = true
+            }
+        case "audio_output", "audiooutput":
+            if truth != false { capability.outputModalities.insert("audio") }
+        case "video_output", "videooutput":
+            if truth != false { capability.outputModalities.insert("video") }
+        default:
+            break
+        }
+        if capability.contextLength == nil, let context = intValue(value), normalizedKey.contains("context") {
+            capability.contextLength = context
+        }
+    }
+
+    private static func scanContextLength(in raw: [String: Any]?) -> Int? {
+        guard let raw else { return nil }
+        return scanContextLength(in: raw, depth: 0)
+    }
+
+    private static func scanContextLength(in dict: [String: Any], depth: Int) -> Int? {
+        guard depth <= 4 else { return nil }
+        let keys = [
+            "context_length", "contextLength", "context_window", "contextWindow",
+            "max_context_length", "maxContextLength", "max_context", "maxContext",
+            "num_ctx"
+        ]
+        for key in keys {
+            if let value = intValue(dict[key]) {
+                return value
+            }
+        }
+        for value in dict.values {
+            if let nested = value as? [String: Any],
+               let context = scanContextLength(in: nested, depth: depth + 1) {
+                return context
+            }
+        }
+        return nil
+    }
+
+    private static func addModalities(from value: Any, to set: inout Set<String>) {
+        for item in stringValues(value) {
+            let normalized = normalizeToken(item)
+            if normalized == "images" || normalized.contains("image_generation") || normalized.contains("imagegeneration") {
+                set.insert("image_generation")
+            } else if normalized.contains("image") || normalized == "vision" {
+                set.insert("image")
+            } else if normalized.contains("audio") {
+                set.insert("audio")
+            } else if normalized.contains("video") {
+                set.insert("video")
+            } else if normalized.contains("text") {
+                set.insert("text")
+            } else if !normalized.isEmpty {
+                set.insert(normalized)
+            }
+        }
+    }
+
+    private static func stringValues(_ value: Any) -> [String] {
+        if let string = value as? String {
+            return string
+                .split { $0 == "," || $0.isWhitespace }
+                .map(String.init)
+        }
+        if let strings = value as? [String] { return strings }
+        if let array = value as? [Any] { return array.flatMap(stringValues) }
+        if let dict = value as? [String: Any] {
+            return dict.flatMap { key, value in [key] + stringValues(value) }
+        }
+        return []
+    }
+
+    private static func truthy(_ value: Any) -> Bool? {
+        if let bool = value as? Bool { return bool }
+        if let int = value as? Int { return int != 0 }
+        if let double = value as? Double { return double != 0 }
+        if let number = value as? NSNumber { return number.intValue != 0 }
+        if let string = value as? String {
+            let cleaned = string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if ["1", "true", "yes", "enabled", "on", "supported"].contains(cleaned) { return true }
+            if ["0", "false", "no", "disabled", "off", "unsupported"].contains(cleaned) { return false }
+        }
+        return nil
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let int = value as? Int, int > 0 { return int }
+        if let double = value as? Double, double > 0 { return Int(double) }
+        if let number = value as? NSNumber, number.intValue > 0 { return number.intValue }
+        if let string = value as? String {
+            let cleaned = string
+                .replacingOccurrences(of: ",", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if cleaned.hasSuffix("k"), let n = Double(cleaned.dropLast()) {
+                return Int(n * 1_000)
+            }
+            if cleaned.hasSuffix("m"), let n = Double(cleaned.dropLast()) {
+                return Int(n * 1_000_000)
+            }
+            if let int = Int(cleaned), int > 0 { return int }
+        }
+        return nil
+    }
+
+    private static func normalizeToken(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
     }
 }

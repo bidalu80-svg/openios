@@ -1247,13 +1247,15 @@ struct ChatDetailView: View {
             guard height > 1, !viewModel.messages.isEmpty else { return }
             isScrolledUp = false
             lastProgrammaticScrollTime = Date()
-            let animation = keyboard.matchedAnimation
-            let delay = keyboard.animationDuration + 0.05
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            scrollToBottomWithoutAnimation()
+            DispatchQueue.main.async {
                 lastProgrammaticScrollTime = Date()
-                withAnimation(animation) {
-                    scrollPosition.scrollTo(edge: .bottom)
-                }
+                scrollToBottomWithoutAnimation()
+            }
+            let settleDelay = max(0.1, keyboard.animationDuration + 0.05)
+            DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) {
+                lastProgrammaticScrollTime = Date()
+                scrollToBottomWithoutAnimation()
             }
         }
     }
@@ -1271,6 +1273,7 @@ struct ChatDetailView: View {
             .padding(.bottom, 8)
             .frame(maxWidth: iPadMaxContentWidth)
             .frame(maxWidth: .infinity)
+            .transaction { $0.animation = nil }
         }
         .background(ScrollViewHorizontalLock())
         .scrollIndicators(.hidden)
@@ -1404,7 +1407,19 @@ struct ChatDetailView: View {
     // MARK: - Messages List
 
     private var lastTurnMinHeight: CGFloat {
-        keyboard.height > 1 ? 0 : max(viewState_containerHeight, 0)
+        let containerHeight = max(viewState_containerHeight, 0)
+        guard keyboard.height > 1 else { return containerHeight }
+
+        let keyboardAdjustedHeight = max(containerHeight - keyboard.height, 0)
+        return max(keyboardAdjustedHeight, min(containerHeight, 220))
+    }
+
+    private func scrollToBottomWithoutAnimation() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollPosition.scrollTo(edge: .bottom)
+        }
     }
 
     /// Splits messages into two groups around the last conversation turn.

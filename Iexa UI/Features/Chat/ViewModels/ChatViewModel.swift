@@ -93,6 +93,92 @@ struct ChatContextBudgetStatus: Sendable, Equatable {
     }
 }
 
+private enum LocalContextOffloadStore {
+    static func modelText(label: String, text: String, maxInlineCharacters: Int) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > maxInlineCharacters else { return text }
+
+        let referencePath = write(label: label, text: trimmed)
+        let metadataBudget = 700
+        let excerptBudget = max(800, maxInlineCharacters - metadataBudget)
+        let headCount = max(400, excerptBudget / 2)
+        let tailCount = max(400, excerptBudget - headCount)
+        let head = String(trimmed.prefix(headCount))
+        let tail = String(trimmed.suffix(tailCount))
+        let displayPath = referencePath ?? "unavailable"
+
+        return """
+        [context offload: \(label)]
+        full_content_saved_locally: \(displayPath)
+        original_characters: \(trimmed.count)
+        inline_excerpt: head \(head.count) chars + tail \(tail.count) chars
+        --- head ---
+        \(head)
+        --- tail ---
+        \(tail)
+        [/context offload]
+        """
+    }
+
+    private static func write(label: String, text: String) -> String? {
+        do {
+            let directory = try offloadDirectory()
+            let fileName = "\(slug(label))-\(stableHash(text)).txt"
+            let fileURL = directory.url.appendingPathComponent(fileName)
+            if !FileManager.default.fileExists(atPath: fileURL.path) {
+                try text.write(to: fileURL, atomically: true, encoding: .utf8)
+            }
+            return "\(directory.displayPath)/\(fileName)"
+        } catch {
+            return nil
+        }
+    }
+
+    private static func offloadDirectory() throws -> (url: URL, displayPath: String) {
+        let fileManager = FileManager.default
+        if let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let shared = documents
+                .appendingPathComponent("Iexa Alpine", isDirectory: true)
+                .appendingPathComponent("shared", isDirectory: true)
+                .appendingPathComponent(".iexa-context-offload", isDirectory: true)
+            try fileManager.createDirectory(at: shared, withIntermediateDirectories: true)
+            return (shared, "/mnt/iexa/.iexa-context-offload")
+        }
+
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
+        let fallback = base.appendingPathComponent("IexaContextOffloads", isDirectory: true)
+        try fileManager.createDirectory(at: fallback, withIntermediateDirectories: true)
+        return (fallback, fallback.path)
+    }
+
+    private static func stableHash(_ text: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
+    }
+
+    private static func slug(_ label: String) -> String {
+        var result = ""
+        let safePunctuation = CharacterSet(charactersIn: "-_")
+        let separators = CharacterSet(charactersIn: " /.")
+        for scalar in label.lowercased().unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) || safePunctuation.contains(scalar) {
+                result.unicodeScalars.append(scalar)
+            } else if separators.contains(scalar) {
+                result.append("-")
+            }
+            if result.count >= 48 { break }
+        }
+        return result.trimmingCharacters(in: CharacterSet(charactersIn: "-_")).isEmpty
+            ? "context"
+            : result.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+    }
+}
+
 /// Manages state and logic for a single chat conversation.
 /// Handles sending/streaming messages via Socket.IO, loading history, and model selection.
 /// Instances are held by `ActiveChatStore` so they survive navigation transitions.
@@ -1395,7 +1481,7 @@ final class ChatViewModel {
         LocalAlpineToolCapability(
             name: "read_file",
             description: "Read workspace/rootfs files without shell text parsing.",
-            arguments: ["path", "start_line?", "line_count?", "max_bytes?", "Minis alias: file_read"]
+            arguments: ["path", "start_line?", "line_count?", "max_bytes?", "alias: file_read"]
         ),
         LocalAlpineToolCapability(
             name: "edit_file",
@@ -1444,8 +1530,8 @@ final class ChatViewModel {
         ),
         LocalAlpineToolCapability(
             name: "browser_use",
-            description: "Fetch an HTTP/HTTPS URL from the Alpine shell with bounded output.",
-            arguments: ["url/href/link", "aliases: web_fetch/fetch_url/open_url"]
+            description: "Fetch an HTTP/HTTPS URL from the Alpine shell with bounded output, or save it to a workspace file for preview/offload.",
+            arguments: ["url/href/link", "save_to/output/path optional", "open_preview optional", "max_lines optional", "aliases: web_fetch/fetch_url/open_url"]
         )
     ]
 
@@ -1466,8 +1552,9 @@ final class ChatViewModel {
         - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
         - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`.
-        - Minis-compatible aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
-        - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls.
+        - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
+        - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls. `browser_use` supports optional `save_to`/`output` plus `open_preview:true` so large HTML/SVG/JSON responses can be written under `/mnt/iexa` and opened through the preview bridge instead of being pasted into chat.
+        - In-app preview bridge: after creating a user-viewable file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
         - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, or macOS-only utilities.
         - Rootfs/environment/dependency checks: if the user asks whether Python/Lua/Node/C++ or dependencies exist, inspect the running Alpine rootfs/runtime/toolchain directly with bounded `command -v`, `--version`, `apk info`, `python3 -m pip list`, `find /usr/lib /usr/local/lib`, or small module-list commands. Do not invent `/mnt/iexa/rootfs`; `/mnt/iexa` is only the workspace mount. Do not only search `/mnt/iexa` project dependency files unless the user specifically asks for project dependency files.
@@ -1549,16 +1636,18 @@ final class ChatViewModel {
             }
             if !content.isEmpty {
                 lines.append(message.isStreaming ? "  partial output:" : "  result:")
-                lines.append(indentForSystemContext(clippedForSystemContext(
+                lines.append(indentForSystemContext(contextTextForModel(
                     redactedLocalAlpineInternalPaths(in: content),
-                    maxCharacters: 4_000
+                    label: "local-alpine-result",
+                    maxInlineCharacters: 4_000
                 )))
             }
             if let rawResult, !rawResult.isEmpty, rawResult != content {
                 lines.append("  raw result:")
-                lines.append(indentForSystemContext(clippedForSystemContext(
+                lines.append(indentForSystemContext(contextTextForModel(
                     redactedLocalAlpineInternalPaths(in: rawResult),
-                    maxCharacters: 4_000
+                    label: "local-alpine-raw-result",
+                    maxInlineCharacters: 4_000
                 )))
             }
             if !commandResults.isEmpty {
@@ -1570,7 +1659,7 @@ final class ChatViewModel {
                     cwd: \(result.cwd)
                     exit_code: \(exit)
                     output:
-                    \(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : clippedForSystemContext(redactedLocalAlpineInternalPaths(in: result.outputPreview), maxCharacters: 4_000))
+                    \(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : contextTextForModel(redactedLocalAlpineInternalPaths(in: result.outputPreview), label: "local-alpine-command-output", maxInlineCharacters: 4_000))
                     """))
                 }
             }
@@ -4992,14 +5081,11 @@ final class ChatViewModel {
                             exactUsage = usage
                         }
 
-                        if let delta = event.contentDelta, !delta.isEmpty {
-                            acc.append(delta)
-                            self.updateAssistantMessage(
-                                id: assistantMessageId,
-                                content: acc.content,
-                                isStreaming: true
-                            )
-                        }
+                        self.applyStreamingEventDelta(
+                            event,
+                            to: acc,
+                            assistantMessageId: assistantMessageId
+                        )
 
                         if event.isFinished { break }
                     }
@@ -5020,6 +5106,7 @@ final class ChatViewModel {
 
                 if Task.isCancelled { return }
 
+                acc.markReasoningDone()
                 if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     self.updateAssistantMessage(
                         id: assistantMessageId,
@@ -5255,15 +5342,12 @@ final class ChatViewModel {
                                 exactUsage = usage
                             }
 
-                            // Content delta tokens
-                            if let delta = event.contentDelta, !delta.isEmpty {
-                                acc.append(delta)
-                                self.updateAssistantMessage(
-                                    id: assistantMessageId,
-                                    content: acc.content,
-                                    isStreaming: true
-                                )
-                            }
+                            // Content and reasoning delta tokens
+                            self.applyStreamingEventDelta(
+                                event,
+                                to: acc,
+                                assistantMessageId: assistantMessageId
+                            )
 
                             // Stream finished
                             if event.isFinished { break }
@@ -7510,14 +7594,11 @@ final class ChatViewModel {
                             exactUsage = usage
                         }
 
-                        if let delta = event.contentDelta, !delta.isEmpty {
-                            acc.append(delta)
-                            self.updateAssistantMessage(
-                                id: capturedNewAssistantId,
-                                content: acc.content,
-                                isStreaming: true
-                            )
-                        }
+                        self.applyStreamingEventDelta(
+                            event,
+                            to: acc,
+                            assistantMessageId: capturedNewAssistantId
+                        )
 
                         if event.isFinished { break }
                     }
@@ -7538,6 +7619,7 @@ final class ChatViewModel {
 
                 if Task.isCancelled { return }
 
+                acc.markReasoningDone()
                 if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     self.updateAssistantMessage(
                         id: capturedNewAssistantId,
@@ -7675,11 +7757,11 @@ final class ChatViewModel {
                             if let usage = event.usage, !usage.isEmpty {
                                 exactUsage = usage
                             }
-                            if let delta = event.contentDelta, !delta.isEmpty {
-                                acc.append(delta)
-                                self.updateAssistantMessage(
-                                    id: capturedNewAssistantId, content: acc.content, isStreaming: true)
-                            }
+                            self.applyStreamingEventDelta(
+                                event,
+                                to: acc,
+                                assistantMessageId: capturedNewAssistantId
+                            )
                             if event.isFinished { break }
                         }
                     } catch {
@@ -8088,10 +8170,11 @@ final class ChatViewModel {
                             if let usage = event.usage, !usage.isEmpty {
                                 exactUsage = usage
                             }
-                            if let delta = event.contentDelta, !delta.isEmpty {
-                                acc.append(delta)
-                                self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
-                            }
+                            self.applyStreamingEventDelta(
+                                event,
+                                to: acc,
+                                assistantMessageId: assistantMessageId
+                            )
                             if event.isFinished { break }
                         }
                     } catch {
@@ -8214,12 +8297,20 @@ final class ChatViewModel {
             let data = event["data"] as? [String: Any] ?? event
             let type = data["type"] as? String
             if type == "chat:message:delta" || type == "message" || type == "event:message:delta" {
-                let payload = data["data"] as? [String: Any]
-                let content = payload?["content"] as? String ?? ""
+                let payload = data["data"] as? [String: Any] ?? data
+                var didAppend = false
+                if let reasoning = Self.reasoningDelta(from: payload) {
+                    acc.appendReasoning(reasoning)
+                    didAppend = true
+                }
+                let content = payload["content"] as? String ?? ""
                 if !content.isEmpty {
                     // Append directly — the accumulator dispatches to
                     // the main actor immediately on every token.
                     acc.append(content)
+                    didAppend = true
+                }
+                if didAppend {
                     return
                 }
             }
@@ -8240,15 +8331,111 @@ final class ChatViewModel {
             // Fast-path for channel content deltas
             let data = event["data"] as? [String: Any] ?? event
             let type = data["type"] as? String
-            let payload = data["data"] as? [String: Any]
-            if type == "message", let content = payload?["content"] as? String, !content.isEmpty {
-                acc.append(content)
-                return
+            let payload = data["data"] as? [String: Any] ?? data
+            if type == "message" {
+                var didAppend = false
+                if let reasoning = Self.reasoningDelta(from: payload) {
+                    acc.appendReasoning(reasoning)
+                    didAppend = true
+                }
+                if let content = payload["content"] as? String, !content.isEmpty {
+                    acc.append(content)
+                    didAppend = true
+                }
+                if didAppend {
+                    return
+                }
             }
             Task { @MainActor in
                 self.handleChannelEvent(event, assistantMessageId: assistantMessageId, acc: acc)
             }
         }
+    }
+
+    @discardableResult
+    private func applyStreamingEventDelta(
+        _ event: SSEEvent,
+        to acc: ContentAccumulator,
+        assistantMessageId: String
+    ) -> Bool {
+        var didUpdate = false
+
+        if let reasoning = event.reasoningDelta,
+           !reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            acc.appendReasoning(reasoning)
+            didUpdate = true
+        }
+
+        if let delta = event.contentDelta, !delta.isEmpty {
+            acc.append(delta)
+            didUpdate = true
+        }
+
+        if didUpdate {
+            updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+        }
+        return didUpdate
+    }
+
+    private static func reasoningDelta(from value: Any?) -> String? {
+        guard let value else { return nil }
+
+        if let text = value as? String {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
+        }
+
+        if let array = value as? [Any] {
+            let rendered = array.compactMap { reasoningDelta(from: $0) }.joined()
+            return rendered.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : rendered
+        }
+
+        guard let dict = value as? [String: Any] else { return nil }
+
+        if let type = dict["type"] as? String,
+           [
+            "response.reasoning_text.delta",
+            "response.reasoning.delta",
+            "response.output_reasoning.delta"
+           ].contains(type),
+           let delta = dict["delta"] as? String,
+           !delta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return delta
+        }
+
+        if dict["type"] as? String == "content_block_delta",
+           let delta = dict["delta"] as? [String: Any],
+           ["thinking_delta", "reasoning_delta"].contains(delta["type"] as? String ?? ""),
+           let text = (delta["thinking"] as? String) ?? (delta["text"] as? String),
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return text
+        }
+
+        if let choices = dict["choices"] as? [[String: Any]],
+           let first = choices.first {
+            if let delta = first["delta"] as? [String: Any],
+               let reasoning = reasoningDelta(from: delta) {
+                return reasoning
+            }
+            if let message = first["message"] as? [String: Any],
+               let reasoning = reasoningDelta(from: message) {
+                return reasoning
+            }
+        }
+
+        for key in [
+            "reasoning_content", "reasoningContent",
+            "reasoning_text", "reasoningText",
+            "thinking_content", "thinkingContent",
+            "thinking", "think",
+            "thought", "thoughts",
+            "reasoning"
+        ] {
+            if let rendered = reasoningDelta(from: dict[key]) {
+                return rendered
+            }
+        }
+
+        return nil
     }
 
     private func handleChatEvent(
@@ -8361,19 +8548,36 @@ final class ChatViewModel {
 
             case "chat:message:delta", "message", "event:message:delta":
                 let content = payload?["content"] as? String ?? ""
+                var didUpdate = false
+                if let reasoning = Self.reasoningDelta(from: payload ?? data) {
+                    acc.appendReasoning(reasoning)
+                    didUpdate = true
+                }
                 if !content.isEmpty {
                     acc.append(content)
+                    didUpdate = true
+                }
+                if didUpdate {
                     updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
                 }
 
             case "chat:message", "replace":
                 let content = payload?["content"] as? String ?? ""
+                var didUpdate = false
+                if let reasoning = Self.reasoningDelta(from: payload ?? data) {
+                    acc.appendReasoning(reasoning)
+                    didUpdate = true
+                }
                 if !content.isEmpty {
+                    let localBody = acc.bodyContent
                     let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
-                        local: acc.content,
+                        local: localBody,
                         incoming: content
-                    ) ? acc.content : content
+                    ) ? localBody : content
                     acc.replace(protectedContent)
+                    didUpdate = true
+                }
+                if didUpdate {
                     updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
                 }
 
@@ -8420,8 +8624,16 @@ final class ChatViewModel {
         if let choices = payload["choices"] as? [[String: Any]],
            let first = choices.first,
            let delta = first["delta"] as? [String: Any] {
+            var didUpdate = false
+            if let reasoning = Self.reasoningDelta(from: delta) {
+                acc.appendReasoning(reasoning)
+                didUpdate = true
+            }
             if let c = delta["content"] as? String, !c.isEmpty {
                 acc.append(c)
+                didUpdate = true
+            }
+            if didUpdate {
                 updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
             }
             if let toolCalls = delta["tool_calls"] as? [[String: Any]] {
@@ -8446,12 +8658,19 @@ final class ChatViewModel {
             }
         }
 
+        if payload["choices"] == nil,
+           let reasoning = Self.reasoningDelta(from: payload) {
+            acc.appendReasoning(reasoning)
+            updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+        }
+
         // Direct content field
         if let content = payload["content"] as? String, !content.isEmpty {
+            let localBody = acc.bodyContent
             let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
-                local: acc.content,
+                local: localBody,
                 incoming: content
-            ) ? acc.content : content
+            ) ? localBody : content
             acc.replace(protectedContent)
             updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
         }
@@ -8506,9 +8725,19 @@ final class ChatViewModel {
         let type = data["type"] as? String
         let payload = data["data"] as? [String: Any]
 
-        if type == "message", let content = payload?["content"] as? String, !content.isEmpty {
-            acc.append(content)
-            updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+        if type == "message" {
+            var didUpdate = false
+            if let reasoning = Self.reasoningDelta(from: payload ?? data) {
+                acc.appendReasoning(reasoning)
+                didUpdate = true
+            }
+            if let content = payload?["content"] as? String, !content.isEmpty {
+                acc.append(content)
+                didUpdate = true
+            }
+            if didUpdate {
+                updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+            }
         }
     }
 
@@ -8522,6 +8751,8 @@ final class ChatViewModel {
         acc: ContentAccumulator,
         usage: [String: Any]? = nil
     ) {
+        acc.markReasoningDone()
+
         // If content is empty, poll server for it
         if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             Task {
@@ -8705,6 +8936,8 @@ final class ChatViewModel {
         acc: ContentAccumulator,
         usage: [String: Any]? = nil
     ) async {
+        acc.markReasoningDone()
+
         guard let chatId = effectiveChatId, let manager else {
             updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
             cleanupStreaming()
@@ -8717,8 +8950,10 @@ final class ChatViewModel {
                 let refreshed = try await manager.fetchConversation(id: chatId)
                 if let lastAssistant = refreshed.messages.last(where: { $0.role == .assistant }),
                    !lastAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let localContent = conversation?.messages
-                        .first(where: { $0.id == assistantMessageId })?.content ?? acc.content
+                    let localBody = acc.bodyContent
+                    let localContent = localBody.isEmpty
+                        ? (conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? "")
+                        : localBody
                     let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
                         local: localContent,
                         incoming: lastAssistant.content
@@ -9322,7 +9557,8 @@ final class ChatViewModel {
         let nameSuggestsImageGeneration = shouldUseDirectImageGeneration(modelId: model.id)
             || shouldPreferChatNativeImageGeneration(modelId: model.id)
 
-        if (defaults.contains("image_generation") && isTruthy("image_generation")
+        if (model.supportsImageGeneration
+            || (defaults.contains("image_generation") && isTruthy("image_generation"))
             || nameSuggestsImageGeneration)
             && !userDisabledBuiltinFeatures.contains("image_generation") {
             imageGenerationEnabled = true
@@ -9381,7 +9617,8 @@ final class ChatViewModel {
         webSearchEnabled = isChatWebSearchAllowed
         let nameSuggestsImageGeneration = shouldUseDirectImageGeneration(modelId: model.id)
             || shouldPreferChatNativeImageGeneration(modelId: model.id)
-        imageGenerationEnabled = (defaults.contains("image_generation") && isTruthy("image_generation"))
+        imageGenerationEnabled = model.supportsImageGeneration
+            || (defaults.contains("image_generation") && isTruthy("image_generation"))
             || nameSuggestsImageGeneration
         codeInterpreterEnabled = defaults.contains("code_interpreter") && isTruthy("code_interpreter")
         suppressBuiltinFeatureTracking = false
@@ -9619,8 +9856,8 @@ final class ChatViewModel {
         let modelNameSuggestsImageGeneration = selectedModelId.map {
             shouldUseDirectImageGeneration(modelId: $0) || shouldPreferChatNativeImageGeneration(modelId: $0)
         } ?? false
-        let shouldEnableImageGeneration = modelNameSuggestsImageGeneration
-            && (imageGenerationEnabled || modelAllowsImageGeneration)
+        let shouldEnableImageGeneration = !userDisabledBuiltinFeatures.contains("image_generation")
+            && (imageGenerationEnabled || modelAllowsImageGeneration || modelNameSuggestsImageGeneration)
 
         // Use ONLY the current toggle state. Server defaults are already applied
         // to these toggles at init time via syncUIWithModelDefaults() — which runs
@@ -10443,41 +10680,8 @@ final class ChatViewModel {
         guard model != nil || modelId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
             return 0
         }
-        if let contextLength = model?.contextLength, contextLength > 0 {
+        if let contextLength = LocalModelCapabilityRegistry.contextLength(for: model, modelId: modelId), contextLength > 0 {
             return contextLength
-        }
-        var parts: [String] = []
-        if let modelId, !modelId.isEmpty { parts.append(modelId) }
-        if let model {
-            parts.append(model.id)
-            parts.append(model.name)
-            if let description = model.description, !description.isEmpty {
-                parts.append(description)
-            }
-        }
-        let raw = parts.joined(separator: " ").lowercased()
-        if raw.contains("1m") || raw.contains("1000k") { return 1_000_000 }
-        if raw.contains("512k") { return 512_000 }
-        if raw.contains("256k") { return 256_000 }
-        if raw.contains("200k") { return 200_000 }
-        if raw.contains("128k") { return 128_000 }
-        if raw.contains("96k") { return 96_000 }
-        if raw.contains("64k") { return 64_000 }
-        if raw.contains("32k") { return 32_000 }
-        if raw.contains("16k") { return 16_000 }
-        if raw.contains("8k") { return 8_000 }
-        if raw.contains("4k") { return 4_000 }
-        if raw.contains("claude-3") || raw.contains("claude-sonnet") || raw.contains("claude-opus") {
-            return 200_000
-        }
-        if raw.contains("gemini-1.5") || raw.contains("gemini-2") {
-            return 1_000_000
-        }
-        if raw.contains("gpt-4.1") || raw.contains("gpt-5") || raw.contains("gpt-4o") || raw.contains("o3") || raw.contains("o4") {
-            return 128_000
-        }
-        if raw.contains("qwen") || raw.contains("grok") || raw.contains("deepseek") {
-            return 128_000
         }
         return 32_000
     }
@@ -10534,6 +10738,46 @@ final class ChatViewModel {
         return fileArray.count * 256
     }
 
+    private static func contextTextForModel(
+        _ text: String,
+        label: String,
+        maxInlineCharacters: Int
+    ) -> String {
+        LocalContextOffloadStore.modelText(
+            label: label,
+            text: text,
+            maxInlineCharacters: maxInlineCharacters
+        )
+    }
+
+    private static func offloadOversizedMessageContentIfNeeded(
+        _ messages: [[String: Any]]
+    ) -> [[String: Any]] {
+        messages.map { message in
+            var prepared = message
+            let role = (prepared["role"] as? String) ?? "message"
+            if let text = prepared["content"] as? String {
+                prepared["content"] = contextTextForModel(
+                    text,
+                    label: "\(role)-message",
+                    maxInlineCharacters: 12_000
+                )
+            } else if var parts = prepared["content"] as? [[String: Any]] {
+                for index in parts.indices {
+                    if let text = parts[index]["text"] as? String {
+                        parts[index]["text"] = contextTextForModel(
+                            text,
+                            label: "\(role)-message-part",
+                            maxInlineCharacters: 12_000
+                        )
+                    }
+                }
+                prepared["content"] = parts
+            }
+            return prepared
+        }
+    }
+
     private static func messageTextForContextSummary(_ message: [String: Any]) -> String {
         let role = (message["role"] as? String) ?? "message"
         let content: String = {
@@ -10563,24 +10807,26 @@ final class ChatViewModel {
     ) -> (messages: [[String: Any]], status: ChatContextBudgetStatus) {
         let window = contextWindowTokens(for: model, modelId: modelId)
         let originalTokens = estimatedTokens(in: messages)
+        let preparedMessages = offloadOversizedMessageContentIfNeeded(messages)
+        let preparedTokens = estimatedTokens(in: preparedMessages)
         var status = contextStatus(
             model: model,
             modelId: modelId,
-            usedTokens: originalTokens
+            usedTokens: preparedTokens
         )
 
         let softLimit = Int(Double(window) * 0.82)
-        guard window > 0, originalTokens > softLimit, messages.count > 4 else {
-            return (messages, status)
+        guard window > 0, preparedTokens > softLimit, preparedMessages.count > 4 else {
+            return (preparedMessages, status)
         }
 
         let leadingSystemCount = messages.prefix {
             ($0["role"] as? String) == "system"
         }.count
-        let leadingSystemMessages = Array(messages.prefix(leadingSystemCount))
-        let chronologicalMessages = Array(messages.dropFirst(leadingSystemCount))
+        let leadingSystemMessages = Array(preparedMessages.prefix(leadingSystemCount))
+        let chronologicalMessages = Array(preparedMessages.dropFirst(leadingSystemCount))
         guard chronologicalMessages.count > 3 else {
-            return (messages, status)
+            return (preparedMessages, status)
         }
 
         let keepTailCount = min(max(4, chronologicalMessages.count / 3), 12)
@@ -11789,7 +12035,11 @@ final class ChatViewModel {
                 let redactedOutput = redactedLocalAlpineInternalPaths(in: result.outputPreview)
                 let output = redactedOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     ? "（无输出）"
-                    : clippedForSystemContext(redactedOutput, maxCharacters: 8_000)
+                    : contextTextForModel(
+                        redactedOutput,
+                        label: "local-alpine-command-output",
+                        maxInlineCharacters: 8_000
+                    )
                 lines.append("""
                 - command: \(redactedCommand)
                   cwd: \(result.cwd)
@@ -11800,7 +12050,11 @@ final class ChatViewModel {
             }
         } else if !rawResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lines.append("raw_output:")
-            lines.append(clippedForSystemContext(redactedLocalAlpineInternalPaths(in: rawResult), maxCharacters: 10_000))
+            lines.append(contextTextForModel(
+                redactedLocalAlpineInternalPaths(in: rawResult),
+                label: "local-alpine-raw-output",
+                maxInlineCharacters: 10_000
+            ))
         }
         if !writtenFiles.isEmpty {
             lines.append("written_files:")
@@ -12046,8 +12300,12 @@ final class ChatViewModel {
         let localSkillsContext = LocalSkillsService.shared.contextPrompt()
         let localNativeToolContext = latestUserTextForLocalAlpine.map(Self.shouldExposeLocalNativeTools)
             == true ? Self.localNativeToolSystemContext() : nil
+        let modelCapabilityContext = Self.modelCapabilitySystemContext(
+            model: selectedModel,
+            modelId: selectedModelId ?? conversation.model
+        )
         let feedbackPreferenceContext = AssistantFeedbackPreferenceStore.systemContext()
-        let combinedSystemPrompt = [asyncEffectiveSP, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localNativeToolContext, localSkillsContext, memoryContext, feedbackPreferenceContext]
+        let combinedSystemPrompt = [asyncEffectiveSP, modelCapabilityContext, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localNativeToolContext, localSkillsContext, memoryContext, feedbackPreferenceContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
@@ -12665,13 +12923,11 @@ final class ChatViewModel {
                         if let usage = event.usage, !usage.isEmpty {
                             exactUsage = usage
                         }
-                        if let delta = event.contentDelta, !delta.isEmpty {
-                            acc.append(delta)
-                            self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
-                        }
+                        self.applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
                         if event.isFinished { break }
                     }
                     if Task.isCancelled { return }
+                    acc.markReasoningDone()
                     await self.finishLocalAlpineContinuation(
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
@@ -12688,13 +12944,11 @@ final class ChatViewModel {
                         if let usage = event.usage, !usage.isEmpty {
                             exactUsage = usage
                         }
-                        if let delta = event.contentDelta, !delta.isEmpty {
-                            acc.append(delta)
-                            self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
-                        }
+                        self.applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
                         if event.isFinished { break }
                     }
                     if Task.isCancelled { return }
+                    acc.markReasoningDone()
                     await self.finishLocalAlpineContinuation(
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
@@ -12949,13 +13203,11 @@ final class ChatViewModel {
                         if let usage = event.usage, !usage.isEmpty {
                             exactUsage = usage
                         }
-                        if let delta = event.contentDelta, !delta.isEmpty {
-                            acc.append(delta)
-                            self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
-                        }
+                        self.applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
                         if event.isFinished { break }
                     }
                     if Task.isCancelled { return }
+                    acc.markReasoningDone()
                     await self.finishLocalNativeContinuation(
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
@@ -12972,13 +13224,11 @@ final class ChatViewModel {
                         if let usage = event.usage, !usage.isEmpty {
                             exactUsage = usage
                         }
-                        if let delta = event.contentDelta, !delta.isEmpty {
-                            acc.append(delta)
-                            self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
-                        }
+                        self.applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
                         if event.isFinished { break }
                     }
                     if Task.isCancelled { return }
+                    acc.markReasoningDone()
                     await self.finishLocalNativeContinuation(
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
@@ -14064,13 +14314,11 @@ final class ChatViewModel {
                         if let usage = event.usage, !usage.isEmpty {
                             exactUsage = usage
                         }
-                        if let delta = event.contentDelta, !delta.isEmpty {
-                            acc.append(delta)
-                            self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
-                        }
+                        self.applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
                         if event.isFinished { break }
                     }
                     if Task.isCancelled { return }
+                    acc.markReasoningDone()
                     await self.finishLocalAlpineContinuation(
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
@@ -14087,13 +14335,11 @@ final class ChatViewModel {
                         if let usage = event.usage, !usage.isEmpty {
                             exactUsage = usage
                         }
-                        if let delta = event.contentDelta, !delta.isEmpty {
-                            acc.append(delta)
-                            self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
-                        }
+                        self.applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
                         if event.isFinished { break }
                     }
                     if Task.isCancelled { return }
+                    acc.markReasoningDone()
                     await self.finishLocalAlpineContinuation(
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
@@ -15025,6 +15271,46 @@ final class ChatViewModel {
         }
     }
 
+    private static func modelCapabilitySystemContext(model: AIModel?, modelId: String?) -> String? {
+        let resolvedModelId = (modelId ?? model?.id ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard model != nil || !resolvedModelId.isEmpty else { return nil }
+
+        let capability = model?.resolvedCapabilities
+        let contextLength = LocalModelCapabilityRegistry.contextLength(for: model, modelId: resolvedModelId)
+        let input = capability?.inputModalities.sorted().joined(separator: ", ") ?? "unknown"
+        let output = capability?.outputModalities.sorted().joined(separator: ", ") ?? "unknown"
+        let endpointTypes = capability?.endpointTypes.sorted().joined(separator: ", ") ?? ""
+
+        var lines = [
+            "[Current model capability]",
+            "model_id: \(resolvedModelId.isEmpty ? model?.id ?? "unknown" : resolvedModelId)"
+        ]
+        if let name = model?.name, !name.isEmpty {
+            lines.append("model_name: \(name)")
+        }
+        if let contextLength, contextLength > 0 {
+            lines.append("context_window_tokens: \(contextLength)")
+        }
+        lines.append("input_modalities: \(input)")
+        lines.append("output_modalities: \(output)")
+        if !endpointTypes.isEmpty {
+            lines.append("endpoint_types: \(endpointTypes)")
+        }
+        if let model {
+            lines.append("supports_image_input: \(model.supportsImageInput)")
+            lines.append("supports_image_generation: \(model.supportsImageGeneration)")
+            lines.append("supports_reasoning: \(model.supportsReasoning)")
+            lines.append("supports_tool_calling: \(model.supportsToolCalling)")
+            lines.append("supports_structured_output: \(model.supportsStructuredOutput)")
+            if !model.tags.isEmpty {
+                lines.append("tags: \(model.tags.joined(separator: ", "))")
+            }
+        }
+        lines.append("Use this capability data when deciding whether a user request should use chat, image generation, attachments, Local Alpine, or a different model.")
+        lines.append("[/Current model capability]")
+        return lines.joined(separator: "\n")
+    }
+
     private static func localAlpineFinalSummaryVisibleContent(from content: String) -> String {
         let visible = LocalAlpineAgentService.visibleContent(from: content)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -15330,6 +15616,7 @@ final class ChatViewModel {
     private func attachInlineImages(from rawContent: String, to messageIndex: Int) {
         let extractedImages = Self.extractInlineImageReferences(from: rawContent)
         guard !extractedImages.isEmpty else { return }
+        guard conversation?.messages.indices.contains(messageIndex) == true else { return }
 
         var merged = conversation?.messages[messageIndex].files ?? []
         var appended = false
@@ -15343,9 +15630,10 @@ final class ChatViewModel {
 
         conversation?.messages[messageIndex].files = merged
         let messageId = conversation?.messages[messageIndex].id
+        let messageContent = conversation?.messages[messageIndex].content
         if let messageId {
             conversation?.history.updateNode(id: messageId) { node in
-                node.content = conversation?.messages[messageIndex].content ?? node.content
+                node.content = messageContent ?? node.content
                 node.files = merged
                 node.done = true
             }
@@ -15651,24 +15939,42 @@ final class ChatViewModel {
             }
         }
 
-        addMatches(#"!?\[[^\]]*\]\((data:image/[^)\s]+)\)"#)
+        addMatches(#"!?\[[^\]]*\]\(\s*(data:image/[^)\s]+)(?:\s+["'][^)]*["'])?\s*\)"#)
+        addMatches(#"!?\[[^\]]*\]\(\s*(https?://[^)\s]+)(?:\s+["'][^)]*["'])?\s*\)"#)
         addMatches(#"<img[^>]+src=["'](data:image/[^"']+)["']"#)
+        addMatches(#"<img[^>]+src=["'](https?://[^"']+)["']"#)
         addMatches(#"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,})"#)
         addMatches(#"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_\-\s]{128,})""#)
+        addMatches(#"(?:"url"|"image_url"|"display_url"|"download_url"|"image")\s*:\s*"(https?:\\?/\\?/[^"]+)""#)
+        addMatches(#"(https?://[^\s"'<>`)]+)"#)
 
         return results.compactMap { value -> String? in
-            let trimmed = value
+            let trimmed = sanitizedImageReferenceCandidate(value)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
             if trimmed.hasPrefix("data:image/") {
-                return writeGeneratedImageToCache(dataURL: trimmed)
+                let compact = trimmed.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+                return writeGeneratedImageToCache(dataURL: compact)
             }
             if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
-                return nil
+                return isLikelyImageURL(trimmed) ? trimmed : nil
             }
-            guard looksLikeBase64Image(trimmed) else { return nil }
-            return writeGeneratedImageToCache(dataURL: "data:image/png;base64,\(trimmed)")
+            let compact = trimmed.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            guard looksLikeBase64Image(compact) else { return nil }
+            return writeGeneratedImageToCache(dataURL: "data:image/png;base64,\(compact)")
         }
+    }
+
+    private static func sanitizedImageReferenceCandidate(_ value: String) -> String {
+        var candidate = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\/"#, with: "/")
+            .replacingOccurrences(of: "&amp;", with: "&")
+
+        let trailing = CharacterSet(charactersIn: ".,;:)]}\"'")
+        while let scalar = candidate.unicodeScalars.last, trailing.contains(scalar) {
+            candidate.removeLast()
+        }
+        return candidate
     }
 
     private static func looksLikeBase64Image(_ value: String) -> Bool {
@@ -15696,14 +16002,22 @@ final class ChatViewModel {
         if lower.contains("data:image") || lower.contains("image/") {
             return true
         }
-        if ["assets.grok.com"].contains(host) {
+        let generatedImageHosts = [
+            "assets.grok.com",
+            "replicate.delivery",
+            "fal.media"
+        ]
+        if generatedImageHosts.contains(where: { host == $0 || host.hasSuffix(".\($0)") }) {
+            return true
+        }
+        if host.contains("blob.core.windows.net") || host.contains("oaidalle") {
             return true
         }
         let imageHosts = ["image", "img", "cdn", "asset", "media", "static", "file", "files"]
         if imageHosts.contains(where: { host.contains($0) }) {
             return true
         }
-        let imagePathHints = ["/image", "/images", "/generated", "/media", "/asset", "/assets", "/file", "/files"]
+        let imagePathHints = ["/image", "/images", "/img-", "/generated", "/media", "/asset", "/assets", "/file", "/files"]
         return imagePathHints.contains(where: { lower.contains($0) })
     }
 
@@ -15788,9 +16102,12 @@ final class ChatViewModel {
         let patterns = [
             #"!?\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
             #"!?\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
+            #"\!\[[^\]]*\]\(\s*https?://[^)\s]+(?:\s+["'][^)]*["'])?\s*\)"#,
             #"<img[^>]+src=["']data:image/[^"']+["'][^>]*>"#,
+            #"<img[^>]+src=["']https?://[^"']+["'][^>]*>"#,
             #"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,}"#,
-            #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"[A-Za-z0-9+/=_\-\s]{128,}""#
+            #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"[A-Za-z0-9+/=_\-\s]{128,}""#,
+            #"(?:"url"|"image_url"|"display_url"|"download_url"|"image")\s*:\s*"https?:\\?/\\?/[^"]+""#
         ]
         for pattern in patterns {
             cleaned = cleaned.replacingOccurrences(
@@ -15858,6 +16175,8 @@ final class ChatViewModel {
 final class ContentAccumulator: @unchecked Sendable {
     private let lock = NSLock()
     private nonisolated(unsafe) var _content: String = ""
+    private nonisolated(unsafe) var _reasoningContent: String = ""
+    private nonisolated(unsafe) var _reasoningDone: Bool = false
     private nonisolated(unsafe) var _onUpdate: (@MainActor @Sendable (_ content: String) -> Void)?
 
     /// Guards against flooding the main actor with redundant Tasks.
@@ -15881,6 +16200,13 @@ final class ContentAccumulator: @unchecked Sendable {
     }
 
     nonisolated var content: String {
+        lock.lock()
+        let value = renderedContentLocked()
+        lock.unlock()
+        return value
+    }
+
+    nonisolated var bodyContent: String {
         lock.lock()
         let value = _content
         lock.unlock()
@@ -15918,17 +16244,30 @@ final class ContentAccumulator: @unchecked Sendable {
         let callback = _onUpdate
         lock.unlock()
 
-        guard needsDispatch else { return }
+        dispatchIfNeeded(needsDispatch, callback: callback)
+    }
 
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            // Read the LATEST content — may include tokens that arrived
-            // after append() returned but before this Task executed.
-            let latest = self.content
-            callback?(latest)
-            // Clear the flag so the next token can enqueue a new Task.
-            self.clearPendingFlag()
+    nonisolated func appendReasoning(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        lock.lock()
+        _reasoningDone = false
+        if !_reasoningContent.isEmpty, trimmed == _reasoningContent {
+            lock.unlock()
+            return
+        } else if !_reasoningContent.isEmpty, trimmed.hasPrefix(_reasoningContent) {
+            // Some providers send cumulative reasoning instead of a true delta.
+            _reasoningContent = trimmed
+        } else {
+            _reasoningContent += text
         }
+        let needsDispatch = !_pendingUpdate
+        if needsDispatch { _pendingUpdate = true }
+        let callback = _onUpdate
+        lock.unlock()
+
+        dispatchIfNeeded(needsDispatch, callback: callback)
     }
 
     nonisolated func replace(_ text: String) {
@@ -15939,13 +16278,57 @@ final class ContentAccumulator: @unchecked Sendable {
         let callback = _onUpdate
         lock.unlock()
 
-        guard needsDispatch else { return }
+        dispatchIfNeeded(needsDispatch, callback: callback)
+    }
 
+    nonisolated func markReasoningDone() {
+        lock.lock()
+        guard !_reasoningContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            lock.unlock()
+            return
+        }
+        _reasoningDone = true
+        let needsDispatch = !_pendingUpdate
+        if needsDispatch { _pendingUpdate = true }
+        let callback = _onUpdate
+        lock.unlock()
+
+        dispatchIfNeeded(needsDispatch, callback: callback)
+    }
+
+    private nonisolated func dispatchIfNeeded(
+        _ needsDispatch: Bool,
+        callback: (@MainActor @Sendable (_ content: String) -> Void)?
+    ) {
+        guard needsDispatch else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
             let latest = self.content
             callback?(latest)
             self.clearPendingFlag()
         }
+    }
+
+    private nonisolated func renderedContentLocked() -> String {
+        let reasoning = _reasoningContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reasoning.isEmpty else { return _content }
+
+        let escaped = Self.escapeReasoningHTML(reasoning)
+        let block = """
+        <details type="reasoning" done="\(_reasoningDone ? "true" : "false")"><summary>\(_reasoningDone ? "思考" : "思考中…")</summary>
+        \(escaped)
+        </details>
+        """
+        if _content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return block
+        }
+        return block + "\n\n" + _content
+    }
+
+    private nonisolated static func escapeReasoningHTML(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 }

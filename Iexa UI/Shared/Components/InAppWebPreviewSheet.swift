@@ -438,12 +438,20 @@ private struct InAppWebPreviewRepresentable: UIViewRepresentable {
         context.coordinator.webView = webView
         state.webView = webView
         webView.addObserver(context.coordinator, forKeyPath: #keyPath(WKWebView.estimatedProgress), options: [.new], context: nil)
-        webView.load(URLRequest(url: url))
+        load(url, in: webView)
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         if webView.url == nil {
+            load(url, in: webView)
+        }
+    }
+
+    private func load(_ url: URL, in webView: WKWebView) {
+        if url.isFileURL {
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        } else {
             webView.load(URLRequest(url: url))
         }
     }

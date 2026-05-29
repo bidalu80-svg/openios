@@ -4,6 +4,11 @@ import QuickLook
 import UIKit
 import Foundation
 
+private func localAlpinePreviewShouldUseWebView(_ url: URL) -> Bool {
+    guard url.isFileURL else { return false }
+    return ["html", "htm", "xhtml", "svg"].contains(url.pathExtension.lowercased())
+}
+
 // MARK: - Local Alpine Terminal Console
 
 struct LocalAlpineTerminalConsoleView: View {
@@ -30,6 +35,8 @@ struct LocalAlpineTerminalConsoleView: View {
     @State private var isPollingSessionOutput = false
     @State private var streamingCommandSessionID: Int?
     @State private var consoleOutputRevision = 0
+    @State private var previewFileURL: URL?
+    @State private var previewWebURL: WebPreviewURL?
 
     private let terminalGreen = Color(red: 0.24, green: 0.82, blue: 0.36)
     private let terminalCommandFontSize: CGFloat = 13
@@ -203,6 +210,10 @@ struct LocalAlpineTerminalConsoleView: View {
             .presentationDragIndicator(.visible)
             .interactiveDismissDisabled()
         }
+        .sheet(item: $previewWebURL) { item in
+            InAppWebPreviewSheet(url: item.url)
+        }
+        .quickLookPreview($previewFileURL)
     }
 
     private var headerBar: some View {
@@ -675,11 +686,39 @@ struct LocalAlpineTerminalConsoleView: View {
             pendingInteractiveInput = request.defaultValue
             pendingInteractiveRequest = request
             isRunning = false
+            handleOpenRequests(result.openRequests)
             return
         }
 
+        handleOpenRequests(result.openRequests)
         isRunning = false
         refocusCommandLine()
+    }
+
+    private func handleOpenRequests(_ requests: [LocalAlpineOpenRequest]) {
+        guard !requests.isEmpty else { return }
+        for request in requests {
+            if let url = request.webURL {
+                previewWebURL = WebPreviewURL(url: url)
+                continue
+            }
+            Task {
+                do {
+                    let url = try await LocalAlpineTerminalService.shared.materializePreviewURL(for: request)
+                    await MainActor.run {
+                        if localAlpinePreviewShouldUseWebView(url) {
+                            previewWebURL = WebPreviewURL(url: url)
+                        } else {
+                            previewFileURL = url
+                        }
+                    }
+                } catch {
+                    await MainActor.run {
+                        appendSystemOutput("预览失败：\(error.localizedDescription)", exitCode: nil)
+                    }
+                }
+            }
+        }
     }
 
     private func appendSystemOutput(_ output: String, exitCode: Int?) {
@@ -939,7 +978,9 @@ struct LocalAlpineTerminalConsoleView: View {
                 input: "\u{1B}[\(cursor.row);\(cursor.column)R"
             )
         }
-        sanitized = Self.sanitizedTerminalOutput(sanitized)
+        let parsed = LocalAlpineOpenMarkerParser.extract(from: sanitized)
+        handleOpenRequests(parsed.requests)
+        sanitized = Self.sanitizedTerminalOutput(parsed.cleaned)
 
         if sanitized.isEmpty { return }
         interactiveOutput += sanitized
@@ -1493,6 +1534,7 @@ struct TerminalBrowserView: View {
     @Environment(\.theme) private var theme
     @State private var showFilePicker = false
     @State private var previewFileURL: URL?
+    @State private var previewWebURL: WebPreviewURL?
     @State private var shareFileURL: URL?
     @State private var confirmDeleteItem: TerminalFileItem?
     @FocusState private var isCommandFocused: Bool
@@ -1598,8 +1640,14 @@ struct TerminalBrowserView: View {
             .interactiveDismissDisabled()
         }
         .quickLookPreview($previewFileURL)
+        .sheet(item: $previewWebURL) { item in
+            InAppWebPreviewSheet(url: item.url)
+        }
         .sheet(item: $shareFileURL) { url in
             ShareSheetView(activityItems: [url])
+        }
+        .onChange(of: viewModel.pendingOpenRequest) { _, request in
+            handleOpenRequest(request)
         }
     }
 
@@ -1631,6 +1679,31 @@ struct TerminalBrowserView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private func handleOpenRequest(_ request: LocalAlpineOpenRequest?) {
+        guard let request else { return }
+        viewModel.consumePendingOpenRequest(request)
+        if let url = request.webURL {
+            previewWebURL = WebPreviewURL(url: url)
+            return
+        }
+        Task {
+            do {
+                let url = try await LocalAlpineTerminalService.shared.materializePreviewURL(for: request)
+                await MainActor.run {
+                    if localAlpinePreviewShouldUseWebView(url) {
+                        previewWebURL = WebPreviewURL(url: url)
+                    } else {
+                        previewFileURL = url
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    viewModel.errorMessage = error.localizedDescription
+                }
+            }
+        }
     }
 
     // MARK: - Breadcrumb Navigation
@@ -2042,6 +2115,8 @@ private struct LocalAlpinePanelMiniTerminalView: View {
     @Bindable var viewModel: TerminalBrowserViewModel
 
     @Environment(\.theme) private var theme
+    @State private var previewFileURL: URL?
+    @State private var previewWebURL: WebPreviewURL?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2075,6 +2150,38 @@ private struct LocalAlpinePanelMiniTerminalView: View {
             .presentationDetents([.height(300)])
             .presentationDragIndicator(.visible)
             .interactiveDismissDisabled()
+        }
+        .sheet(item: $previewWebURL) { item in
+            InAppWebPreviewSheet(url: item.url)
+        }
+        .quickLookPreview($previewFileURL)
+        .onChange(of: viewModel.pendingOpenRequest) { _, request in
+            handleOpenRequest(request)
+        }
+    }
+
+    private func handleOpenRequest(_ request: LocalAlpineOpenRequest?) {
+        guard let request else { return }
+        viewModel.consumePendingOpenRequest(request)
+        if let url = request.webURL {
+            previewWebURL = WebPreviewURL(url: url)
+            return
+        }
+        Task {
+            do {
+                let url = try await LocalAlpineTerminalService.shared.materializePreviewURL(for: request)
+                await MainActor.run {
+                    if localAlpinePreviewShouldUseWebView(url) {
+                        previewWebURL = WebPreviewURL(url: url)
+                    } else {
+                        previewFileURL = url
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    viewModel.errorMessage = error.localizedDescription
+                }
+            }
         }
     }
 

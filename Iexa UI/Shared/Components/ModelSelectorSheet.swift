@@ -1,5 +1,40 @@
 import SwiftUI
 
+private struct ModelCapabilityBadge: Hashable {
+    let icon: String
+    let text: String
+}
+
+private func modelCapabilityBadges(for model: AIModel) -> [ModelCapabilityBadge] {
+    var badges: [ModelCapabilityBadge] = []
+    if let context = model.resolvedContextLength, context > 0 {
+        let text: String
+        if context >= 1_000_000 {
+            text = "\(context / 1_000_000)M"
+        } else if context >= 1_000 {
+            text = "\(context / 1_000)K"
+        } else {
+            text = "\(context)"
+        }
+        badges.append(ModelCapabilityBadge(icon: "rectangle.expand.vertical", text: text))
+    }
+    if model.supportsImageGeneration {
+        badges.append(ModelCapabilityBadge(icon: "photo.on.rectangle.angled", text: "生图"))
+    } else if model.supportsImageInput {
+        badges.append(ModelCapabilityBadge(icon: "eye", text: "视觉"))
+    }
+    if model.supportsReasoning {
+        badges.append(ModelCapabilityBadge(icon: "brain.head.profile", text: "推理"))
+    }
+    if model.supportsToolCalling {
+        badges.append(ModelCapabilityBadge(icon: "wrench.and.screwdriver", text: "工具"))
+    }
+    if model.supportsStructuredOutput {
+        badges.append(ModelCapabilityBadge(icon: "curlybraces.square", text: "JSON"))
+    }
+    return badges
+}
+
 // MARK: - Model Selector Sheet
 
 /// A clean, native-feel bottom-sheet model picker.
@@ -391,6 +426,7 @@ struct ModelSelectorSheet: View {
                         .lineLimit(1)
 
                     modelSubtitle(model)
+                    modelCapabilityRow(model)
                 }
 
                 Spacer(minLength: 0)
@@ -446,24 +482,33 @@ struct ModelSelectorSheet: View {
     }
 
     @ViewBuilder
+    private func modelCapabilityRow(_ model: AIModel) -> some View {
+        let badges = modelCapabilityBadges(for: model)
+        if !badges.isEmpty {
+            HStack(spacing: 8) {
+                ForEach(badges, id: \.self) { badge in
+                    HStack(spacing: 3) {
+                        Image(systemName: badge.icon)
+                            .scaledFont(size: 9, weight: .medium)
+                        Text(badge.text)
+                            .scaledFont(size: 10, weight: .medium)
+                    }
+                    .foregroundStyle(theme.textTertiary)
+                }
+            }
+            .lineLimit(1)
+        }
+    }
+
+    @ViewBuilder
     private func modelSubtitle(_ model: AIModel) -> some View {
         let desc = model.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let contextStr: String? = {
-            guard let ctx = model.contextLength, ctx > 0 else { return nil }
-            if ctx >= 1_000_000 { return "\(ctx / 1_000_000)M ctx" }
-            if ctx >= 1_000 { return "\(ctx / 1_000)K ctx" }
-            return "\(ctx) ctx"
-        }()
 
         if !desc.isEmpty {
             Text(desc)
                 .scaledFont(size: 12)
                 .foregroundStyle(theme.textTertiary)
                 .lineLimit(1)
-        } else if let ctx = contextStr {
-            Text(ctx)
-                .scaledFont(size: 12)
-                .foregroundStyle(theme.textTertiary)
         }
     }
 

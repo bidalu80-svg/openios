@@ -1840,11 +1840,54 @@ actor LocalAlpineAgentService {
                 return nil
             }
             let quotedURL = shellSingleQuotedStatic(url)
+            let lineCount = max(20, min(intValue(value(for: ["max_lines", "line_count", "lines"], in: object))
+                ?? intValue(value(for: ["max_lines", "line_count", "lines"], in: dict))
+                ?? 160, 500))
+            let timeoutSeconds = max(5, min(intValue(value(for: ["timeout", "timeout_seconds", "max_time"], in: object))
+                ?? intValue(value(for: ["timeout", "timeout_seconds", "max_time"], in: dict))
+                ?? 25, 120))
+            let savePath = value(for: ["save_to", "saveTo", "output", "output_path", "file", "path"], in: object)
+                .flatMap { pathString(from: $0) }
+                ?? value(for: ["save_to", "saveTo", "output", "output_path"], in: dict)
+                    .flatMap { pathString(from: $0) }
+            let openPreview = boolValue(value(for: ["open_preview", "openPreview", "preview", "open"], in: object))
+                ?? boolValue(value(for: ["open_preview", "openPreview", "preview", "open"], in: dict))
+                ?? false
+
+            if let savePath {
+                let quotedOutput = shellSingleQuotedStatic(savePath)
+                let command = """
+                set -eu
+                out=\(quotedOutput)
+                mkdir -p "$(dirname "$out")"
+                if command -v curl >/dev/null 2>&1 || apk add --no-cache curl >/dev/null 2>&1; then
+                  curl -L --max-time \(timeoutSeconds) --silent --show-error \(quotedURL) -o "$out"
+                elif command -v wget >/dev/null 2>&1; then
+                  wget -qO "$out" \(quotedURL)
+                else
+                  printf 'browser_use unavailable: curl/wget not installed\\n' >&2
+                  exit 127
+                fi
+                bytes=$(wc -c < "$out" 2>/dev/null | tr -d ' ')
+                printf 'Saved browser_use response: %s (%s bytes)\\n' "$out" "${bytes:-0}"
+                if [ "\(openPreview ? "1" : "0")" = "1" ]; then
+                  iexa-open "$out" 2>/dev/null || true
+                fi
+                printf '\\n== preview ==\\n'
+                if grep -Iq . "$out" 2>/dev/null; then
+                  sed -n '1,\(lineCount)p' "$out"
+                else
+                  printf 'Binary or non-text file saved; inline preview skipped.\\n'
+                fi
+                """
+                return (command, "browser_use", "\(url) -> \(savePath)", [savePath], cwd)
+            }
+
             let command = """
             if command -v curl >/dev/null 2>&1 || apk add --no-cache curl >/dev/null 2>&1; then
-              curl -L --max-time 25 --silent --show-error \(quotedURL) | sed -n '1,160p'
+              curl -L --max-time \(timeoutSeconds) --silent --show-error \(quotedURL) | sed -n '1,\(lineCount)p'
             elif command -v wget >/dev/null 2>&1; then
-              wget -qO- \(quotedURL) | sed -n '1,160p'
+              wget -qO- \(quotedURL) | sed -n '1,\(lineCount)p'
             else
               printf 'browser_use unavailable: curl/wget not installed\\n' >&2
               exit 127
