@@ -15,6 +15,49 @@ private struct MessageShareItem: Identifiable {
     let text: String
 }
 
+private func localAlpineContentType(for file: LocalAlpineWrittenFile) -> String {
+    switch (file.fileName as NSString).pathExtension.lowercased() {
+    case "py":
+        return "text/x-python"
+    case "swift":
+        return "text/x-swift"
+    case "js":
+        return "text/javascript"
+    case "ts":
+        return "text/typescript"
+    case "json":
+        return "application/json"
+    case "yaml", "yml":
+        return "application/yaml"
+    case "xml":
+        return "application/xml"
+    case "html", "htm":
+        return "text/html"
+    case "css", "scss", "sh", "md", "txt", "toml", "ini", "cfg", "conf":
+        return "text/plain"
+    default:
+        return "application/octet-stream"
+    }
+}
+
+private struct AgentActivityStep: Identifiable, Hashable {
+    enum Kind: Hashable {
+        case tool
+        case file
+        case command
+        case status
+    }
+
+    let id: String
+    let kind: Kind
+    let title: String
+    let detail: String
+    let isRunning: Bool
+    let failed: Bool
+    let outputPreview: String
+    let file: LocalAlpineWrittenFile?
+}
+
 private struct AgentActivityItem: Identifiable, Hashable {
     let id: String
     let timestamp: Date
@@ -23,43 +66,39 @@ private struct AgentActivityItem: Identifiable, Hashable {
     let fileCount: Int
     let commandCount: Int
     let hasFailure: Bool
+    let writtenFiles: [LocalAlpineWrittenFile]
+    let commandResults: [LocalAlpineAgentCommandResult]
     let toolCalls: [LocalAlpineToolCall]
+    let steps: [AgentActivityStep]
 
     var isActive: Bool {
-        isStreaming || toolCalls.contains { $0.isRunning }
+        isStreaming || steps.contains { $0.isRunning } || toolCalls.contains { $0.isRunning }
     }
 
     var completedStepCount: Int {
-        let completedTools = toolCalls.filter { !$0.isRunning }.count
-        if completedTools > 0 { return completedTools }
-        return max(commandCount + fileCount, isActive ? 0 : 1)
+        let completed = steps.filter { !$0.isRunning }.count
+        if completed > 0 { return completed }
+        return isActive ? 0 : min(totalStepCount, 1)
     }
 
     var totalStepCount: Int {
-        max(toolCalls.count, commandCount + fileCount, 1)
+        max(steps.count, 1)
     }
 
     var currentStepTitle: String {
-        if let running = toolCalls.last(where: { $0.isRunning }) {
-            return Self.displayTitle(for: running)
-        }
-        if let latest = toolCalls.last {
-            return Self.displayTitle(for: latest)
-        }
-        return summary
+        currentStep?.title ?? summary
     }
 
     var currentStepDetail: String {
-        if let running = toolCalls.last(where: { $0.isRunning }) {
-            return running.displayDetail
-        }
-        if let latest = toolCalls.last {
-            return latest.displayDetail
-        }
-        var parts: [String] = []
-        if commandCount > 0 { parts.append("\(commandCount) 条命令") }
-        if fileCount > 0 { parts.append("\(fileCount) 个文件") }
-        return parts.isEmpty ? "查看完整 Agent 记录" : parts.joined(separator: " · ")
+        currentStep?.detail ?? summary
+    }
+
+    var hasConcreteSteps: Bool {
+        !steps.isEmpty
+    }
+
+    var currentStep: AgentActivityStep? {
+        steps.last(where: { $0.isRunning }) ?? steps.last
     }
 
     var currentToolCall: LocalAlpineToolCall? {
@@ -67,20 +106,189 @@ private struct AgentActivityItem: Identifiable, Hashable {
     }
 
     var currentStepIndex: Int {
-        guard let currentToolCall,
-              let index = toolCalls.firstIndex(where: { $0.id == currentToolCall.id }) else {
+        guard let currentStep,
+              let index = steps.firstIndex(where: { $0.id == currentStep.id }) else {
             return min(max(completedStepCount, 1), totalStepCount)
         }
         return index + 1
     }
 
     var currentStepPreview: String {
-        guard let currentToolCall else { return currentStepDetail }
-        if let output = currentToolCall.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !output.isEmpty {
-            return Self.previewSnippet(output)
+        guard let currentStep else { return currentStepDetail }
+        if !currentStep.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return Self.previewSnippet(currentStep.outputPreview)
         }
-        return Self.previewSnippet(currentToolCall.displayDetail)
+        return Self.previewSnippet(currentStep.detail)
+    }
+
+    var currentPreviewFile: LocalAlpineWrittenFile? {
+        currentStep?.file
+    }
+
+    var currentPreviewTitle: String {
+        if let file = currentPreviewFile {
+            return file.fileName
+        }
+        return "agent"
+    }
+
+    var currentPreviewSubtitle: String {
+        if let file = currentPreviewFile {
+            return localAlpineContentType(for: file)
+        }
+        return "查看完整 Agent 记录"
+    }
+
+    var currentPreviewText: String {
+        if let file = currentPreviewFile {
+            let lines = file.previewLines(limit: 7)
+            return lines.isEmpty
+                ? file.path
+                : lines.map { String($0.prefix(96)) }.joined(separator: "\n")
+        }
+        let text = Self.previewSnippet(currentStepPreview, limit: 180)
+        return text.isEmpty ? currentStepTitle : text
+    }
+
+    private static func file(for call: LocalAlpineToolCall, in files: [LocalAlpineWrittenFile]) -> LocalAlpineWrittenFile? {
+        guard !files.isEmpty else { return nil }
+        let pathCandidates = Set(call.filePaths.map(normalizedPath(_:)))
+        if let matched = files.reversed().first(where: { file in
+            let normalized = normalizedPath(file.path)
+            return pathCandidates.contains(normalized) || pathCandidates.contains(file.fileName)
+        }) {
+            return matched
+        }
+        return nil
+    }
+
+    private static func steps(
+        toolCalls: [LocalAlpineToolCall],
+        writtenFiles: [LocalAlpineWrittenFile],
+        commandResults: [LocalAlpineAgentCommandResult],
+        statusHistory: [ChatStatusUpdate]
+    ) -> [AgentActivityStep] {
+        var steps: [AgentActivityStep] = statusSteps(from: statusHistory)
+
+        steps.append(contentsOf: toolCalls.map { call in
+            let title = displayTitle(for: call)
+            let detail = call.displayDetail
+            let output = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return AgentActivityStep(
+                id: "tool-\(call.id)",
+                kind: .tool,
+                title: title,
+                detail: detail.isEmpty ? title : detail,
+                isRunning: call.isRunning,
+                failed: call.failed,
+                outputPreview: output,
+                file: file(for: call, in: writtenFiles)
+            )
+        })
+
+        let existingFilePaths = Set(steps.compactMap { $0.file?.path })
+        for file in writtenFiles where !existingFilePaths.contains(file.path) {
+            steps.append(
+                AgentActivityStep(
+                    id: "file-\(file.path)",
+                    kind: .file,
+                    title: "写入文件",
+                    detail: file.path,
+                    isRunning: false,
+                    failed: false,
+                    outputPreview: file.previewLines(limit: 10).joined(separator: "\n"),
+                    file: file
+                )
+            )
+        }
+
+        let existingCommands = Set(toolCalls.compactMap { call -> String? in
+            let command = call.command?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return command?.isEmpty == false ? command : nil
+        })
+        for (index, result) in commandResults.enumerated() {
+            let command = result.command.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !command.isEmpty, command.lowercased() != "write_files" else { continue }
+            guard !existingCommands.contains(command) else { continue }
+            steps.append(
+                AgentActivityStep(
+                    id: "command-\(index)-\(command.hashValue)",
+                    kind: .command,
+                    title: result.failed ? "运行出错" : "运行命令",
+                    detail: command,
+                    isRunning: false,
+                    failed: result.failed,
+                    outputPreview: result.outputPreview,
+                    file: nil
+                )
+            )
+        }
+
+        return steps
+    }
+
+    private static func statusSteps(from statusHistory: [ChatStatusUpdate]) -> [AgentActivityStep] {
+        statusHistory.enumerated().compactMap { index, status in
+            guard status.hidden != true else { return nil }
+            let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            guard action.contains("web_search")
+                    || action.contains("browser_web_search")
+                    || action.contains("code_interpreter")
+                    || action.contains("get_readable")
+                    || action.contains("readable")
+                    || action.contains("local_native_tool") else {
+                return nil
+            }
+
+            let title = title(for: status, action: action)
+            let detail = status.query?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? status.query!
+                : (status.description ?? status.status ?? title)
+            let output = statusPreview(status)
+            return AgentActivityStep(
+                id: "status-\(index)-\(action)-\(detail.hashValue)",
+                kind: .status,
+                title: title,
+                detail: detail,
+                isRunning: status.done != true,
+                failed: false,
+                outputPreview: output.isEmpty ? detail : output,
+                file: nil
+            )
+        }
+    }
+
+    private static func title(for status: ChatStatusUpdate, action: String) -> String {
+        let description = status.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if action.contains("readable") { return "读取搜索结果摘要" }
+        if action.contains("web_search") || action.contains("browser_web_search") {
+            if description.contains("读取") || description.lowercased().contains("read") {
+                return "读取搜索结果摘要"
+            }
+            return status.query?.isEmpty == false ? "搜索 \(status.query!)" : "搜索网页"
+        }
+        if action.contains("code_interpreter") { return "运行代码" }
+        return description.isEmpty ? "运行工具" : description
+    }
+
+    private static func statusPreview(_ status: ChatStatusUpdate) -> String {
+        var lines: [String] = []
+        if !status.queries.isEmpty {
+            lines.append(contentsOf: status.queries.prefix(4).map { "query: \($0)" })
+        } else if let query = status.query, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.append("query: \(query)")
+        }
+        if let count = status.count {
+            lines.append("count: \(count)")
+        }
+        lines.append(contentsOf: status.items.prefix(4).compactMap { item in
+            item.title ?? item.link
+        })
+        lines.append(contentsOf: status.urls.prefix(4))
+        if let description = status.description, !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.append(description)
+        }
+        return lines.joined(separator: "\n")
     }
 
     static func previewSnippet(_ text: String, limit: Int = 220) -> String {
@@ -163,7 +371,16 @@ private struct AgentActivityItem: Identifiable, Hashable {
             return action == "local_alpine"
                 || action == "local_alpine_agent"
                 || action == "local_alpine_tool"
+                || action.contains("web_search")
+                || action.contains("browser_web_search")
+                || action.contains("code_interpreter")
+                || action.contains("get_readable")
+                || action.contains("readable")
         }
+    }
+
+    private static func normalizedPath(_ path: String) -> String {
+        path.replacingOccurrences(of: "\\", with: "/")
     }
 
     init?(message: ChatMessage) {
@@ -199,7 +416,15 @@ private struct AgentActivityItem: Identifiable, Hashable {
         self.fileCount = summaryFileCount
         self.commandCount = summaryCommandCount
         self.hasFailure = hasError
+        self.writtenFiles = writtenFiles
+        self.commandResults = commandResults
         self.toolCalls = toolCalls
+        self.steps = Self.steps(
+            toolCalls: toolCalls,
+            writtenFiles: writtenFiles,
+            commandResults: visibleCommands,
+            statusHistory: message.statusHistory
+        )
     }
 }
 
@@ -284,6 +509,9 @@ struct ChatDetailView: View {
     @State private var randomPrompts: [SuggestedPrompt] = []
     @State private var showAgentTaskPanel = false
     @State private var agentActivitySnapshot: [AgentActivityItem] = []
+    @State private var agentFloatingFilePreview: LocalAlpineWrittenFilePreviewItem?
+    @State private var agentFloatingStepPreview: AgentFloatingStepPreviewItem?
+    @State private var agentFloatingLoadingPath: String?
 
     private var tokenUsageTotalsSnapshot: ChatTokenUsageSnapshot {
         ChatTokenUsageSnapshot(
@@ -302,18 +530,11 @@ struct ChatDetailView: View {
         var buttonCount = 1
         if onNewChat != nil { buttonCount += 1 }
         if viewModel.messages.isEmpty { buttonCount += 1 }
-        if hasRecentAgentActivity { buttonCount += 1 }
         let buttonWidth = 34
         let buttonSpacing = 2
         let horizontalPadding = 12
         let spacingWidth = max(0, buttonCount - 1) * buttonSpacing
         return CGFloat(buttonCount * buttonWidth + spacingWidth + horizontalPadding)
-    }
-
-    private var hasRecentAgentActivity: Bool {
-        viewModel.messages.suffix(30).contains { message in
-            AgentActivityItem.isActivityMessage(message)
-        }
     }
 
     private var recentAgentActivityItems: [AgentActivityItem] {
@@ -323,7 +544,8 @@ struct ChatDetailView: View {
     }
 
     private var latestVisibleAgentActivity: AgentActivityItem? {
-        guard let item = viewModel.messages.suffix(40).reversed().compactMap(AgentActivityItem.init(message:)).first else {
+        let items = viewModel.messages.suffix(40).reversed().compactMap(AgentActivityItem.init(message:))
+        guard let item = items.first(where: { $0.hasConcreteSteps }) ?? items.first else {
             return nil
         }
         if item.isActive || viewModel.isStreaming { return item }
@@ -338,6 +560,48 @@ struct ChatDetailView: View {
         Haptics.play(.light)
         refreshAgentActivitySnapshot()
         showAgentTaskPanel = true
+    }
+
+    @MainActor
+    private func openAgentFloatingPreview(step: AgentActivityStep?) {
+        guard let step else {
+            openAgentTaskPanel()
+            return
+        }
+        guard let file = step.file else {
+            let text = step.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? step.detail
+                : step.outputPreview
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                openAgentTaskPanel()
+            } else {
+                Haptics.play(.light)
+                agentFloatingStepPreview = AgentFloatingStepPreviewItem(
+                    title: step.title,
+                    detail: step.detail,
+                    text: text
+                )
+            }
+            return
+        }
+        Haptics.play(.light)
+        if agentFloatingLoadingPath == file.path {
+            return
+        }
+        agentFloatingLoadingPath = file.path
+        Task {
+            let code: String
+            do {
+                let data = try await LocalAlpineTerminalService.shared.readFile(path: file.path)
+                code = String(data: data, encoding: .utf8) ?? file.previewTailLines.joined(separator: "\n")
+            } catch {
+                code = file.previewTailLines.joined(separator: "\n")
+            }
+            await MainActor.run {
+                agentFloatingLoadingPath = nil
+                agentFloatingFilePreview = LocalAlpineWrittenFilePreviewItem(file: file, code: code)
+            }
+        }
     }
 
     private func resetTokenUsageTotals() {
@@ -648,6 +912,14 @@ struct ChatDetailView: View {
             AgentTaskPanelView(items: agentActivitySnapshot)
                 .themed()
         }
+        .sheet(item: $agentFloatingFilePreview) { item in
+            LocalAlpineWrittenFilePreviewSheet(item: item)
+                .themed()
+        }
+        .sheet(item: $agentFloatingStepPreview) { item in
+            AgentFloatingStepPreviewSheet(item: item)
+                .themed()
+        }
         .sheet(item: $previewWebURL) { item in
             InAppWebPreviewSheet(url: item.url)
                 .themed()
@@ -845,19 +1117,6 @@ struct ChatDetailView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Chat parameters")
-                if hasRecentAgentActivity {
-                    Button {
-                        openAgentTaskPanel()
-                    } label: {
-                        Image(systemName: "checklist")
-                            .scaledFont(size: 15, weight: .semibold)
-                            .foregroundStyle(theme.textSecondary)
-                            .frame(width: 34, height: 34)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Agent 步骤")
-                }
                 if viewModel.messages.isEmpty {
                     Button {
                         withAnimation(MicroAnimation.snappy) {
@@ -1078,6 +1337,23 @@ struct ChatDetailView: View {
                         viewModel.updateTaskStatus(taskId: taskId, newStatus: newStatus)
                     }
                 )
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .opacity
+                ))
+            }
+
+            if let item = latestVisibleAgentActivity, item.hasConcreteSteps {
+                AgentStepFloatingBar(
+                    item: item,
+                    taskCount: item.totalStepCount,
+                    onOpenAgentLog: openAgentTaskPanel,
+                    onPreviewTap: { step in
+                        openAgentFloatingPreview(step: step)
+                    }
+                )
+                .padding(.horizontal, 28)
+                .padding(.bottom, 8)
                 .transition(.asymmetric(
                     insertion: .move(edge: .bottom).combined(with: .opacity),
                     removal: .opacity
@@ -1340,18 +1616,6 @@ struct ChatDetailView: View {
         // FAB overlay
         .overlay(alignment: .bottomTrailing) {
             scrollToBottomFAB
-        }
-        .overlay(alignment: .bottom) {
-            if let item = latestVisibleAgentActivity {
-                AgentStepFloatingBar(
-                    item: item,
-                    taskCount: item.totalStepCount,
-                    onTap: openAgentTaskPanel
-                )
-                .padding(.horizontal, 28)
-                .padding(.bottom, isScrolledUp ? 58 : 12)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
         }
         .onAppear {
             // Snap instantly to bottom on chat open.
@@ -5073,10 +5337,6 @@ private struct LocalAlpineResultCard: View {
                 inlineStepPills
             }
 
-            if !writtenFiles.isEmpty {
-                LocalAlpineWrittenFilesCard(files: writtenFiles)
-            }
-
             if isExpanded {
                 if !parsed.commandText.isEmpty {
                     LocalAlpineCodeSection(title: "命令", text: parsed.commandText, maxHeight: 140)
@@ -5264,22 +5524,22 @@ private struct AgentInlineStepsView: View {
 
     @Environment(\.theme) private var theme
 
-    private var visibleCalls: [LocalAlpineToolCall] {
-        Array(item.toolCalls.suffix(3))
+    private var visibleSteps: [AgentActivityStep] {
+        Array(item.steps.suffix(3))
     }
 
     var body: some View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 7) {
-                ForEach(visibleCalls, id: \.id) { call in
-                    AgentToolStepPill(call: call)
+                ForEach(visibleSteps, id: \.id) { step in
+                    AgentActivityStepPill(step: step)
                 }
 
-                if item.toolCalls.count > visibleCalls.count {
+                if item.steps.count > visibleSteps.count {
                     HStack(spacing: 6) {
                         Image(systemName: "ellipsis")
                             .scaledFont(size: 11, weight: .bold)
-                        Text("还有 \(item.toolCalls.count - visibleCalls.count) 个步骤")
+                        Text("还有 \(item.steps.count - visibleSteps.count) 个步骤")
                             .scaledFont(size: 11, weight: .semibold)
                     }
                     .foregroundStyle(theme.textTertiary)
@@ -5452,10 +5712,10 @@ private struct AgentTaskCard: View {
             .scaledFont(size: 11, weight: .medium)
             .foregroundStyle(theme.textTertiary)
 
-            if !item.toolCalls.isEmpty {
+            if !item.steps.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(item.toolCalls.prefix(4)), id: \.id) { call in
-                        AgentToolStepPill(call: call)
+                    ForEach(Array(item.steps.prefix(6)), id: \.id) { step in
+                        AgentActivityStepPill(step: step)
                     }
                 }
             }
@@ -5475,82 +5735,156 @@ private struct AgentTaskCard: View {
 private struct AgentStepFloatingBar: View {
     let item: AgentActivityItem
     let taskCount: Int
-    let onTap: () -> Void
+    let onOpenAgentLog: () -> Void
+    let onPreviewTap: (AgentActivityStep?) -> Void
 
     @Environment(\.theme) private var theme
+    @State private var selectedIndex: Int = 0
 
     private var tint: Color {
-        if item.hasFailure { return .orange }
-        return item.isActive ? theme.brandPrimary : theme.success
+        if selectedStep?.failed == true || item.hasFailure { return .orange }
+        return item.isActive || selectedStep?.isRunning == true ? theme.brandPrimary : theme.success
     }
 
     private var icon: String {
-        if item.hasFailure { return "exclamationmark.circle.fill" }
-        return item.isActive ? "progress.indicator" : "checkmark.circle.fill"
+        if selectedStep?.failed == true || item.hasFailure { return "exclamationmark.circle.fill" }
+        return selectedStep?.isRunning == true ? "progress.indicator" : "checkmark.circle.fill"
+    }
+
+    private var clampedIndex: Int {
+        guard !item.steps.isEmpty else { return 0 }
+        return min(max(selectedIndex, 0), item.steps.count - 1)
+    }
+
+    private var selectedStep: AgentActivityStep? {
+        guard !item.steps.isEmpty else { return nil }
+        return item.steps[clampedIndex]
     }
 
     private var pageText: String {
-        "\(max(item.currentStepIndex, 1))/\(max(item.totalStepCount, 1))"
+        "\(clampedIndex + 1)/\(max(taskCount, 1))"
     }
 
     private var previewTitle: String {
-        item.currentToolCall?.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            ? item.currentToolCall?.name ?? "agent"
-            : "agent"
+        selectedStep?.file?.fileName ?? "agent"
+    }
+
+    private var previewSubtitle: String {
+        if let file = selectedStep?.file {
+            return localAlpineContentType(for: file)
+        }
+        return "查看完整 Agent 记录"
     }
 
     private var previewText: String {
-        let text = AgentActivityItem.previewSnippet(item.currentStepPreview, limit: 160)
-        return text.isEmpty ? item.currentStepTitle : text
+        guard let selectedStep else { return item.currentPreviewText }
+        if let file = selectedStep.file {
+            let lines = file.previewLines(limit: 7)
+            return lines.isEmpty ? file.path : lines.map { String($0.prefix(96)) }.joined(separator: "\n")
+        }
+        let text = selectedStep.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? selectedStep.detail
+            : selectedStep.outputPreview
+        return AgentActivityItem.previewSnippet(text, limit: 220)
+    }
+
+    private var selectedTitle: String {
+        selectedStep?.title ?? item.currentStepTitle
+    }
+
+    private func movePage(_ delta: Int) {
+        guard !item.steps.isEmpty else { return }
+        let next = min(max(clampedIndex + delta, 0), item.steps.count - 1)
+        guard next != selectedIndex else { return }
+        Haptics.play(.light)
+        withAnimation(MicroAnimation.snappy) {
+            selectedIndex = next
+        }
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            Button(action: onTap) {
-                HStack(spacing: 9) {
-                    Image(systemName: icon)
-                        .scaledFont(size: 18, weight: .bold)
-                        .foregroundStyle(tint)
-                        .frame(width: 25, height: 25)
+        ZStack(alignment: .bottomLeading) {
+            HStack(spacing: 9) {
+                Image(systemName: icon)
+                    .scaledFont(size: 18, weight: .bold)
+                    .foregroundStyle(tint)
+                    .frame(width: 25, height: 25)
 
-                    Text(item.currentStepTitle)
-                        .scaledFont(size: 15, weight: .semibold)
-                        .foregroundStyle(theme.textPrimary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                Text(selectedTitle)
+                    .scaledFont(size: 15, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onOpenAgentLog)
 
-                    Spacer(minLength: 10)
+                Spacer(minLength: 10)
 
+                Button {
+                    movePage(-1)
+                } label: {
                     Image(systemName: "chevron.left")
-                        .scaledFont(size: 15, weight: .bold)
-                        .foregroundStyle(theme.textPrimary)
-
-                    Text(pageText)
-                        .scaledFont(size: 13, weight: .semibold, design: .rounded)
-                        .foregroundStyle(theme.textSecondary)
-                        .monospacedDigit()
-
-                    Image(systemName: "chevron.right")
-                        .scaledFont(size: 15, weight: .bold)
-                        .foregroundStyle(theme.textTertiary)
+                        .scaledFont(size: 17, weight: .bold)
+                        .foregroundStyle(clampedIndex > 0 ? theme.textPrimary : theme.textTertiary.opacity(0.45))
+                        .frame(width: 30, height: 34)
                 }
-                .padding(.leading, 78)
-                .padding(.trailing, 16)
-                .frame(height: 56)
-                .frame(maxWidth: .infinity)
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.28 : 0.42), lineWidth: 0.7)
+                .buttonStyle(.plain)
+                .disabled(clampedIndex == 0)
+
+                Text(pageText)
+                    .scaledFont(size: 13, weight: .semibold, design: .rounded)
+                    .foregroundStyle(theme.textSecondary)
+                    .monospacedDigit()
+
+                Button {
+                    movePage(1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .scaledFont(size: 17, weight: .bold)
+                        .foregroundStyle(clampedIndex < item.steps.count - 1 ? theme.textPrimary : theme.textTertiary.opacity(0.45))
+                        .frame(width: 30, height: 34)
+                }
+                .buttonStyle(.plain)
+                .disabled(clampedIndex >= item.steps.count - 1)
+            }
+            .padding(.leading, 160)
+            .padding(.trailing, 12)
+            .frame(height: 52)
+            .frame(maxWidth: 620)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.28 : 0.42), lineWidth: 0.7)
+            )
+            .shadow(color: .black.opacity(theme.isDark ? 0.25 : 0.12), radius: 18, x: 0, y: 8)
+            .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .frame(maxHeight: .infinity, alignment: .bottom)
+
+            Button {
+                onPreviewTap(selectedStep)
+            } label: {
+                AgentToolPreviewPop(
+                    previewTitle: previewTitle,
+                    previewSubtitle: previewSubtitle,
+                    previewText: previewText
                 )
-                .shadow(color: .black.opacity(theme.isDark ? 0.25 : 0.12), radius: 18, x: 0, y: 8)
+                .frame(width: 138, height: 82)
             }
             .buttonStyle(.plain)
-
-            AgentToolPreviewPop(previewTitle: previewTitle, previewText: previewText)
-                .frame(width: 118, height: 76)
-                .offset(x: 16, y: -60)
+            .padding(.leading, 20)
+            .padding(.bottom, 30)
+        }
+        .frame(height: 126, alignment: .bottom)
+        .frame(maxWidth: 620)
+        .onAppear {
+            selectedIndex = max(0, item.currentStepIndex - 1)
+        }
+        .onChange(of: item.id) { _, _ in
+            selectedIndex = max(0, item.currentStepIndex - 1)
+        }
+        .onChange(of: item.steps.count) { _, count in
+            selectedIndex = min(max(0, item.currentStepIndex - 1), max(0, count - 1))
         }
         .accessibilityLabel("Agent 步骤 \(taskCount)")
     }
@@ -5558,19 +5892,25 @@ private struct AgentStepFloatingBar: View {
 
 private struct AgentToolPreviewPop: View {
     let previewTitle: String
+    let previewSubtitle: String
     let previewText: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(previewTitle)
                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.82))
                 .lineLimit(1)
 
+            Text(previewSubtitle)
+                .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.58))
+                .lineLimit(1)
+
             Text(previewText)
                 .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Color(red: 0.30, green: 0.63, blue: 1.0))
-                .lineLimit(5)
+                .lineLimit(6)
                 .truncationMode(.tail)
         }
         .padding(.horizontal, 9)
@@ -5581,6 +5921,72 @@ private struct AgentToolPreviewPop: View {
                 .fill(Color.black.opacity(0.88))
         )
         .shadow(color: .black.opacity(0.22), radius: 8, x: 0, y: 4)
+    }
+}
+
+private struct AgentActivityStepPill: View {
+    let step: AgentActivityStep
+
+    @Environment(\.theme) private var theme
+
+    private var tint: Color {
+        if step.failed { return .orange }
+        return step.isRunning ? theme.brandPrimary : theme.success
+    }
+
+    private var iconName: String {
+        if step.failed { return "exclamationmark.circle.fill" }
+        if step.isRunning { return "progress.indicator" }
+        switch step.kind {
+        case .file:
+            return "doc.text"
+        case .command:
+            return "terminal.fill"
+        case .status:
+            return step.title.contains("搜索") || step.title.contains("网页") ? "globe" : "checkmark.circle.fill"
+        case .tool:
+            return "checkmark.circle.fill"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            ZStack {
+                Circle()
+                    .fill(tint.opacity(theme.isDark ? 0.20 : 0.13))
+                    .frame(width: 25, height: 25)
+                Image(systemName: iconName)
+                    .scaledFont(size: 13, weight: .semibold)
+                    .foregroundStyle(tint)
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(step.title)
+                    .scaledFont(size: 14, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if !step.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(step.detail)
+                        .scaledFont(size: 10, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 14)
+        .frame(height: 45)
+        .fixedSize(horizontal: true, vertical: false)
+        .background(
+            Capsule(style: .continuous)
+                .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.78))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.24 : 0.42), lineWidth: 0.7)
+        )
     }
 }
 
@@ -5784,6 +6190,91 @@ private struct LocalAlpineWrittenFilePreviewSheet: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text("\(item.file.lineCount) 行 · \(item.file.byteCount) B")
+                    .scaledFont(size: 11, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+}
+
+private struct AgentFloatingStepPreviewItem: Identifiable, Hashable {
+    let id = UUID()
+    let title: String
+    let detail: String
+    let text: String
+}
+
+private struct AgentFloatingStepPreviewSheet: View {
+    let item: AgentFloatingStepPreviewItem
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+    @State private var copied = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                header
+                Divider()
+                ScrollView {
+                    Text(item.text.isEmpty ? "（无内容）" : item.text)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(theme.textPrimary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                }
+                .background(theme.background)
+            }
+            .navigationTitle(item.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("完成") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        UIPasteboard.general.string = item.text
+                        Haptics.notify(.success)
+                        withAnimation(MicroAnimation.snappy) { copied = true }
+                        Task {
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                            await MainActor.run {
+                                withAnimation(MicroAnimation.snappy) { copied = false }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .scaledFont(size: 14, weight: .medium)
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checklist")
+                .scaledFont(size: 15, weight: .semibold)
+                .foregroundStyle(theme.brandPrimary)
+                .frame(width: 32, height: 32)
+                .background(theme.brandPrimary.opacity(theme.isDark ? 0.16 : 0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.detail.isEmpty ? item.title : item.detail)
+                    .scaledFont(size: 12, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                Text("\(item.text.count) 字符")
                     .scaledFont(size: 11, weight: .medium)
                     .foregroundStyle(theme.textTertiary)
             }
