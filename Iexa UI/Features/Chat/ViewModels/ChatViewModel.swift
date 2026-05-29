@@ -11994,6 +11994,7 @@ final class ChatViewModel {
         queries: [String] = []
     ) -> String {
         var blocks: [String] = []
+        var remainingEvidenceCharacters = 2_400
         var docsByURL: [String: WebSearchDocument] = [:]
         for doc in result.docs {
             guard let url = doc.metadata["source"] ?? doc.metadata["link"],
@@ -12001,68 +12002,103 @@ final class ChatViewModel {
             docsByURL[url] = doc
         }
 
-        for (index, item) in result.items.prefix(6).enumerated() {
-            let url = item.link ?? result.filenames.dropFirst(index).first ?? ""
-            var lines = [
-                "### Result \(index + 1)",
-                "Title: \(item.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Untitled")"
-            ]
-            if !url.isEmpty { lines.append("URL: \(url)") }
-            if let snippet = item.snippet?.trimmingCharacters(in: .whitespacesAndNewlines), !snippet.isEmpty {
-                lines.append("Snippet: \(String(snippet.prefix(600)))")
-            }
-            if let doc = docsByURL[url] {
-                let excerpt = doc.content
-                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !excerpt.isEmpty {
-                    lines.append("Page excerpt: \(String(excerpt.prefix(1200)))")
+        func appendBlock(_ lines: [String]) {
+            guard remainingEvidenceCharacters > 0 else { return }
+            let block = lines.joined(separator: "\n")
+            guard !block.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            if block.count <= remainingEvidenceCharacters {
+                blocks.append(block)
+                remainingEvidenceCharacters -= block.count
+            } else {
+                let clipped = String(block.prefix(max(0, remainingEvidenceCharacters))).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !clipped.isEmpty {
+                    blocks.append(clipped + "...")
+                    remainingEvidenceCharacters = 0
                 }
             }
-            blocks.append(lines.joined(separator: "\n"))
+        }
+
+        for (index, item) in result.items.prefix(4).enumerated() {
+            let url = item.link ?? result.filenames.dropFirst(index).first ?? ""
+            var lines = [
+                "[\(index + 1)] \(Self.compactWebSearchEvidence(item.title ?? "Untitled", limit: 96))"
+            ]
+            if !url.isEmpty { lines.append("URL: \(url)") }
+            var evidenceParts: [String] = []
+            if let snippet = item.snippet {
+                let compact = Self.compactWebSearchEvidence(snippet, limit: 220)
+                if !compact.isEmpty { evidenceParts.append(compact) }
+            }
+            if let doc = docsByURL[url] {
+                let compact = Self.compactWebSearchEvidence(Self.webSearchDocumentEvidence(from: doc), limit: 360)
+                if !compact.isEmpty, !evidenceParts.contains(compact) {
+                    evidenceParts.append(compact)
+                }
+            }
+            let evidence = evidenceParts.joined(separator: " ")
+            if !evidence.isEmpty {
+                lines.append("Evidence: \(evidence)")
+            }
+            appendBlock(lines)
         }
 
         if blocks.isEmpty {
-            for (index, doc) in result.docs.prefix(4).enumerated() {
+            for (index, doc) in result.docs.prefix(3).enumerated() {
                 let url = doc.metadata["source"] ?? doc.metadata["link"] ?? ""
                 let title = doc.metadata["title"] ?? doc.metadata["name"] ?? url
-                let excerpt = doc.content
-                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 var lines = [
-                    "### Result \(index + 1)",
-                    "Title: \(title)"
+                    "[\(index + 1)] \(Self.compactWebSearchEvidence(title, limit: 96))"
                 ]
                 if !url.isEmpty { lines.append("URL: \(url)") }
-                lines.append("Page excerpt: \(String(excerpt.prefix(1200)))")
-                blocks.append(lines.joined(separator: "\n"))
+                let evidence = Self.compactWebSearchEvidence(Self.webSearchDocumentEvidence(from: doc), limit: 360)
+                if !evidence.isEmpty {
+                    lines.append("Evidence: \(evidence)")
+                }
+                appendBlock(lines)
             }
         }
 
         guard !blocks.isEmpty else { return "" }
-        let queryLines = Self.mergeSearchQueries(original: query, generated: queries, limit: 4)
+        let queryLines = Self.mergeSearchQueries(original: query, generated: queries, limit: 3)
             .map { "- \($0)" }
             .joined(separator: "\n")
 
         return """
 
-        [内置浏览器联网搜索结果]
+        [内置浏览器联网搜索摘要]
         查询：\(query)
         搜索时间：\(Self.webSearchTimestampText())
         实际搜索词：
         \(queryLines)
 
-        以下结果由 Iexa 客户端在发送本轮消息前，通过内置 WKWebView 浏览器搜索/读取网页取得。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果。回答要求：
-        - 先直接给结论，再补充必要来源和时间。
-        - 天气、油价、新闻、价格、版本等实时问题，必须说清楚信息日期/发布时间；如果结果没有当前日期/当前年份证据，先继续细化搜索，仍没有就明确说“未在搜索结果中找到精确值”，不要编。
-        - 如果结果只是搜索页/中转页/摘要，或没有打开到可用正文，请明确说明缺少可验证来源，不要输出任何搜索工具块。
-        - 如果用户明确让你“那你搜啊/你自己搜”，不要回答操作步骤给用户；应当直接基于搜索资料回答，资料不足就继续细化搜索。
-        - 引用来源时使用普通链接或来源标题，不要输出 cite turn0search 之类隐藏引用标记，也不要输出无法显示的方框字符。
-        - 不要声称你无法联网。
+        这是客户端搜索后压缩过的证据摘要。请直接回答用户问题，优先使用下面来源；涉及最新信息时写清搜索时间/来源时间。资料不足就明确说未找到可验证结论，不要编造，不要输出隐藏引用标记。
 
         \(blocks.joined(separator: "\n\n"))
-        [/内置浏览器联网搜索结果]
+        [/内置浏览器联网搜索摘要]
         """
+    }
+
+    private static func webSearchDocumentEvidence(from doc: WebSearchDocument) -> String {
+        if let snippet = doc.metadata["search_snippet"], !snippet.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return snippet
+        }
+        if let range = doc.content.range(of: "Content excerpt:") {
+            return String(doc.content[range.upperBound...])
+        }
+        return doc.content
+    }
+
+    private static func compactWebSearchEvidence(_ text: String, limit: Int) -> String {
+        let compact = text
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "Title:", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "URL:", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "Description:", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "Search snippet:", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "Content excerpt:", with: "", options: .caseInsensitive)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard compact.count > limit else { return compact }
+        return String(compact.prefix(limit)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
     }
 
     private func webSearchSources(from result: WebSearchResponse) -> [ChatSourceReference] {
