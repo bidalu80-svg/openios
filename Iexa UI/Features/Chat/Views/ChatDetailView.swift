@@ -79,6 +79,32 @@ private struct AgentActivityItem: Identifiable, Hashable {
     let toolCalls: [LocalAlpineToolCall]
     let steps: [AgentActivityStep]
 
+    init(
+        id: String,
+        timestamp: Date,
+        isStreaming: Bool,
+        summary: String,
+        fileCount: Int,
+        commandCount: Int,
+        hasFailure: Bool,
+        writtenFiles: [LocalAlpineWrittenFile],
+        commandResults: [LocalAlpineAgentCommandResult],
+        toolCalls: [LocalAlpineToolCall],
+        steps: [AgentActivityStep]
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.isStreaming = isStreaming
+        self.summary = summary
+        self.fileCount = fileCount
+        self.commandCount = commandCount
+        self.hasFailure = hasFailure
+        self.writtenFiles = writtenFiles
+        self.commandResults = commandResults
+        self.toolCalls = toolCalls
+        self.steps = steps
+    }
+
     var isActive: Bool {
         isStreaming || steps.contains { $0.isRunning } || toolCalls.contains { $0.isRunning }
     }
