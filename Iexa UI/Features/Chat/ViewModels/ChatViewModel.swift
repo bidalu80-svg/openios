@@ -12699,6 +12699,20 @@ final class ChatViewModel {
             queries = [qStr]
         }
 
+        var items: [ChatStatusItem] = []
+        if let rawItems = data["items"] as? [[String: Any]] {
+            items = rawItems.compactMap { item in
+                let title = item["title"] as? String
+                    ?? item["name"] as? String
+                    ?? item["label"] as? String
+                let link = item["link"] as? String
+                    ?? item["url"] as? String
+                    ?? item["source"] as? String
+                guard title != nil || link != nil else { return nil }
+                return ChatStatusItem(title: title, link: link)
+            }
+        }
+
         return ChatStatusUpdate(
             action: data["action"] as? String,
             description: data["description"] as? String,
@@ -12706,6 +12720,7 @@ final class ChatViewModel {
             hidden: data["hidden"] as? Bool,
             urls: (data["urls"] as? [String]) ?? [],
             occurredAt: .now,
+            items: items,
             count: data["count"] as? Int ?? (data["count"] as? Double).map { Int($0) },
             query: data["query"] as? String,
             queries: queries
@@ -12726,15 +12741,63 @@ final class ChatViewModel {
     /// groups by metadata.source key and creates one ChatSourceReference per
     /// unique URL.
     private func parseSources(_ array: [[String: Any]]) -> [ChatSourceReference]? {
+        func expandedSourceEntries(from entries: [[String: Any]]) -> [[String: Any]] {
+            var expanded: [[String: Any]] = []
+
+            func append(_ entry: [String: Any]) {
+                if let annotations = entry["annotations"] as? [[String: Any]] {
+                    for annotation in annotations {
+                        append(annotation)
+                    }
+                    let hasOwnSourceFields = entry["source"] != nil
+                        || entry["url"] != nil
+                        || entry["link"] != nil
+                        || entry["metadata"] != nil
+                        || entry["document"] != nil
+                        || entry["id"] != nil
+                        || entry["title"] != nil
+                        || entry["name"] != nil
+                    if !hasOwnSourceFields {
+                        return
+                    }
+                }
+
+                if let citation = entry["url_citation"] as? [String: Any] {
+                    var normalized = citation
+                    normalized["type"] = normalized["type"] ?? entry["type"] ?? "url_citation"
+                    if normalized["source"] == nil, let url = normalized["url"] {
+                        normalized["source"] = url
+                    }
+                    expanded.append(normalized)
+                    return
+                }
+
+                if (entry["type"] as? String) == "url_citation" {
+                    expanded.append(entry)
+                    return
+                }
+
+                expanded.append(entry)
+            }
+
+            for entry in entries {
+                append(entry)
+            }
+            return expanded
+        }
+
         // Accumulate by unique key (URL or fallback index)
         var accumulated: [(key: String, url: String?, title: String?, snippet: String?, type: String?, meta: [String: String])] = []
         var seenKeys = Set<String>()
         var fallbackIdx = 0
 
-        for entry in array {
+        for entry in expandedSourceEntries(from: array) {
             // Extract nested source object
             var baseSource = (entry["source"] as? [String: Any]) ?? [:]
-            for key in ["id", "name", "title", "url", "link", "type"] {
+            if let sourceValue = entry["source"], !(sourceValue is [String: Any]) {
+                baseSource["source"] = sourceValue
+            }
+            for key in ["id", "name", "title", "url", "link", "source", "type"] {
                 if let value = entry[key], baseSource[key] == nil {
                     baseSource[key] = value
                 }
@@ -12764,6 +12827,7 @@ final class ChatViewModel {
                         if let v = meta[k] as? String, !v.isEmpty { return v }
                     }
                     if let v = baseSource["id"] as? String, !v.isEmpty { return v }
+                    if let v = baseSource["source"] as? String, !v.isEmpty { return v }
                     return nil
                 }()
 
@@ -12778,6 +12842,9 @@ final class ChatViewModel {
                 let url: String? = {
                     for k in ["source", "url", "link"] {
                         if let v = meta[k] as? String, v.hasPrefix("http") { return v }
+                    }
+                    for k in ["source", "url", "link"] {
+                        if let v = baseSource[k] as? String, v.hasPrefix("http") { return v }
                     }
                     if let v = baseSource["url"] as? String, v.hasPrefix("http") { return v }
                     if let id = idCandidate, id.hasPrefix("http") { return id }

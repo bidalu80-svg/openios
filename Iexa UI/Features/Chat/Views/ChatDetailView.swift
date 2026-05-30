@@ -5508,8 +5508,14 @@ private struct IsolatedAssistantMessage: View {
             return message.content
         }()
 
-        let effectiveSources: [ChatSourceReference] = isActivelyStreaming
+        let baseSources: [ChatSourceReference] = isActivelyStreaming
             ? streamingStore.streamingSources : message.sources
+        let effectiveSources = Self.effectiveCitationSources(
+            baseSources: baseSources,
+            statusHistory: isActivelyStreaming
+                ? streamingStore.streamingStatusHistory
+                : message.statusHistory
+        )
 
         // During streaming: pass raw content through (zero processing per token).
         // After streaming: apply URL resolution and citation linking.
@@ -5704,10 +5710,10 @@ private struct IsolatedAssistantMessage: View {
     // MARK: - Static Preprocessing (no ChatDetailView dependency)
 
     static func preprocessCitations(_ content: String, sources: [ChatSourceReference], preferDomain: Bool = true) -> String {
-        guard !sources.isEmpty else { return content }
+        var expanded = Self.preprocessLinkedCitationDestinations(content)
+        guard !sources.isEmpty else { return expanded }
 
         // --- Pass 1: expand [1, 2, 3] → [1][2][3] so the single-number pass handles them ---
-        var expanded = content
         let multiPattern = #"\[(\d+(?:\s*,\s*\d+)+)\](?!\()"#
         if let multiRegex = try? NSRegularExpression(pattern: multiPattern) {
             let nsExpanded = expanded as NSString
@@ -5749,6 +5755,80 @@ private struct IsolatedAssistantMessage: View {
             searchStart = fullRange.upperBound
         }
         result += expanded[searchStart...]
+        return result
+    }
+
+    private static func effectiveCitationSources(
+        baseSources: [ChatSourceReference],
+        statusHistory: [ChatStatusUpdate]
+    ) -> [ChatSourceReference] {
+        guard !statusHistory.isEmpty else { return baseSources }
+        var merged = baseSources
+        var seen = Set<String>()
+
+        func sourceKey(_ source: ChatSourceReference) -> String? {
+            if let url = source.resolvedURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !url.isEmpty {
+                return url.lowercased()
+            }
+            if let id = source.id?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !id.isEmpty {
+                return id.lowercased()
+            }
+            return nil
+        }
+
+        for source in merged {
+            if let key = sourceKey(source) {
+                seen.insert(key)
+            }
+        }
+
+        func appendSource(title: String?, url: String) {
+            let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmedURL.hasPrefix("http") else { return }
+            let key = trimmedURL.lowercased()
+            guard !seen.contains(key) else { return }
+            seen.insert(key)
+            let cleanTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            merged.append(ChatSourceReference(
+                id: trimmedURL,
+                title: cleanTitle?.isEmpty == false ? cleanTitle : nil,
+                url: trimmedURL
+            ))
+        }
+
+        for status in statusHistory where status.hidden != true {
+            for item in status.items {
+                if let link = item.link {
+                    appendSource(title: item.title, url: link)
+                }
+            }
+            for url in status.urls {
+                appendSource(title: nil, url: url)
+            }
+        }
+
+        return merged
+    }
+
+    private static func preprocessLinkedCitationDestinations(_ content: String) -> String {
+        let pattern = #"(?<!!)\[(\d+)\]\((https?://[^\s\)]+)(?:\s+["'][^"']*["'])?\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return content }
+        let nsContent = content as NSString
+        let matches = regex.matches(in: content, range: NSRange(location: 0, length: nsContent.length))
+        guard !matches.isEmpty else { return content }
+
+        var result = content
+        for match in matches.reversed() {
+            guard let fullRange = Range(match.range, in: result),
+                  let numberRange = Range(match.range(at: 1), in: result),
+                  let urlRange = Range(match.range(at: 2), in: result) else { continue }
+            let number = String(result[numberRange])
+            let url = String(result[urlRange])
+            let destination = url.hasSuffix("#cite") ? url : "\(url)#cite"
+            result.replaceSubrange(fullRange, with: "[\(number)](\(destination))")
+        }
         return result
     }
 
