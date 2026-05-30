@@ -188,6 +188,33 @@ private struct AgentActivityItem: Identifiable, Hashable {
         return text.isEmpty ? currentStepTitle : text
     }
 
+    func limitingSteps(to maxSteps: Int) -> AgentActivityItem {
+        guard maxSteps > 0, steps.count > maxSteps else { return self }
+
+        let limitedSteps = Array(steps.suffix(maxSteps))
+        let limitedFileCount = limitedSteps.filter { step in
+            step.kind == .file || step.file != nil
+        }.count
+        let limitedCommandCount = limitedSteps.filter { step in
+            step.kind == .command
+                || step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }.count
+
+        return AgentActivityItem(
+            id: "\(id)-limited-\(maxSteps)-\(steps.count)",
+            timestamp: timestamp,
+            isStreaming: isStreaming,
+            summary: "最近 \(maxSteps) 个步骤",
+            fileCount: limitedFileCount,
+            commandCount: limitedCommandCount,
+            hasFailure: limitedSteps.contains { $0.failed },
+            writtenFiles: limitedSteps.compactMap(\.file),
+            commandResults: commandResults,
+            toolCalls: toolCalls,
+            steps: limitedSteps
+        )
+    }
+
     private static func file(for call: LocalAlpineToolCall, in files: [LocalAlpineWrittenFile]) -> LocalAlpineWrittenFile? {
         guard !files.isEmpty else { return nil }
         let pathCandidates = Set(call.filePaths.map(normalizedPath(_:)))
@@ -639,6 +666,10 @@ struct ChatDetailView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
 
+    private static let agentFloatingPreviewStepLimit = 80
+    private static let agentFloatingPreviewMessageWindow = 32
+    private static let agentFloatingPreviewItemLimit = 12
+
     private let logger = Logger(subsystem: "com.openui", category: "ChatDetailView")
 
     private let initialConversationId: String?
@@ -748,6 +779,15 @@ struct ChatDetailView: View {
             .compactMap { activityItem(for: $0) }
     }
 
+    private var floatingAgentActivityItems: [AgentActivityItem] {
+        Array(
+            viewModel.messages
+                .suffix(Self.agentFloatingPreviewMessageWindow)
+                .compactMap { activityItem(for: $0) }
+                .suffix(Self.agentFloatingPreviewItemLimit)
+        )
+    }
+
     private var transcriptMessages: [ChatMessage] {
         viewModel.messages.filter { !shouldHideFromTranscript($0) }
     }
@@ -845,6 +885,18 @@ struct ChatDetailView: View {
         }
         if item.isActive || viewModel.isStreaming { return item }
         return Date().timeIntervalSince(item.timestamp) < 180 ? item : nil
+    }
+
+    private var visibleAgentActivityWindowPreview: AgentActivityItem? {
+        let items = floatingAgentActivityItems
+        if let merged = AgentActivityItem.mergedTurn(
+            id: "window-\(items.first?.id ?? "empty")-\(items.last?.id ?? "latest")",
+            items: items
+        ), merged.hasConcreteSteps {
+            return merged.limitingSteps(to: Self.agentFloatingPreviewStepLimit)
+        }
+
+        return latestVisibleAgentActivity?.limitingSteps(to: Self.agentFloatingPreviewStepLimit)
     }
 
     private func refreshAgentActivitySnapshot() {
@@ -1683,7 +1735,7 @@ struct ChatDetailView: View {
                 ))
             }
 
-            if let item = latestVisibleAgentActivity, item.hasConcreteSteps {
+            if let item = visibleAgentActivityWindowPreview, item.hasConcreteSteps {
                 AgentStepFloatingBar(
                     item: item,
                     taskCount: item.totalStepCount,
