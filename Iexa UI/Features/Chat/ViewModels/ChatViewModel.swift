@@ -8682,7 +8682,7 @@ final class ChatViewModel {
                 }
             }
 
-        case "source", "citation":
+        case "source", "citation", "annotation":
             if let payload, let sources = parseSources([payload]) {
                 appendSources(id: assistantMessageId, sources: sources)
             }
@@ -8819,6 +8819,10 @@ final class ChatViewModel {
                let sources = parseSources(citations) {
                 appendSources(id: assistantMessageId, sources: sources)
             }
+            if let annotations = delta["annotations"] as? [[String: Any]],
+               let sources = parseSources(annotations) {
+                appendSources(id: assistantMessageId, sources: sources)
+            }
         }
 
         if payload["choices"] == nil,
@@ -8850,7 +8854,9 @@ final class ChatViewModel {
         }
 
         // Top-level sources
-        if let rawSources = payload["sources"] as? [[String: Any]] ?? payload["citations"] as? [[String: Any]],
+        if let rawSources = payload["sources"] as? [[String: Any]]
+            ?? payload["citations"] as? [[String: Any]]
+            ?? payload["annotations"] as? [[String: Any]],
            let sources = parseSources(rawSources) {
             appendSources(id: assistantMessageId, sources: sources)
         }
