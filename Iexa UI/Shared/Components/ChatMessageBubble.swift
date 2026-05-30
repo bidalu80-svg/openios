@@ -175,40 +175,6 @@ private struct UserBubbleShape: Shape {
 
 // MARK: - Typing Indicator
 
-/// A compact visible placeholder for the gap before the model emits text or tool steps.
-struct AssistantThinkingCapsule: View {
-    var title: LocalizedStringKey = "正在思考"
-
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.mini)
-                .tint(theme.brandPrimary)
-                .frame(width: 16, height: 16)
-
-            Text(title)
-                .scaledFont(size: 13, weight: .semibold)
-                .foregroundStyle(theme.textPrimary)
-                .lineLimit(1)
-        }
-        .padding(.leading, 12)
-        .padding(.trailing, 14)
-        .frame(height: 38)
-        .fixedSize(horizontal: true, vertical: false)
-        .background(
-            Capsule(style: .continuous)
-                .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.78))
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.24 : 0.42), lineWidth: 0.7)
-        )
-        .accessibilityLabel(Text(title))
-    }
-}
-
 /// An animated typing indicator shown while the assistant is composing.
 struct TypingIndicator: View {
     @Environment(\.theme) private var theme

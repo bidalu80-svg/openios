@@ -574,6 +574,8 @@ struct FullScreenImageGalleryView: View {
 
     var body: some View {
         GeometryReader { geometry in
+            let pageSize = geometry.size
+
             ZStack {
                 Color.black.ignoresSafeArea()
 
@@ -584,11 +586,12 @@ struct FullScreenImageGalleryView: View {
                                 FullScreenImageGalleryPage(
                                     item: item,
                                     apiClient: apiClient,
+                                    pageSize: pageSize,
                                     onLoaded: { image in
                                         loadedImages[item.id] = image
                                     }
                                 )
-                                .frame(width: geometry.size.width, height: geometry.size.height)
+                                .frame(width: pageSize.width, height: pageSize.height, alignment: .center)
                                 .id(item.id)
                                 .onAppear {
                                     currentItemId = item.id
@@ -681,29 +684,35 @@ struct FullScreenImageGalleryView: View {
 private struct FullScreenImageGalleryPage: View {
     let item: AuthenticatedImageGalleryItem
     let apiClient: APIClient?
+    let pageSize: CGSize
     let onLoaded: (UIImage) -> Void
 
     @State private var image: UIImage?
     @State private var didFail = false
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .center) {
+            Color.clear
+
             if let image {
                 Image(uiImage: image)
                     .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: pageSize.width, height: pageSize.height, alignment: .center)
             } else if didFail {
                 Image(systemName: "photo")
                     .scaledFont(size: 34, weight: .medium)
                     .foregroundStyle(.white.opacity(0.55))
+                    .frame(width: pageSize.width, height: pageSize.height, alignment: .center)
             } else {
                 ProgressView()
                     .controlSize(.large)
                     .tint(.white)
+                    .frame(width: pageSize.width, height: pageSize.height, alignment: .center)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(width: pageSize.width, height: pageSize.height, alignment: .center)
+        .clipped()
         .task(id: item.fileId) {
             guard image == nil else { return }
             if let loaded = await AuthenticatedImageView.loadImageValue(

@@ -2656,7 +2656,10 @@ struct AssistantMessageContent: View {
 
         VStack(alignment: .leading, spacing: Spacing.xs) {
             if isStreaming && !hasRenderableGroups {
-                AssistantThinkingCapsule()
+                HStack {
+                    TypingIndicator()
+                    Spacer()
+                }
             } else {
                 // Render each segment in the order it appears in the content.
                 // Adjacent tool calls are grouped together with dividers

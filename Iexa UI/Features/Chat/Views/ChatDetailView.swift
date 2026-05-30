@@ -947,6 +947,9 @@ struct ChatDetailView: View {
             if hasVisibleActivity {
                 return false
             }
+            if message.isStreaming {
+                return false
+            }
             return message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && messageHasProcessOnlyStatus(message)
         }
@@ -970,6 +973,7 @@ struct ChatDetailView: View {
             return true
         }
         if message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !message.isStreaming,
            messageHasProcessOnlyStatus(message) {
             return true
         }
@@ -2545,13 +2549,13 @@ struct ChatDetailView: View {
                         apiClient: dependencies.apiClient
                     )
                 }
-            } else if message.isStreaming && !hasAgentToolPreview(for: message) {
+            } else if message.isStreaming {
                 ChatMessageBubble(
                     role: .assistant,
                     showTimestamp: activeActionMessageId == message.id,
                     timestamp: message.timestamp
                 ) {
-                    AssistantThinkingCapsule()
+                    TypingIndicator()
                 }
             }
         } else {
@@ -2676,7 +2680,7 @@ struct ChatDetailView: View {
                 message: message,
                 activeVersionIndex: activeVersionIndex[message.id] ?? -1,
                 contentOverride: assistantContentOverride[message.id],
-                showEmptyThinkingCapsule: !hasAgentToolPreview(for: message),
+                showEmptyThinkingCapsule: true,
                 serverBaseURL: viewModel.serverBaseURL,
                 authToken: viewModel.serverAuthToken,
                 apiClient: dependencies.apiClient
@@ -5490,11 +5494,15 @@ private struct IsolatedAssistantMessage: View {
                 || (message.model == "Local Alpine" && message.statusHistory.contains(where: {
                     $0.action?.lowercased() == "local_alpine"
                 })) {
-                EmptyView()
+                if showEmptyThinkingCapsule {
+                    TypingIndicator()
+                } else {
+                    EmptyView()
+                }
             } else if message.metadata?["iexa_image_generation_placeholder"] == "true" {
                 ImageGenerationPlaceholderView()
             } else if showEmptyThinkingCapsule {
-                AssistantThinkingCapsule()
+                TypingIndicator()
             } else {
                 EmptyView()
             }

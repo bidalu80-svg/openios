@@ -12983,16 +12983,6 @@ final class ChatViewModel {
         guard !localAlpineMissingToolCorrectionParentIds.contains(messageId) else {
             return false
         }
-        if let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) {
-            var metadata = conversation?.messages[index].metadata ?? [:]
-            metadata["iexa_local_alpine_hidden_correction_parent"] = "true"
-            conversation?.messages[index].metadata = metadata
-            conversation?.history.updateNode(id: messageId) { node in
-                var nodeMetadata = node.metadata ?? [:]
-                nodeMetadata["iexa_local_alpine_hidden_correction_parent"] = "true"
-                node.metadata = nodeMetadata
-            }
-        }
         localAlpineMissingToolCorrectionParentIds.insert(messageId)
         localAlpineContinuationParentIds.insert(messageId)
         localAlpineContinuationTask?.cancel()
@@ -15614,11 +15604,8 @@ final class ChatViewModel {
                     finalContent = resolvedFinalContent
                 }
                 let agentContent = finalRawContent
-                let latestUserRequiresHostExecution = conversation?.messages.last(where: {
-                    $0.role == .user && !Self.isLocalAlpineAgentResult($0)
-                }).map { Self.localAlpineUserRequestRequiresHostExecution($0.content) } ?? false
                 let shouldHideToolParent = shouldHandleLocalAlpineDisplay
-                    && (finalLocalAlpineInstructionDetected || latestUserRequiresHostExecution)
+                    && finalLocalAlpineInstructionDetected
                 conversation?.messages[index].content = finalContent
                 conversation?.messages[index].isStreaming = false
                 if shouldHideToolParent {
