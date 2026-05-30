@@ -210,6 +210,16 @@ struct StreamingMarkdownView: View {
         if Self.isHiddenInternalToolBlock(language: recoveredBlock.language, code: recoveredBlock.content) {
             return result
         }
+        guard Self.shouldRenderFenceAsCode(language: recoveredBlock.language, code: recoveredBlock.content) else {
+            let demotedFence = Self.demotedRejectedFenceMarkdown(
+                language: recoveredBlock.language,
+                code: recoveredBlock.content
+            )
+            if !demotedFence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result.append(.markdown(demotedFence))
+            }
+            return result
+        }
 
         result.append(streamingCodeSegment(
             language: recoveredBlock.language,
@@ -1021,6 +1031,13 @@ struct StreamingMarkdownView: View {
                     if units.isEmpty { return [] }
                     return collapseParsedUnits(units, fallback: parseText)
                 }
+                guard Self.shouldRenderFenceAsCode(language: rawLanguage, code: "") else {
+                    let demotedFence = Self.demotedRejectedFenceMarkdown(language: rawLanguage, code: "")
+                    if !demotedFence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        units.append(.markdown(demotedFence))
+                    }
+                    return collapseParsedUnits(units, fallback: parseText)
+                }
                 units.append(.segment(.codeBlock(
                     language: rawLanguage.isEmpty ? "text" : rawLanguage,
                     code: ""
@@ -1062,6 +1079,22 @@ struct StreamingMarkdownView: View {
                     units.append(.markdown(preceding))
                 }
                 remaining = remaining[closeRange.upperBound...]
+                continue
+            }
+            if !Self.shouldRenderFenceAsCode(language: recoveredFence.language, code: codeContent) {
+                let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
+                if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    units.append(.markdown(preceding))
+                }
+                let demotedFence = Self.demotedRejectedFenceMarkdown(
+                    language: recoveredFence.language,
+                    code: codeContent
+                )
+                if !demotedFence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    units.append(.markdown(demotedFence))
+                }
+                let blockEnd = closeRange.upperBound
+                remaining = normalizedFenceTail(remaining[blockEnd...])
                 continue
             }
             let normalizedBlock = normalizedCodeBlock(language: lang, content: codeContent)
@@ -1580,6 +1613,53 @@ struct StreamingMarkdownView: View {
         return trimmed
     }
 
+    private static func shouldRenderFenceAsCode(language: String, code: String) -> Bool {
+        let rawLanguage = language.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = rawLanguage.lowercased()
+        let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isHiddenInternalToolBlock(language: normalized, code: code) else { return false }
+        guard !rawLanguage.isEmpty else { return !trimmedCode.isEmpty }
+
+        let firstToken = normalized.split(maxSplits: 1, whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? normalized
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789_+-#.")
+        let firstTokenIsSafe = firstToken.unicodeScalars.allSatisfy { allowed.contains($0) }
+        let wholeInfoIsSafe = normalized.unicodeScalars.allSatisfy { allowed.contains($0) }
+        if wholeInfoIsSafe {
+            return !trimmedCode.isEmpty || StreamingMarkdownView.recognizedFenceLanguageTokens.contains(normalized)
+        }
+        if firstTokenIsSafe,
+           StreamingMarkdownView.recognizedFenceLanguageTokens.contains(firstToken),
+           !trimmedCode.isEmpty {
+            return true
+        }
+        return false
+    }
+
+    private static func demotedRejectedFenceMarkdown(language: String, code: String) -> String {
+        let title = language.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        if title.isEmpty { return body }
+        if body.isEmpty { return title }
+        return title + "\n" + body
+    }
+
+    private static let recognizedFenceLanguageTokens: Set<String> = [
+        "bash", "sh", "shell", "zsh", "fish", "powershell", "ps1",
+        "nginx", "conf", "ini", "toml", "yaml", "yml", "xml",
+        "swift", "kotlin", "java", "javascript", "js", "typescript", "ts",
+        "tsx", "jsx", "html", "css", "scss", "python", "python3", "py",
+        "ruby", "rb", "go", "rust", "rs", "c", "cpp", "c++", "objc",
+        "objective-c", "php", "lua", "sql", "dockerfile", "makefile",
+        "json", "jsonc", "markdown", "md", "text", "txt", "dart", "r",
+        "scala", "groovy", "gradle", "perl", "pl", "haskell", "hs",
+        "elixir", "ex", "exs", "erlang", "erl", "clojure", "clj",
+        "fsharp", "fs", "ocaml", "ml", "matlab", "julia", "jl",
+        "racket", "scheme", "lisp", "vue", "svelte", "csharp", "cs",
+        "solidity", "sol", "graphql", "gql", "proto", "protobuf",
+        "bat", "cmd", "diff", "patch", "regex", "vim", "vimscript",
+        "mermaid", "svg", "math", "latex"
+    ]
+
     private func looksLikeInlineFenceCode(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
@@ -1655,21 +1735,7 @@ struct StreamingMarkdownView: View {
     private func isRecognizedCodeLanguage(_ language: String) -> Bool {
         let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return false }
-        let languages: Set<String> = [
-            "bash", "sh", "shell", "zsh", "fish", "powershell", "ps1",
-            "nginx", "conf", "ini", "toml", "yaml", "yml", "xml",
-            "swift", "kotlin", "java", "javascript", "js", "typescript", "ts",
-            "tsx", "jsx", "html", "css", "scss", "python", "py", "ruby", "rb",
-            "go", "rust", "rs", "c", "cpp", "c++", "objc", "objective-c",
-            "php", "lua", "sql", "dockerfile", "makefile", "json", "jsonc",
-            "markdown", "md", "text", "txt", "dart", "r", "scala", "groovy",
-            "gradle", "perl", "pl", "haskell", "hs", "elixir", "ex", "exs",
-            "erlang", "erl", "clojure", "clj", "fsharp", "fs", "ocaml", "ml",
-            "matlab", "julia", "jl", "racket", "scheme", "lisp", "vue", "svelte",
-            "csharp", "cs", "solidity", "sol", "graphql", "gql", "proto", "protobuf",
-            "bat", "cmd", "diff", "patch", "regex", "vim", "vimscript"
-        ]
-        return languages.contains(normalized)
+        return Self.recognizedFenceLanguageTokens.contains(normalized)
     }
 
     private func injectCSS(_ css: String, into html: String) -> String {
