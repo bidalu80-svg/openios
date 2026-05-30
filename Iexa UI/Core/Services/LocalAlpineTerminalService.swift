@@ -1479,13 +1479,44 @@ actor LocalAlpineTerminalService {
           done
           hash -r 2>/dev/null || true
         }
+        iexa_real_apk() {
+          if [ -x /sbin/apk ]; then
+            /sbin/apk "$@"
+          elif [ -x /usr/sbin/apk ]; then
+            /usr/sbin/apk "$@"
+          else
+            command apk "$@"
+          fi
+        }
+        iexa_run_apk() {
+          apk_bin=""
+          if [ -x /sbin/apk ]; then
+            apk_bin="/sbin/apk"
+          elif [ -x /usr/sbin/apk ]; then
+            apk_bin="/usr/sbin/apk"
+          fi
+          if [ -n "$apk_bin" ] && command -v timeout >/dev/null 2>&1; then
+            timeout 120 "$apk_bin" "$@"
+            status=$?
+          else
+            iexa_real_apk "$@"
+            status=$?
+          fi
+          case "$status" in
+            124|137|143)
+              printf '\\nIEXA_ALPINE_INSTALL_TIMEOUT: apk command exceeded 120 seconds.\\n' >&2
+              printf 'The package mirror or network may be slow. Try a smaller package set, retry later, or switch the Alpine repository mirror.\\n' >&2
+              ;;
+          esac
+          return "$status"
+        }
         apk() {
           case "${1:-}" in
             add|fix|upgrade|update)
               attempts=0
               while :; do
                 iexa_refresh_dns
-                if command apk "$@"; then
+                if iexa_run_apk "$@"; then
                   status=0
                 else
                   status=$?
@@ -1498,7 +1529,7 @@ actor LocalAlpineTerminalService {
               done
               ;;
             *)
-              if command apk "$@"; then
+              if iexa_real_apk "$@"; then
                 status=0
               else
                 status=$?

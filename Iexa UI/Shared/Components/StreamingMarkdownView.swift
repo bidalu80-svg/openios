@@ -575,23 +575,6 @@ struct StreamingMarkdownView: View {
 
         // Sort by position in the string (earliest first)
         results.sort { $0.range.lowerBound < $1.range.lowerBound }
-        if let pattern = Self.directDataImagePattern {
-            let matches = pattern.matches(in: text, options: [], range: fullRange)
-            for match in matches {
-                guard match.numberOfRanges >= 2,
-                      let swiftRange = Range(match.range(at: 1), in: text) else { continue }
-                let ref = Self.normalizedDataImageReference(String(text[swiftRange]))
-                guard let imgURL = Self.makeImageURL(from: ref) else { continue }
-                if results.contains(where: { $0.range.overlaps(swiftRange) }) { continue }
-                results.append(ParsedImage(
-                    range: swiftRange,
-                    imageURL: imgURL,
-                    altText: "",
-                    linkURL: nil
-                ))
-            }
-            results.sort { $0.range.lowerBound < $1.range.lowerBound }
-        }
         return results
     }
 
@@ -630,22 +613,12 @@ struct StreamingMarkdownView: View {
     private static func sanitizedMarkdownTextForDisplay(_ text: String) -> String {
         var cleaned = text
         cleaned = removeProviderCitationArtifacts(from: cleaned)
-        if let pattern = dataImageMarkdownPattern {
-            cleaned = pattern.stringByReplacingMatches(
-                in: cleaned,
-                options: [],
-                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
-                withTemplate: ""
-            )
-        }
-        if let pattern = partialDataImageMarkdownPattern {
-            cleaned = pattern.stringByReplacingMatches(
-                in: cleaned,
-                options: [],
-                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
-                withTemplate: ""
-            )
-        }
+        cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(cleaned)
+        cleaned = cleaned.replacingOccurrences(
+            of: #"!?\[[^\]]*\]\(\s*(?:<已隐藏超长Base64内容>)?\s*\)"#,
+            with: "",
+            options: .regularExpression
+        )
         if let pattern = partialMarkdownImagePattern,
            (cleaned.lowercased().contains("data:image/")
             || cleaned.lowercased().contains("image:data/")) {
@@ -664,27 +637,39 @@ struct StreamingMarkdownView: View {
                 withTemplate: ""
             )
         }
-        if let pattern = directDataImagePattern {
-            cleaned = pattern.stringByReplacingMatches(
-                in: cleaned,
-                options: [],
-                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
-                withTemplate: ""
-            )
-        }
-        cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(cleaned)
-        cleaned = compactBareLinks(in: cleaned)
+        cleaned = normalizedDisplayLinks(in: cleaned)
         return cleaned
     }
 
-    private static func compactBareLinks(in text: String) -> String {
-        let pattern = #"(?<![\]\(])https?://[^\s<>"']+"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
-        let nsText = text as NSString
-        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
-        guard !matches.isEmpty else { return text }
+    private static func normalizedDisplayLinks(in text: String) -> String {
+        transformOutsideFencedCode(in: text) { prose in
+            let unwrapped = unwrapRedundantMarkdownLinkBrackets(in: prose)
+            let compacted = compactBareLinks(in: unwrapped)
+            return unwrapRedundantMarkdownLinkBrackets(in: compacted)
+        }
+    }
 
-        var result = text
+    private static func unwrapRedundantMarkdownLinkBrackets(in text: String) -> String {
+        let pattern = #"(?<!\!)\[\s*(\[[^\]\n]+\]\([^\)\n]+\))\s*\]?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        return regex.stringByReplacingMatches(
+            in: text,
+            options: [],
+            range: NSRange(text.startIndex..<text.endIndex, in: text),
+            withTemplate: "$1"
+        )
+    }
+
+    private static func compactBareLinks(in text: String) -> String {
+        let text = compactMarkdownLinksWhoseTitleIsURL(in: text)
+        let textWithBracketedLinks = compactBracketedBareLinks(in: text)
+        let pattern = #"(?<![\]\(\[])https?://[^\s<>"']+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return textWithBracketedLinks }
+        let nsText = textWithBracketedLinks as NSString
+        let matches = regex.matches(in: textWithBracketedLinks, range: NSRange(location: 0, length: nsText.length))
+        guard !matches.isEmpty else { return textWithBracketedLinks }
+
+        var result = textWithBracketedLinks
         for match in matches.reversed() {
             let raw = nsText.substring(with: match.range)
             let (url, trailing) = splitTrailingPunctuation(from: raw)
@@ -695,6 +680,46 @@ struct StreamingMarkdownView: View {
             if let range = Range(match.range, in: result) {
                 result.replaceSubrange(range, with: replacement)
             }
+        }
+        return result
+    }
+
+    private static func compactMarkdownLinksWhoseTitleIsURL(in text: String) -> String {
+        let pattern = #"(?<!\!)\[\s*(https?://[^\]\s<>"']+)\s*\]\((https?://[^\)\s<>"']+)\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let nsText = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+        guard !matches.isEmpty else { return text }
+
+        var result = text
+        for match in matches.reversed() {
+            guard match.numberOfRanges >= 3 else { continue }
+            let destination = nsText.substring(with: match.range(at: 2))
+            guard URL(string: destination) != nil,
+                  let range = Range(match.range, in: result) else { continue }
+            let title = compactLinkTitle(for: destination)
+            result.replaceSubrange(range, with: "[\(title) ↗](\(destination))")
+        }
+        return result
+    }
+
+    private static func compactBracketedBareLinks(in text: String) -> String {
+        let pattern = #"(?<!\!)\[\s*(https?://[^\]\s<>"']+)\s*\](?!\()"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let nsText = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+        guard !matches.isEmpty else { return text }
+
+        var result = text
+        for match in matches.reversed() {
+            guard match.numberOfRanges >= 2 else { continue }
+            let raw = nsText.substring(with: match.range(at: 1))
+            let (url, trailing) = splitTrailingPunctuation(from: raw)
+            guard !url.isEmpty,
+                  URL(string: url) != nil,
+                  let range = Range(match.range, in: result) else { continue }
+            let title = compactLinkTitle(for: url)
+            result.replaceSubrange(range, with: "[\(title) ↗](\(url))\(trailing)")
         }
         return result
     }
@@ -2049,6 +2074,8 @@ private struct KaTeXWebView: UIViewRepresentable {
 }
 
 enum InlineDataPayloadSanitizer {
+    private static let placeholder = "<已隐藏超长Base64内容>"
+
     private static let inlineDataURIPattern: NSRegularExpression? = {
         try? NSRegularExpression(
             pattern: #"(?:(data:((?:image|audio|video)/[A-Za-z0-9.+-]+))|(image:data/([A-Za-z0-9.+-]+)));base64,([A-Za-z0-9+/=_\-\s]{256,})"#,
@@ -2076,36 +2103,135 @@ enum InlineDataPayloadSanitizer {
             return text
         }
 
-        var cleaned = text
+        var cleaned = replaceInlineDataURIs(in: text)
+        cleaned = replaceLongBase64Runs(in: cleaned)
 
-        if let pattern = inlineDataURIPattern {
-            cleaned = pattern.stringByReplacingMatches(
-                in: cleaned,
-                options: [],
-                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
-                withTemplate: "<已隐藏超长Base64内容>"
-            )
-        }
+        if cleaned.utf8.count <= 240_000 {
+            if let pattern = inlineDataURIPattern {
+                cleaned = pattern.stringByReplacingMatches(
+                    in: cleaned,
+                    options: [],
+                    range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                    withTemplate: placeholder
+                )
+            }
 
-        if base64FieldPatterns.count >= 1 {
-            cleaned = base64FieldPatterns[0].stringByReplacingMatches(
-                in: cleaned,
-                options: [],
-                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
-                withTemplate: "$1<已隐藏超长Base64内容>$3"
-            )
-        }
+            if base64FieldPatterns.count >= 1 {
+                cleaned = base64FieldPatterns[0].stringByReplacingMatches(
+                    in: cleaned,
+                    options: [],
+                    range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                    withTemplate: "$1\(placeholder)$3"
+                )
+            }
 
-        if base64FieldPatterns.count >= 2 {
-            cleaned = base64FieldPatterns[1].stringByReplacingMatches(
-                in: cleaned,
-                options: [],
-                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
-                withTemplate: "<已隐藏超长Base64内容>"
-            )
+            if base64FieldPatterns.count >= 2 {
+                cleaned = base64FieldPatterns[1].stringByReplacingMatches(
+                    in: cleaned,
+                    options: [],
+                    range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                    withTemplate: placeholder
+                )
+            }
         }
 
         return cleaned
+    }
+
+    private static func replaceInlineDataURIs(in text: String) -> String {
+        let markers = ["data:image/", "data:audio/", "data:video/", "image:data/"]
+        var result = ""
+        var cursor = text.startIndex
+        result.reserveCapacity(min(text.count, 8192))
+
+        while cursor < text.endIndex {
+            guard let markerRange = earliestRange(of: markers, in: text, from: cursor) else {
+                result += String(text[cursor..<text.endIndex])
+                break
+            }
+
+            result += String(text[cursor..<markerRange.lowerBound])
+
+            guard let base64Range = text.range(
+                of: ";base64,",
+                options: .caseInsensitive,
+                range: markerRange.upperBound..<text.endIndex
+            ) else {
+                result += String(text[markerRange])
+                cursor = markerRange.upperBound
+                continue
+            }
+
+            result += placeholder
+            var payloadCursor = base64Range.upperBound
+            while payloadCursor < text.endIndex {
+                let character = text[payloadCursor]
+                guard isBase64PayloadCharacter(character) else { break }
+                payloadCursor = text.index(after: payloadCursor)
+            }
+            cursor = payloadCursor
+        }
+
+        return result
+    }
+
+    private static func earliestRange(
+        of markers: [String],
+        in text: String,
+        from start: String.Index
+    ) -> Range<String.Index>? {
+        var best: Range<String.Index>?
+        for marker in markers {
+            guard let range = text.range(of: marker, options: .caseInsensitive, range: start..<text.endIndex) else {
+                continue
+            }
+            if best == nil || range.lowerBound < best!.lowerBound {
+                best = range
+            }
+        }
+        return best
+    }
+
+    private static func replaceLongBase64Runs(in text: String) -> String {
+        var result = ""
+        var run = ""
+        result.reserveCapacity(min(text.count, 8192))
+
+        func flushRun() {
+            if run.count >= 512 {
+                result += placeholder
+            } else {
+                result += run
+            }
+            run.removeAll(keepingCapacity: true)
+        }
+
+        for character in text {
+            if isBase64PayloadCharacter(character), !character.isWhitespace {
+                run.append(character)
+            } else {
+                flushRun()
+                result.append(character)
+            }
+        }
+        flushRun()
+        return result
+    }
+
+    private static func isBase64PayloadCharacter(_ character: Character) -> Bool {
+        if character.isWhitespace { return true }
+        guard character.unicodeScalars.count == 1,
+              let scalar = character.unicodeScalars.first else {
+            return false
+        }
+        switch scalar.value {
+        case 48...57, 65...90, 97...122:
+            return true
+        case 43, 47, 61, 95, 45:
+            return true
+        default:
+            return false
+        }
     }
 }
 
@@ -3131,15 +3257,7 @@ private struct MarkdownInlineImageView: View {
 
     @ViewBuilder
     private var imageContent: some View {
-        if imageURL.scheme == "data",
-           let image = dataURIImage(from: imageURL.absoluteString) {
-            Image(uiImage: image)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(maxWidth: .infinity, maxHeight: 300, alignment: .leading)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .onAppear { loadedUIImage = image }
-        } else if let loadedUIImage {
+        if let loadedUIImage {
             Image(uiImage: loadedUIImage)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
@@ -3209,21 +3327,31 @@ private struct MarkdownInlineImageView: View {
         }
     }
 
-    private func dataURIImage(from dataURI: String) -> UIImage? {
+    private static func dataURIImage(from dataURI: String) -> UIImage? {
         guard dataURI.hasPrefix("data:image/"),
               dataURI.count <= 7_000_000,
               let comma = dataURI.firstIndex(of: ",") else { return nil }
         let encoded = String(dataURI[dataURI.index(after: comma)...])
-        guard let data = Data(base64Encoded: encoded) else { return nil }
+        guard let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters) else { return nil }
         guard data.count <= 5_000_000 else { return nil }
         return UIImage(data: data)
     }
 
     @MainActor
     private func loadRemoteImageIfNeeded() async {
-        guard imageURL.scheme != "data" else { return }
         isLoading = true
         didFailToLoad = false
+
+        if imageURL.scheme == "data" {
+            let value = imageURL.absoluteString
+            let decoded = await Task.detached(priority: .userInitiated) {
+                Self.dataURIImage(from: value)
+            }.value
+            loadedUIImage = decoded
+            isLoading = false
+            didFailToLoad = decoded == nil
+            return
+        }
 
         let token = authTokenForImageURL()
         for attempt in 0..<Self.maxAutoRetries {
@@ -3257,7 +3385,7 @@ private struct MarkdownInlineImageView: View {
     private func saveImageToPhotos() async {
         guard saveState != .saving else { return }
         saveState = .saving
-        let image = loadedUIImage ?? dataURIImage(from: imageURL.absoluteString)
+        let image = loadedUIImage ?? Self.dataURIImage(from: imageURL.absoluteString)
         guard let image else {
             saveState = .failed
             return

@@ -464,6 +464,7 @@ final class ChatViewModel {
     private var localAlpineFailedCommands: [String: LocalAlpineAgentCommandFailure] = [:]
     private var localAlpineCompletedCommands: [String: LocalAlpineAgentCompletedCommand] = [:]
     private var localAlpineFailureSignatures: [String: Int] = [:]
+    private var localAlpineNoProgressSignatures: [String: Int] = [:]
     private var localAlpineBlockedRepeatCommands: [String: Int] = [:]
     private var localAlpineFinalSummaryParentIds: Set<String> = []
     private var localAlpineContinuationParentIds: Set<String> = []
@@ -473,8 +474,15 @@ final class ChatViewModel {
     private var localAlpineContinuationWatchdogTask: Task<Void, Never>?
     private var localAlpineActiveRunIdsByMessageId: [String: String] = [:]
     private var localAlpineLiveToolCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
+    private var localAlpineLastLiveToolStatusByMessageId: [String: ChatStatusUpdate] = [:]
+    @ObservationIgnored private var localAlpinePendingToolCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
+    @ObservationIgnored private var localAlpinePendingToolStatusByMessageId: [String: ChatStatusUpdate] = [:]
+    @ObservationIgnored private var localAlpineToolEventFlushTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var localAlpineLastToolEventFlushAtByMessageId: [String: Date] = [:]
     private let localAlpineAgentMaxSteps = 10
     private let localAlpineContinuationMaxNoCommandRetries = 1
+    private let localAlpineNoProgressRepeatLimit = 2
+    private let localAlpineToolEventFlushInterval: TimeInterval = 0.22
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     @ObservationIgnored private var localAlpineInputContinuation: CheckedContinuation<String?, Never>?
@@ -671,6 +679,34 @@ final class ChatViewModel {
 
     func localAlpineLiveToolCalls(for messageId: String) -> [LocalAlpineToolCall] {
         localAlpineLiveToolCallsByMessageId[messageId] ?? []
+    }
+
+    func localAlpineLiveToolStatus(for messageId: String) -> ChatStatusUpdate? {
+        localAlpineLastLiveToolStatusByMessageId[messageId]
+    }
+
+    private func clearLocalAlpineLiveToolState(for messageId: String) {
+        localAlpineToolEventFlushTasks[messageId]?.cancel()
+        localAlpineToolEventFlushTasks.removeValue(forKey: messageId)
+        localAlpineActiveRunIdsByMessageId.removeValue(forKey: messageId)
+        localAlpineLiveToolCallsByMessageId.removeValue(forKey: messageId)
+        localAlpineLastLiveToolStatusByMessageId.removeValue(forKey: messageId)
+        localAlpinePendingToolCallsByMessageId.removeValue(forKey: messageId)
+        localAlpinePendingToolStatusByMessageId.removeValue(forKey: messageId)
+        localAlpineLastToolEventFlushAtByMessageId.removeValue(forKey: messageId)
+    }
+
+    private func clearAllLocalAlpineLiveToolState() {
+        for task in localAlpineToolEventFlushTasks.values {
+            task.cancel()
+        }
+        localAlpineToolEventFlushTasks.removeAll()
+        localAlpineActiveRunIdsByMessageId.removeAll()
+        localAlpineLiveToolCallsByMessageId.removeAll()
+        localAlpineLastLiveToolStatusByMessageId.removeAll()
+        localAlpinePendingToolCallsByMessageId.removeAll()
+        localAlpinePendingToolStatusByMessageId.removeAll()
+        localAlpineLastToolEventFlushAtByMessageId.removeAll()
     }
 
     // MARK: - Tree Sync Helpers
@@ -1463,11 +1499,8 @@ final class ChatViewModel {
         guard !trimmed.isEmpty else { return nil }
 
         if isImage, let dataURI = normalizedImageDataURI(trimmed) {
-            return writeGeneratedImageToCache(dataURL: dataURI.replacingOccurrences(
-                of: #"\s+"#,
-                with: "",
-                options: .regularExpression
-            ))
+            guard let compact = compactImageDataURI(dataURI) else { return nil }
+            return writeGeneratedImageToCache(dataURL: compact)
         }
 
         if trimmed.hasPrefix("data:") || trimmed.hasPrefix("image:data/") {
@@ -6537,7 +6570,18 @@ final class ChatViewModel {
 
     private static func localAlpineCommandObjects(fromNormalized object: Any) -> [Any] {
         if let dict = object as? [String: Any],
-           let nested = dict["iexa_alpine"] ?? dict["commands"] {
+           let nested = dict["iexa_alpine"]
+            ?? dict["local_alpine_exec"]
+            ?? dict["tool_calls"]
+            ?? dict["toolCalls"]
+            ?? dict["function_call"]
+            ?? dict["functionCall"]
+            ?? dict["tool_use"]
+            ?? dict["toolUse"]
+            ?? dict["tool_call"]
+            ?? dict["toolCall"]
+            ?? dict["calls"]
+            ?? dict["commands"] {
             return localAlpineCommandObjects(fromNormalized: nested)
         }
         if let array = object as? [Any] {
@@ -6923,6 +6967,7 @@ final class ChatViewModel {
         hasFinishedStreaming = true
         isStreaming = false
         selfInitiatedStream = false
+        clearLocalAlpineLiveToolState(for: assistantMessageId)
         activeTaskId = nil
         lastTaskExtractionLength = 0
 
@@ -7181,14 +7226,14 @@ final class ChatViewModel {
         localAlpineFailedCommands.removeAll()
         localAlpineCompletedCommands.removeAll()
         localAlpineFailureSignatures.removeAll()
+        localAlpineNoProgressSignatures.removeAll()
         localAlpineBlockedRepeatCommands.removeAll()
         localAlpineFinalSummaryParentIds.removeAll()
         localAlpineContinuationParentIds.removeAll()
         localAlpineFinishedContinuationMessageIds.removeAll()
         localAlpineContinuationRetryCounts.removeAll()
         localAlpineMissingToolCorrectionParentIds.removeAll()
-        localAlpineActiveRunIdsByMessageId.removeAll()
-        localAlpineLiveToolCallsByMessageId.removeAll()
+        clearAllLocalAlpineLiveToolState()
     }
 
     private func cancelLocalAlpineAgentLoop() {
@@ -7204,8 +7249,7 @@ final class ChatViewModel {
         localAlpineContinuationParentIds.removeAll()
         localAlpineContinuationRetryCounts.removeAll()
         localAlpineMissingToolCorrectionParentIds.removeAll()
-        localAlpineActiveRunIdsByMessageId.removeAll()
-        localAlpineLiveToolCallsByMessageId.removeAll()
+        clearAllLocalAlpineLiveToolState()
     }
 
     private func pauseLocalAlpineAgentLoopForUserInterjection() {
@@ -7222,8 +7266,7 @@ final class ChatViewModel {
         localAlpineContinuationParentIds.removeAll()
         localAlpineContinuationRetryCounts.removeAll()
         localAlpineMissingToolCorrectionParentIds.removeAll()
-        localAlpineActiveRunIdsByMessageId.removeAll()
-        localAlpineLiveToolCallsByMessageId.removeAll()
+        clearAllLocalAlpineLiveToolState()
     }
 
     private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
@@ -10231,9 +10274,49 @@ final class ChatViewModel {
     private static func imageData(fromDataURL dataURL: String) -> Data? {
         guard dataURL.hasPrefix("data:image/"),
               let comma = dataURL.firstIndex(of: ",") else { return nil }
-        let base64 = String(dataURL[dataURL.index(after: comma)...])
-            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
-        return Data(base64Encoded: base64)
+        let encoded = dataURL[dataURL.index(after: comma)...]
+        guard encoded.utf8.count <= 24_000_000 else { return nil }
+        guard let data = Data(base64Encoded: String(encoded), options: .ignoreUnknownCharacters),
+              data.count <= 18_000_000 else {
+            return nil
+        }
+        return data
+    }
+
+    private static func compactImageDataURI(_ dataURI: String) -> String? {
+        let normalized = normalizedImageDataURI(dataURI)
+        guard let normalized,
+              normalized.hasPrefix("data:image/"),
+              let comma = normalized.firstIndex(of: ",") else {
+            return nil
+        }
+        let header = String(normalized[..<normalized.index(after: comma)])
+        let body = normalized[normalized.index(after: comma)...]
+        guard body.utf8.count <= 24_000_000 else { return nil }
+
+        var compactBody = ""
+        compactBody.reserveCapacity(min(body.count, 24_000_000))
+        for character in body where !character.isWhitespace {
+            guard isBase64PayloadCharacter(character) else { return nil }
+            compactBody.append(character)
+        }
+        guard compactBody.count >= 128 else { return nil }
+        return header + compactBody
+    }
+
+    private static func isBase64PayloadCharacter(_ character: Character) -> Bool {
+        guard character.unicodeScalars.count == 1,
+              let scalar = character.unicodeScalars.first else {
+            return false
+        }
+        switch scalar.value {
+        case 48...57, 65...90, 97...122:
+            return true
+        case 43, 47, 61, 95, 45:
+            return true
+        default:
+            return false
+        }
     }
 
     private static func requestedImageSize(from prompt: String) -> String {
@@ -10627,7 +10710,8 @@ final class ChatViewModel {
     private func localDisplayImageReference(from imageReference: String, canvasSize: String? = nil) async -> String? {
         if let normalized = Self.normalizedImageDataURI(imageReference) {
             let resized = Self.resizedImageDataURL(from: normalized, canvasSize: canvasSize) ?? normalized
-            return Self.writeGeneratedImageToCache(dataURL: resized)
+            guard let compact = Self.compactImageDataURI(resized) else { return nil }
+            return Self.writeGeneratedImageToCache(dataURL: compact)
         }
         return nil
     }
@@ -10697,11 +10781,9 @@ final class ChatViewModel {
         let normalizedImageData = Self.normalizedImageDataURI(imageReference)
         let normalizedDisplayData = Self.normalizedImageDataURI(displayReference)
         let localDisplayReference = (normalizedDisplayData ?? normalizedImageData).flatMap {
-            Self.writeGeneratedImageToCache(dataURL: $0.replacingOccurrences(
-                of: #"\s+"#,
-                with: "",
-                options: .regularExpression
-            ))
+            Self.compactImageDataURI($0).flatMap { compactDataURL in
+                Self.writeGeneratedImageToCache(dataURL: compactDataURL)
+            }
         }
         let resolvedDisplayReference = localDisplayReference ?? displayReference
         let contentType = Self.imageContentType(for: normalizedDisplayData ?? normalizedImageData ?? resolvedDisplayReference)
@@ -10952,7 +11034,7 @@ final class ChatViewModel {
             modelId: modelId ?? model?.id ?? "",
             usedTokens: usedTokens,
             windowTokens: window,
-            isWindowEstimated: model?.contextLength == nil,
+            isWindowEstimated: LocalModelCapabilityRegistry.declaredContextLength(for: model) == nil,
             isCompressed: isCompressed,
             originalTokens: originalTokens,
             compressedTokens: compressedTokens
@@ -13961,6 +14043,76 @@ final class ChatViewModel {
         return true
     }
 
+    private func repeatedLocalAlpineNoProgressShouldStop(after result: LocalAlpineAgentResult, parentId: String) -> Bool {
+        guard result.interactiveRequest == nil, result.hadFailure == false else { return false }
+        if result.editedFileCount > 0 || !result.writtenFiles.isEmpty {
+            localAlpineNoProgressSignatures.removeAll()
+            return false
+        }
+
+        let executableCommands = result.commandResults
+            .map { $0.command.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.lowercased() != "write_files" }
+        let combinedCommands = executableCommands.joined(separator: "\n")
+        guard !combinedCommands.isEmpty else { return false }
+
+        let isLowProgressStep = Self.localAlpineCommandsAreInspectionOnly(combinedCommands)
+            || Self.localAlpineActionWasOnlyInstallOrWrite(combinedCommands)
+        guard isLowProgressStep else {
+            localAlpineNoProgressSignatures.removeAll()
+            return false
+        }
+
+        let signature = Self.localAlpineNoProgressSignature(for: result)
+        let count = (localAlpineNoProgressSignatures[signature] ?? 0) + 1
+        localAlpineNoProgressSignatures[signature] = count
+        guard count >= localAlpineNoProgressRepeatLimit else { return false }
+
+        appendLocalAlpineNoProgressStopMessage(
+            parentId: parentId,
+            reason: "连续 \(count) 次得到相同的检查/安装观察结果，但没有写入、编辑或新的验证进展。"
+        )
+        return true
+    }
+
+    private static func localAlpineCommandsAreInspectionOnly(_ combinedCommands: String) -> Bool {
+        let commands = combinedCommands
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        guard !commands.isEmpty else { return false }
+        let inspectionPatterns = [
+            #"^(?:pwd|ls\b|find\b|grep\b|rg\b|cat\b|sed\s+-n\b|head\b|tail\b|wc\b|stat\b|file\b|tree\b)"#,
+            #"^(?:command\s+-v|which\b|apk\s+info\b|apk\s+search\b)"#,
+            #"^(?:python3?|pip3?|node|npm|lua(?:5\.\d)?|gcc|g\+\+|clang|make)\s+(?:--version|-v|version|list|show|freeze)\b"#
+        ]
+        return commands.allSatisfy { command in
+            inspectionPatterns.contains {
+                command.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil
+            }
+        }
+    }
+
+    private static func localAlpineNoProgressSignature(for result: LocalAlpineAgentResult) -> String {
+        let commands = result.commandResults.map { commandResult in
+            let command = commandResult.command
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let cwd = commandResult.cwd
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let output = commandResult.outputPreview
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return "\(cwd)|\(command)|\(commandResult.exitCode.map(String.init) ?? "nil")|\(output.hashValue)"
+        }
+        let tools = result.toolCalls.map { call in
+            "\(call.name)|\(call.phase.rawValue)|\(call.exitCode.map(String.init) ?? "nil")|\(call.filePaths.joined(separator: ","))"
+        }
+        return (commands + tools).joined(separator: "\n")
+    }
+
     private func appendLocalAlpineRepeatedCommandMessage(parentId: String, failure: LocalAlpineAgentCommandFailure) -> String {
         let repeatCount = localAlpineBlockedRepeatCommands[
             Self.localAlpineCommandKey(command: failure.command, cwd: failure.cwd)
@@ -14084,6 +14236,19 @@ final class ChatViewModel {
         \(pythonRepairInstruction)
         """
         appendAssistantResult(parentId: parentId, model: selectedModelId ?? "Local Alpine Agent", content: content)
+    }
+
+    private func appendLocalAlpineNoProgressStopMessage(parentId: String, reason: String) {
+        let content = """
+        Local Alpine 执行结果
+
+        我先停下，避免继续空转。
+
+        原因：\(reason)
+
+        下一步需要模型换一种更明确的本地操作，比如读取目标文件、列目录、运行一个有界验证命令，或直接总结当前已完成的结果。
+        """
+        appendLocalAlpineSystemResult(parentId: parentId, content: content)
     }
 
     private func appendLocalAlpineSystemResult(parentId: String, content: String) -> String {
@@ -14387,8 +14552,7 @@ final class ChatViewModel {
             conversation?.messages[index].metadata = metadata
         }
         await attachLocalAlpineGeneratedMediaIfNeeded(messageId: resultMessageId)
-        localAlpineActiveRunIdsByMessageId.removeValue(forKey: resultMessageId)
-        localAlpineLiveToolCallsByMessageId.removeValue(forKey: resultMessageId)
+        clearLocalAlpineLiveToolState(for: resultMessageId)
         let resultMessageSnapshot = conversation?.messages.first(where: { $0.id == resultMessageId })
         let resultMetadata = resultMessageSnapshot?.metadata
         let resultFiles = resultMessageSnapshot?.files
@@ -14409,6 +14573,8 @@ final class ChatViewModel {
 
         localAlpineNoCommandContinuationRetries = 0
         if repeatedLocalAlpineErrorShouldStop(after: result, parentId: resultMessageId) {
+            localAlpineAgentStopRequested = true
+        } else if repeatedLocalAlpineNoProgressShouldStop(after: result, parentId: resultMessageId) {
             localAlpineAgentStopRequested = true
         } else if result.interactiveRequest == nil,
                   !localAlpineAgentStopRequested,
@@ -14847,6 +15013,12 @@ final class ChatViewModel {
         localAlpineContinuationTask = nil
         localAlpineContinuationWatchdogTask = nil
         cleanupStreaming()
+        appendLocalAlpineNoProgressStopMessage(
+            parentId: parentId,
+            reason: finalSummaryOnly
+                ? "模型长时间没有整理出可展示的最终结果。"
+                : "模型长时间没有给出新的本地工具步骤。"
+        )
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
     }
@@ -14876,6 +15048,12 @@ final class ChatViewModel {
             if parentNeedsFollowUp {
                 localAlpineAgentStopRequested = true
                 localAlpineContinuationTask = nil
+                if let parentResultId {
+                    appendLocalAlpineNoProgressStopMessage(
+                        parentId: parentResultId,
+                        reason: "模型返回了空内容，没有给出下一步工具调用。"
+                    )
+                }
             }
             return
         }
@@ -15642,8 +15820,14 @@ final class ChatViewModel {
         statusHistory: [ChatStatusUpdate]? = nil,
         error: ChatMessageError? = nil
     ) {
-        let displayContent = Self.cleanedProviderCitationArtifacts(content)
-        let safeDisplayContent = Self.safeAssistantDisplayContent(displayContent)
+        let showInlineImageReceiveState = isStreaming
+            && Self.shouldShowInlineImageReceiveState(for: content)
+        let displayContent = showInlineImageReceiveState
+            ? ""
+            : Self.cleanedProviderCitationArtifacts(content)
+        let safeDisplayContent = showInlineImageReceiveState
+            ? Self.inlineImageReceivePlaceholder
+            : Self.safeAssistantDisplayContent(displayContent)
         let shouldHandleLocalAlpineDisplay = terminalEnabled && selectedTerminalIsLocalAlpine
         let visibleAlpineDisplayContent: String? = {
             guard shouldHandleLocalAlpineDisplay else { return nil }
@@ -15940,6 +16124,9 @@ final class ChatViewModel {
 
     private static func safeAssistantDisplayContent(_ text: String) -> String {
         let withoutLocalToolEcho = cleanedLocalAlpineMissingToolEchoes(text)
+        if shouldShowInlineImageReceiveState(for: withoutLocalToolEcho) {
+            return cleanedAssistantInlineImagePayloads(withoutLocalToolEcho)
+        }
         guard withoutLocalToolEcho.range(of: "data:image/", options: .caseInsensitive) != nil
             || withoutLocalToolEcho.range(of: "image:data/", options: .caseInsensitive) != nil
             || withoutLocalToolEcho.range(of: "data:video/", options: .caseInsensitive) != nil
@@ -15952,6 +16139,19 @@ final class ChatViewModel {
                 cleanedAssistantInlineImagePayloads(prose)
             )
         }
+    }
+
+    private static let inlineImageReceivePlaceholder = "正在接收图片..."
+
+    private static func shouldShowInlineImageReceiveState(for text: String) -> Bool {
+        let containsInlineDataImage = text.range(of: "data:image/", options: .caseInsensitive) != nil
+            || text.range(of: "image:data/", options: .caseInsensitive) != nil
+        if containsInlineDataImage {
+            return true
+        }
+        guard text.utf8.count > 2_048 else { return false }
+        return text.range(of: "b64_json", options: .caseInsensitive) != nil
+            || text.range(of: "image_base64", options: .caseInsensitive) != nil
     }
 
     private static func cleanedLocalAlpineMissingToolEchoes(_ text: String) -> String {
@@ -15992,9 +16192,6 @@ final class ChatViewModel {
     private static func localAlpineDisplayContentForStreaming(_ visible: String, raw: String) -> String {
         let trimmed = visible.trimmingCharacters(in: .whitespacesAndNewlines)
         if Self.contentContainsLocalAlpineInstruction(raw) {
-            return ""
-        }
-        if trimmed.count > 220 {
             return ""
         }
         let lower = trimmed.lowercased()
@@ -16088,6 +16285,12 @@ final class ChatViewModel {
                 appended = true
             }
         }
+        if extractedImages.isEmpty,
+           Self.contentLikelyContainsExtractableImageReference(rawContent),
+           !merged.contains(where: { Self.isImageFile($0) }) {
+            merged.append(ChatMessageFile.generatedImageFailurePlaceholder(index: 1))
+            appended = true
+        }
         merged = Self.sanitizedMessageFiles(merged)
 
         let cleanedContent = Self.cleanedAssistantContentAfterImageExtraction(rawContent)
@@ -16175,7 +16378,10 @@ final class ChatViewModel {
         _ event: LocalAlpineToolEvent,
         messageId: String
     ) {
-        guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
+        guard conversation?.messages.contains(where: { $0.id == messageId }) == true else {
+            clearLocalAlpineLiveToolState(for: messageId)
+            return
+        }
 
         if let activeRunId = localAlpineActiveRunIdsByMessageId[messageId],
            activeRunId != event.runId {
@@ -16183,20 +16389,15 @@ final class ChatViewModel {
         }
         localAlpineActiveRunIdsByMessageId[messageId] = event.runId
 
-        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
-        var metadata = conversation?.messages[index].metadata ?? [:]
-        metadata["iexa_local_alpine_tool_run_id"] = event.runId
-
-        var calls = LocalAlpineToolCall.decodeMetadata(metadata["iexa_local_alpine_tool_calls"])
+        var calls = localAlpinePendingToolCallsByMessageId[messageId]
+            ?? localAlpineLiveToolCallsByMessageId[messageId]
+            ?? []
         if let existingIndex = calls.firstIndex(where: { $0.id == event.call.id }) {
             calls[existingIndex] = event.call
         } else {
             calls.append(event.call)
         }
-        if let encoded = LocalAlpineToolCall.metadataString(for: calls) {
-            metadata["iexa_local_alpine_tool_calls"] = encoded
-        }
-        localAlpineLiveToolCallsByMessageId[messageId] = calls
+        localAlpinePendingToolCallsByMessageId[messageId] = calls
 
         let status = ChatStatusUpdate(
             action: "local_alpine_tool",
@@ -16204,17 +16405,10 @@ final class ChatViewModel {
             done: event.call.phase == .result,
             occurredAt: .now
         )
-        var statusHistory = conversation?.messages[index].statusHistory ?? []
-        statusHistory.append(status)
+        localAlpinePendingToolStatusByMessageId[messageId] = status
 
-        conversation?.messages[index].metadata = metadata
-        conversation?.messages[index].statusHistory = statusHistory
-        conversation?.messages[index].isStreaming = true
-        conversation?.history.updateNode(id: messageId) { node in
-            node.metadata = metadata
-            node.statusHistory = statusHistory
-            node.done = false
-        }
+        flushLocalAlpineToolEventIfNeeded(messageId: messageId, immediate: event.call.phase == .start || event.call.phase == .result)
+
         Task {
             await RunLiveActivityService.shared.update(
                 id: messageId,
@@ -16225,6 +16419,46 @@ final class ChatViewModel {
                 force: true
             )
         }
+    }
+
+    private func flushLocalAlpineToolEventIfNeeded(messageId: String, immediate: Bool) {
+        if immediate {
+            flushLocalAlpineToolEvent(messageId: messageId)
+            return
+        }
+
+        let now = Date()
+        if let lastFlush = localAlpineLastToolEventFlushAtByMessageId[messageId],
+           now.timeIntervalSince(lastFlush) < localAlpineToolEventFlushInterval {
+            scheduleLocalAlpineToolEventFlush(messageId: messageId)
+            return
+        }
+        flushLocalAlpineToolEvent(messageId: messageId)
+    }
+
+    private func scheduleLocalAlpineToolEventFlush(messageId: String) {
+        guard localAlpineToolEventFlushTasks[messageId] == nil else { return }
+        let interval = localAlpineToolEventFlushInterval
+        localAlpineToolEventFlushTasks[messageId] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.localAlpineToolEventFlushTasks.removeValue(forKey: messageId)
+                self?.flushLocalAlpineToolEvent(messageId: messageId)
+            }
+        }
+    }
+
+    private func flushLocalAlpineToolEvent(messageId: String) {
+        localAlpineToolEventFlushTasks[messageId]?.cancel()
+        localAlpineToolEventFlushTasks.removeValue(forKey: messageId)
+        if let pendingCalls = localAlpinePendingToolCallsByMessageId.removeValue(forKey: messageId) {
+            localAlpineLiveToolCallsByMessageId[messageId] = pendingCalls
+        }
+        if let pendingStatus = localAlpinePendingToolStatusByMessageId.removeValue(forKey: messageId) {
+            localAlpineLastLiveToolStatusByMessageId[messageId] = pendingStatus
+        }
+        localAlpineLastToolEventFlushAtByMessageId[messageId] = Date()
     }
 
     /// Refreshes conversation metadata (title, sources, follow-ups, files) from server.
@@ -16318,27 +16552,34 @@ final class ChatViewModel {
         let extractedFiles = hasContent ? ToolCallParser.extractFileReferences(from: message.content) : []
         let extractedImages = hasContent ? Self.extractInlineImageReferences(from: message.content) : []
         var appendedFile = false
+        var mergedFiles = message.files
         if !extractedFiles.isEmpty {
             logger.info("Extracted \(extractedFiles.count) file(s) from tool results for message \(messageId)")
-            var merged = message.files
             for file in extractedFiles {
                 guard let url = file.url else { continue }
-                if !merged.contains(where: { $0.url == url || $0.displayURL == url }) {
-                    merged.append(file)
+                if !mergedFiles.contains(where: { $0.url == url || $0.displayURL == url }) {
+                    mergedFiles.append(file)
                     appendedFile = true
                 }
             }
-            conversation?.messages[index].files = merged
         }
         if !extractedImages.isEmpty {
-            var merged = conversation?.messages[index].files ?? message.files
             for image in extractedImages {
-                if !merged.contains(where: { $0.url == image.url || $0.displayURL == image.displayURL }) {
-                    merged.append(image)
+                if !mergedFiles.contains(where: { $0.url == image.url || $0.displayURL == image.displayURL }) {
+                    mergedFiles.append(image)
                     appendedFile = true
                 }
             }
-            conversation?.messages[index].files = merged
+        }
+        if hasContent,
+           extractedImages.isEmpty,
+           Self.contentLikelyContainsExtractableImageReference(message.content),
+           !mergedFiles.contains(where: { Self.isImageFile($0) }) {
+            mergedFiles.append(ChatMessageFile.generatedImageFailurePlaceholder(index: 1))
+            appendedFile = true
+        }
+        if appendedFile {
+            conversation?.messages[index].files = Self.sanitizedMessageFiles(mergedFiles)
         }
 
         let cleanedContent = Self.cleanedAssistantContentAfterImageExtraction(message.content)
@@ -16409,7 +16650,10 @@ final class ChatViewModel {
     }
 
     private static func extractImageReferenceStrings(from content: String) -> [String] {
-        var results: [String] = []
+        var results: [String] = extractInlineDataImageDataURIs(from: content).compactMap {
+            writeGeneratedImageToCache(dataURL: $0)
+        }
+
         func addMatches(_ pattern: String, captureIndex: Int = 1) {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return }
             let nsContent = content as NSString
@@ -16420,33 +16664,109 @@ final class ChatViewModel {
             }
         }
 
-        addMatches(#"!?\[[^\]]*\]\(\s*(data:image/[^)\s]+)(?:\s+["'][^)]*["'])?\s*\)"#)
-        addMatches(#"!?\[[^\]]*\]\(\s*(image:data/[^)\s]+)(?:\s+["'][^)]*["'])?\s*\)"#)
-        addMatches(#"!?\[[^\]]*\]\(\s*(https?://[^)\s]+)(?:\s+["'][^)]*["'])?\s*\)"#)
-        addMatches(#"<img[^>]+src=["'](data:image/[^"']+)["']"#)
-        addMatches(#"<img[^>]+src=["'](image:data/[^"']+)["']"#)
-        addMatches(#"<img[^>]+src=["'](https?://[^"']+)["']"#)
-        addMatches(#"(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,})"#)
-        addMatches(#"(image:data/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,})"#)
-        addMatches(#"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_\-\s]{128,})""#)
-        addMatches(#"(?:"url"|"image_url"|"display_url"|"download_url"|"image")\s*:\s*"(https?:\\?/\\?/[^"]+)""#)
-        addMatches(#"(https?://[^\s"'<>`)]+)"#)
+        if content.utf8.count <= 240_000 {
+            addMatches(#"!?\[[^\]]*\]\(\s*(https?://[^)\s]+)(?:\s+["'][^)]*["'])?\s*\)"#)
+            addMatches(#"<img[^>]+src=["'](https?://[^"']+)["']"#)
+            addMatches(#"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_\-\s]{128,})""#)
+            addMatches(#"(?:"url"|"image_url"|"display_url"|"download_url"|"image")\s*:\s*"(https?:\\?/\\?/[^"]+)""#)
+            addMatches(#"(https?://[^\s"'<>`)]+)"#)
+        }
 
-        return results.compactMap { value -> String? in
+        let normalizedResults = results.compactMap { value -> String? in
             let trimmed = sanitizedImageReferenceCandidate(value)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let normalizedDataImage = normalizedImageDataURI(trimmed)
             if let normalizedDataImage {
-                let compact = normalizedDataImage.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+                guard let compact = compactImageDataURI(normalizedDataImage) else { return nil }
                 return writeGeneratedImageToCache(dataURL: compact)
+            }
+            if trimmed.hasPrefix("file://") {
+                return trimmed
             }
             if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
                 return isLikelyImageURL(trimmed) ? trimmed : nil
             }
-            let compact = trimmed.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            let compact = compactBase64Payload(trimmed)
             guard looksLikeBase64Image(compact) else { return nil }
             return writeGeneratedImageToCache(dataURL: "data:image/png;base64,\(compact)")
         }
+
+        var seen = Set<String>()
+        return normalizedResults.filter { seen.insert($0).inserted }
+    }
+
+    private static func extractInlineDataImageDataURIs(from content: String) -> [String] {
+        guard content.range(of: "data:image/", options: .caseInsensitive) != nil
+            || content.range(of: "image:data/", options: .caseInsensitive) != nil else {
+            return []
+        }
+
+        var results: [String] = []
+        var cursor = content.startIndex
+
+        while cursor < content.endIndex, results.count < 4 {
+            guard let markerRange = firstDataImageMarkerRange(in: content, from: cursor) else {
+                break
+            }
+            guard let commaRange = content.range(
+                of: ",",
+                range: markerRange.upperBound..<content.endIndex
+            ) else {
+                break
+            }
+
+            let header = String(content[markerRange.lowerBound..<commaRange.lowerBound]).lowercased()
+            guard header.contains(";base64") else {
+                cursor = markerRange.upperBound
+                continue
+            }
+
+            var payloadEnd = commaRange.upperBound
+            var payloadLength = 0
+            while payloadEnd < content.endIndex {
+                let character = content[payloadEnd]
+                guard isBase64PayloadCharacter(character) else { break }
+                payloadLength += 1
+                guard payloadLength <= 24_000_000 else { break }
+                payloadEnd = content.index(after: payloadEnd)
+            }
+            guard payloadLength >= 128 else {
+                cursor = payloadEnd
+                continue
+            }
+
+            let rawURI = String(content[markerRange.lowerBound..<payloadEnd])
+            if let compact = compactImageDataURI(rawURI) {
+                results.append(compact)
+            }
+            cursor = payloadEnd
+        }
+
+        return results
+    }
+
+    private static func firstDataImageMarkerRange(in text: String, from start: String.Index) -> Range<String.Index>? {
+        let markers = ["data:image/", "image:data/"]
+        var best: Range<String.Index>?
+        for marker in markers {
+            guard let range = text.range(of: marker, options: .caseInsensitive, range: start..<text.endIndex) else {
+                continue
+            }
+            if best == nil || range.lowerBound < best!.lowerBound {
+                best = range
+            }
+        }
+        return best
+    }
+
+    private static func compactBase64Payload(_ value: String) -> String {
+        var compact = ""
+        compact.reserveCapacity(min(value.count, 24_000_000))
+        for character in value where !character.isWhitespace {
+            guard isBase64PayloadCharacter(character) else { return value }
+            compact.append(character)
+        }
+        return compact
     }
 
     private static func sanitizedImageReferenceCandidate(_ value: String) -> String {
@@ -16523,7 +16843,7 @@ final class ChatViewModel {
             cleanedAssistantInlineImagePayloads(prose)
         }
 
-        if !extractImageReferenceStrings(from: content).isEmpty {
+        if contentLikelyContainsExtractableImageReference(content) {
             let startsLikeRawJSON = cleaned.hasPrefix("{") || cleaned.hasPrefix("[")
             let mostlyRequestJSON = startsLikeRawJSON
                 && (cleaned.contains("\"prompt\"") || cleaned.contains("\"size\"") || cleaned.contains("\"model\""))
@@ -16536,6 +16856,16 @@ final class ChatViewModel {
         }
 
         return cleaned
+    }
+
+    private static func contentLikelyContainsExtractableImageReference(_ content: String) -> Bool {
+        content.range(of: "data:image/", options: .caseInsensitive) != nil
+            || content.range(of: "image:data/", options: .caseInsensitive) != nil
+            || content.range(of: "b64_json", options: .caseInsensitive) != nil
+            || content.range(of: "image_base64", options: .caseInsensitive) != nil
+            || content.range(of: "image_url", options: .caseInsensitive) != nil
+            || content.range(of: "display_url", options: .caseInsensitive) != nil
+            || content.range(of: "download_url", options: .caseInsensitive) != nil
     }
 
     private static func transformProseOutsideFencedCode(
@@ -16595,21 +16925,15 @@ final class ChatViewModel {
     }
 
     private static func cleanedAssistantInlineImagePayloads(_ content: String) -> String {
-        var cleaned = content
+        var cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(content)
         let patterns = [
-            #"!?\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
-            #"!?\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
-            #"!?\[[^\]]*\]\(\s*image:data/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
-            #"!?\[[^\]]*\]\(\s*image:data/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
+            #"!?\[[^\]]*\]\(\s*(?:<已隐藏超长Base64内容>)?\s*\)"#,
             #"(?m)^\s*!?\[[^\]]*\]\(\s*$"#,
             #"!?\[[^\]]*\]\(\s*$"#,
             #"\!\[[^\]]*\]\(\s*https?://[^)\s]+(?:\s+["'][^)]*["'])?\s*\)"#,
-            #"<img[^>]+src=["']data:image/[^"']+["'][^>]*>"#,
-            #"<img[^>]+src=["']image:data/[^"']+["'][^>]*>"#,
             #"<img[^>]+src=["']https?://[^"']+["'][^>]*>"#,
-            #"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,}"#,
-            #"image:data/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,}"#,
-            #"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"[A-Za-z0-9+/=_\-\s]{128,}""#,
+            #"<img[^>]+src=["'](?:<已隐藏超长Base64内容>)["'][^>]*>"#,
+            #"<已隐藏超长Base64内容>"#,
             #"(?:"url"|"image_url"|"display_url"|"download_url"|"image")\s*:\s*"https?:\\?/\\?/[^"]+""#
         ]
         for pattern in patterns {

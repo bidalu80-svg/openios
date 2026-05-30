@@ -1369,7 +1369,7 @@ actor LocalAlpineAgentService {
                 ?? dict["function_name"]
         )
         guard let rawName else { return nil }
-        let normalizedName = normalizeCompatibleToolName(rawName)
+        let normalizedName = Self.normalizeCompatibleToolName(rawName)
         guard Self.knownStructuredToolNames.contains(normalizedName) else { return nil }
 
         var rawArguments = dict["arguments"]
@@ -1387,9 +1387,9 @@ actor LocalAlpineAgentService {
 
         let arguments: [String: Any]
         if let argumentDict = Self.dictionaryValue(rawArguments) {
-            arguments = argumentDict
+            arguments = Self.repairedToolArguments(argumentDict, for: normalizedName)
         } else if let rawArguments {
-            arguments = ["value": rawArguments]
+            arguments = Self.repairedToolArguments(["value": rawArguments], for: normalizedName)
         } else {
             var trimmed = dict
             for key in [
@@ -1399,7 +1399,7 @@ actor LocalAlpineAgentService {
             ] {
                 trimmed.removeValue(forKey: key)
             }
-            arguments = trimmed
+            arguments = Self.repairedToolArguments(trimmed, for: normalizedName)
         }
 
         let wrapper: [String: Any] = [
@@ -1409,14 +1409,16 @@ actor LocalAlpineAgentService {
         return parseToolCallShape(from: wrapper)
     }
 
-    private nonisolated func normalizeCompatibleToolName(_ name: String) -> String {
+    private nonisolated static func normalizeCompatibleToolName(_ name: String) -> String {
         let lowered = name
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "-", with: "_")
             .lowercased()
         switch lowered {
-        case "execute_shell", "exec_shell", "shell_exec", "shell":
+        case "execute_shell", "exec_shell", "shell_exec", "shell", "run_shell", "run_bash":
             return "shell_execute"
+        case "run_command", "execute_command", "exec_command", "terminal", "terminal_command":
+            return "command"
         case "readfile":
             return "read_file"
         case "writefile":
@@ -1434,19 +1436,136 @@ actor LocalAlpineAgentService {
         }
     }
 
-    private func parseOperationAliasShape(from dict: [String: Any]) -> [LocalAlpineAgentCommand]? {
-        let op = Self.stringValue(dict["op"] ?? dict["operation"] ?? dict["type"])?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        guard let op, Self.knownStructuredToolNames.contains(op) else { return nil }
-        if let special = parseSpecialToolShape(tool: op, arguments: dict) {
-            return special
+    private nonisolated static func repairedToolArguments(
+        _ arguments: [String: Any],
+        for tool: String
+    ) -> [String: Any] {
+        var repaired = arguments
+        let aliases = requiredArgumentAliases(for: tool)
+        for (required, candidates) in aliases where repaired[required] == nil {
+            if let match = candidates.first(where: { repaired[$0] != nil }) {
+                repaired[required] = repaired[match]
+                continue
+            }
+            if let fuzzy = fuzzyArgumentKey(for: required, in: repaired.keys) {
+                repaired[required] = repaired[fuzzy]
+            }
         }
+        return repaired
+    }
+
+    private nonisolated static func requiredArgumentAliases(for tool: String) -> [String: [String]] {
+        switch tool {
+        case "bash", "shell", "sh", "exec", "run", "command", "shell_execute":
+            return [
+                "command": [
+                    "cmd", "shell", "bash", "exec", "run", "shell_execute",
+                    "input", "value", "code", "script", "program"
+                ]
+            ]
+        case "read", "read_file", "read_files", "cat", "open_file", "file_read",
+             "delete", "delete_file", "delete_files", "remove_file", "remove_files",
+             "delete_dir", "remove_dir", "rm", "rmdir", "file_delete",
+             "list", "list_dir", "list_directory", "ls", "file_list", "directory_list",
+             "append", "append_file", "append_and_read",
+             "patch", "patch_file", "patch_files", "apply_patch",
+             "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write",
+             "edit", "edit_file", "edit_files", "replace_file",
+             "verify", "check":
+            return [
+                "path": [
+                    "file_path", "filepath", "filePath", "full_path", "fullPath",
+                    "target", "target_path", "targetPath", "filename", "file", "name",
+                    "value"
+                ]
+            ]
+        case "grep", "search", "search_files", "file_search":
+            return [
+                "pattern": ["query", "text", "regex", "needle", "keyword", "keywords", "value"]
+            ]
+        case "glob", "find", "glob/find", "find_files":
+            return [
+                "pattern": ["query", "name", "glob", "file_pattern", "filePattern", "value"]
+            ]
+        case "browser_use", "browser", "browse", "web_fetch", "fetch_url", "open_url":
+            return [
+                "url": ["href", "link", "uri", "address", "value"]
+            ]
+        case "move_file", "rename_file", "copy_file":
+            return [
+                "from": ["source", "src", "old_path", "oldPath", "source_path", "sourcePath", "path"],
+                "to": ["dest", "dst", "destination", "target", "target_path", "targetPath", "new_path", "newPath"]
+            ]
+        default:
+            return [:]
+        }
+    }
+
+    private nonisolated static func fuzzyArgumentKey(
+        for required: String,
+        in keys: Dictionary<String, Any>.Keys
+    ) -> String? {
+        let normalizedRequired = normalizedArgumentKey(required)
+        return keys.first { key in
+            let normalized = normalizedArgumentKey(key)
+            guard normalized != normalizedRequired else { return false }
+            return oneEditAway(normalized, normalizedRequired)
+        }
+    }
+
+    private nonisolated static func normalizedArgumentKey(_ key: String) -> String {
+        key
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+    }
+
+    private nonisolated static func oneEditAway(_ lhs: String, _ rhs: String) -> Bool {
+        guard abs(lhs.count - rhs.count) <= 1 else { return false }
+        let left = Array(lhs)
+        let right = Array(rhs)
+        if left.count == right.count {
+            var differences = 0
+            for index in left.indices where left[index] != right[index] {
+                differences += 1
+                if differences > 1 { return false }
+            }
+            return differences == 1
+        }
+
+        let longer = left.count > right.count ? left : right
+        let shorter = left.count > right.count ? right : left
+        var longIndex = 0
+        var shortIndex = 0
+        var skipped = false
+        while longIndex < longer.count && shortIndex < shorter.count {
+            if longer[longIndex] == shorter[shortIndex] {
+                longIndex += 1
+                shortIndex += 1
+            } else if skipped {
+                return false
+            } else {
+                skipped = true
+                longIndex += 1
+            }
+        }
+        return true
+    }
+
+    private func parseOperationAliasShape(from dict: [String: Any]) -> [LocalAlpineAgentCommand]? {
+        let rawOp = Self.stringValue(dict["op"] ?? dict["operation"] ?? dict["type"])?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let op = rawOp.map { Self.normalizeCompatibleToolName($0) }
+        guard let op, Self.knownStructuredToolNames.contains(op) else { return nil }
         var merged = dict
         merged.removeValue(forKey: "op")
         merged.removeValue(forKey: "operation")
         merged.removeValue(forKey: "type")
-        let arguments = merged
+        let arguments = Self.repairedToolArguments(merged, for: op)
+        merged = arguments
+        if let special = parseSpecialToolShape(tool: op, arguments: arguments) {
+            return special
+        }
         switch op {
         case "bash", "shell", "sh", "exec", "run", "command", "shell_execute":
             if Self.shellCommandString(from: merged) == nil {
@@ -1512,15 +1631,18 @@ actor LocalAlpineAgentService {
     }
 
     private func parseToolCallShape(from dict: [String: Any]) -> [LocalAlpineAgentCommand]? {
-        let tool = Self.stringValue(dict["tool"] ?? dict["function"] ?? dict["action"] ?? dict["name"])?
+        let rawTool = Self.stringValue(dict["tool"] ?? dict["function"] ?? dict["action"] ?? dict["name"])?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+        let tool = rawTool.map { Self.normalizeCompatibleToolName($0) }
         let rawArguments = dict["arguments"] ?? dict["args"] ?? dict["input"] ?? dict["parameters"] ?? dict
         guard let tool,
               Self.knownStructuredToolNames.contains(tool) else {
             return nil
         }
-        let arguments = Self.dictionaryValue(rawArguments) ?? ["value": rawArguments]
+        let arguments = Self.repairedToolArguments(
+            Self.dictionaryValue(rawArguments) ?? ["value": rawArguments],
+            for: tool
+        )
         if let special = parseSpecialToolShape(tool: tool, arguments: arguments) {
             return special
         }
@@ -4688,7 +4810,7 @@ actor LocalAlpineAgentService {
             return true
         }
         guard token == "json" else { return false }
-        return parsed.body.contains("\"iexa_alpine\"")
+        return bodyContainsInstructionJSON(parsed.body)
     }
 
     private nonisolated static func parsedInstructionFence(info: String, body: String) -> (token: String, body: String) {
@@ -5131,8 +5253,129 @@ actor LocalAlpineAgentService {
             return loweredBody.contains("\"iexa")
                 || loweredBody.contains("iexa_alpine")
                 || loweredBody.contains("local_alpine_exec")
+                || loweredBody.contains("\"tool_calls\"")
+                || loweredBody.contains("\"toolcalls\"")
+                || loweredBody.contains("\"function_call\"")
+                || loweredBody.contains("\"functioncall\"")
         }
         return false
+    }
+
+    nonisolated private static func bodyContainsInstructionJSON(_ body: String) -> Bool {
+        let lowered = body.lowercased()
+        if lowered.contains("\"iexa_alpine\"")
+            || lowered.contains("\"local_alpine_exec\"")
+            || lowered.contains("iexa_alpine")
+            || lowered.contains("local_alpine_exec") {
+            return true
+        }
+
+        guard lowered.contains("\"tool_calls\"")
+            || lowered.contains("\"toolcalls\"")
+            || lowered.contains("\"function_call\"")
+            || lowered.contains("\"functioncall\"")
+            || lowered.contains("\"tooluse\"")
+            || lowered.contains("\"tool_use\"")
+            || lowered.contains("\"toolcall\"")
+            || lowered.contains("\"tool_call\"")
+            || lowered.contains("\"tool\"")
+            || lowered.contains("\"name\"")
+            || lowered.contains("\"command\"")
+            || lowered.contains("\"cmd\"") else {
+            return false
+        }
+
+        if let data = body.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) {
+            return objectContainsLocalAlpineToolInstruction(object, insideToolEnvelope: false)
+        }
+
+        return bodyContainsCompatibleToolHeuristic(lowered)
+    }
+
+    nonisolated private static func objectContainsLocalAlpineToolInstruction(
+        _ object: Any,
+        insideToolEnvelope: Bool
+    ) -> Bool {
+        if let array = object as? [Any] {
+            return array.contains {
+                objectContainsLocalAlpineToolInstruction($0, insideToolEnvelope: insideToolEnvelope)
+            }
+        }
+        guard let dict = object as? [String: Any] else { return false }
+
+        if dict["iexa_alpine"] != nil || dict["local_alpine_exec"] != nil {
+            return true
+        }
+
+        let envelopeKeys = [
+            "tool_calls", "toolCalls", "toolcalls", "calls",
+            "function_call", "functionCall", "functioncall",
+            "tool_use", "toolUse", "tooluse",
+            "tool_call", "toolCall", "toolcall"
+        ]
+        for key in envelopeKeys {
+            if let value = dict[key],
+               objectContainsLocalAlpineToolInstruction(value, insideToolEnvelope: true) {
+                return true
+            }
+        }
+
+        let nameKeys = [
+            "name", "tool", "action", "operation", "op",
+            "toolName", "tool_name", "functionName", "function_name"
+        ]
+        for key in nameKeys {
+            guard let rawName = stringValue(dict[key]) else { continue }
+            let normalized = normalizeCompatibleToolName(rawName)
+            if knownStructuredToolNames.contains(normalized) {
+                return true
+            }
+        }
+
+        if let function = dict["function"] as? [String: Any],
+           objectContainsLocalAlpineToolInstruction(function, insideToolEnvelope: true) {
+            return true
+        }
+        if let arguments = dict["arguments"] as? [String: Any],
+           objectContainsLocalAlpineToolInstruction(arguments, insideToolEnvelope: insideToolEnvelope) {
+            return true
+        }
+
+        let structuredKeys = [
+            "read_file", "read_files", "write_file", "write_files", "edit_file", "patch_file",
+            "delete_file", "list_dir", "glob", "grep", "browser_use"
+        ]
+        if structuredKeys.contains(where: { dict[$0] != nil }) {
+            return true
+        }
+
+        if insideToolEnvelope, shellCommandString(from: dict) != nil {
+            return true
+        }
+
+        return dict.values.contains {
+            objectContainsLocalAlpineToolInstruction($0, insideToolEnvelope: insideToolEnvelope)
+        }
+    }
+
+    nonisolated private static func bodyContainsCompatibleToolHeuristic(_ loweredBody: String) -> Bool {
+        let toolNamePattern = #""(?:name|tool|action|operation|op|toolName|tool_name|functionName|function_name)"\s*:\s*"([^"]+)""#
+        if let regex = try? NSRegularExpression(pattern: toolNamePattern, options: [.caseInsensitive]) {
+            let nsBody = loweredBody as NSString
+            let matches = regex.matches(in: loweredBody, range: NSRange(location: 0, length: nsBody.length))
+            for match in matches where match.numberOfRanges >= 2 {
+                let rawName = nsBody.substring(with: match.range(at: 1))
+                if knownStructuredToolNames.contains(normalizeCompatibleToolName(rawName)) {
+                    return true
+                }
+            }
+        }
+
+        return loweredBody.range(
+            of: #""(?:command|cmd|shell|bash|exec|run)"\s*:\s*"[^"]{1,200}""#,
+            options: .regularExpression
+        ) != nil
     }
 
     nonisolated private static func incompleteInstructionTagRange(in content: String) -> NSRange? {

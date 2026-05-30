@@ -559,7 +559,11 @@ private struct AgentActivityItem: Identifiable, Hashable {
         path.replacingOccurrences(of: "\\", with: "/")
     }
 
-    init?(message: ChatMessage, liveToolCalls: [LocalAlpineToolCall] = []) {
+    init?(
+        message: ChatMessage,
+        liveToolCalls: [LocalAlpineToolCall] = [],
+        liveStatus: ChatStatusUpdate? = nil
+    ) {
         if message.metadata?["iexa_local_alpine_final_summary"] != nil
             || message.metadata?["iexa_local_alpine_continuation"] == "true"
             || message.metadata?["iexa_local_alpine_missing_tool_correction"] != nil
@@ -574,6 +578,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
         let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata?["iexa_local_alpine_command_results"])
         let persistedToolCalls = LocalAlpineToolCall.decodeMetadata(metadata?["iexa_local_alpine_tool_calls"])
         let toolCalls = Self.mergedToolCalls(persisted: persistedToolCalls, live: liveToolCalls)
+        let statusHistory = liveStatus.map { message.statusHistory + [$0] } ?? message.statusHistory
         let parsed = ParsedLocalAlpineResult(content: message.content, metadata: metadata)
         let visibleCommands = commandResults.filter {
             $0.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "write_files"
@@ -606,7 +611,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             toolCalls: toolCalls,
             writtenFiles: writtenFiles,
             commandResults: visibleCommands,
-            statusHistory: message.statusHistory
+            statusHistory: statusHistory
         )
     }
 
@@ -816,7 +821,8 @@ struct ChatDetailView: View {
     private func activityItem(for message: ChatMessage) -> AgentActivityItem? {
         AgentActivityItem(
             message: message,
-            liveToolCalls: viewModel.localAlpineLiveToolCalls(for: message.id)
+            liveToolCalls: viewModel.localAlpineLiveToolCalls(for: message.id),
+            liveStatus: viewModel.localAlpineLiveToolStatus(for: message.id)
         )
     }
 

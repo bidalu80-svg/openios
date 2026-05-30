@@ -72,9 +72,14 @@ final class APIClient: @unchecked Sendable {
 
     private static func parseModelContextLength(_ raw: [String: Any]) -> Int? {
         let keys = [
+            "context",
             "context_length", "contextLength", "context_window", "contextWindow",
             "max_context_length", "maxContextLength", "max_context", "maxContext",
-            "num_ctx"
+            "num_ctx", "n_ctx", "ctx", "context_size", "contextSize",
+            "max_input_tokens", "maxInputTokens", "input_token_limit", "inputTokenLimit",
+            "prompt_token_limit", "promptTokenLimit", "token_limit", "tokenLimit",
+            "max_model_len", "maxModelLen", "model_max_length", "modelMaxLength",
+            "max_sequence_length", "maxSequenceLength", "max_position_embeddings", "maxPositionEmbeddings"
         ]
 
         func intValue(_ value: Any?) -> Int? {
@@ -105,10 +110,26 @@ final class APIClient: @unchecked Sendable {
                     return value
                 }
             }
-            for nestedKey in ["info", "meta", "params", "capabilities", "limits"] {
+            for nestedKey in [
+                "info", "meta", "params", "capabilities", "limit", "limits",
+                "top_provider", "topProvider", "architecture", "config",
+                "model_info", "modelInfo", "model", "metadata"
+            ] {
                 if let nested = dict[nestedKey] as? [String: Any],
                    let value = scan(nested) {
                     return value
+                }
+            }
+            for value in dict.values {
+                if let nested = value as? [String: Any],
+                   let context = scan(nested) {
+                    return context
+                } else if let nestedArray = value as? [[String: Any]] {
+                    for nested in nestedArray.prefix(12) {
+                        if let context = scan(nested) {
+                            return context
+                        }
+                    }
                 }
             }
             return nil
@@ -594,6 +615,13 @@ final class APIClient: @unchecked Sendable {
         }
     }
 
+    private func isXAIImageModel(_ model: String) -> Bool {
+        let raw = model.lowercased()
+        return raw.contains("grok-imagine")
+            || (raw.contains("grok") && raw.contains("image"))
+            || (raw.contains("grok") && raw.contains("imagine"))
+    }
+
     private static func imageGenerationProbeBody() -> [String: Any] {
         [
             "prompt": "",
@@ -771,6 +799,15 @@ final class APIClient: @unchecked Sendable {
     }
 
     func generateImage(prompt: String, model: String, size: String = "1024x1024") async throws -> String {
+        if isXAIImageModel(model) {
+            return try await generateXAIImage(
+                prompt: prompt,
+                model: model,
+                size: size,
+                images: []
+            )
+        }
+
         let baseBody: [String: Any] = [
             "model": model,
             "prompt": prompt,
@@ -891,6 +928,190 @@ final class APIClient: @unchecked Sendable {
             ),
             data: nil
         )
+    }
+
+    private func generateXAIImage(
+        prompt: String,
+        model: String,
+        size: String,
+        images: [ImageEditSource]
+    ) async throws -> String {
+        let paths = images.isEmpty ? imageGenerationPaths : imageEditPaths
+        var lastError: Error?
+        for path in paths {
+            for requestBody in xaiImageBodyVariants(
+                prompt: prompt,
+                model: model,
+                size: size,
+                images: images
+            ) {
+                do {
+                    let payload = try await requestAnyJSON(
+                        path: path,
+                        method: .post,
+                        body: requestBody,
+                        timeout: 300
+                    )
+                    if let imageReference = firstImageReference(in: payload) {
+                        return imageReference
+                    }
+                    lastError = APIError.responseDecoding(
+                        underlying: NSError(
+                            domain: "APIClient",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Grok 图片接口没有返回图片地址。"]
+                        ),
+                        data: nil
+                    )
+                } catch {
+                    guard shouldTryNextImageEndpoint(after: error) else {
+                        throw error
+                    }
+                    lastError = error
+                }
+            }
+        }
+
+        if !images.isEmpty, let firstImage = images.first {
+            let multipartVariants: [[NetworkManager.MultipartUploadFile]] = [
+                images.prefix(16).map {
+                    NetworkManager.MultipartUploadFile(
+                        fieldName: "image[]",
+                        fileData: $0.data,
+                        fileName: $0.fileName,
+                        mimeType: mimeType(for: $0.fileName)
+                    )
+                },
+                images.prefix(16).map {
+                    NetworkManager.MultipartUploadFile(
+                        fieldName: "image",
+                        fileData: $0.data,
+                        fileName: $0.fileName,
+                        mimeType: mimeType(for: $0.fileName)
+                    )
+                },
+                [
+                    NetworkManager.MultipartUploadFile(
+                        fieldName: "image",
+                        fileData: firstImage.data,
+                        fileName: firstImage.fileName,
+                        mimeType: mimeType(for: firstImage.fileName)
+                    )
+                ]
+            ]
+            var fields: [String: String] = [
+                "model": model,
+                "prompt": prompt,
+                "n": "1"
+            ]
+            let trimmedSize = size.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let aspectRatio = xaiAspectRatio(for: trimmedSize) {
+                fields["aspect_ratio"] = aspectRatio
+            }
+            if !trimmedSize.isEmpty, trimmedSize != "auto" {
+                fields["size"] = trimmedSize
+            }
+
+            for path in imageEditPaths {
+                for files in multipartVariants {
+                    do {
+                        let payload = try await network.uploadMultipart(
+                            path: path,
+                            files: files,
+                            additionalFields: fields,
+                            timeout: 300
+                        )
+                        if let imageReference = firstImageReference(in: payload) {
+                            return imageReference
+                        }
+                        lastError = APIError.responseDecoding(
+                            underlying: NSError(
+                                domain: "APIClient",
+                                code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: "Grok multipart 图片接口没有返回图片地址。"]
+                            ),
+                            data: nil
+                        )
+                    } catch {
+                        guard shouldTryNextImageEndpoint(after: error) else {
+                            throw error
+                        }
+                        lastError = error
+                    }
+                }
+            }
+        }
+
+        throw APIError.responseDecoding(
+            underlying: NSError(
+                domain: "APIClient",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: lastError?.localizedDescription ?? "Grok 图片接口没有返回图片地址。"]
+            ),
+            data: nil
+        )
+    }
+
+    private func xaiImageBodyVariants(
+        prompt: String,
+        model: String,
+        size: String,
+        images: [ImageEditSource]
+    ) -> [[String: Any]] {
+        let trimmedSize = size.trimmingCharacters(in: .whitespacesAndNewlines)
+        let aspectRatio = xaiAspectRatio(for: trimmedSize)
+        let imageURLs = images.prefix(16).map {
+            "data:\(mimeType(for: $0.fileName));base64,\($0.data.base64EncodedString())"
+        }
+
+        var base: [String: Any] = [
+            "model": model,
+            "prompt": prompt
+        ]
+        if let aspectRatio {
+            base["aspect_ratio"] = aspectRatio
+        }
+
+        var variants: [[String: Any]] = []
+        if imageURLs.isEmpty {
+            variants.append(base)
+            variants.append(base.merging(["n": 1]) { _, new in new })
+        } else {
+            variants.append(base.merging(["image_urls": imageURLs]) { _, new in new })
+            variants.append(base.merging(["image": imageURLs[0]]) { _, new in new })
+            variants.append(base.merging(["image_url": imageURLs[0]]) { _, new in new })
+            variants.append(base.merging(["images": imageURLs]) { _, new in new })
+        }
+
+        guard !trimmedSize.isEmpty, trimmedSize != "auto" else {
+            return variants
+        }
+        return variants + variants.map { body in
+            body.merging(["size": trimmedSize]) { _, new in new }
+        }
+    }
+
+    private func xaiAspectRatio(for size: String) -> String? {
+        let trimmed = size.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return "auto" }
+        if trimmed == "auto" {
+            return "auto"
+        }
+        let parts = trimmed.split(separator: "x")
+        guard parts.count == 2,
+              let width = Double(parts[0]),
+              let height = Double(parts[1]),
+              width > 0,
+              height > 0 else {
+            return nil
+        }
+        let ratio = width / height
+        if abs(ratio - 1.0) < 0.05 { return "1:1" }
+        if abs(ratio - (16.0 / 9.0)) < 0.08 { return "16:9" }
+        if abs(ratio - (9.0 / 16.0)) < 0.08 { return "9:16" }
+        if abs(ratio - (4.0 / 3.0)) < 0.08 { return "4:3" }
+        if abs(ratio - (3.0 / 4.0)) < 0.08 { return "3:4" }
+        return "auto"
     }
 
     private func responsesImageGenerationBodyVariants(
@@ -1125,6 +1346,14 @@ final class APIClient: @unchecked Sendable {
         let editImages = Array(images.prefix(16))
         guard let firstImage = editImages.first else {
             return try await generateImage(prompt: prompt, model: model, size: size)
+        }
+        if isXAIImageModel(model) {
+            return try await generateXAIImage(
+                prompt: prompt,
+                model: model,
+                size: size,
+                images: editImages
+            )
         }
 
         var lastError: Error?

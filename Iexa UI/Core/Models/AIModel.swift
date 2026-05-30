@@ -182,6 +182,10 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
         LocalModelCapabilityRegistry.contextLength(for: self, modelId: id)
     }
 
+    var declaredContextLength: Int? {
+        LocalModelCapabilityRegistry.declaredContextLength(for: self)
+    }
+
     var resolvedCapabilities: LocalModelCapability {
         LocalModelCapabilityRegistry.capability(for: self)
     }
@@ -350,11 +354,8 @@ enum LocalModelCapabilityRegistry {
     }
 
     static func contextLength(for model: AIModel?, modelId: String?) -> Int? {
-        if let explicit = model?.contextLength, explicit > 0 {
-            return explicit
-        }
-        if let rawContext = scanContextLength(in: model?.rawModelItem), rawContext > 0 {
-            return rawContext
+        if let declared = declaredContextLength(for: model) {
+            return declared
         }
 
         var parts: [String] = []
@@ -389,6 +390,16 @@ enum LocalModelCapabilityRegistry {
         }
         if raw.contains("qwen") || raw.contains("grok") || raw.contains("deepseek") {
             return 128_000
+        }
+        return nil
+    }
+
+    static func declaredContextLength(for model: AIModel?) -> Int? {
+        if let explicit = model?.contextLength, explicit > 0 {
+            return explicit
+        }
+        if let rawContext = scanContextLength(in: model?.rawModelItem), rawContext > 0 {
+            return rawContext
         }
         return nil
     }
@@ -476,9 +487,14 @@ enum LocalModelCapabilityRegistry {
     private static func scanContextLength(in dict: [String: Any], depth: Int) -> Int? {
         guard depth <= 4 else { return nil }
         let keys = [
+            "context",
             "context_length", "contextLength", "context_window", "contextWindow",
             "max_context_length", "maxContextLength", "max_context", "maxContext",
-            "num_ctx"
+            "num_ctx", "n_ctx", "ctx", "context_size", "contextSize",
+            "max_input_tokens", "maxInputTokens", "input_token_limit", "inputTokenLimit",
+            "prompt_token_limit", "promptTokenLimit", "token_limit", "tokenLimit",
+            "max_model_len", "maxModelLen", "model_max_length", "modelMaxLength",
+            "max_sequence_length", "maxSequenceLength", "max_position_embeddings", "maxPositionEmbeddings"
         ]
         for key in keys {
             if let value = intValue(dict[key]) {
@@ -489,6 +505,12 @@ enum LocalModelCapabilityRegistry {
             if let nested = value as? [String: Any],
                let context = scanContextLength(in: nested, depth: depth + 1) {
                 return context
+            } else if let nestedArray = value as? [[String: Any]] {
+                for nested in nestedArray.prefix(12) {
+                    if let context = scanContextLength(in: nested, depth: depth + 1) {
+                        return context
+                    }
+                }
             }
         }
         return nil
