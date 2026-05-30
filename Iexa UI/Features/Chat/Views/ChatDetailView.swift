@@ -958,6 +958,9 @@ struct ChatDetailView: View {
            metadata["iexa_local_alpine_final_summary"] == nil {
             return true
         }
+        if metadata["iexa_local_alpine_hidden_tool_parent"] == "true" {
+            return true
+        }
         if metadata["iexa_local_alpine_auto_verify"] != nil
             || metadata["iexa_local_alpine_missing_tool_correction"] != nil
             || metadata["iexa_local_alpine_hidden_correction_parent"] == "true" {
@@ -1050,6 +1053,8 @@ struct ChatDetailView: View {
     @State private var downloadErrorMessage = ""
     /// URL for QuickLook in-app file preview (PDF, images, docs, etc.)
     @State private var previewFileURL: URL?
+    /// Fullscreen image browser for images visible in the current chat window.
+    @State private var imageGalleryPresentation: AuthenticatedImageGalleryPresentation?
     /// Message-level file preview sheet. Keeps sent files out of message text.
     @State private var previewingMessageFile: MessageFilePreviewItem?
     /// URL for in-app webpage preview from assistant markdown links.
@@ -1319,6 +1324,13 @@ struct ChatDetailView: View {
         .sheet(item: $previewingMessageFile) { item in
             MessageFilePreviewSheet(file: item.file, apiClient: dependencies.apiClient)
                 .themed()
+        }
+        .fullScreenCover(item: $imageGalleryPresentation) { presentation in
+            FullScreenImageGalleryView(
+                items: presentation.items,
+                initialItemId: presentation.initialItemId,
+                apiClient: dependencies.apiClient
+            )
         }
         // Prompt variable input sheet — shown when a selected prompt has {{variables}}
         .sheet(isPresented: Binding<Bool>(
@@ -2027,7 +2039,10 @@ struct ChatDetailView: View {
             isScrolledUp = false
             lastProgrammaticScrollTime = Date()
 
-            if old == 0 {
+            if old == 0 && keyboard.isVisible {
+                repinToLatestMessageIfFollowing(after: 0.06)
+                repinToLatestMessageIfFollowing(after: 0.18)
+            } else if old == 0 {
                 // First message in a new chat — smooth ease-out.
                 withAnimation(.easeOut(duration: 0.3)) {
                     scrollPosition.scrollTo(edge: .bottom)
@@ -2530,6 +2545,14 @@ struct ChatDetailView: View {
                         apiClient: dependencies.apiClient
                     )
                 }
+            } else if message.isStreaming && !hasAgentToolPreview(for: message) {
+                ChatMessageBubble(
+                    role: .assistant,
+                    showTimestamp: activeActionMessageId == message.id,
+                    timestamp: message.timestamp
+                ) {
+                    AssistantThinkingCapsule()
+                }
             }
         } else {
             ChatMessageBubble(
@@ -2653,6 +2676,7 @@ struct ChatDetailView: View {
                 message: message,
                 activeVersionIndex: activeVersionIndex[message.id] ?? -1,
                 contentOverride: assistantContentOverride[message.id],
+                showEmptyThinkingCapsule: !hasAgentToolPreview(for: message),
                 serverBaseURL: viewModel.serverBaseURL,
                 authToken: viewModel.serverAuthToken,
                 apiClient: dependencies.apiClient
@@ -3515,12 +3539,69 @@ struct ChatDetailView: View {
     @ViewBuilder
     private func chatImageView(fileId: String, allowsEditing: Bool = true) -> some View {
         if allowsEditing {
-            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient) { image in
-                prepareGeneratedImageForEditing(image)
-            }
+            AuthenticatedImageView(
+                fileId: fileId,
+                apiClient: dependencies.apiClient,
+                onEdit: { image in
+                    prepareGeneratedImageForEditing(image)
+                },
+                onPreview: {
+                    openImageGallery(startingAt: fileId)
+                }
+            )
         } else {
-            AuthenticatedImageView(fileId: fileId, apiClient: dependencies.apiClient)
+            AuthenticatedImageView(
+                fileId: fileId,
+                apiClient: dependencies.apiClient,
+                onPreview: {
+                    openImageGallery(startingAt: fileId)
+                }
+            )
         }
+    }
+
+    private func openImageGallery(startingAt fileId: String) {
+        let items = currentChatImageGalleryItems()
+        guard !items.isEmpty else { return }
+        let initialId = items.first(where: { $0.fileId == fileId })?.id ?? items[0].id
+        imageGalleryPresentation = AuthenticatedImageGalleryPresentation(
+            items: items,
+            initialItemId: initialId
+        )
+    }
+
+    private func currentChatImageGalleryItems() -> [AuthenticatedImageGalleryItem] {
+        var items: [AuthenticatedImageGalleryItem] = []
+        var ordinal = 0
+
+        func appendImageFiles(_ files: [ChatMessageFile], messageId: String) {
+            for file in files where isImageFile(file) && !file.isGeneratedImageFailurePlaceholder {
+                guard let fileId = imageReference(for: file) else { continue }
+                items.append(AuthenticatedImageGalleryItem(
+                    id: "\(messageId)-image-\(ordinal)",
+                    fileId: fileId
+                ))
+                ordinal += 1
+            }
+        }
+
+        for message in transcriptMessages {
+            if message.role == .user {
+                let imageFiles = activeUserDisplayFiles(for: message).filter { isImageFile($0) }
+                appendImageFiles(Array(imageFiles.prefix(9)), messageId: message.id)
+            } else if message.role == .assistant && !message.isStreaming {
+                let versionIndex = activeVersionIndex[message.id] ?? -1
+                let displayFiles: [ChatMessageFile]
+                if versionIndex >= 0 && versionIndex < message.versions.count {
+                    displayFiles = message.versions[versionIndex].files
+                } else {
+                    displayFiles = message.files
+                }
+                appendImageFiles(Array(displayFiles.filter { isImageFile($0) }.prefix(9)), messageId: message.id)
+            }
+        }
+
+        return items
     }
 
     private func activeUserDisplayContent(for message: ChatMessage) -> String {
@@ -5363,6 +5444,8 @@ private struct IsolatedAssistantMessage: View {
     /// This allows the UI to show the paired AI response for an older user edit WITHOUT creating fake
     /// regeneration versions on the assistant message.
     var contentOverride: String? = nil
+    /// Suppressed once real inline agent/tool steps are visible for the message.
+    var showEmptyThinkingCapsule: Bool = true
     let serverBaseURL: String
     /// Auth token passed down to Rich UI embed webviews for localStorage injection.
     var authToken: String? = nil
@@ -5410,8 +5493,10 @@ private struct IsolatedAssistantMessage: View {
                 EmptyView()
             } else if message.metadata?["iexa_image_generation_placeholder"] == "true" {
                 ImageGenerationPlaceholderView()
+            } else if showEmptyThinkingCapsule {
+                AssistantThinkingCapsule()
             } else {
-                TypingIndicator()
+                EmptyView()
             }
         } else {
             // Perf optimisation: when a tool-call block has been fully closed and

@@ -9,6 +9,7 @@ struct AuthenticatedImageView: View {
     let fileId: String
     let apiClient: APIClient?
     let onEdit: ((UIImage) -> Void)?
+    let onPreview: (() -> Void)?
 
     @State private var loadedImage: UIImage?
     @State private var isLoading = true
@@ -36,10 +37,16 @@ struct AuthenticatedImageView: View {
         let cost: Int
     }
 
-    init(fileId: String, apiClient: APIClient?, onEdit: ((UIImage) -> Void)? = nil) {
+    init(
+        fileId: String,
+        apiClient: APIClient?,
+        onEdit: ((UIImage) -> Void)? = nil,
+        onPreview: (() -> Void)? = nil
+    ) {
         self.fileId = fileId
         self.apiClient = apiClient
         self.onEdit = onEdit
+        self.onPreview = onPreview
     }
 
     /// In-memory cache for file-based images. Prevents re-fetching when
@@ -65,7 +72,7 @@ struct AuthenticatedImageView: View {
                         .opacity(imageIsRevealed ? 1 : 0)
                         .scaleEffect(imageIsRevealed || reduceMotion ? 1 : 0.985)
                         .onTapGesture {
-                            showFullScreen = true
+                            openPreview()
                         }
                         .contextMenu {
                             Button {
@@ -96,7 +103,7 @@ struct AuthenticatedImageView: View {
                             }
 
                             Button {
-                                showFullScreen = true
+                                openPreview()
                             } label: {
                                 Label("全屏查看", systemImage: "arrow.up.left.and.arrow.down.right")
                             }
@@ -357,6 +364,64 @@ struct AuthenticatedImageView: View {
         isLoading = false
     }
 
+    private func openPreview() {
+        if let onPreview {
+            onPreview()
+        } else {
+            showFullScreen = true
+        }
+    }
+
+    static func loadImageValue(fileId: String, apiClient: APIClient?) async -> UIImage? {
+        if let cached = imageCache.object(forKey: fileId as NSString) {
+            return cached
+        }
+
+        if let inlineImage = await inlineDataImage(from: fileId) {
+            imageCache.setObject(inlineImage.image, forKey: fileId as NSString, cost: inlineImage.cost)
+            return inlineImage.image
+        }
+
+        if let localURL = localImageURL(from: fileId) {
+            do {
+                let loaded = try await loadLocalImage(from: localURL)
+                imageCache.setObject(loaded.image, forKey: fileId as NSString, cost: loaded.cost)
+                return loaded.image
+            } catch {
+                return nil
+            }
+        }
+
+        if let remoteURL = remoteImageURL(from: fileId) {
+            let image = await ImageCacheService.shared.loadImage(
+                from: remoteURL,
+                authToken: authTokenForRemoteURL(remoteURL, apiClient: apiClient)
+            )
+            if let image {
+                imageCache.setObject(image, forKey: fileId as NSString)
+            }
+            return image
+        }
+
+        guard let apiClient else { return nil }
+        for attempt in 0..<maxAutoRetries {
+            guard !Task.isCancelled else { return nil }
+            do {
+                let (data, _) = try await apiClient.getFileContent(id: fileId)
+                let loaded = try await decodeImageData(data)
+                guard !Task.isCancelled else { return nil }
+                imageCache.setObject(loaded.image, forKey: fileId as NSString, cost: loaded.cost)
+                return loaded.image
+            } catch {
+                if attempt < maxAutoRetries - 1 {
+                    let delay = UInt64(pow(2.0, Double(attempt))) * 1_000_000_000
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+            }
+        }
+        return nil
+    }
+
     private func setLoadedImage(_ image: UIImage, animated: Bool = true) {
         if animated && !reduceMotion {
             imageIsRevealed = false
@@ -419,6 +484,10 @@ struct AuthenticatedImageView: View {
     }
 
     private func authTokenForRemoteURL(_ remoteURL: URL) -> String? {
+        Self.authTokenForRemoteURL(remoteURL, apiClient: apiClient)
+    }
+
+    private static func authTokenForRemoteURL(_ remoteURL: URL, apiClient: APIClient?) -> String? {
         guard let apiClient else { return nil }
         guard let token = apiClient.network.authToken, !token.isEmpty else { return nil }
         guard let baseURL = URL(string: apiClient.baseURL),
@@ -471,6 +540,184 @@ struct AuthenticatedImageView: View {
 }
 
 // MARK: - Full Screen Image Viewer
+
+struct AuthenticatedImageGalleryItem: Identifiable, Hashable {
+    let id: String
+    let fileId: String
+}
+
+struct AuthenticatedImageGalleryPresentation: Identifiable {
+    let id = UUID()
+    let items: [AuthenticatedImageGalleryItem]
+    let initialItemId: String
+}
+
+struct FullScreenImageGalleryView: View {
+    let items: [AuthenticatedImageGalleryItem]
+    let initialItemId: String
+    let apiClient: APIClient?
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var currentItemId: String
+    @State private var loadedImages: [String: UIImage] = [:]
+
+    init(
+        items: [AuthenticatedImageGalleryItem],
+        initialItemId: String,
+        apiClient: APIClient?
+    ) {
+        self.items = items
+        self.initialItemId = initialItemId
+        self.apiClient = apiClient
+        self._currentItemId = State(initialValue: initialItemId)
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        LazyVStack(spacing: 0) {
+                            ForEach(items) { item in
+                                FullScreenImageGalleryPage(
+                                    item: item,
+                                    apiClient: apiClient,
+                                    onLoaded: { image in
+                                        loadedImages[item.id] = image
+                                    }
+                                )
+                                .frame(width: geometry.size.width, height: geometry.size.height)
+                                .id(item.id)
+                                .onAppear {
+                                    currentItemId = item.id
+                                }
+                            }
+                        }
+                        .scrollTargetLayout()
+                    }
+                    .scrollIndicators(.hidden)
+                    .scrollTargetBehavior(.paging)
+                    .ignoresSafeArea()
+                    .onAppear {
+                        currentItemId = initialItemId
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(initialItemId, anchor: .top)
+                        }
+                    }
+                }
+
+                VStack {
+                    HStack {
+                        Spacer()
+
+                        Button {
+                            Task { await shareCurrentImage() }
+                        } label: {
+                            Image(systemName: "square.and.arrow.up")
+                                .scaledFont(size: 18, weight: .medium)
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
+
+                        Button {
+                            dismiss()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .scaledFont(size: 16, weight: .bold)
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+
+                    Spacer()
+                }
+            }
+        }
+        .statusBarHidden()
+    }
+
+    @MainActor
+    private func shareCurrentImage() async {
+        guard let item = items.first(where: { $0.id == currentItemId }) ?? items.first else { return }
+        let image: UIImage?
+        if let cached = loadedImages[item.id] {
+            image = cached
+        } else {
+            image = await AuthenticatedImageView.loadImageValue(fileId: item.fileId, apiClient: apiClient)
+            if let image {
+                loadedImages[item.id] = image
+            }
+        }
+        guard let image else { return }
+        presentShareSheet(for: image)
+    }
+
+    @MainActor
+    private func presentShareSheet(for image: UIImage) {
+        let activityVC = UIActivityViewController(
+            activityItems: [image],
+            applicationActivities: nil
+        )
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = windowScene.windows.first?.rootViewController {
+            var topVC = rootVC
+            while let presented = topVC.presentedViewController {
+                topVC = presented
+            }
+            activityVC.popoverPresentationController?.sourceView = topVC.view
+            topVC.present(activityVC, animated: true)
+        }
+    }
+}
+
+private struct FullScreenImageGalleryPage: View {
+    let item: AuthenticatedImageGalleryItem
+    let apiClient: APIClient?
+    let onLoaded: (UIImage) -> Void
+
+    @State private var image: UIImage?
+    @State private var didFail = false
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if didFail {
+                Image(systemName: "photo")
+                    .scaledFont(size: 34, weight: .medium)
+                    .foregroundStyle(.white.opacity(0.55))
+            } else {
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(.white)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task(id: item.fileId) {
+            guard image == nil else { return }
+            if let loaded = await AuthenticatedImageView.loadImageValue(
+                fileId: item.fileId,
+                apiClient: apiClient
+            ) {
+                image = loaded
+                onLoaded(loaded)
+            } else {
+                didFail = true
+            }
+        }
+    }
+}
 
 /// A full-screen image viewer with pinch-to-zoom, double-tap-to-zoom,
 /// dismiss gesture, and share button.

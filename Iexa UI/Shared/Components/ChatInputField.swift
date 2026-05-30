@@ -482,11 +482,27 @@ struct ChatInputField: View {
     }
 
     private func dismissKeyboard() {
+        dismissInlinePickers()
         isFocused = false
+        resignFirstResponder()
+    }
+
+    private func dismissKeyboardAfterSubmit() {
+        dismissInlinePickers()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+            isFocused = false
+            resignFirstResponder()
+        }
+    }
+
+    private func dismissInlinePickers() {
         onHashDismiss?()
         onAtDismiss?()
         onSlashDismiss?()
         onDollarDismiss?()
+    }
+
+    private func resignFirstResponder() {
         UIApplication.shared.sendAction(
             #selector(UIResponder.resignFirstResponder),
             to: nil,
@@ -497,8 +513,8 @@ struct ChatInputField: View {
 
     private func submitMessage() {
         guard canSend else { return }
-        dismissKeyboard()
         onSend()
+        dismissKeyboardAfterSubmit()
     }
 
     // MARK: - Inline Terminal Button

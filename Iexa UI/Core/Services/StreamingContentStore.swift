@@ -252,6 +252,7 @@ final class StreamingContentStore {
     /// For abort/cancel paths use `abortStreaming()` which instantly flushes.
     @discardableResult
     func endStreaming() -> StreamingResult {
+        let displaySource = presentationContent ?? streamingContent
         let result = StreamingResult(
             messageId: streamingMessageId,
             content: streamingContent,
@@ -262,7 +263,7 @@ final class StreamingContentStore {
 
         // If there are still chars to drain, enter finishing mode.
         // The display link keeps running; cleanup happens in drainTick().
-        if displayContent.count < streamingContent.count {
+        if displayContent.count < displaySource.count {
             isFinishing = true
             // isActive stays true — the streaming view remains visible
         } else {

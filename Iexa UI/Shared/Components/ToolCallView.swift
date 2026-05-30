@@ -2652,14 +2652,11 @@ struct AssistantMessageContent: View {
             // so the embeds are still rendered (handled below as .standaloneEmbeds).
             return mutableGroups + [.standaloneEmbeds(messageEmbeds)]
         }()
+        let hasRenderableGroups = Self.hasRenderableContent(in: groups)
 
         VStack(alignment: .leading, spacing: Spacing.xs) {
-            if ordered.segments.isEmpty && isStreaming {
-                // Show typing indicator when streaming with no content yet
-                HStack {
-                    TypingIndicator()
-                    Spacer()
-                }
+            if isStreaming && !hasRenderableGroups {
+                AssistantThinkingCapsule()
             } else {
                 // Render each segment in the order it appears in the content.
                 // Adjacent tool calls are grouped together with dividers
@@ -2787,6 +2784,21 @@ struct AssistantMessageContent: View {
         case reasoningBlocks([ReasoningData])
         /// Message-level embeds with no associated tool call to attach to.
         case standaloneEmbeds([String])
+    }
+
+    private static func hasRenderableContent(in groups: [SegmentGroup]) -> Bool {
+        groups.contains { group in
+            switch group {
+            case .text(let text):
+                return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .toolCalls(let calls):
+                return !calls.isEmpty
+            case .reasoningBlocks(let blocks):
+                return !blocks.isEmpty
+            case .standaloneEmbeds(let embeds):
+                return !embeds.isEmpty
+            }
+        }
     }
 
     private static func groupSegments(_ segments: [ContentSegment]) -> [SegmentGroup] {

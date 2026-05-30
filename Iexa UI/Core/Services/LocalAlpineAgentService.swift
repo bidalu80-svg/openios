@@ -4694,8 +4694,7 @@ actor LocalAlpineAgentService {
         }
 
         if let firstToolRange = mergedRanges(removalRanges).min(by: { $0.location < $1.location }) {
-            let prefix = nsContent.substring(with: NSRange(location: 0, length: max(0, firstToolRange.location)))
-            return cleanedVisibleToolPreface(from: prefix)
+            return ""
         }
         return ""
     }
@@ -4813,6 +4812,15 @@ actor LocalAlpineAgentService {
                 blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .newlines))
             }
         }
+        if let tagRegex = try? NSRegularExpression(pattern: #"<local_alpine_exec>([\s\S]*?)</local_alpine_exec>"#, options: [.caseInsensitive]) {
+            let matches = tagRegex.matches(in: content, range: fullRange)
+            for match in matches where match.numberOfRanges >= 2 {
+                blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .newlines))
+            }
+        }
+        for range in pseudoToolCallRangesWithPayload(in: content, includeIncomplete: false) {
+            blocks.append(nsContent.substring(with: range.payload).trimmingCharacters(in: .newlines))
+        }
         return blocks
     }
 
@@ -4824,7 +4832,7 @@ actor LocalAlpineAgentService {
         in content: String,
         includeIncomplete: Bool
     ) -> [(full: NSRange, payload: NSRange)] {
-        let pattern = #"(?m)(?:^|\n)\s*(?:to\s*=\s*)?local_alpine_exec(?:\s+code)?\s*"#
+        let pattern = #"(?m)(?:^|\n)\s*(?:(?:to|tool|name)\s*=\s*)?(?:local_alpine_exec|iexa_alpine)(?:\s+code)?\s*"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
             return []
         }
@@ -4846,6 +4854,34 @@ actor LocalAlpineAgentService {
                 full: NSRange(markerRange.lowerBound..<payloadRange.upperBound, in: content),
                 payload: NSRange(payloadRange, in: content)
             ))
+        }
+        if let toolRegex = try? NSRegularExpression(
+            pattern: #"(?is)<\s*tool\b[^>]*(?:name|tool_name)\s*=\s*["'](?:iexa_alpine|local_alpine_exec)["'][^>]*>"#,
+            options: [.caseInsensitive]
+        ) {
+            for match in toolRegex.matches(in: content, range: fullRange) {
+                guard let markerRange = Range(match.range, in: content),
+                      let payloadRange = balancedJSONRange(in: content, after: markerRange.upperBound) else {
+                    if includeIncomplete,
+                       let markerRange = Range(match.range, in: content) {
+                        let full = NSRange(markerRange.lowerBound..<content.endIndex, in: content)
+                        ranges.append((full: full, payload: full))
+                    }
+                    continue
+                }
+                let closeRange = content.range(
+                    of: "</tool>",
+                    options: [.caseInsensitive],
+                    range: payloadRange.upperBound..<content.endIndex
+                )
+                ranges.append((
+                    full: NSRange(
+                        markerRange.lowerBound..<(closeRange?.upperBound ?? payloadRange.upperBound),
+                        in: content
+                    ),
+                    payload: NSRange(payloadRange, in: content)
+                ))
+            }
         }
         return ranges
     }

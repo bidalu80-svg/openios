@@ -1578,6 +1578,10 @@ final class ChatViewModel {
         message.metadata?["iexa_local_alpine_hidden_correction_parent"] == "true"
     }
 
+    private static func isLocalAlpineHiddenToolParent(_ message: ChatMessage) -> Bool {
+        message.metadata?["iexa_local_alpine_hidden_tool_parent"] == "true"
+    }
+
     private static func isLocalNativeToolResult(_ message: ChatMessage) -> Bool {
         message.metadata?["iexa_local_native_result"] == "true"
             || message.model == "Local Native"
@@ -1660,7 +1664,7 @@ final class ChatViewModel {
         \(capabilities)
         Aliases are accepted inside JSON (`file_read`, `file_write`, `shell_execute`, `browser_use`/`web_fetch`, etc.) but keep the outer fence language exactly `iexa_alpine`.
 
-        Rules: one tool block per assistant turn; read the next observation before continuing; no guessed success/stdout/file contents/final summary after a tool block; pure prose means final answer; never ask the user to paste local output back. For source writes use `write_files`, same-path `edit_file`, or `patch_file`, not shell heredocs/cat/tee/echo. After creating user-viewable files, optionally run `iexa-open /mnt/iexa/<file>` for in-app preview.
+        Rules: one tool block per assistant turn; if using a tool, output the fence immediately with no preface; read the next observation before continuing; no guessed success/stdout/file contents/final summary after a tool block; pure prose means final answer; never ask the user to paste local output back. For source writes use `write_files`, same-path `edit_file`, or `patch_file`, not shell heredocs/cat/tee/echo. After creating user-viewable files, optionally run `iexa-open /mnt/iexa/<file>` for in-app preview.
         [/Local Alpine tool protocol]
         """
     }
@@ -9902,6 +9906,7 @@ final class ChatViewModel {
             params.removeValue(forKey: "function_calling")
             params.removeValue(forKey: "tool_choice")
             params.removeValue(forKey: "tools")
+            Self.applyLocalAlpineOutputTokenCap(to: &params)
             if var modelItem = request.modelItem,
                var info = modelItem["info"] as? [String: Any],
                var modelParams = info["params"] as? [String: Any] {
@@ -9977,6 +9982,35 @@ final class ChatViewModel {
         if isFirst && titleGenEnabled { bgTasks["title_generation"] = true }
         if isFirst && tagsEnabled { bgTasks["tags_generation"] = true }
         if !bgTasks.isEmpty { request.backgroundTasks = bgTasks }
+    }
+
+    private static func applyLocalAlpineOutputTokenCap(to params: inout [String: Any]) {
+        let cap = 8_192
+        let keys = ["max_tokens", "max_completion_tokens", "max_output_tokens"]
+        var foundExisting = false
+        for key in keys {
+            guard let existing = params[key] else { continue }
+            foundExisting = true
+            if let value = numericTokenLimit(existing), value > cap {
+                params[key] = cap
+            }
+        }
+        if !foundExisting {
+            params["max_tokens"] = cap
+        }
+    }
+
+    private static func numericTokenLimit(_ value: Any) -> Int? {
+        switch value {
+        case let int as Int:
+            return int
+        case let double as Double:
+            return Int(double)
+        case let string as String:
+            return Int(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        default:
+            return nil
+        }
     }
 
     /// Builds chat features by merging user toggles with the model's admin-configured
@@ -12496,7 +12530,8 @@ final class ChatViewModel {
             if isLocalAlpineResult && Self.isLocalAlpineProtocolCorrectionMessage(message) {
                 continue
             }
-            if Self.isLocalAlpineHiddenCorrectionParent(message) {
+            if Self.isLocalAlpineHiddenCorrectionParent(message)
+                || Self.isLocalAlpineHiddenToolParent(message) {
                 continue
             }
             if isLocalAlpineResult {
@@ -14414,7 +14449,8 @@ final class ChatViewModel {
             timestamp: assistantMessage.timestamp,
             model: modelId,
             done: false,
-            statusHistory: [thinkingStatus]
+            statusHistory: [thinkingStatus],
+            metadata: assistantMessage.metadata
         )
 
         self.conversation?.messages.append(assistantMessage)
@@ -15496,7 +15532,9 @@ final class ChatViewModel {
                     ? "正在改用本地 Alpine 执行..."
                     : workspaceVisible
             }
-            return visible
+            return isStreaming
+                ? Self.localAlpineDisplayContentForStreaming(visible, raw: safeDisplayContent)
+                : visible
         }()
         let baseRenderedDisplayContent = visibleAlpineDisplayContent ?? safeDisplayContent
         let localAlpineInstructionDetected = shouldHandleLocalAlpineDisplay
@@ -15576,8 +15614,18 @@ final class ChatViewModel {
                     finalContent = resolvedFinalContent
                 }
                 let agentContent = finalRawContent
+                let latestUserRequiresHostExecution = conversation?.messages.last(where: {
+                    $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+                }).map { Self.localAlpineUserRequestRequiresHostExecution($0.content) } ?? false
+                let shouldHideToolParent = shouldHandleLocalAlpineDisplay
+                    && (finalLocalAlpineInstructionDetected || latestUserRequiresHostExecution)
                 conversation?.messages[index].content = finalContent
                 conversation?.messages[index].isStreaming = false
+                if shouldHideToolParent {
+                    var metadata = conversation?.messages[index].metadata ?? [:]
+                    metadata["iexa_local_alpine_hidden_tool_parent"] = "true"
+                    conversation?.messages[index].metadata = metadata
+                }
                 attachInlineImages(from: finalRawContent, to: index)
                 // Merge sources from store into message
                 if !result.sources.isEmpty {
@@ -15612,6 +15660,11 @@ final class ChatViewModel {
                         node.done = true
                         if !result.sources.isEmpty { node.sources = result.sources }
                         if !result.statusHistory.isEmpty { node.statusHistory = result.statusHistory }
+                        if shouldHideToolParent {
+                            var metadata = node.metadata ?? [:]
+                            metadata["iexa_local_alpine_hidden_tool_parent"] = "true"
+                            node.metadata = metadata
+                        }
                     }
                 }
                 completedAssistantContentForAgent = agentContent
@@ -15814,6 +15867,26 @@ final class ChatViewModel {
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? Self.localAlpinePromptLeakPlaceholder : cleaned
+    }
+
+    private static func localAlpineDisplayContentForStreaming(_ visible: String, raw: String) -> String {
+        let trimmed = visible.trimmingCharacters(in: .whitespacesAndNewlines)
+        if Self.contentContainsLocalAlpineInstruction(raw) {
+            return ""
+        }
+        if trimmed.count > 220 {
+            return ""
+        }
+        let lower = trimmed.lowercased()
+        let deferredMarkers = [
+            "请继续执行", "我不能再凭印象猜", "继续执行目录查询",
+            "不能直接执行", "无法直接执行", "请手动", "手动运行",
+            "please continue", "run manually", "copy and paste"
+        ]
+        if deferredMarkers.contains(where: { lower.contains($0.lowercased()) }) {
+            return ""
+        }
+        return visible
     }
 
     private static let localAlpinePromptLeakPlaceholder = "本地 Agent 已接管，正在执行，结果会自动回来。"
