@@ -1644,37 +1644,24 @@ final class ChatViewModel {
     private static var localAlpineToolManifest: String {
         let capabilities = localAlpineToolCapabilities
             .map { capability in
-                "  - `\(capability.name)`: \(capability.description) Args: \(capability.arguments.joined(separator: ", "))."
+                "`\(capability.name)`(\(capability.arguments.joined(separator: ", ")))"
             }
-            .joined(separator: "\n")
+            .joined(separator: "; ")
         return """
-        Local Alpine tool manifest:
-        - Transport: emit exactly one fenced Markdown block with language `iexa_alpine`. The app parses that block, runs it locally, and appends the real result as a later Local Alpine observation.
-        - This is a client-side Markdown tool bridge, not a provider/native function. Do not check provider tool availability. Never call `iexa_alpine` through function-call syntax and never say the provider tool does not exist.
-        - Valid call shape:
+        [Local Alpine tool protocol]
+        Call exactly one fenced Markdown block when you want local execution:
           ```iexa_alpine
           {"command":"pwd && ls -la","cwd":"/mnt/iexa"}
           ```
-        - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
-        - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
-        - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`.
-        - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
-        - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls. `browser_use` supports optional `save_to`/`output` plus `open_preview:true` so large HTML/SVG/JSON responses can be written under `/mnt/iexa` and opened through the preview bridge instead of being pasted into chat.
-        - In-app preview bridge: after creating a user-viewable file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.
-        - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
-        - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, or macOS-only utilities.
-        - Rootfs/environment/dependency checks: if the user asks whether Python/Lua/Node/C++ or dependencies exist, inspect the running Alpine rootfs/runtime/toolchain directly with bounded `command -v`, `--version`, `apk info`, `python3 -m pip list`, `find /usr/lib /usr/local/lib`, or small module-list commands. Do not invent `/mnt/iexa/rootfs`; `/mnt/iexa` is only the workspace mount. Do not only search `/mnt/iexa` project dependency files unless the user specifically asks for project dependency files.
-        - Service/process commands: prefer foreground commands and bounded verification. Do not assume OpenRC/system services are available unless a prior command proves it.
-        - `command`/`shell_execute` is shell text only. For structured tools, use top-level keys such as `read_file`, `file_read`, `write_files`, `file_write`, `edit_file`, `patch_file`, `delete_file`, `delete_files`, `list_dir`, `glob`, `grep`, `verify`, or `browser_use`.
-        - Hard protocol rule: for any intermediate local-work step, pure prose means "stop and answer normally"; it will not be auto-upgraded into execution. Emit a real tool block only when you are intentionally requesting local execution.
-        - JSON tool capabilities:
+        Host executes the block after your message and returns a real Local Alpine observation. This is not provider/native function-calling. Never emit `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside the fence, or say `iexa_alpine` is unavailable.
+
+        Environment: `/mnt/iexa` workspace; Alpine Linux BusyBox/ash; package manager `apk`. Use POSIX sh. Avoid apt/yum/dnf/pacman/brew/sudo/systemctl/launchctl/macOS-only commands.
+        Structured JSON keys:
         \(capabilities)
-        - Source file writes: never write code through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files.code_lines`, `content_lines`, `content_base64`, same-path `edit_file`, or `patch_file`.
-        - Python writes: `.py`/`.pyw` must use `write_files.code_lines` or `content_base64`; localized Python repairs should prefer `read_file` then same-path `edit_file`/`patch_file`.
-        - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
-        - Tool loop: one assistant turn emits at most one `iexa_alpine` block; the next turn must read the returned stdout/stderr/exit code before deciding whether to continue.
-        - Tool-call turn output: when emitting an `iexa_alpine` block, do not append success claims, guessed stdout, file contents, or final summaries after the block. The host will return the real Local Alpine observation in the next turn.
-        - Visible preface: prefer no prose before the block. If needed, write one short progress sentence only. Never ask the user to send back local execution results; the host app returns results automatically.
+        Aliases are accepted inside JSON (`file_read`, `file_write`, `shell_execute`, `browser_use`/`web_fetch`, etc.) but keep the outer fence language exactly `iexa_alpine`.
+
+        Rules: one tool block per assistant turn; read the next observation before continuing; no guessed success/stdout/file contents/final summary after a tool block; pure prose means final answer; never ask the user to paste local output back. For source writes use `write_files`, same-path `edit_file`, or `patch_file`, not shell heredocs/cat/tee/echo. After creating user-viewable files, optionally run `iexa-open /mnt/iexa/<file>` for in-app preview.
+        [/Local Alpine tool protocol]
         """
     }
 
@@ -1691,7 +1678,7 @@ final class ChatViewModel {
             No Local Alpine tool_result has been observed yet for this turn. Treat this as the start of a Codex CLI style local agent session.
 
             Current user goal:
-            \(indentForSystemContext(clippedForSystemContext(latestUserGoal ?? "（未提供）", maxCharacters: 1_500)))
+            \(indentForSystemContext(clippedForSystemContext(latestUserGoal ?? "（未提供）", maxCharacters: 900)))
 
             First-turn bootstrap policy:
             - Do not spend a turn only restating that you will inspect the environment. If inspection is needed, emit the actual `iexa_alpine` block immediately.
@@ -1711,7 +1698,7 @@ final class ChatViewModel {
             """
         }
 
-        let blocks = alpineMessages.suffix(2).map { message -> String in
+        let blocks = alpineMessages.suffix(1).map { message -> String in
             let metadata = message.metadata ?? [:]
             let status = message.statusHistory.last?.description?.trimmingCharacters(in: .whitespacesAndNewlines)
             let state = message.isStreaming ? "running" : "completed"
@@ -1725,7 +1712,7 @@ final class ChatViewModel {
             var lines = ["- state: \(state)"]
             if let latestUserGoal, !latestUserGoal.isEmpty {
                 lines.append("  user_goal:")
-                lines.append(indentForSystemContext(clippedForSystemContext(latestUserGoal, maxCharacters: 1_500)))
+                lines.append(indentForSystemContext(clippedForSystemContext(latestUserGoal, maxCharacters: 900)))
             }
             if let status, !status.isEmpty {
                 lines.append("  status: \(status)")
@@ -1737,7 +1724,7 @@ final class ChatViewModel {
                 lines.append("  command/request:")
                 lines.append(indentForSystemContext(clippedForSystemContext(
                     redactedLocalAlpineInternalPaths(in: command),
-                    maxCharacters: 1_500
+                    maxCharacters: 900
                 )))
             }
             if !content.isEmpty {
@@ -1745,7 +1732,7 @@ final class ChatViewModel {
                 lines.append(indentForSystemContext(contextTextForModel(
                     redactedLocalAlpineInternalPaths(in: content),
                     label: "local-alpine-result",
-                    maxInlineCharacters: 4_000
+                    maxInlineCharacters: 2_000
                 )))
             }
             if let rawResult, !rawResult.isEmpty, rawResult != content {
@@ -1753,25 +1740,25 @@ final class ChatViewModel {
                 lines.append(indentForSystemContext(contextTextForModel(
                     redactedLocalAlpineInternalPaths(in: rawResult),
                     label: "local-alpine-raw-result",
-                    maxInlineCharacters: 4_000
+                    maxInlineCharacters: 1_200
                 )))
             }
             if !commandResults.isEmpty {
                 lines.append("  command observations:")
-                for result in commandResults.suffix(3) {
+                for result in commandResults.suffix(2) {
                     let exit = result.exitCode.map(String.init) ?? "unknown"
                     lines.append(indentForSystemContext("""
                     command: \(result.command)
                     cwd: \(result.cwd)
                     exit_code: \(exit)
                     output:
-                    \(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : contextTextForModel(redactedLocalAlpineInternalPaths(in: result.outputPreview), label: "local-alpine-command-output", maxInlineCharacters: 4_000))
+                    \(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : contextTextForModel(redactedLocalAlpineInternalPaths(in: result.outputPreview), label: "local-alpine-command-output", maxInlineCharacters: 1_500))
                     """))
                 }
             }
             if !writtenFiles.isEmpty {
                 lines.append("  written files:")
-                let fileLines = writtenFiles.map { file in
+                let fileLines = writtenFiles.suffix(8).map { file in
                     "- \(file.path) (\(file.lineCount) 行, \(file.byteCount) bytes)"
                 }.joined(separator: "\n")
                 lines.append(indentForSystemContext(fileLines))
@@ -1811,20 +1798,11 @@ final class ChatViewModel {
 
         return """
         [Local Alpine execution state]
-        The iOS host app simulates a Codex CLI tool loop. A fenced `iexa_alpine` block is the local tool_use, and each Local Alpine result below is the tool_result/observation. This state is real host-side execution state, even if the command block itself is no longer visible in chat.
+        Latest real Local Alpine observation. Treat it as host tool_result state.
 
         \(blocks.joined(separator: "\n\n"))
 
-        Rules for this state:
-        - If state is running, tell the user the Local Alpine command is still running or ask whether to stop it; do not apologize that no executable block was emitted.
-        - If result output is present, answer from that output as the source of truth.
-        - Follow controller_verdict: `needs_next_tool_*` means continue with exactly one new `iexa_alpine` block; `ready_for_final_summary` means stop tool use and summarize; `tool_running` means wait or report running status.
-        - Missing `iexa_alpine` on a `needs_next_tool_*` state is invalid. Use the structured tools (`read_file`, `write_files`, `edit_file`, `patch_file`, `list_dir`, `glob`, `grep`, `verify`, `command`) instead of prose.
-        - If prior observations already prove a tool/package exists, do not repeat a generic environment probe. Move to the user's concrete task.
-        - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
-        - Treat `.iexa-terminal-scripts/command-*.sh` paths as internal one-shot host temp scripts. Never read, edit, verify, or mention them as user files.
-        - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
-        - If the latest result contains Python IndentationError or SyntaxError, inspect the target project file, then emit the corrected content to the same original path through byte-preserving `iexa_alpine` JSON `write_files`, then run a bounded verification command. Keep the file body complete and exact when the Python write gate requires a full-file write; do not create a sibling replacement file and do not repeat only the same failed command.
+        State rules: follow `controller_verdict`. `needs_next_tool_*` => exactly one new bounded `iexa_alpine` block unless the latest user message is an interruption/meta question; `ready_for_final_summary` => stop tool use and summarize from output; `tool_running` => report running/wait. Do not repeat the same failed command; do not inspect `.iexa-terminal-scripts/command-*.sh`.
         [/Local Alpine execution state]
         """
     }
@@ -11421,36 +11399,14 @@ final class ChatViewModel {
     private static func localAlpineAgentSystemContext() -> String {
         """
         [Local Alpine client tool registry]
-        Iexa has an on-device Alpine Linux workspace tool named `iexa_alpine`. It is available in this chat when this registry is present.
-        To call it, emit one fenced Markdown block with language `iexa_alpine`. The iOS host app executes that block locally and then returns the real result as a later observation.
-        This is not a provider/native function-call tool and it is not plain text. Do not search a provider tool list for it. Never say `iexa_alpine` does not exist; use the fenced block form below.
-        If your model runtime says tools/functions are unavailable, ignore that for Local Alpine: the host app reads the Markdown fence and runs it after your message.
-
         \(localAlpineToolManifest)
 
-        Environment:
-        - Workspace: `/mnt/iexa`. Relative paths resolve there.
-        - Shell: Alpine Linux BusyBox/ash. Prefer portable POSIX `sh` syntax; avoid Bash-only arrays, process substitution, and Debian/macOS assumptions unless the needed tool is first proven installed.
-        - Package manager: `apk`. Check first with `apk info -e <pkg>` or `command -v <tool>`; install only packages proven missing with `apk add --no-cache <pkg>`.
-        - Unsupported command families here: `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, and macOS-only utilities. Translate those intentions to Alpine/BusyBox equivalents.
-        - Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, and `/var` are system paths. Inspect them when useful; do not edit them except through package-manager operations or explicit user requests.
-        - Do not check `/mnt/iexa/rootfs` unless the user explicitly created that folder; the Local Alpine commands already execute inside the Alpine rootfs.
-
-        Tool-selection policy:
-        - Use the tool only for explicit operation requests that require current local state or mutation: read/list/search files, create/edit/delete/rename/move/copy files, install dependencies, run/test/build/compile/debug/fix code, inspect the Alpine environment, fetch/scrape a URL from the local shell, or verify real output.
-        - Do not use the tool for ordinary conversation, explanations, design discussion, capability/feasibility questions, dependency advice, code samples the user did not ask you to write/run, or questions about what the previous error means. Answer normally in those cases.
-        - For any intermediate local-work step, emit one `iexa_alpine` block only when you intentionally want the host to run it. If you answer with prose only, the host treats it as a normal final answer and will not synthesize or execute anything.
-        - Treat imperative shorthand as execution requests here: 写/创建/运行/跑/测试/检查/看下/读/改/换/删/再跑/继续 and write/create/run/test/check/read/modify/change/delete/rerun/continue should operate on `/mnt/iexa` or the latest relevant Local Alpine file/command when the context points there.
-        - For follow-ups like "this", "it", "这个", "它", "删了", "换一个", "再跑", or "继续", infer the latest written file or executed command from the Local Alpine observation instead of asking the user to restate it.
-        - If a demo request omits a URL, filename, or sample input, choose safe defaults and proceed: `example.com`/`example.org` for network demos and simple names like `test.lua`, `main.cpp`, or `simple_spider.py`.
-        - Do not ask for confirmation for explicit `/mnt/iexa` deletes, edits, reads, checks, runs, or reruns. Ask only when the target is outside `/mnt/iexa`, destructive across many files, or genuinely unknown.
-        - If the user asks you to write/run/fix/check a project or script, operate under `/mnt/iexa`, verify with a bounded command, and then summarize the real result.
-        - For existing source files, read the target first and prefer same-path `edit_file`/`patch_file`; use `write_files` for new files or large same-path rewrites. For deletes, use `delete_file`/`delete_files` instead of shell `rm`; set `recursive:true` only when deleting a directory.
-        - Prefer structured `list_dir`, `glob`, `grep`, and `verify` wrappers over ad-hoc `find`/`grep`/run syntax when they fit.
-        - If the user asks to run recent code from the conversation, save the latest runnable code block under `/mnt/iexa`, run it with the right interpreter/compiler, and summarize the real output.
-        - If the user asks to generate, save, show, display, or send images, write each final image under `/mnt/iexa` and print every final path, preferably one `READY: /mnt/iexa/<name>.png` line per image. If the user requests multiple images, create distinct variants rather than duplicating one file: vary composition, angle, lighting, background details, colors, or small visual details while preserving the user's core prompt. The host app will read PNG/JPEG/WebP/GIF/BMP/AVIF files from `/mnt/iexa` and attach them to the chat bubble automatically. Do not claim you cannot send or display images after creating them.
-        - If a tool result shows failure, choose one different bounded fix/diagnostic step or stop with the concrete blocker. Never repeat the exact same failed command.
-        - If a tool result shows success and the user goal is complete, stop tool use and answer normally.
+        Use Local Alpine for explicit local operations needing current state or mutation: files, scripts, dependencies, run/test/build/compile/debug/fix, rootfs/toolchain inspection, bounded URL fetch, or verification. Do not use it for ordinary explanation, feasibility/capability questions, or code samples the user did not ask you to save/run.
+        Interpret imperative shorthand as local work when context points to `/mnt/iexa` or prior Alpine output: 写/创建/运行/跑/测试/检查/看下/读/改/换/删/再跑/继续 and write/create/run/test/check/read/modify/change/delete/rerun/continue. Resolve "this/it/这个/它/删了/换一个/再跑/继续" from latest written file/command when possible.
+        Safe defaults: if demo details are missing, use `example.com`/`example.org`, `test.lua`, `main.cpp`, or `simple_spider.py`. Do not ask confirmation for explicit bounded `/mnt/iexa` operations; ask only for outside-workspace, broad destructive, or unknown targets.
+        Prefer structured `read_file`, `write_files`, `edit_file`, `patch_file`, `delete_file`, `list_dir`, `glob`, `grep`, `verify`, and `browser_use`. For existing source, read first and edit/patch same path; use `write_files` for new or large rewrites. For generated image files, write final PNG/JPEG/WebP/GIF/BMP/AVIF under `/mnt/iexa` and print `READY: /mnt/iexa/<name>` paths.
+        If a tool result fails, choose one different bounded diagnostic/fix or stop with the concrete blocker. If it succeeds and the goal is complete, stop tool use and answer normally.
+        [/Local Alpine client tool registry]
         """
     }
 
@@ -13631,6 +13587,28 @@ final class ChatViewModel {
         cleanupStreaming()
     }
 
+    private static func appendSystemInstruction(
+        _ instruction: String,
+        marker: String,
+        to messages: inout [[String: Any]]
+    ) {
+        let trimmedInstruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedInstruction.isEmpty else { return }
+
+        if !messages.isEmpty, messages[0]["role"] as? String == "system" {
+            var system = messages[0]
+            let existing = system["content"] as? String ?? ""
+            if existing.contains(marker) { return }
+            system["content"] = [existing, trimmedInstruction]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+            messages[0] = system
+        } else {
+            messages.insert(["role": "system", "content": trimmedInstruction], at: 0)
+        }
+    }
+
     private static func appendLocalNativeResultInstruction(to messages: inout [[String: Any]]) {
         let instruction = """
         [Local native tool result]
@@ -13638,16 +13616,7 @@ final class ChatViewModel {
         Reply to the user in normal language only. If the local tool succeeded, summarize the concrete result. If it failed, explain the permission/state problem and the next user action.
         [/Local native tool result]
         """
-        if !messages.isEmpty, messages[0]["role"] as? String == "system" {
-            var system = messages[0]
-            let existing = system["content"] as? String ?? ""
-            system["content"] = [existing, instruction]
-                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                .joined(separator: "\n\n")
-            messages[0] = system
-        } else {
-            messages.insert(["role": "system", "content": instruction], at: 0)
-        }
+        appendSystemInstruction(instruction, marker: "[Local native tool result]", to: &messages)
     }
 
     private static func shouldExposeLocalNativeTools(_ text: String) -> Bool {
@@ -15409,16 +15378,7 @@ final class ChatViewModel {
         - Keep visible text before a tool block empty or one short progress sentence.
         [/Local Alpine continuation]
         """
-        if !messages.isEmpty, messages[0]["role"] as? String == "system" {
-            var system = messages[0]
-            let existing = system["content"] as? String ?? ""
-            system["content"] = [existing, instruction]
-                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                .joined(separator: "\n\n")
-            messages[0] = system
-        } else {
-            messages.insert(["role": "system", "content": instruction], at: 0)
-        }
+        appendSystemInstruction(instruction, marker: "[Local Alpine continuation]", to: &messages)
     }
 
     private static func appendLocalAlpineMissingToolCorrectionInstruction(
@@ -15447,16 +15407,7 @@ final class ChatViewModel {
         - Keep visible text before the block empty or one short progress sentence.
         [/Local Alpine missing tool correction]
         """
-        if !messages.isEmpty, messages[0]["role"] as? String == "system" {
-            var system = messages[0]
-            let existing = system["content"] as? String ?? ""
-            system["content"] = [existing, instruction]
-                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                .joined(separator: "\n\n")
-            messages[0] = system
-        } else {
-            messages.insert(["role": "system", "content": instruction], at: 0)
-        }
+        appendSystemInstruction(instruction, marker: "[Local Alpine missing tool correction]", to: &messages)
     }
 
     private static func appendLocalAlpineFinalSummaryInstruction(to messages: inout [[String: Any]]) {
@@ -15472,16 +15423,7 @@ final class ChatViewModel {
         Keep it short and based only on the real Local Alpine output.
         [/Local Alpine final summary]
         """
-        if !messages.isEmpty, messages[0]["role"] as? String == "system" {
-            var system = messages[0]
-            let existing = system["content"] as? String ?? ""
-            system["content"] = [existing, instruction]
-                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                .joined(separator: "\n\n")
-            messages[0] = system
-        } else {
-            messages.insert(["role": "system", "content": instruction], at: 0)
-        }
+        appendSystemInstruction(instruction, marker: "[Local Alpine final summary]", to: &messages)
     }
 
     private static func modelCapabilitySystemContext(model: AIModel?, modelId: String?) -> String? {
