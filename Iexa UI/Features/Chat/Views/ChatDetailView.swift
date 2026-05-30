@@ -590,7 +590,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
         self.timestamp = message.timestamp
         self.isStreaming = message.isStreaming
         self.summary = message.isStreaming
-            ? "正在运行本地 Alpine"
+            ? "正在处理本地任务"
             : parsed.activitySummary(
                 editedFileCount: summaryFileCount == 0 ? nil : summaryFileCount,
                 commandCount: summaryCommandCount == 0 ? nil : summaryCommandCount,
@@ -1002,6 +1002,20 @@ struct ChatDetailView: View {
                 || action == "local_alpine_tool"
                 || action == "local_native_tool"
         }
+    }
+
+    private func messageLatestVisibleStatusIsWebSearch(_ message: ChatMessage) -> Bool {
+        guard let status = message.statusHistory.last(where: { $0.hidden != true }) else {
+            return false
+        }
+        let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return action == "web_search"
+            || action == "websearch"
+            || action == "web search"
+            || action == "local_alpine_web_search"
+            || action == "browser_web_search"
+            || action == "get_readable"
+            || action.contains("readable")
     }
 
     private func contentContainsLocalAlpineInstruction(_ content: String) -> Bool {
@@ -2429,7 +2443,9 @@ struct ChatDetailView: View {
             }
 
             // ── Sources bar ──
-            if message.role == .assistant && !message.isStreaming {
+            if message.role == .assistant
+                && !message.isStreaming
+                && !messageLatestVisibleStatusIsWebSearch(message) {
                 let vIdx = activeVersionIndex[message.id] ?? -1
                 let displaySources: [ChatSourceReference] = {
                     if vIdx >= 0 && vIdx < message.versions.count {
@@ -5847,7 +5863,7 @@ private struct LocalAlpineResultCard: View {
                 parts.append("已运行 \(effectiveCommandCount) 条命令")
             }
             if parts.isEmpty {
-                parts.append("本地 Alpine 已完成")
+                parts.append("本地任务已完成")
             }
             if parsed.hasNonZeroExit || commandResults.contains(where: { $0.failed }) || toolCalls.contains(where: { $0.failed }) {
                 parts.append("有错误")
@@ -7236,7 +7252,7 @@ private struct ParsedLocalAlpineResult {
     }
 
     func streamingSummary(statusDetail: String) -> String {
-        statusDetail.isEmpty ? "正在运行本地 Alpine" : statusDetail
+        statusDetail.isEmpty ? "正在处理本地任务" : statusDetail
     }
 
     func activitySummary(editedFileCount overrideEditedFileCount: Int? = nil, commandCount overrideCommandCount: Int? = nil, hasError: Bool) -> String {
@@ -7250,7 +7266,7 @@ private struct ParsedLocalAlpineResult {
             parts.append("已运行 \(effectiveCommandCount) 条命令")
         }
         if parts.isEmpty {
-            parts.append("本地 Alpine 已完成")
+            parts.append("本地任务已完成")
         }
         if hasError {
             parts.append("有错误")

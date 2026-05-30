@@ -6860,11 +6860,11 @@ final class ChatViewModel {
         let output = formatDirectLocalAlpineOutput(command: userMessage.content, result: result)
         let doneDescription: String
         if result.interactiveRequest != nil {
-            doneDescription = "本地 Alpine 输入已取消"
+            doneDescription = "本地输入已取消"
         } else if result.exitCode == 0 {
-            doneDescription = "本地 Alpine 执行完成"
+            doneDescription = "本地命令已完成"
         } else {
-            doneDescription = "本地 Alpine 执行结束，退出码 \(result.exitCode.map(String.init) ?? "unknown")"
+            doneDescription = "本地命令已结束，退出码 \(result.exitCode.map(String.init) ?? "unknown")"
         }
         updateAssistantMessage(
             id: assistantMessageId,
@@ -7026,15 +7026,15 @@ final class ChatViewModel {
         if lowercased.contains("apk add ")
             || lowercased.contains("apk upgrade")
             || lowercased.contains("apk fix") {
-            return "正在安装 Alpine 软件包..."
+            return "正在安装本地软件包..."
         }
         if lowercased.contains("apk update") {
-            return "正在更新 Alpine 软件源..."
+            return "正在更新本地软件源..."
         }
         if shouldLocalAlpineCheckDependencies(for: lowercased) {
-            return "正在确认 Alpine 环境并执行命令..."
+            return "正在确认本地环境并执行命令..."
         }
-        return "正在执行本地 Alpine 命令..."
+        return "正在执行本地命令..."
     }
 
     private func localAlpineCompletedDescription(for result: LocalAlpineAgentResult) -> String {
@@ -7046,7 +7046,7 @@ final class ChatViewModel {
             parts.append("已运行 \(result.executedCommandCount) 条命令")
         }
         if parts.isEmpty {
-            parts.append("本地 Alpine 已完成")
+            parts.append("本地任务已完成")
         }
         if result.hadFailure {
             parts.append("有错误")
@@ -7130,7 +7130,7 @@ final class ChatViewModel {
         }
         return tick.isMultiple(of: 2)
             ? "命令仍在运行，已运行 \(seconds) 秒..."
-            : "正在等待本地 Alpine 返回结果，已运行 \(seconds) 秒..."
+            : "正在等待本地结果，已运行 \(seconds) 秒..."
     }
 
     private func requestLocalAlpineInput(_ request: LocalAlpineInteractiveRequest) async -> String? {
@@ -13030,6 +13030,7 @@ final class ChatViewModel {
         }
         localAlpineMissingToolCorrectionParentIds.insert(messageId)
         localAlpineContinuationParentIds.insert(messageId)
+        markLocalAlpineCorrectionParentHidden(messageId: messageId)
         localAlpineContinuationTask?.cancel()
         localAlpineContinuationTask = Task { [weak self] in
             await self?.startLocalAlpineMissingToolCorrection(
@@ -13039,6 +13040,20 @@ final class ChatViewModel {
             )
         }
         return true
+    }
+
+    private func markLocalAlpineCorrectionParentHidden(messageId: String) {
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else {
+            return
+        }
+        var metadata = conversation?.messages[index].metadata ?? [:]
+        metadata["iexa_local_alpine_hidden_correction_parent"] = "true"
+        conversation?.messages[index].metadata = metadata
+        conversation?.history.updateNode(id: messageId) { node in
+            var nodeMetadata = node.metadata ?? [:]
+            nodeMetadata["iexa_local_alpine_hidden_correction_parent"] = "true"
+            node.metadata = nodeMetadata
+        }
     }
 
     private func startLocalAlpineMissingToolCorrection(
@@ -13059,7 +13074,7 @@ final class ChatViewModel {
         let assistantMessageId = UUID().uuidString
         let status = ChatStatusUpdate(
             action: "local_alpine_agent",
-            description: "正在重新请求本地工具调用...",
+            description: "正在准备本地执行...",
             done: false
         )
         let message = ChatMessage(
@@ -13224,7 +13239,7 @@ final class ChatViewModel {
                         id: assistantMessageId,
                         content: "",
                         isStreaming: false,
-                        error: ChatMessageError(content: "当前会话没有可轮询的 chatId，无法继续 Local Alpine Agent。")
+                        error: ChatMessageError(content: "当前会话无法继续本地任务。")
                     )
                     self.cleanupStreaming()
                 } else {
@@ -14221,7 +14236,7 @@ final class ChatViewModel {
         await startLocalAlpineLiveActivity(
             id: resultMessageId,
             command: content,
-            detail: initialStatus.description ?? "正在执行本地 Alpine 命令..."
+            detail: initialStatus.description ?? "正在执行本地命令..."
         )
         let progressHeartbeat = startLocalAlpineProgressHeartbeat(
             messageId: resultMessageId,
@@ -14245,13 +14260,13 @@ final class ChatViewModel {
         let result = toolResult.result
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
         guard !Task.isCancelled else {
-            let stoppedStatus = localAlpineStatus(description: "本地 Alpine 已停止", done: true)
+            let stoppedStatus = localAlpineStatus(description: "本地任务已停止", done: true)
             updateAssistantMessage(
                 id: resultMessageId,
                 content: "",
                 isStreaming: false,
                 statusHistory: [stoppedStatus],
-                error: ChatMessageError(content: "已停止本地 Alpine Agent")
+                error: ChatMessageError(content: "已停止本地任务")
             )
             conversation?.history.updateNode(id: resultMessageId) { node in
                 node.done = true
@@ -14272,7 +14287,7 @@ final class ChatViewModel {
         let doneStatus = localAlpineStatus(
             description: result.interactiveRequest == nil
                 ? localAlpineCompletedDescription(for: result)
-                : "本地 Alpine 输入已取消",
+                : "本地输入已取消",
             done: true
         )
         updateAssistantMessage(
@@ -14453,8 +14468,8 @@ final class ChatViewModel {
 
         let assistantMessageId = UUID().uuidString
         let thinkingDescription = finalSummaryOnly
-            ? "本地输出已返回，正在整理回答..."
-            : "本地输出已返回，正在思考下一步..."
+            ? "本地结果已返回，正在整理回答..."
+            : "本地结果已返回，正在检查下一步..."
         let thinkingStatus = ChatStatusUpdate(
             action: "local_alpine_agent",
             description: thinkingDescription,
@@ -14630,7 +14645,7 @@ final class ChatViewModel {
                         id: assistantMessageId,
                         content: "",
                         isStreaming: false,
-                        error: ChatMessageError(content: "当前会话没有可轮询的 chatId，无法继续 Local Alpine Agent。")
+                        error: ChatMessageError(content: "当前会话无法继续本地任务。")
                     )
                     self.cleanupStreaming()
                 } else {
@@ -14803,11 +14818,11 @@ final class ChatViewModel {
         let emittedLocalAlpineInstruction = !isFinalSummary && Self.contentContainsLocalAlpineInstruction(content)
         let doneDescription: String
         if isFinalSummary {
-            doneDescription = "已整理本地 Alpine 回答"
+            doneDescription = "已整理本地回答"
         } else if emittedLocalAlpineInstruction {
             doneDescription = "已决定继续执行下一步"
         } else {
-            doneDescription = "已整理本地 Alpine 输出"
+            doneDescription = "已整理本地结果"
         }
         let doneStatus = ChatStatusUpdate(
             action: "local_alpine_agent",
@@ -15564,7 +15579,7 @@ final class ChatViewModel {
                 || visible.localizedCaseInsensitiveContains("iexa_workspace") {
                 let workspaceVisible = LocalWorkspaceAgentService.visibleContent(from: visible)
                 visible = workspaceVisible == "正在执行本地工作区操作..."
-                    ? "正在改用本地 Alpine 执行..."
+                    ? "正在改用本地执行..."
                     : workspaceVisible
             }
             return isStreaming
@@ -15595,7 +15610,7 @@ final class ChatViewModel {
         let effectiveStatusHistory = statusHistory ?? (alpineInstructionIsHidden ? [
             ChatStatusUpdate(
                 action: "local_alpine_agent",
-                description: isStreaming ? "正在准备执行本地 Alpine 命令..." : "已决定继续执行下一步",
+                description: isStreaming ? "正在准备执行本地命令..." : "已决定继续执行下一步",
                 done: isStreaming ? false : true,
                 occurredAt: .now
             )
@@ -15760,7 +15775,7 @@ final class ChatViewModel {
             let workspaceDisplayContent = completedAssistantDisplayContent ?? displayContent
             var visibleWorkspaceContent = LocalWorkspaceAgentService.visibleContent(from: workspaceDisplayContent)
             if visibleWorkspaceContent == "正在执行本地工作区操作..." {
-                visibleWorkspaceContent = "正在改用本地 Alpine 执行..."
+                visibleWorkspaceContent = "正在改用本地执行..."
             }
             if visibleWorkspaceContent != workspaceDisplayContent,
                let index = conversation?.messages.firstIndex(where: { $0.id == id }) {
@@ -15921,7 +15936,7 @@ final class ChatViewModel {
         return visible
     }
 
-    private static let localAlpinePromptLeakPlaceholder = "本地 Agent 已接管，正在执行，结果会自动回来。"
+    private static let localAlpinePromptLeakPlaceholder = "正在准备本地执行，结果会自动回来。"
 
     private static func containsInternalPromptLeak(_ text: String) -> Bool {
         let normalized = text.lowercased()

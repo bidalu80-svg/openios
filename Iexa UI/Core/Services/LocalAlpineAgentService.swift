@@ -1152,6 +1152,10 @@ actor LocalAlpineAgentService {
             return []
         }
 
+        if let compatibleToolCommands = parseCompatibleToolEnvelope(from: dict), !compatibleToolCommands.isEmpty {
+            return compatibleToolCommands
+        }
+
         if let opCommands = parseOperationAliasShape(from: dict), !opCommands.isEmpty {
             return opCommands
         }
@@ -1302,6 +1306,132 @@ actor LocalAlpineAgentService {
         }
 
         return leadingCommands + nestedCommands
+    }
+
+    private func parseCompatibleToolEnvelope(from dict: [String: Any]) -> [LocalAlpineAgentCommand]? {
+        if let type = Self.stringValue(dict["type"])?
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased(),
+           ["tooluse", "tool_use", "toolcall", "tool_call", "function_call", "function"].contains(type),
+           let commands = parseCompatibleToolEnvelopeValue(dict),
+           !commands.isEmpty {
+            return commands
+        }
+
+        let envelopeKeys = [
+            "toolUse", "tool_use", "toolCall", "tool_call",
+            "function_call", "functionCall"
+        ]
+        for key in envelopeKeys {
+            guard let value = dict[key] else { continue }
+            if let commands = parseCompatibleToolEnvelopeValue(value), !commands.isEmpty {
+                return commands
+            }
+        }
+
+        for key in ["tool_calls", "toolCalls", "calls"] {
+            guard let value = dict[key] else { continue }
+            let values = (value as? [Any]) ?? [value]
+            let commands = values.flatMap { parseCompatibleToolEnvelopeValue($0) ?? [] }
+            if !commands.isEmpty { return commands }
+        }
+
+        return nil
+    }
+
+    private func parseCompatibleToolEnvelopeValue(_ value: Any) -> [LocalAlpineAgentCommand]? {
+        if let array = value as? [Any] {
+            let commands = array.flatMap { parseCompatibleToolEnvelopeValue($0) ?? [] }
+            return commands.isEmpty ? nil : commands
+        }
+        guard var dict = value as? [String: Any] else {
+            return nil
+        }
+
+        if let nested = dict["value"] as? [String: Any] {
+            dict = nested.merging(dict) { nestedValue, _ in nestedValue }
+        }
+
+        if let function = dict["function"] as? [String: Any] {
+            var merged = function
+            for (key, value) in dict where merged[key] == nil {
+                merged[key] = value
+            }
+            dict = merged
+        }
+
+        let rawName = Self.stringValue(
+            dict["name"]
+                ?? dict["toolName"]
+                ?? dict["tool_name"]
+                ?? dict["tool"]
+                ?? dict["functionName"]
+                ?? dict["function_name"]
+        )
+        guard let rawName else { return nil }
+        let normalizedName = normalizeCompatibleToolName(rawName)
+        guard Self.knownStructuredToolNames.contains(normalizedName) else { return nil }
+
+        var rawArguments = dict["arguments"]
+            ?? dict["args"]
+            ?? dict["input"]
+            ?? dict["inputJson"]
+            ?? dict["input_json"]
+            ?? dict["parameters"]
+            ?? dict["params"]
+            ?? dict["json"]
+        if rawArguments == nil,
+           let function = dict["function"] as? [String: Any] {
+            rawArguments = function["arguments"] ?? function["args"] ?? function["input"]
+        }
+
+        let arguments: [String: Any]
+        if let argumentDict = Self.dictionaryValue(rawArguments) {
+            arguments = argumentDict
+        } else if let rawArguments {
+            arguments = ["value": rawArguments]
+        } else {
+            var trimmed = dict
+            for key in [
+                "id", "toolUseId", "tool_use_id", "toolCallId", "tool_call_id",
+                "name", "toolName", "tool_name", "tool", "functionName", "function_name",
+                "type", "function", "value"
+            ] {
+                trimmed.removeValue(forKey: key)
+            }
+            arguments = trimmed
+        }
+
+        let wrapper: [String: Any] = [
+            "tool": normalizedName,
+            "arguments": arguments
+        ]
+        return parseToolCallShape(from: wrapper)
+    }
+
+    private nonisolated func normalizeCompatibleToolName(_ name: String) -> String {
+        let lowered = name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+        switch lowered {
+        case "execute_shell", "exec_shell", "shell_exec", "shell":
+            return "shell_execute"
+        case "readfile":
+            return "read_file"
+        case "writefile":
+            return "write_file"
+        case "editfile":
+            return "edit_file"
+        case "patchfile":
+            return "patch_file"
+        case "deletefile":
+            return "delete_file"
+        case "listdir":
+            return "list_dir"
+        default:
+            return lowered
+        }
     }
 
     private func parseOperationAliasShape(from dict: [String: Any]) -> [LocalAlpineAgentCommand]? {

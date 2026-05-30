@@ -250,18 +250,18 @@ struct StreamingStatusView: View {
         if status.done == true {
             if let count = status.count, count > 0 {
                 if browser { return "内置浏览器已读取 \(count) 个网页" }
-                return localAlpine ? "本地 Alpine 已读取 \(count) 个网页" : "已搜索 \(count) 个网页"
+                return localAlpine ? "本地已读取 \(count) 个网页" : "已搜索 \(count) 个网页"
             }
             if !status.items.isEmpty {
                 if browser { return "内置浏览器已搜索 \(status.items.count) 个来源" }
-                return localAlpine ? "本地 Alpine 已搜索 \(status.items.count) 个来源" : "已搜索 \(status.items.count) 个来源"
+                return localAlpine ? "本地已搜索 \(status.items.count) 个来源" : "已搜索 \(status.items.count) 个来源"
             }
-            return status.description ?? (browser ? "内置浏览器搜索完成" : (localAlpine ? "本地 Alpine 搜索完成" : "已完成联网搜索"))
+            return status.description ?? (browser ? "内置浏览器搜索完成" : (localAlpine ? "本地搜索完成" : "已完成联网搜索"))
         }
         if let query = status.query, !query.isEmpty {
-            return browser ? "内置浏览器搜索中" : (localAlpine ? "本地 Alpine 搜索中" : "正在搜索")
+            return browser ? "内置浏览器搜索中" : (localAlpine ? "本地搜索中" : "正在搜索")
         }
-        return status.description ?? (browser ? "内置浏览器搜索中" : (localAlpine ? "本地 Alpine 搜索中" : "正在联网搜索"))
+        return status.description ?? (browser ? "内置浏览器搜索中" : (localAlpine ? "本地搜索中" : "正在联网搜索"))
     }
 
     private func webSearchSubtitle(for status: ChatStatusUpdate?) -> String {
@@ -441,7 +441,7 @@ struct StreamingStatusView: View {
     private var localAlpineCard: some View {
         let latest = latestStatus
         let title = localAlpineTitle(for: latest)
-        let subtitle = latest.flatMap { resolveStatusDescription(for: $0) } ?? "正在执行本地 Alpine 命令..."
+        let subtitle = latest.flatMap { resolveStatusDescription(for: $0) } ?? "正在执行本地命令..."
         let isDone = latest?.done == true
         let activeStage = localAlpineActiveStage(for: subtitle, isDone: isDone)
         let stages = localAlpineStageTitles(for: subtitle)
@@ -589,12 +589,12 @@ struct StreamingStatusView: View {
     }
 
     private func localAlpineTitle(for status: ChatStatusUpdate?) -> String {
-        if status?.done == true { return "本地 Alpine 已完成" }
+        if status?.done == true { return "本地任务已完成" }
         let description = status?.description ?? ""
         if description.contains("依赖") && description.contains("执行") { return "正在执行命令" }
         if description.contains("依赖") { return "正在检查依赖" }
         if description.contains("软件包") || description.contains("软件源") { return "正在安装软件包" }
-        return "本地 Alpine 正在执行"
+        return "正在执行本地任务"
     }
 
     private func localAlpineStageTitles(for description: String) -> [String] {
@@ -667,7 +667,7 @@ struct StreamingStatusView: View {
         let latest = latestStatus
         let isDone = latest?.done == true
         let title = latest.map(resolveStatusDescription(for:))
-            ?? "正在执行本地 Alpine 命令..."
+            ?? "正在执行本地命令..."
         let didFail = localAlpineDidFail(title)
         let color: Color = didFail ? .orange : (isDone ? theme.textTertiary : theme.brandPrimary)
 
@@ -695,7 +695,7 @@ struct StreamingStatusView: View {
         let latest = latestStatus
         let isDone = latest?.done == true
         let title = latest.map(resolveStatusDescription(for:))
-            ?? "正在整理本地 Alpine 输出"
+            ?? "正在整理本地结果"
         let failed = localAlpineDidFail(title)
         let color: Color = failed ? .orange : (isDone ? theme.success : theme.brandPrimary)
 
@@ -944,17 +944,17 @@ struct StreamingStatusView: View {
             if isDone {
                 if let count = status.count, count > 0 {
                     if browser { return "内置浏览器已读取 \(count) 个网页" }
-                    return localAlpine ? "本地 Alpine 已读取 \(count) 个网页" : "已搜索 \(count) 个网页"
+                    return localAlpine ? "本地已读取 \(count) 个网页" : "已搜索 \(count) 个网页"
                 }
-                return desc ?? (browser ? "内置浏览器搜索完成" : (localAlpine ? "本地 Alpine 搜索完成" : "已完成联网搜索"))
+                return desc ?? (browser ? "内置浏览器搜索完成" : (localAlpine ? "本地搜索完成" : "已完成联网搜索"))
             }
             if let query = status.query, !query.isEmpty {
-                return browser ? "内置浏览器搜索：\(query)" : (localAlpine ? "本地 Alpine 搜索：\(query)" : "正在搜索：\(query)")
+                return browser ? "内置浏览器搜索：\(query)" : (localAlpine ? "本地搜索：\(query)" : "正在搜索：\(query)")
             }
             if !status.queries.isEmpty {
-                return browser ? "内置浏览器搜索中" : (localAlpine ? "本地 Alpine 搜索中" : "正在搜索")
+                return browser ? "内置浏览器搜索中" : (localAlpine ? "本地搜索中" : "正在搜索")
             }
-            return desc ?? (browser ? "内置浏览器搜索中" : (localAlpine ? "本地 Alpine 搜索中" : "正在联网搜索"))
+            return desc ?? (browser ? "内置浏览器搜索中" : (localAlpine ? "本地搜索中" : "正在联网搜索"))
 
         case "generate_image", "image_generation", "generateimage":
             if isDone { return desc ?? "Image generated" }
@@ -968,8 +968,8 @@ struct StreamingStatusView: View {
             return desc ?? (isDone ? "Tool completed" : "Executing tool…")
 
         case "local_alpine_agent":
-            if isDone { return desc ?? "已整理本地 Alpine 输出" }
-            return desc ?? "本地输出已返回，正在思考下一步..."
+            if isDone { return desc ?? "已整理本地结果" }
+            return desc ?? "正在检查结果并决定下一步..."
 
         case "memory", "memory_search":
             if isDone { return desc ?? "Memory retrieved" }
