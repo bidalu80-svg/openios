@@ -68,6 +68,16 @@ private struct AgentActivityStep: Identifiable, Hashable {
     var isLocalStatusPlaceholder: Bool {
         kind == .status && id.hasPrefix("local-status-")
     }
+
+    var isWebSearchStatusStep: Bool {
+        guard kind == .status else { return false }
+        let normalizedId = id.lowercased()
+        return normalizedId.contains("web_search")
+            || normalizedId.contains("websearch")
+            || normalizedId.contains("browser_web_search")
+            || normalizedId.contains("get_readable")
+            || normalizedId.contains("readable")
+    }
 }
 
 private struct AgentActivityItem: Identifiable, Hashable {
@@ -133,6 +143,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
 
     var hasConcreteSteps: Bool {
         !steps.isEmpty
+    }
+
+    var hasOnlyWebSearchStatusSteps: Bool {
+        hasConcreteSteps && steps.allSatisfy(\.isWebSearchStatusStep)
     }
 
     var currentStep: AgentActivityStep? {
@@ -2592,12 +2606,17 @@ struct ChatDetailView: View {
     }
 
     private func hasAgentToolPreview(for message: ChatMessage) -> Bool {
-        agentActivity(for: message)?.hasConcreteSteps == true
+        guard let item = agentActivity(for: message), item.hasConcreteSteps else {
+            return false
+        }
+        return !item.hasOnlyWebSearchStatusSteps
     }
 
     @ViewBuilder
     private func agentStepPreview(for message: ChatMessage) -> some View {
-        if let item = agentActivity(for: message), item.hasConcreteSteps {
+        if let item = agentActivity(for: message),
+           item.hasConcreteSteps,
+           !item.hasOnlyWebSearchStatusSteps {
             AgentInlineStepsView(item: item, onTap: openAgentTaskPanel)
                 .padding(.horizontal, Spacing.screenPadding)
                 .padding(.top, Spacing.xs)

@@ -573,9 +573,7 @@ struct FullScreenImageGalleryView: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            let pageSize = geometry.size
-
+        GeometryReader { _ in
             ZStack {
                 Color.black.ignoresSafeArea()
 
@@ -586,12 +584,11 @@ struct FullScreenImageGalleryView: View {
                                 FullScreenImageGalleryPage(
                                     item: item,
                                     apiClient: apiClient,
-                                    pageSize: pageSize,
                                     onLoaded: { image in
                                         loadedImages[item.id] = image
                                     }
                                 )
-                                .frame(width: pageSize.width, height: pageSize.height, alignment: .center)
+                                .containerRelativeFrame([.horizontal, .vertical], alignment: .center)
                                 .id(item.id)
                                 .onAppear {
                                     currentItemId = item.id
@@ -606,7 +603,7 @@ struct FullScreenImageGalleryView: View {
                     .onAppear {
                         currentItemId = initialItemId
                         DispatchQueue.main.async {
-                            proxy.scrollTo(initialItemId, anchor: .top)
+                            proxy.scrollTo(initialItemId, anchor: .center)
                         }
                     }
                 }
@@ -644,6 +641,7 @@ struct FullScreenImageGalleryView: View {
                 }
             }
         }
+        .ignoresSafeArea()
         .statusBarHidden()
     }
 
@@ -684,35 +682,36 @@ struct FullScreenImageGalleryView: View {
 private struct FullScreenImageGalleryPage: View {
     let item: AuthenticatedImageGalleryItem
     let apiClient: APIClient?
-    let pageSize: CGSize
     let onLoaded: (UIImage) -> Void
 
     @State private var image: UIImage?
     @State private var didFail = false
 
     var body: some View {
-        ZStack(alignment: .center) {
-            Color.clear
+        GeometryReader { proxy in
+            ZStack(alignment: .center) {
+                Color.clear
 
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: pageSize.width, height: pageSize.height, alignment: .center)
-            } else if didFail {
-                Image(systemName: "photo")
-                    .scaledFont(size: 34, weight: .medium)
-                    .foregroundStyle(.white.opacity(0.55))
-                    .frame(width: pageSize.width, height: pageSize.height, alignment: .center)
-            } else {
-                ProgressView()
-                    .controlSize(.large)
-                    .tint(.white)
-                    .frame(width: pageSize.width, height: pageSize.height, alignment: .center)
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
+                } else if didFail {
+                    Image(systemName: "photo")
+                        .scaledFont(size: 34, weight: .medium)
+                        .foregroundStyle(.white.opacity(0.55))
+                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
+                } else {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
+                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
+                }
             }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
+            .clipped()
         }
-        .frame(width: pageSize.width, height: pageSize.height, alignment: .center)
-        .clipped()
         .task(id: item.fileId) {
             guard image == nil else { return }
             if let loaded = await AuthenticatedImageView.loadImageValue(

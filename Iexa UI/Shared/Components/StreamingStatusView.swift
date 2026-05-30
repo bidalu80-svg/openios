@@ -28,6 +28,23 @@ struct StreamingStatusView: View {
         visibleStatuses.last
     }
 
+    /// The latest web-search/readable status in this batch. Some providers send
+    /// `get_readable` after `web_search`; the UI should still stay on the compact
+    /// sources row instead of turning into a generic tool capsule.
+    private var latestWebSearchStatus: ChatStatusUpdate? {
+        let webStatuses = visibleStatuses.filter { status in
+            guard let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+                return false
+            }
+            return Self.isWebSearchAction(action)
+        }
+        return webStatuses.last { status in
+            !status.items.isEmpty
+                || !status.urls.isEmpty
+                || (status.count ?? 0) > 0
+        } ?? webStatuses.last
+    }
+
     /// Whether all status updates are marked done.
     private var allDone: Bool {
         visibleStatuses.allSatisfy { $0.done == true }
@@ -102,8 +119,20 @@ struct StreamingStatusView: View {
     }
 
     private var isWebSearchStatus: Bool {
-        guard let action = latestStatus?.action?.lowercased() else { return false }
-        return ["web_search", "websearch", "web search", "local_alpine_web_search", "browser_web_search"].contains(action)
+        guard let action = latestStatus?.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+            return false
+        }
+        return Self.isWebSearchAction(action)
+    }
+
+    private static func isWebSearchAction(_ action: String) -> Bool {
+        action == "web_search"
+            || action == "websearch"
+            || action == "web search"
+            || action == "local_alpine_web_search"
+            || action == "browser_web_search"
+            || action == "get_readable"
+            || action.contains("readable")
     }
 
     private func isLocalAlpineWebSearch(_ status: ChatStatusUpdate?) -> Bool {
@@ -115,13 +144,13 @@ struct StreamingStatusView: View {
     }
 
     private var webSearchCard: some View {
-        let latest = latestStatus
+        let latest = latestWebSearchStatus ?? latestStatus
         let isDone = latest?.done == true
         let title = webSearchTitle(for: latest)
         let subtitle = webSearchSubtitle(for: latest)
         let queries = webSearchQueries(for: latest)
         let items = webSearchItems(for: latest)
-        let visibleSourceCount = max(items.count, latest?.urls.count ?? 0)
+        let visibleSourceCount = max(max(items.count, latest?.urls.count ?? 0), latest?.count ?? 0)
 
         return VStack(alignment: .leading, spacing: 10) {
             Button {
