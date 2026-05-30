@@ -12927,7 +12927,8 @@ final class ChatViewModel {
         guard terminalEnabled && selectedTerminalIsLocalAlpine else { return false }
         guard !localAlpineAgentStopRequested else { return false }
         guard !localAlpineAutoExecutionPaused else { return false }
-        guard !Self.contentContainsLocalAlpineInstruction(content) else { return false }
+        let promptLeakDetected = Self.containsInternalPromptLeak(content)
+        guard promptLeakDetected || !Self.contentContainsLocalAlpineInstruction(content) else { return false }
         guard let message = conversation?.messages.first(where: { $0.id == messageId }),
               message.role == .assistant,
               message.metadata?["iexa_local_alpine_final_summary"] == nil,
@@ -13187,6 +13188,7 @@ final class ChatViewModel {
             return
         }
         guard !localAlpineAgentExecutedMessageIds.contains(messageId) else { return }
+        guard !Self.containsInternalPromptLeak(content) else { return }
         if localAlpineStepsSinceLastUser() >= localAlpineAgentMaxSteps {
             localAlpineAgentExecutedMessageIds.insert(messageId)
             appendLocalAlpineAgentLimitMessage(parentId: messageId)
@@ -15496,11 +15498,27 @@ final class ChatViewModel {
             }
             return visible
         }()
-        let renderedDisplayContent = visibleAlpineDisplayContent ?? safeDisplayContent
-        let alpineInstructionIsHidden = shouldHandleLocalAlpineDisplay
-            && Self.contentContainsLocalAlpineInstruction(displayContent)
+        let baseRenderedDisplayContent = visibleAlpineDisplayContent ?? safeDisplayContent
+        let localAlpineInstructionDetected = shouldHandleLocalAlpineDisplay
+            && (
+                Self.contentContainsLocalAlpineInstruction(content)
+                    || Self.contentContainsLocalAlpineInstruction(displayContent)
+            )
+        let localAlpinePromptLeakDetected = shouldHandleLocalAlpineDisplay
+            && (
+                Self.containsInternalPromptLeak(content)
+                    || Self.containsInternalPromptLeak(displayContent)
+                    || Self.containsInternalPromptLeak(baseRenderedDisplayContent)
+            )
+        let localAlpineDisplayIsHidden = shouldHandleLocalAlpineDisplay
             && visibleAlpineDisplayContent != nil
-            && renderedDisplayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && baseRenderedDisplayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (localAlpineInstructionDetected || localAlpinePromptLeakDetected)
+        let renderedDisplayContent = (localAlpinePromptLeakDetected || localAlpineDisplayIsHidden)
+            ? Self.localAlpinePromptLeakPlaceholder
+            : baseRenderedDisplayContent
+        let alpineInstructionIsHidden = localAlpineDisplayIsHidden
+            || (shouldHandleLocalAlpineDisplay && localAlpinePromptLeakDetected)
         let effectiveStatusHistory = statusHistory ?? (alpineInstructionIsHidden ? [
             ChatStatusUpdate(
                 action: "local_alpine_agent",
@@ -15534,9 +15552,29 @@ final class ChatViewModel {
                 // Streaming just ended — flush store to conversation
                 let result = streamingStore.endStreaming()
                 let finalRawContent = content.isEmpty ? result.content : content
-                let finalContent = safeDisplayContent.isEmpty
+                let resolvedFinalContent = safeDisplayContent.isEmpty
                     ? Self.safeAssistantDisplayContent(result.content)
                     : safeDisplayContent
+                let finalPromptLeakDetected = localAlpinePromptLeakDetected
+                    || Self.containsInternalPromptLeak(finalRawContent)
+                    || Self.containsInternalPromptLeak(resolvedFinalContent)
+                let finalLocalAlpineInstructionDetected = localAlpineInstructionDetected
+                    || Self.contentContainsLocalAlpineInstruction(finalRawContent)
+                    || Self.contentContainsLocalAlpineInstruction(resolvedFinalContent)
+                let finalVisibleAlpineContent = shouldHandleLocalAlpineDisplay
+                    ? LocalAlpineAgentService.visibleContent(from: resolvedFinalContent)
+                    : resolvedFinalContent
+                let finalAlpineDisplayIsHidden = shouldHandleLocalAlpineDisplay
+                    && finalVisibleAlpineContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && (finalPromptLeakDetected || finalLocalAlpineInstructionDetected)
+                let finalContent: String
+                if finalPromptLeakDetected || finalAlpineDisplayIsHidden {
+                    finalContent = Self.localAlpinePromptLeakPlaceholder
+                } else if shouldHandleLocalAlpineDisplay {
+                    finalContent = finalVisibleAlpineContent
+                } else {
+                    finalContent = resolvedFinalContent
+                }
                 let agentContent = finalRawContent
                 conversation?.messages[index].content = finalContent
                 conversation?.messages[index].isStreaming = false
@@ -15594,7 +15632,7 @@ final class ChatViewModel {
                 }
                 if !isStreaming {
                     completedAssistantContentForAgent = content.isEmpty ? displayContent : content
-                    completedAssistantDisplayContent = safeDisplayContent
+                    completedAssistantDisplayContent = renderedDisplayContent
                 }
             }
             if let sources { conversation?.messages[index].sources = sources }
@@ -15755,20 +15793,75 @@ final class ChatViewModel {
             with: "\n",
             options: .regularExpression
         )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"(?im)^\s*[^。\n.!?]*\biexa_alpine\b[^。\n.!?]*(?:cannot|can't|can\s+not|do\s+not|don't|unable\s+to)\s+(?:call|invoke|use|access|execute)[^。\n.!?]*[。.!?]*\s*"#,
+            with: "\n",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"(?im)^\s*[^。\n.!?]*\biexa_alpine\b[^。\n.!?]*(?:not\s+available|unavailable|unsupported|unknown\s+tool)[^。\n.!?]*[。.!?]*\s*"#,
+            with: "\n",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"(?im)^\s*[^。\n.!?]*`?iexa_alpine`?[^。\n.!?]*(?:工具不存在|不存在|不可用|无法调用|不能调用|不支持|未知工具)[^。\n.!?]*[。.!?]*\s*"#,
+            with: "\n",
+            options: .regularExpression
+        )
         guard cleaned != text else { return text }
         cleaned = cleaned
             .replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? "正在切换到 Iexa 本地 Agent..." : cleaned
+        return cleaned.isEmpty ? Self.localAlpinePromptLeakPlaceholder : cleaned
+    }
+
+    private static let localAlpinePromptLeakPlaceholder = "本地 Agent 已接管，正在执行，结果会自动回来。"
+
+    private static func containsInternalPromptLeak(_ text: String) -> Bool {
+        let normalized = text.lowercased()
+        guard normalized.contains("local alpine")
+            || normalized.contains("iexa_alpine")
+            || normalized.contains("[current model capability]") else {
+            return false
+        }
+
+        let strongMarkers = [
+            "[local alpine tool protocol]",
+            "[/local alpine tool protocol]",
+            "[local alpine client tool registry]",
+            "[/local alpine client tool registry]",
+            "[local alpine execution state]",
+            "[/local alpine execution state]",
+            "[local alpine observation]",
+            "[/local alpine observation]",
+            "[local alpine continuation]",
+            "[/local alpine continuation]",
+            "[local alpine missing tool correction]",
+            "[/local alpine missing tool correction]",
+            "[current model capability]",
+            "[/current model capability]",
+            "structured json keys:",
+            "host executes the block after your message",
+            "this is not provider/native function-calling",
+            "pure prose means final answer",
+            "call exactly one fenced markdown block",
+            "read the next observation before continuing",
+            "controller_verdict"
+        ]
+        return strongMarkers.contains { normalized.contains($0) }
     }
 
     private static func cleanedInternalPromptArtifacts(_ text: String) -> String {
         var cleaned = text
         let blockNames = [
+            "Current model capability",
+            "Local Alpine tool protocol",
+            "Local Alpine client tool registry",
             "Local Alpine execution state",
             "Local Alpine observation",
             "Local Alpine continuation",
+            "Local Alpine missing tool correction",
             "Local Alpine final summary",
             "Local native tool result"
         ]
