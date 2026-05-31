@@ -315,28 +315,35 @@ struct WebLinkContextResolver: Sendable {
         let author = primaryObject.flatMap { Self.firstUsefulString(in: $0, keys: ["nickname", "nickName", "userName", "authorName"]) }
             .map(Self.cleanupText)
 
-        var videoCandidates: [String] = []
+        var originalVideoCandidates: [String] = []
+        var detectedVideoCandidates: [String] = []
         if let noteObject {
-            videoCandidates.append(contentsOf: Self.generatedXiaohongshuOriginVideoURLs(in: noteObject))
-            videoCandidates.append(contentsOf: Self.preferredXiaohongshuStreamURLs(in: noteObject))
-            videoCandidates.append(contentsOf: Self.xiaohongshuURLs(in: noteObject, kind: .video))
+            originalVideoCandidates.append(contentsOf: Self.generatedXiaohongshuOriginVideoURLs(in: noteObject))
+            detectedVideoCandidates.append(contentsOf: originalVideoCandidates)
+            detectedVideoCandidates.append(contentsOf: Self.preferredXiaohongshuStreamURLs(in: noteObject))
+            detectedVideoCandidates.append(contentsOf: Self.xiaohongshuURLs(in: noteObject, kind: .video))
         } else {
             for object in jsonObjects {
-                videoCandidates.append(contentsOf: Self.generatedXiaohongshuOriginVideoURLs(in: object))
-                videoCandidates.append(contentsOf: Self.preferredXiaohongshuStreamURLs(in: object))
-                videoCandidates.append(contentsOf: Self.xiaohongshuURLs(in: object, kind: .video))
+                let originURLs = Self.generatedXiaohongshuOriginVideoURLs(in: object)
+                originalVideoCandidates.append(contentsOf: originURLs)
+                detectedVideoCandidates.append(contentsOf: originURLs)
+                detectedVideoCandidates.append(contentsOf: Self.preferredXiaohongshuStreamURLs(in: object))
+                detectedVideoCandidates.append(contentsOf: Self.xiaohongshuURLs(in: object, kind: .video))
             }
         }
-        if videoCandidates.isEmpty {
-            videoCandidates.append(contentsOf: Self.mediaURLCandidates(in: html, kind: .video))
+        if detectedVideoCandidates.isEmpty {
+            detectedVideoCandidates.append(contentsOf: Self.mediaURLCandidates(in: html, kind: .video))
         }
-        if !videoCandidates.isEmpty,
+
+        var videoCandidates: [String] = []
+        if !detectedVideoCandidates.isEmpty,
            let downloadProxyURL = Self.xiaohongshuDownloadProxyURL(
                 sourceURL: pageURL.absoluteString,
                 title: title
            ) {
-            videoCandidates.insert(downloadProxyURL, at: 0)
+            videoCandidates.append(downloadProxyURL)
         }
+        videoCandidates.append(contentsOf: originalVideoCandidates)
         videoCandidates = Self.sortedXiaohongshuVideoURLs(Self.uniqueMediaURLs(videoCandidates, preservingQuery: true))
 
         let resolvedVideos = videoCandidates.map { mediaURL in

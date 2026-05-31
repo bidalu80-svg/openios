@@ -135,7 +135,7 @@ struct InAppWebPreviewSheet: View {
                let url = URL(string: raw) {
                 return url
             }
-            return safePageVideoURL(state.pageVideoURL)
+            return nil
         }
         if WebLinkContextResolver.isDouyinURL(activeURL) {
             if let raw = resolvedDouyinPost?.video?.url, let url = URL(string: raw) {
