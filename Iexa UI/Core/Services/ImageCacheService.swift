@@ -262,6 +262,19 @@ actor ImageCacheService {
                     "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
                     forHTTPHeaderField: "Accept"
                 )
+                if Self.isXiaohongshuMediaURL(url) {
+                    request.setValue(
+                        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36 xiaohongshu",
+                        forHTTPHeaderField: "User-Agent"
+                    )
+                    request.setValue(
+                        "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                        forHTTPHeaderField: "Accept"
+                    )
+                    request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+                    request.setValue("https://www.xiaohongshu.com", forHTTPHeaderField: "Origin")
+                    request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
+                }
                 if url.host?.lowercased() == "assets.grok.com" {
                     request.setValue("https://grok.com/", forHTTPHeaderField: "Referer")
                 }
@@ -340,6 +353,11 @@ actor ImageCacheService {
                 _ = await loadImage(from: url)
             }
         }
+    }
+
+    private static func isXiaohongshuMediaURL(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        return host == "ci.xiaohongshu.com" || host == "xhscdn.com" || host.hasSuffix(".xhscdn.com")
     }
 
     /// Prefetches the current user's avatar URL in the background so it is warm in memory

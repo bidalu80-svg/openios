@@ -356,14 +356,9 @@ struct WebLinkContextResolver: Sendable {
         }
         let resolvedVideo = resolvedVideos.first
 
-        var imageCandidates: [String] = []
-        if let noteObject {
-            imageCandidates.append(contentsOf: Self.xiaohongshuURLs(in: noteObject, kind: .image))
-        }
-        for object in jsonObjects {
-            imageCandidates.append(contentsOf: Self.xiaohongshuURLs(in: object, kind: .image))
-        }
-        imageCandidates.append(contentsOf: Self.mediaURLCandidates(in: html, kind: .image))
+        let imageCandidates = noteObject.map {
+            Self.xiaohongshuOriginalImageURLs(in: $0)
+        } ?? []
         let images = Self.resolvedXiaohongshuImages(
             from: Self.uniqueMediaURLs(imageCandidates),
             title: title,
@@ -665,6 +660,119 @@ struct WebLinkContextResolver: Sendable {
 
         walk(object)
         return uniqueMediaURLs(urls, preservingQuery: kind == .video)
+    }
+
+    private static func xiaohongshuOriginalImageURLs(in note: [String: Any]) -> [String] {
+        let urls = xiaohongshuImageList(in: note).compactMap { image -> String? in
+            guard let selected = selectedXiaohongshuImageURL(from: image) else { return nil }
+            return originalXiaohongshuImageURL(from: selected)
+        }.filter {
+            isCanonicalXiaohongshuImageURL($0)
+        }
+        return uniqueMediaURLs(urls)
+    }
+
+    private static func xiaohongshuImageList(in note: [String: Any]) -> [[String: Any]] {
+        if let list = note["imageList"] as? [[String: Any]] {
+            return list
+        }
+        if let list = note["imageList"] as? [Any] {
+            return list.compactMap { $0 as? [String: Any] }
+        }
+        if let list = note["images"] as? [[String: Any]] {
+            return list
+        }
+        if let list = note["images"] as? [Any] {
+            return list.compactMap { $0 as? [String: Any] }
+        }
+        if let image = note["image"] as? [String: Any] {
+            return [image]
+        }
+        return []
+    }
+
+    private static func selectedXiaohongshuImageURL(from image: [String: Any]) -> String? {
+        if let url = image["urlDefault"] as? String, !url.isEmpty {
+            return url
+        }
+        if let url = image["url"] as? String, !url.isEmpty {
+            return url
+        }
+
+        let infoList: [[String: Any]]
+        if let list = image["infoList"] as? [[String: Any]] {
+            infoList = list
+        } else if let list = image["infoList"] as? [Any] {
+            infoList = list.compactMap { $0 as? [String: Any] }
+        } else {
+            infoList = []
+        }
+
+        if let preferred = infoList.first(where: { info in
+            let scene = ((info["imageScene"] as? String) ?? (info["scene"] as? String) ?? (info["type"] as? String) ?? "")
+                .lowercased()
+            return scene.range(of: #"(origin|original|default|dft|wb_dft)"#, options: .regularExpression) != nil
+                && ((info["url"] as? String)?.isEmpty == false)
+        }),
+           let url = preferred["url"] as? String {
+            return url
+        }
+
+        if let first = infoList.first(where: { (($0["url"] as? String)?.isEmpty == false) }),
+           let url = first["url"] as? String {
+            return url
+        }
+
+        if let traceId = image["traceId"] as? String, !traceId.isEmpty {
+            return "https://ci.xiaohongshu.com/\(traceId)"
+        }
+        return nil
+    }
+
+    private static func originalXiaohongshuImageURL(from rawURL: String) -> String {
+        let normalized = normalizedXiaohongshuMediaURLProtocol(normalizedEmbeddedText(rawURL))
+        let lower = normalized.lowercased()
+        guard lower.contains("xhscdn.com"),
+              !lower.contains("video"),
+              let url = URL(string: normalized) else {
+            return normalized
+        }
+
+        let tokenPath = url.path
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .split(whereSeparator: { $0 == "!" || $0 == "?" })
+            .first
+            .map(String.init) ?? ""
+        let segments = tokenPath.split(separator: "/").map(String.init).filter { !$0.isEmpty }
+        let mediaToken = segments.count >= 3 ? segments.dropFirst(2).joined(separator: "/") : tokenPath
+        guard !mediaToken.isEmpty else { return normalized }
+
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "ci.xiaohongshu.com"
+        components.path = "/\(mediaToken)"
+        return components.url?.absoluteString ?? "https://ci.xiaohongshu.com/\(mediaToken)"
+    }
+
+    private static func isCanonicalXiaohongshuImageURL(_ rawURL: String) -> Bool {
+        guard let url = URL(string: rawURL),
+              url.scheme?.lowercased() == "https",
+              url.host?.lowercased() == "ci.xiaohongshu.com",
+              !url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty else {
+            return false
+        }
+        return !isXiaohongshuVideoURL(rawURL)
+    }
+
+    private static func normalizedXiaohongshuMediaURLProtocol(_ rawURL: String) -> String {
+        guard var components = URLComponents(string: rawURL),
+              components.scheme?.lowercased() == "http",
+              let host = components.host?.lowercased(),
+              host == "ci.xiaohongshu.com" || host.hasSuffix(".xhscdn.com") || host == "xhscdn.com" else {
+            return rawURL
+        }
+        components.scheme = "https"
+        return components.url?.absoluteString ?? rawURL
     }
 
     private static func generatedXiaohongshuOriginVideoURLs(in object: Any) -> [String] {

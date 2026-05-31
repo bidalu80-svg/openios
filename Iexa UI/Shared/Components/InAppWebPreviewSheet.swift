@@ -486,10 +486,9 @@ struct InAppWebPreviewSheet: View {
         for image in images {
             guard let imageURL = URL(string: image.url) else { continue }
             var request = URLRequest(url: imageURL, timeoutInterval: 120)
-            request.setValue(Self.mobileUserAgent, forHTTPHeaderField: "User-Agent")
-            request.setValue("image/avif,image/webp,image/apng,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
-            request.setValue(activeURL.absoluteString, forHTTPHeaderField: "Referer")
+            applyMediaDownloadHeaders(to: &request, sourceURL: imageURL)
             let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+            try validateDownloadedMedia(at: temporaryURL, response: response, sourceURL: imageURL)
             let destination = directory.appendingPathComponent(downloadImageFileName(image: image, response: response, url: imageURL))
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.moveItem(at: temporaryURL, to: destination)
