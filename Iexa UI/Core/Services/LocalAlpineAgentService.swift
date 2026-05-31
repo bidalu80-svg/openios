@@ -783,6 +783,23 @@ actor LocalAlpineAgentService {
                     continue
                 }
 
+                if let warning = busyBoxCompatibilityWarning(for: commandToExecute) {
+                    let result = LocalAlpineCommandResult(
+                        command: commandToExecute,
+                        output: warning,
+                        exitCode: 126,
+                        interactiveRequest: nil
+                    )
+                    stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
+                    commandResults.append(Self.commandResult(
+                        command: commandToExecute,
+                        cwd: effectiveCWD,
+                        result: result
+                    ))
+                    stopRemainingCommands = true
+                    continue
+                }
+
                 let classifiedShellTool = Self.shellToolClassification(
                     for: commandToExecute,
                     fallbackName: command.shellToolName,
@@ -4320,6 +4337,63 @@ actor LocalAlpineAgentService {
         Code files are indentation/escaping-sensitive. Do not write source files through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts.
         Re-send the change through structured `iexa_alpine` JSON using `edit_file`, `patch_file`, or same-path `write_files` with `code_lines`, `content_lines`, or `content_base64`, then run a bounded verification command before executing it.
         """
+    }
+
+    private func busyBoxCompatibilityWarning(for command: String) -> String? {
+        let normalized = command
+            .replacingOccurrences(of: "\\\n", with: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+
+        let issue: String?
+        let replacement: String?
+        if Self.commandMatches(normalized, pattern: #"\bfind\b[^;&|]*\s-printf\b"#) {
+            issue = "`find -printf` is a GNU find extension; BusyBox find in this runtime does not support it."
+            replacement = "Use `glob`/`list_dir`, or `find PATH -type f -print | sed -n '1,200p'`."
+        } else if Self.commandMatches(normalized, pattern: #"\bgrep\b[^;&|]*\s-P\b"#) {
+            issue = "`grep -P` requires PCRE grep; BusyBox grep does not provide it."
+            replacement = "Use `grep` structured search, `grep -E`, or a small Python regex script if Python support is required."
+        } else if Self.commandMatches(normalized, pattern: #"\bsed\b[^;&|]*\s-i\s+''"#) {
+            issue = "`sed -i ''` is macOS/BSD sed syntax; BusyBox sed uses a different in-place form."
+            replacement = "Use structured `edit_file`/`patch_file`, or BusyBox-safe `sed -i 's/old/new/g' file` only for simple non-code edits."
+        } else if normalized.contains("[[") || normalized.contains("]]") {
+            issue = "`[[ ... ]]` is a Bash conditional; the Local Alpine shell is BusyBox ash."
+            replacement = "Use POSIX `[ ... ]`/`test`, or emit a structured `verify` tool."
+        } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)source\s+"#) {
+            issue = "`source` is a Bash spelling; BusyBox ash uses `.`."
+            replacement = "Use `. ./script.sh` when sourcing is actually needed."
+        } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)(mapfile|readarray)\b"#) {
+            issue = "`mapfile`/`readarray` are Bash builtins and are not available in BusyBox ash."
+            replacement = "Use `while IFS= read -r line; do ...; done`."
+        } else if normalized.contains("<(") || normalized.contains(">(") {
+            issue = "Process substitution `<(...)`/`>(...)` is Bash-only and is not available in BusyBox ash."
+            replacement = "Write a temporary file under `/mnt/iexa` or pipe commands directly."
+        } else if Self.commandMatches(normalized, pattern: #"\btime\.sleep\s*\("#) {
+            issue = "`time.sleep()` can raise `OSError: [Errno 38] Function not implemented` in this iSH-backed Python runtime."
+            replacement = "Avoid sleeps in generated scripts/tests; if a delay is truly required, use shell `sleep` outside Python."
+        } else {
+            return nil
+        }
+
+        return """
+        BusyBox/ash compatibility guard.
+
+        This command was not run because it uses syntax that commonly fails in the Local Alpine BusyBox/ash runtime.
+
+        Issue: \(issue ?? "unsupported command syntax")
+        Rewrite: \(replacement ?? "Use POSIX sh/ash syntax or the structured Local Alpine wrappers.")
+
+        Prefer structured `iexa_alpine` JSON tools for this next step:
+        - `list_dir` or `glob` instead of hand-written `find` formatting
+        - `grep` instead of raw GNU grep flags
+        - `verify` for bounded test/compile/run checks
+        - `edit_file`/`patch_file`/`write_files` for file modifications
+        """
+    }
+
+    private nonisolated static func commandMatches(_ command: String, pattern: String) -> Bool {
+        command.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     private nonisolated static func commandsByConvertingCatHeredocWrites(

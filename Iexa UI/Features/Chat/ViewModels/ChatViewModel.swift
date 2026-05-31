@@ -1678,6 +1678,15 @@ final class ChatViewModel {
         )
     ]
 
+    private static let localAlpineBusyBoxCompatibilityNotes = """
+        BusyBox/ash compatibility:
+        - Prefer structured wrappers (`list_dir`, `glob`, `grep`, `verify`, `browser_use`) for common list/search/check/fetch work; the host converts them into bounded BusyBox-safe commands.
+        - If raw `command` is necessary, write POSIX sh/ash only. Avoid GNU/macOS/bash-only syntax unless a prior command proves support.
+        - Known bad patterns here: `find -printf`, `grep -P`, `sed -i ''`, Bash `[[ ... ]]`, `source`, `mapfile`, `readarray`, and process substitution `<(...)` or `>(...)`.
+        - Safe replacements: `find PATH -type f -print | sed -n '1,200p'`, `grep -E`, `. ./script.sh`, `[ ... ]`, and `while IFS= read -r line; do ...; done`.
+        - iSH/Python runtime quirk: avoid `time.sleep()` in generated scripts/tests; make tests deterministic or use shell `sleep` only when a delay is truly required.
+        """
+
     private static var localAlpineToolManifest: String {
         let capabilities = localAlpineToolCapabilities
             .map { capability in
@@ -1699,6 +1708,7 @@ final class ChatViewModel {
         - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls. `browser_use` supports optional `save_to`/`output` plus `open_preview:true` so large HTML/SVG/JSON responses can be written under `/mnt/iexa` and opened through the preview bridge instead of being pasted into chat.
         - In-app preview bridge: after creating a user-viewable file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
+        \(localAlpineBusyBoxCompatibilityNotes)
         - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, or macOS-only utilities.
         - Rootfs/environment/dependency checks: if the user asks whether Python/Lua/Node/C++ or dependencies exist, inspect the running Alpine rootfs/runtime/toolchain directly with bounded `command -v`, `--version`, `apk info`, `python3 -m pip list`, `find /usr/lib /usr/local/lib`, or small module-list commands. Do not invent `/mnt/iexa/rootfs`; `/mnt/iexa` is only the workspace mount. Do not only search `/mnt/iexa` project dependency files unless the user specifically asks for project dependency files.
         - Service/process commands: prefer foreground commands and bounded verification. Do not assume OpenRC/system services are available unless a prior command proves it.
@@ -1738,6 +1748,7 @@ final class ChatViewModel {
             - If the user is asking a capability question, explanation, example, comparison, or "can this run" style question, answer normally and do not emit `iexa_alpine`.
             - If the task depends on unknown current files, first get a small workspace listing, then continue from that observation.
             - If the task depends on compilers or packages, use one focused probe only when the toolchain has not already been observed.
+            - Use the BusyBox/ash command dialect. Prefer structured wrappers (`list_dir`, `glob`, `grep`, `verify`) over raw `find`/`grep`; never use known GNU/bash-only patterns like `find -printf`, `grep -P`, Bash `[[ ... ]]`, `source`, or process substitution.
             - If the user asked to write/create/build/run code, combine file creation plus compile/run verification in the first useful tool call when practical. Do not stop after a dependency probe if the required tools are present.
             - If the user gave an explicit simple file operation target, combine the operation with a minimal `pwd`/`ls` verification instead of running a separate bootstrap.
             - Do not ask for confirmation for explicit operations bounded to `/mnt/iexa`; user wording such as delete/remove/modify/run/test/read/check is already confirmation. Ask only for paths outside `/mnt/iexa` or multiple unsafe targets.
@@ -1817,6 +1828,10 @@ final class ChatViewModel {
                 lines.append("  required next action:")
                 lines.append(indentForSystemContext("Python syntax/indentation error detected. Inspect the target project file, then repair the original path in place through byte-preserving iexa_alpine JSON write_files and run a bounded verification command. Use a complete-file write only for the same target path when the Python write gate requires it. Do not create a replacement filename or repeat only the same failed command."))
             }
+            if localAlpineOutputHasBusyBoxCompatibilityIssue(content + "\n" + (rawResult ?? "")) {
+                lines.append("  required next action:")
+                lines.append(indentForSystemContext("BusyBox/ash compatibility issue detected. Do not repeat the same command. Use structured wrappers such as list_dir/glob/grep/verify, or rewrite as POSIX sh/ash without GNU/bash-only flags such as find -printf, grep -P, [[ ... ]], source, or process substitution."))
+            }
             let observationText = [content, rawResult].compactMap { $0 }.joined(separator: "\n")
             let normalizedObservation = normalizedLocalAlpineResultTextForFollowUpCheck(observationText)
             let toolCalls = LocalAlpineToolCall.decodeMetadata(metadata["iexa_local_alpine_tool_calls"])
@@ -1862,6 +1877,7 @@ final class ChatViewModel {
         - Treat `.iexa-terminal-scripts/command-*.sh` paths as internal one-shot host temp scripts. Never read, edit, verify, or mention them as user files.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
         - If the latest result contains Python IndentationError or SyntaxError, inspect the target project file, then emit the corrected content to the same original path through byte-preserving `iexa_alpine` JSON `write_files`, then run a bounded verification command. Keep the file body complete and exact when the Python write gate requires a full-file write; do not create a sibling replacement file and do not repeat only the same failed command.
+        - If the latest result contains a BusyBox/ash compatibility error, rewrite the command using `list_dir`, `glob`, `grep`, `verify`, or POSIX sh/ash syntax. Do not repeat GNU/bash-only syntax.
         [/Local Alpine execution state]
         """
     }
@@ -2294,6 +2310,22 @@ final class ChatViewModel {
         return lowercased.contains("indentationerror")
             || lowercased.contains("syntaxerror")
             || lowercased.contains("taberror")
+    }
+
+    private static func localAlpineOutputHasBusyBoxCompatibilityIssue(_ output: String) -> Bool {
+        let lowercased = output.lowercased()
+        let markers = [
+            "busybox/ash compatibility guard",
+            "busybox compatibility",
+            "not supported by busybox",
+            "find: unrecognized: -printf",
+            "grep: unrecognized option: p",
+            "bad substitution",
+            "syntax error: unexpected \"(\"",
+            "syntax error: unexpected \"[[\"",
+            "oserror: [errno 38] function not implemented"
+        ]
+        return markers.contains { lowercased.contains($0) }
     }
 
     private static func localAlpineCommandIsPythonSyntaxCheckOnly(_ command: String) -> Bool {
@@ -14247,6 +14279,12 @@ final class ChatViewModel {
         Code file write retry
         之前的写入命令被保护层拦过。下一步应改用结构化 `edit_file`/`patch_file` 修复原文件，或用 `write_files` 写回同一路径，并运行实际验证命令。
         """
+        } else if Self.localAlpineOutputHasBusyBoxCompatibilityIssue(failure.outputPreview) {
+            pythonRepairInstruction = """
+
+        BusyBox/ash compatibility retry
+        之前命令使用了当前 Local Alpine 不兼容的 GNU/bash/Python 运行时写法。下一步不要重复原命令，优先改用 `list_dir`/`glob`/`grep`/`verify` 结构化工具；必须写 shell 时只用 POSIX sh/ash 和 BusyBox 兼容参数。
+        """
         } else {
             pythonRepairInstruction = ""
         }
@@ -15824,6 +15862,7 @@ final class ChatViewModel {
         - If it is `tool_running`, report that the local command is still running or ask whether to stop it.
         - `iexa_alpine` is a Markdown fence intercepted by the host app, not a provider function. Never say it does not exist.
         - Never ask the user to send back local output; the host app returns Local Alpine output automatically.
+        - Use BusyBox/ash-compatible commands. Prefer `list_dir`, `glob`, `grep`, `verify`, and `browser_use` wrappers; if raw shell is necessary, avoid GNU/bash-only syntax such as `find -printf`, `grep -P`, `[[ ... ]]`, `source`, `mapfile`, and process substitution.
         - Keep visible text before a tool block empty or one short progress sentence.
         [/Local Alpine continuation]
         """
@@ -15852,6 +15891,7 @@ final class ChatViewModel {
         - For reads/checks, use `read_file`, `list_dir`, `grep`, `verify`, or bounded `command` as appropriate.
         - For deletes, use structured `delete_file`/`delete_files`, then verify absence in the same block.
         - For modification, read the relevant file if needed, then use `edit_file`, `patch_file`, or `write_files` and verify when the user asked to run/test.
+        - Use BusyBox/ash-compatible commands. Prefer structured wrappers for list/search/check/fetch work; do not use GNU/bash-only syntax such as `find -printf`, `grep -P`, `[[ ... ]]`, `source`, or process substitution.
         - Do not append guessed success, stdout, file contents, or final summaries after the `iexa_alpine` block.
         - Keep visible text before the block empty or one short progress sentence.
         [/Local Alpine missing tool correction]
