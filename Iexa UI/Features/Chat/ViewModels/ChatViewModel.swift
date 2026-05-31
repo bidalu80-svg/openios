@@ -14502,7 +14502,10 @@ final class ChatViewModel {
             }
         )
         let result = toolResult.result
-        guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else { return }
+        guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else {
+            clearLocalAlpineLiveToolState(for: resultMessageId)
+            return
+        }
         guard !Task.isCancelled else {
             let stoppedStatus = localAlpineStatus(description: "本地任务已停止", done: true)
             updateAssistantMessage(
@@ -14516,11 +14519,13 @@ final class ChatViewModel {
                 node.done = true
                 node.statusHistory = [stoppedStatus]
             }
+            clearLocalAlpineLiveToolState(for: resultMessageId)
             await persistLocalConversationIfNeeded()
             NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
             return
         }
         guard result.didExecute else {
+            clearLocalAlpineLiveToolState(for: resultMessageId)
             conversation?.messages.removeAll { $0.id == resultMessageId }
             conversation?.history.removeSubtree(rootId: resultMessageId)
             await persistLocalConversationIfNeeded()

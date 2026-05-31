@@ -215,7 +215,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
         }.count
 
         return AgentActivityItem(
-            id: "\(id)-limited-\(maxSteps)-\(steps.count)",
+            id: id,
             timestamp: timestamp,
             isStreaming: isStreaming,
             summary: "最近 \(maxSteps) 个步骤",
@@ -660,10 +660,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
             commandCount > 0 ? "命令 \(commandCount)" : nil
         ].compactMap { $0 }
         let isStreaming = activeOrConcreteItems.contains { $0.isActive || $0.isStreaming }
-        let phase = isStreaming ? "active" : "done"
 
         return AgentActivityItem(
-            id: "\(id)-\(activeOrConcreteItems.count)-\(mergedSteps.count)-\(phase)",
+            id: id,
             timestamp: activeOrConcreteItems.map(\.timestamp).max() ?? .now,
             isStreaming: isStreaming,
             summary: summaryParts.isEmpty ? (activeOrConcreteItems.last?.summary ?? "本地步骤") : summaryParts.joined(separator: " · "),
@@ -685,10 +684,7 @@ struct ChatDetailView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
 
-    private static let agentFloatingPreviewStepLimit = 80
-    private static let agentFloatingPreviewMessageWindow = 32
-    private static let agentFloatingPreviewItemLimit = 12
-
+    private static let agentFloatingPreviewStepLimit = 24
     private let logger = Logger(subsystem: "com.openui", category: "ChatDetailView")
 
     private let initialConversationId: String?
@@ -798,13 +794,18 @@ struct ChatDetailView: View {
             .compactMap { activityItem(for: $0) }
     }
 
-    private var floatingAgentActivityItems: [AgentActivityItem] {
-        Array(
-            viewModel.messages
-                .suffix(Self.agentFloatingPreviewMessageWindow)
-                .compactMap { activityItem(for: $0) }
-                .suffix(Self.agentFloatingPreviewItemLimit)
-        )
+    private var currentTurnAgentActivityItems: [AgentActivityItem] {
+        guard viewModel.isStreaming || viewModel.streamingStore.isActive else {
+            return []
+        }
+        let messages = viewModel.messages
+        guard !messages.isEmpty else { return [] }
+        let lastUserIndex = messages.lastIndex(where: { $0.role == .user })
+        let startIndex = lastUserIndex.map { messages.index(after: $0) } ?? messages.startIndex
+        guard startIndex < messages.endIndex else { return [] }
+        return messages[startIndex...]
+            .compactMap { activityItem(for: $0) }
+            .filter { $0.hasConcreteSteps || $0.isActive }
     }
 
     private var transcriptMessages: [ChatMessage] {
@@ -882,37 +883,26 @@ struct ChatDetailView: View {
     }
 
     private var latestVisibleAgentActivity: AgentActivityItem? {
-        let recentMessages = Array(viewModel.messages.suffix(80))
-        let lastUserIndex = recentMessages.lastIndex(where: { $0.role == .user })
-        let currentTurnMessages: ArraySlice<ChatMessage> = {
-            guard let lastUserIndex else { return recentMessages[...] }
-            let start = recentMessages.index(after: lastUserIndex)
-            return start < recentMessages.endIndex ? recentMessages[start...] : []
-        }()
-        let turnItems = currentTurnMessages.compactMap { activityItem(for: $0) }
+        let turnItems = currentTurnAgentActivityItems
 
         if let merged = AgentActivityItem.mergedTurn(
-            id: "turn-\(recentMessages.last?.id ?? "latest")",
+            id: "turn-\(viewModel.messages.last?.id ?? "latest")",
             items: turnItems
         ), merged.hasConcreteSteps {
-            if merged.isActive || viewModel.isStreaming { return merged }
-            return Date().timeIntervalSince(merged.timestamp) < 180 ? merged : nil
+            return merged.isActive || viewModel.isStreaming ? merged : nil
         }
 
-        let items = recentMessages.reversed().compactMap { activityItem(for: $0) }
-        guard let item = items.first(where: { $0.hasConcreteSteps }) ?? items.first else {
-            return nil
-        }
-        if item.isActive || viewModel.isStreaming { return item }
-        return Date().timeIntervalSince(item.timestamp) < 180 ? item : nil
+        guard let item = turnItems.reversed().first(where: { $0.hasConcreteSteps }) ?? turnItems.last else { return nil }
+        return item.isActive || viewModel.isStreaming ? item : nil
     }
 
     private var visibleAgentActivityWindowPreview: AgentActivityItem? {
-        let items = floatingAgentActivityItems
+        let items = currentTurnAgentActivityItems
+        guard !items.isEmpty else { return nil }
         if let merged = AgentActivityItem.mergedTurn(
             id: "window-\(items.first?.id ?? "empty")-\(items.last?.id ?? "latest")",
             items: items
-        ), merged.hasConcreteSteps {
+        ), merged.hasConcreteSteps, merged.isActive || viewModel.isStreaming {
             return merged.limitingSteps(to: Self.agentFloatingPreviewStepLimit)
         }
 
@@ -1343,7 +1333,9 @@ struct ChatDetailView: View {
         .sheet(item: $sourcesSheetMessage) { message in
             SourcesDetailSheet(sources: message.sources)
         }
-        .sheet(isPresented: $showAgentTaskPanel) {
+        .sheet(isPresented: $showAgentTaskPanel, onDismiss: {
+            agentActivitySnapshot = []
+        }) {
             AgentTaskPanelView(items: agentActivitySnapshot)
                 .themed()
         }
@@ -6246,7 +6238,8 @@ private struct AgentInlineStepsView: View {
     @Environment(\.theme) private var theme
 
     private var visibleSteps: [AgentActivityStep] {
-        Array(item.steps.prefix(12))
+        let limit = item.isActive ? 6 : 8
+        return Array(item.steps.suffix(limit))
     }
 
     var body: some View {
@@ -6264,7 +6257,7 @@ private struct AgentInlineStepsView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "ellipsis")
                             .scaledFont(size: 11, weight: .bold)
-                        Text("还有 \(item.steps.count - visibleSteps.count) 个步骤")
+                        Text("还有 \(item.steps.count - visibleSteps.count) 个较早步骤")
                             .scaledFont(size: 11, weight: .semibold)
                     }
                     .foregroundStyle(theme.textTertiary)
@@ -6274,9 +6267,8 @@ private struct AgentInlineStepsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .buttonStyle(.plain)
-        .animation(MicroAnimation.snappy, value: visibleSteps.map(\.id))
         .transaction { transaction in
-            transaction.animation = MicroAnimation.snappy
+            transaction.animation = nil
         }
         .accessibilityLabel("查看步骤")
     }
