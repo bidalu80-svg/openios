@@ -613,6 +613,9 @@ struct StreamingMarkdownView: View {
     private static func sanitizedMarkdownTextForDisplay(_ text: String) -> String {
         var cleaned = text
         cleaned = removeProviderCitationArtifacts(from: cleaned)
+        if Self.containsPartialInlineDataImageReference(cleaned) {
+            cleaned = "正在接收图片..."
+        }
         cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(cleaned)
         cleaned = cleaned.replacingOccurrences(
             of: #"!?\[[^\]]*\]\(\s*(?:<已隐藏超长Base64内容>)?\s*\)"#,
@@ -639,6 +642,14 @@ struct StreamingMarkdownView: View {
         }
         cleaned = normalizedDisplayLinks(in: cleaned)
         return cleaned
+    }
+
+    private static func containsPartialInlineDataImageReference(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("data:imag")
+            || lower.contains("image:data")
+            || (lower.contains("![") && lower.contains("](data:"))
+            || (lower.contains("<img") && lower.contains("src=") && lower.contains("data:"))
     }
 
     private static func normalizedDisplayLinks(in text: String) -> String {
@@ -3327,7 +3338,7 @@ private struct MarkdownInlineImageView: View {
         }
     }
 
-    private static func dataURIImage(from dataURI: String) -> UIImage? {
+    nonisolated private static func dataURIImage(from dataURI: String) -> UIImage? {
         guard dataURI.hasPrefix("data:image/"),
               dataURI.count <= 7_000_000,
               let comma = dataURI.firstIndex(of: ",") else { return nil }

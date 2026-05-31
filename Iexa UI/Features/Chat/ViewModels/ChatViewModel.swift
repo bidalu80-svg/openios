@@ -6569,20 +6569,26 @@ final class ChatViewModel {
     }
 
     private static func localAlpineCommandObjects(fromNormalized object: Any) -> [Any] {
-        if let dict = object as? [String: Any],
-           let nested = dict["iexa_alpine"]
-            ?? dict["local_alpine_exec"]
-            ?? dict["tool_calls"]
-            ?? dict["toolCalls"]
-            ?? dict["function_call"]
-            ?? dict["functionCall"]
-            ?? dict["tool_use"]
-            ?? dict["toolUse"]
-            ?? dict["tool_call"]
-            ?? dict["toolCall"]
-            ?? dict["calls"]
-            ?? dict["commands"] {
-            return localAlpineCommandObjects(fromNormalized: nested)
+        if let dict = object as? [String: Any] {
+            let nestedKeys = [
+                "iexa_alpine",
+                "local_alpine_exec",
+                "tool_calls",
+                "toolCalls",
+                "function_call",
+                "functionCall",
+                "tool_use",
+                "toolUse",
+                "tool_call",
+                "toolCall",
+                "calls",
+                "commands"
+            ]
+            for key in nestedKeys {
+                if let nested = dict[key] {
+                    return localAlpineCommandObjects(fromNormalized: nested)
+                }
+            }
         }
         if let array = object as? [Any] {
             return array.flatMap { localAlpineCommandObjects(fromNormalized: $0) }
@@ -16144,14 +16150,18 @@ final class ChatViewModel {
     private static let inlineImageReceivePlaceholder = "正在接收图片..."
 
     private static func shouldShowInlineImageReceiveState(for text: String) -> Bool {
-        let containsInlineDataImage = text.range(of: "data:image/", options: .caseInsensitive) != nil
-            || text.range(of: "image:data/", options: .caseInsensitive) != nil
-        if containsInlineDataImage {
+        let lower = text.lowercased()
+        if lower.contains("data:image/")
+            || lower.contains("image:data/")
+            || lower.contains("data:imag")
+            || lower.contains("image:data")
+            || (lower.contains("![") && lower.contains("](data:"))
+            || (lower.contains("<img") && lower.contains("src=") && lower.contains("data:")) {
             return true
         }
         guard text.utf8.count > 2_048 else { return false }
-        return text.range(of: "b64_json", options: .caseInsensitive) != nil
-            || text.range(of: "image_base64", options: .caseInsensitive) != nil
+        return lower.contains("b64_json")
+            || lower.contains("image_base64")
     }
 
     private static func cleanedLocalAlpineMissingToolEchoes(_ text: String) -> String {
