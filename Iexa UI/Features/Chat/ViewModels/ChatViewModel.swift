@@ -151,7 +151,7 @@ private enum LocalContextOffloadStore {
         }
 
         let now = Date()
-        let files = urls.compactMap { url -> (url: URL, modified: Date) in
+        let files = urls.compactMap { url -> (url: URL, modified: Date)? in
             guard url.pathExtension.lowercased() == "txt",
                   let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
                   values.isRegularFile == true else {
