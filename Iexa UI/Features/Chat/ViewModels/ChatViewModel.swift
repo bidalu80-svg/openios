@@ -1707,7 +1707,6 @@ final class ChatViewModel {
         - JSON tool capabilities:
         \(capabilities)
         - Source file writes: never write code through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files.code_lines`, `content_lines`, `content_base64`, same-path `edit_file`, or `patch_file`.
-        - New source files: the first write must be a structured JSON `write_files` entry. Put source code in `code_lines` (preferred) or `content_base64`. Do not put Markdown fences such as ```python inside JSON content/code/source fields.
         - Python writes: `.py`/`.pyw` must use `write_files.code_lines` or `content_base64`; localized Python repairs should prefer `read_file` then same-path `edit_file`/`patch_file`.
         - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
         - Tool loop: one assistant turn emits at most one `iexa_alpine` block; the next turn must read the returned stdout/stderr/exit code before deciding whether to continue.
@@ -1740,7 +1739,6 @@ final class ChatViewModel {
             - If the task depends on unknown current files, first get a small workspace listing, then continue from that observation.
             - If the task depends on compilers or packages, use one focused probe only when the toolchain has not already been observed.
             - If the user asked to write/create/build/run code, combine file creation plus compile/run verification in the first useful tool call when practical. Do not stop after a dependency probe if the required tools are present.
-            - For first-time source creation, use `write_files` with `code_lines` in that first tool call, then run syntax/compile verification in the same block. Never answer with a visible code fence and then wait for a correction turn.
             - If the user gave an explicit simple file operation target, combine the operation with a minimal `pwd`/`ls` verification instead of running a separate bootstrap.
             - Do not ask for confirmation for explicit operations bounded to `/mnt/iexa`; user wording such as delete/remove/modify/run/test/read/check is already confirmation. Ask only for paths outside `/mnt/iexa` or multiple unsafe targets.
             - Only treat run/test/build/fix/install/read/write/delete/search as an operation request when the user asks you to actually perform it. If the wording is asking for advice or feasibility, do not use the tool.
@@ -15727,7 +15725,6 @@ final class ChatViewModel {
         - If it is `tool_running`, report that the local command is still running or ask whether to stop it.
         - `iexa_alpine` is a Markdown fence intercepted by the host app, not a provider function. Never say it does not exist.
         - Never ask the user to send back local output; the host app returns Local Alpine output automatically.
-        - For any source write in the next tool block, use structured `write_files.code_lines`, `content_base64`, `edit_file`, or `patch_file`; do not put Markdown code fences inside JSON payload fields.
         - Keep visible text before a tool block empty or one short progress sentence.
         [/Local Alpine continuation]
         """
@@ -15755,7 +15752,6 @@ final class ChatViewModel {
         - Resolve "this/it/这个/它/删了/换一个/再跑/继续" from the latest Local Alpine observation and recent written files.
         - For reads/checks, use `read_file`, `list_dir`, `grep`, `verify`, or bounded `command` as appropriate.
         - For deletes, use structured `delete_file`/`delete_files`, then verify absence in the same block.
-        - For new source files, use `write_files.code_lines` or `content_base64` immediately; never put Markdown code fences inside JSON content/code/source fields.
         - For modification, read the relevant file if needed, then use `edit_file`, `patch_file`, or `write_files` and verify when the user asked to run/test.
         - Do not append guessed success, stdout, file contents, or final summaries after the `iexa_alpine` block.
         - Keep visible text before the block empty or one short progress sentence.
