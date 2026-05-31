@@ -131,7 +131,8 @@ struct InAppWebPreviewSheet: View {
 
     private var playableVideoURL: URL? {
         if WebLinkContextResolver.isXiaohongshuURL(activeURL) {
-            if let raw = resolvedXiaohongshuPost?.video?.url, let url = URL(string: raw) {
+            if let raw = resolvedXiaohongshuPost?.videoCandidates.first?.url ?? resolvedXiaohongshuPost?.video?.url,
+               let url = URL(string: raw) {
                 return url
             }
             return safePageVideoURL(state.pageVideoURL)
@@ -189,6 +190,17 @@ struct InAppWebPreviewSheet: View {
             return resolvedDouyinPost?.video?.title
         }
         return resolvedXiaohongshuPost?.video?.title ?? resolvedDouyinPost?.video?.title
+    }
+
+    private var activeResolvedVideoURLs: [URL] {
+        if WebLinkContextResolver.isXiaohongshuURL(activeURL) {
+            let candidateURLs = resolvedXiaohongshuPost?.videoCandidates.compactMap { URL(string: $0.url) } ?? []
+            if !candidateURLs.isEmpty { return candidateURLs }
+        }
+        if let url = playableVideoURL {
+            return [url]
+        }
+        return []
     }
 
     private var activeSocialPlatformName: String {
@@ -352,14 +364,23 @@ struct InAppWebPreviewSheet: View {
                 await resolveXiaohongshuIfNeeded(force: true)
             }
 
-            if let videoURL = playableVideoURL {
-                let (temporaryURL, response) = try await downloadMediaFile(from: videoURL)
-                let destination = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(downloadFileName(response: response, url: videoURL))
-                try? FileManager.default.removeItem(at: destination)
-                try FileManager.default.moveItem(at: temporaryURL, to: destination)
-                downloadedMedia = WebPreviewDownloadedMedia(urls: [destination])
-                return
+            let videoURLs = activeResolvedVideoURLs
+            if !videoURLs.isEmpty {
+                var lastError: Error?
+                for videoURL in videoURLs {
+                    do {
+                        let (temporaryURL, response) = try await downloadMediaFile(from: videoURL)
+                        let destination = FileManager.default.temporaryDirectory
+                            .appendingPathComponent(downloadFileName(response: response, url: videoURL))
+                        try? FileManager.default.removeItem(at: destination)
+                        try FileManager.default.moveItem(at: temporaryURL, to: destination)
+                        downloadedMedia = WebPreviewDownloadedMedia(urls: [destination])
+                        return
+                    } catch {
+                        lastError = error
+                    }
+                }
+                throw lastError ?? URLError(.cannotDecodeContentData)
             }
 
             let images = activeResolvedImages

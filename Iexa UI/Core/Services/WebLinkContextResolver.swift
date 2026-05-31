@@ -50,6 +50,7 @@ struct ResolvedXiaohongshuPost: Sendable, Hashable {
     let sourceURL: String
     let pageURL: String
     let video: ResolvedWebVideo?
+    let videoCandidates: [ResolvedWebVideo]
     let images: [ResolvedWebImage]
     let title: String
     let author: String?
@@ -57,7 +58,7 @@ struct ResolvedXiaohongshuPost: Sendable, Hashable {
     let noteId: String?
 
     var hasMedia: Bool {
-        video != nil || !images.isEmpty
+        video != nil || !videoCandidates.isEmpty || !images.isEmpty
     }
 }
 
@@ -329,9 +330,16 @@ struct WebLinkContextResolver: Sendable {
         if videoCandidates.isEmpty {
             videoCandidates.append(contentsOf: Self.mediaURLCandidates(in: html, kind: .video))
         }
+        if !videoCandidates.isEmpty,
+           let downloadProxyURL = Self.xiaohongshuDownloadProxyURL(
+                sourceURL: pageURL.absoluteString,
+                title: title
+           ) {
+            videoCandidates.insert(downloadProxyURL, at: 0)
+        }
         videoCandidates = Self.sortedXiaohongshuVideoURLs(Self.uniqueMediaURLs(videoCandidates, preservingQuery: true))
 
-        let resolvedVideo = videoCandidates.first.map { mediaURL in
+        let resolvedVideos = videoCandidates.map { mediaURL in
             ResolvedWebVideo(
                 title: Self.safeVideoFileName(title, fallback: "xiaohongshu-video"),
                 url: mediaURL,
@@ -339,6 +347,7 @@ struct WebLinkContextResolver: Sendable {
                 videoId: noteId
             )
         }
+        let resolvedVideo = resolvedVideos.first
 
         var imageCandidates: [String] = []
         if let noteObject {
@@ -363,6 +372,7 @@ struct WebLinkContextResolver: Sendable {
             sourceURL: url.absoluteString,
             pageURL: pageURL.absoluteString,
             video: resolvedVideo,
+            videoCandidates: resolvedVideos,
             images: images,
             title: title,
             author: author,
@@ -851,9 +861,13 @@ struct WebLinkContextResolver: Sendable {
     private static func xiaohongshuVideoURLRank(_ raw: String) -> Int {
         let lower = raw.lowercased()
         var rank = 50
-        if lower.contains("sns-bak") {
-            rank -= 35
+        if lower.contains("downloader-api.bhwa233.com/api/download") {
+            rank -= 60
         } else if lower.contains("sns-video-bd.xhscdn.com") {
+            rank -= 45
+        } else if lower.contains("sns-video-v") && lower.contains(".mp4") && lower.contains("?") {
+            rank -= 35
+        } else if lower.contains("sns-bak") {
             rank -= 25
         } else if lower.contains("sns-video-v2.xhscdn.com") {
             rank -= 20
@@ -870,6 +884,20 @@ struct WebLinkContextResolver: Sendable {
             rank += 30
         }
         return rank
+    }
+
+    private static func xiaohongshuDownloadProxyURL(sourceURL: String, title: String) -> String? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "downloader-api.bhwa233.com"
+        components.path = "/api/download"
+        components.queryItems = [
+            URLQueryItem(name: "url", value: sourceURL),
+            URLQueryItem(name: "raw", value: "1"),
+            URLQueryItem(name: "type", value: "video"),
+            URLQueryItem(name: "filename", value: safeBaseFileName(title, fallback: "xiaohongshu-video"))
+        ]
+        return components.url?.absoluteString
     }
 
     private static func resolvedXiaohongshuImages(
