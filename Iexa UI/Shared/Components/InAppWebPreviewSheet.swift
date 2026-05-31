@@ -556,7 +556,7 @@ private struct WebPreviewVideoPlayerSheet: View {
         }
         .onAppear {
             let asset = AVURLAsset(url: url, options: [
-                AVURLAssetHTTPHeaderFieldsKey: [
+                "AVURLAssetHTTPHeaderFieldsKey": [
                     "User-Agent": InAppWebPreviewSheet.mobileUserAgent,
                     "Referer": refererURL.absoluteString
                 ]
