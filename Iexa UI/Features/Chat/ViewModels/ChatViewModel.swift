@@ -6691,16 +6691,20 @@ final class ChatViewModel {
     }
 
     private static func localAlpineCompatibleToolName(in dict: [String: Any]) -> String? {
-        ((dict["name"] as? String)
-            ?? (dict["tool"] as? String)
-            ?? (dict["action"] as? String)
-            ?? (dict["operation"] as? String)
-            ?? (dict["op"] as? String)
-            ?? (dict["toolName"] as? String)
-            ?? (dict["tool_name"] as? String)
-            ?? (dict["functionName"] as? String)
-            ?? (dict["function_name"] as? String))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let keys = [
+            "name", "tool", "action", "operation", "op",
+            "toolName", "tool_name", "functionName", "function_name",
+        ]
+        for key in keys {
+            guard let value = dict[key] as? String else {
+                continue
+            }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return nil
     }
 
     private static func localAlpineCompatibleToolNameLooksStructured(_ name: String) -> Bool {
