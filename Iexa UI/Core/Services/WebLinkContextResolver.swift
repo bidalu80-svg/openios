@@ -316,13 +316,20 @@ struct WebLinkContextResolver: Sendable {
 
         var videoCandidates: [String] = []
         if let noteObject {
+            videoCandidates.append(contentsOf: Self.generatedXiaohongshuOriginVideoURLs(in: noteObject))
+            videoCandidates.append(contentsOf: Self.preferredXiaohongshuStreamURLs(in: noteObject))
             videoCandidates.append(contentsOf: Self.xiaohongshuURLs(in: noteObject, kind: .video))
+        } else {
+            for object in jsonObjects {
+                videoCandidates.append(contentsOf: Self.generatedXiaohongshuOriginVideoURLs(in: object))
+                videoCandidates.append(contentsOf: Self.preferredXiaohongshuStreamURLs(in: object))
+                videoCandidates.append(contentsOf: Self.xiaohongshuURLs(in: object, kind: .video))
+            }
         }
-        for object in jsonObjects {
-            videoCandidates.append(contentsOf: Self.xiaohongshuURLs(in: object, kind: .video))
+        if videoCandidates.isEmpty {
+            videoCandidates.append(contentsOf: Self.mediaURLCandidates(in: html, kind: .video))
         }
-        videoCandidates.append(contentsOf: Self.mediaURLCandidates(in: html, kind: .video))
-        videoCandidates = Self.sortedXiaohongshuVideoURLs(Self.uniqueMediaURLs(videoCandidates))
+        videoCandidates = Self.sortedXiaohongshuVideoURLs(Self.uniqueMediaURLs(videoCandidates, preservingQuery: true))
 
         let resolvedVideo = videoCandidates.first.map { mediaURL in
             ResolvedWebVideo(
@@ -640,7 +647,114 @@ struct WebLinkContextResolver: Sendable {
         }
 
         walk(object)
-        return uniqueMediaURLs(urls)
+        return uniqueMediaURLs(urls, preservingQuery: kind == .video)
+    }
+
+    private static func generatedXiaohongshuOriginVideoURLs(in object: Any) -> [String] {
+        var urls: [String] = []
+
+        func appendOriginVideoKey(_ raw: String) {
+            let key = normalizedEmbeddedText(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { return }
+            if key.hasPrefix("http://") || key.hasPrefix("https://") {
+                urls.append(key)
+            } else {
+                urls.append("https://sns-video-bd.xhscdn.com/\(key.trimmingCharacters(in: CharacterSet(charactersIn: "/")))")
+            }
+        }
+
+        func walk(_ value: Any) {
+            if let dict = value as? [String: Any] {
+                if let key = dict["originVideoKey"] as? String {
+                    appendOriginVideoKey(key)
+                }
+                for nested in dict.values {
+                    walk(nested)
+                }
+            } else if let list = value as? [Any] {
+                for item in list {
+                    walk(item)
+                }
+            }
+        }
+
+        walk(object)
+        return uniqueMediaURLs(urls, preservingQuery: true)
+    }
+
+    private static func preferredXiaohongshuStreamURLs(in object: Any) -> [String] {
+        var items: [(score: Int, order: Int, urls: [String])] = []
+        var order = 0
+
+        func intValue(_ value: Any?) -> Int {
+            if let value = value as? Int { return value }
+            if let value = value as? Double { return Int(value) }
+            if let value = value as? NSNumber { return value.intValue }
+            if let value = value as? String { return Int(value) ?? 0 }
+            return 0
+        }
+
+        func normalizedURLStrings(_ value: Any?) -> [String] {
+            if let string = value as? String {
+                return mediaURLCandidates(in: string, kind: .video)
+            }
+            if let list = value as? [String] {
+                return list.flatMap { mediaURLCandidates(in: $0, kind: .video) }
+            }
+            if let list = value as? [Any] {
+                return list.compactMap { $0 as? String }.flatMap { mediaURLCandidates(in: $0, kind: .video) }
+            }
+            return []
+        }
+
+        func appendStreamItem(_ dict: [String: Any]) {
+            let backupURLs = normalizedURLStrings(dict["backupUrls"] ?? dict["backup_urls"])
+            let masterURLs = normalizedURLStrings(dict["masterUrl"] ?? dict["master_url"])
+            let urls = backupURLs + masterURLs
+            guard !urls.isEmpty else { return }
+
+            let codec = (dict["videoCodec"] as? String)?.lowercased() ?? ""
+            let streamType = intValue(dict["streamType"])
+            var score = 0
+            score += intValue(dict["height"])
+            score += intValue(dict["width"]) / 2
+            score += intValue(dict["videoBitrate"]) / 1_000
+            score += intValue(dict["size"]) / 10_000
+            if codec.contains("h264") || codec.contains("avc") {
+                score += 5_000
+            }
+            if streamType == 259 {
+                score += 2_000
+            }
+            items.append((score, order, urls))
+            order += 1
+        }
+
+        func walk(_ value: Any) {
+            if let dict = value as? [String: Any] {
+                if dict["backupUrls"] != nil
+                    || dict["backup_urls"] != nil
+                    || dict["masterUrl"] != nil
+                    || dict["master_url"] != nil
+                {
+                    appendStreamItem(dict)
+                }
+                for nested in dict.values {
+                    walk(nested)
+                }
+            } else if let list = value as? [Any] {
+                for item in list {
+                    walk(item)
+                }
+            }
+        }
+
+        walk(object)
+        let ordered = items.sorted {
+            if $0.score != $1.score { return $0.score > $1.score }
+            return $0.order < $1.order
+        }
+        return uniqueMediaURLs(ordered.flatMap { $0.urls }, preservingQuery: true)
     }
 
     private static func mediaURLCandidates(in text: String, kind: XiaohongshuMediaKind) -> [String] {
@@ -703,7 +817,7 @@ struct WebLinkContextResolver: Sendable {
         return value
     }
 
-    private static func uniqueMediaURLs(_ urls: [String]) -> [String] {
+    private static func uniqueMediaURLs(_ urls: [String], preservingQuery: Bool = false) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
         for raw in urls {
@@ -713,7 +827,7 @@ struct WebLinkContextResolver: Sendable {
             guard let url = URL(string: normalized),
                   let scheme = url.scheme?.lowercased(),
                   scheme == "http" || scheme == "https" else { continue }
-            let key = canonicalImageURLKey(normalized)
+            let key = canonicalMediaURLKey(normalized, preservingQuery: preservingQuery)
             if seen.insert(key).inserted {
                 result.append(normalized)
             }
@@ -737,16 +851,20 @@ struct WebLinkContextResolver: Sendable {
     private static func xiaohongshuVideoURLRank(_ raw: String) -> Int {
         let lower = raw.lowercased()
         var rank = 50
-        if lower.contains("sns-video-v2.xhscdn.com") {
+        if lower.contains("sns-bak") {
+            rank -= 35
+        } else if lower.contains("sns-video-bd.xhscdn.com") {
             rank -= 25
+        } else if lower.contains("sns-video-v2.xhscdn.com") {
+            rank -= 20
         } else if lower.contains("sns-video") || lower.contains("xhs-video") {
             rank -= 15
         }
         if lower.contains("/259/") || lower.contains("_259.mp4") {
             rank -= 10
         }
-        if lower.contains("backup") || lower.contains("sns-bak") {
-            rank += 20
+        if lower.contains("sns-video-v") && lower.contains(".mp4") && !lower.contains("?") {
+            rank += 80
         }
         if lower.contains("watermark") || lower.contains("wm") {
             rank += 30
@@ -872,13 +990,19 @@ struct WebLinkContextResolver: Sendable {
     }
 
     private static func canonicalImageURLKey(_ raw: String) -> String {
+        canonicalMediaURLKey(raw, preservingQuery: false)
+    }
+
+    private static func canonicalMediaURLKey(_ raw: String, preservingQuery: Bool) -> String {
         guard var components = URLComponents(string: raw) else {
             return raw
                 .replacingOccurrences(of: "\\u0026", with: "&")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
         }
-        components.query = nil
+        if !preservingQuery {
+            components.query = nil
+        }
         components.fragment = nil
         components.scheme = components.scheme?.lowercased()
         components.host = components.host?.lowercased()

@@ -4922,6 +4922,7 @@ struct ChatDetailView: View {
             request.setValue(url.host.map { "https://\($0)" } ?? "https://www.iesdouyin.com", forHTTPHeaderField: "Referer")
 
             let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+            try validateDownloadedRemoteMedia(at: temporaryURL, response: response, sourceURL: url)
             let contentType = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? ""
             let fileName = resolvedDownloadFileName(
                 suggestedName: suggestedName,
@@ -4941,6 +4942,43 @@ struct ChatDetailView: View {
         }
     }
 
+    private func validateDownloadedRemoteMedia(at fileURL: URL, response: URLResponse, sourceURL: URL) throws {
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            try? FileManager.default.removeItem(at: fileURL)
+            throw URLError(.badServerResponse)
+        }
+
+        let values = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let fileSize = (values[.size] as? NSNumber)?.int64Value ?? 0
+        guard fileSize > 1_024 else {
+            try? FileManager.default.removeItem(at: fileURL)
+            throw URLError(.cannotDecodeContentData)
+        }
+
+        if shouldValidateRemoteMediaAsMP4(sourceURL: sourceURL, response: response) {
+            let handle = try FileHandle(forReadingFrom: fileURL)
+            defer { handle.closeFile() }
+            let data = handle.readData(ofLength: 12)
+            guard data.count >= 12,
+                  data.subdata(in: 4..<8) == Data("ftyp".utf8) else {
+                try? FileManager.default.removeItem(at: fileURL)
+                throw URLError(.cannotDecodeContentData)
+            }
+        }
+    }
+
+    private func shouldValidateRemoteMediaAsMP4(sourceURL: URL, response: URLResponse) -> Bool {
+        let lower = sourceURL.absoluteString.lowercased()
+        let contentType = ((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+        return sourceURL.pathExtension.lowercased() == "mp4"
+            || lower.contains("sns-video")
+            || lower.contains("sns-bak")
+            || lower.contains("xhs-video")
+            || lower.contains("aweme/v1/play")
+            || contentType.contains("video/mp4")
+    }
+
     private func isDownloadableMediaURL(_ url: URL) -> Bool {
         let lower = url.absoluteString.lowercased()
         let pathExt = url.pathExtension.lowercased()
@@ -4951,6 +4989,7 @@ struct ChatDetailView: View {
             || lower.contains("mime_type=video")
             || lower.contains("video_id=")
             || lower.contains("sns-video")
+            || lower.contains("sns-bak")
             || lower.contains("xhs-video")
     }
 

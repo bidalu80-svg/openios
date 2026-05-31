@@ -1,6 +1,7 @@
 import SwiftUI
 import WebKit
 import AVKit
+import AVFoundation
 
 struct WebPreviewURL: Identifiable, Equatable {
     let url: URL
@@ -91,7 +92,7 @@ struct InAppWebPreviewSheet: View {
             douyinErrorMessage = nil
         }
         .sheet(item: $playingVideo) { item in
-            WebPreviewVideoPlayerSheet(url: item.url)
+            WebPreviewVideoPlayerSheet(url: item.url, refererURL: activeURL)
         }
         .sheet(item: $downloadedMedia) { item in
             ShareSheetView(activityItems: item.urls)
@@ -133,13 +134,13 @@ struct InAppWebPreviewSheet: View {
             if let raw = resolvedXiaohongshuPost?.video?.url, let url = URL(string: raw) {
                 return url
             }
-            return state.pageVideoURL
+            return safePageVideoURL(state.pageVideoURL)
         }
         if WebLinkContextResolver.isDouyinURL(activeURL) {
             if let raw = resolvedDouyinPost?.video?.url, let url = URL(string: raw) {
                 return url
             }
-            return state.pageVideoURL
+            return safePageVideoURL(state.pageVideoURL)
         }
         if let raw = resolvedDouyinPost?.video?.url, let url = URL(string: raw) {
             return url
@@ -147,7 +148,23 @@ struct InAppWebPreviewSheet: View {
         if let raw = resolvedXiaohongshuPost?.video?.url, let url = URL(string: raw) {
             return url
         }
-        return state.pageVideoURL
+        return safePageVideoURL(state.pageVideoURL)
+    }
+
+    private func safePageVideoURL(_ url: URL?) -> URL? {
+        guard let url else { return nil }
+        if WebLinkContextResolver.isXiaohongshuURL(activeURL),
+           Self.isUnsignedXiaohongshuCDNVideoURL(url) {
+            return nil
+        }
+        return url
+    }
+
+    private static func isUnsignedXiaohongshuCDNVideoURL(_ url: URL) -> Bool {
+        let lower = url.absoluteString.lowercased()
+        return lower.contains("sns-video-v")
+            && lower.contains(".mp4")
+            && (url.query?.isEmpty ?? true)
     }
 
     private var resolvedImageCount: Int {
@@ -331,12 +348,12 @@ struct InAppWebPreviewSheet: View {
         defer { isDownloadingDouyin = false }
 
         do {
+            if WebLinkContextResolver.isXiaohongshuURL(activeURL) {
+                await resolveXiaohongshuIfNeeded(force: true)
+            }
+
             if let videoURL = playableVideoURL {
-                var request = URLRequest(url: videoURL, timeoutInterval: 300)
-                request.setValue(Self.mobileUserAgent, forHTTPHeaderField: "User-Agent")
-                request.setValue("*/*", forHTTPHeaderField: "Accept")
-                request.setValue(activeURL.absoluteString, forHTTPHeaderField: "Referer")
-                let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+                let (temporaryURL, response) = try await downloadMediaFile(from: videoURL)
                 let destination = FileManager.default.temporaryDirectory
                     .appendingPathComponent(downloadFileName(response: response, url: videoURL))
                 try? FileManager.default.removeItem(at: destination)
@@ -353,6 +370,53 @@ struct InAppWebPreviewSheet: View {
         } catch {
             douyinErrorMessage = "下载失败：\(error.localizedDescription)"
         }
+    }
+
+    private func downloadMediaFile(from url: URL) async throws -> (URL, URLResponse) {
+        var request = URLRequest(url: url, timeoutInterval: 300)
+        request.setValue(Self.mobileUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        request.setValue(activeURL.absoluteString, forHTTPHeaderField: "Referer")
+        let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+        try validateDownloadedMedia(at: temporaryURL, response: response, sourceURL: url)
+        return (temporaryURL, response)
+    }
+
+    private func validateDownloadedMedia(at fileURL: URL, response: URLResponse, sourceURL: URL) throws {
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            try? FileManager.default.removeItem(at: fileURL)
+            throw URLError(.badServerResponse)
+        }
+
+        let values = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let fileSize = (values[.size] as? NSNumber)?.int64Value ?? 0
+        guard fileSize > 1_024 else {
+            try? FileManager.default.removeItem(at: fileURL)
+            throw URLError(.cannotDecodeContentData)
+        }
+
+        if shouldValidateAsMP4(sourceURL: sourceURL, response: response) {
+            let handle = try FileHandle(forReadingFrom: fileURL)
+            defer { handle.closeFile() }
+            let data = handle.readData(ofLength: 12)
+            guard data.count >= 12,
+                  data.subdata(in: 4..<8) == Data("ftyp".utf8) else {
+                try? FileManager.default.removeItem(at: fileURL)
+                throw URLError(.cannotDecodeContentData)
+            }
+        }
+    }
+
+    private func shouldValidateAsMP4(sourceURL: URL, response: URLResponse) -> Bool {
+        let lower = sourceURL.absoluteString.lowercased()
+        let contentType = ((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+        return sourceURL.pathExtension.lowercased() == "mp4"
+            || lower.contains("sns-video")
+            || lower.contains("sns-bak")
+            || lower.contains("xhs-video")
+            || lower.contains("aweme/v1/play")
+            || contentType.contains("video/mp4")
     }
 
     @MainActor
@@ -439,7 +503,7 @@ struct InAppWebPreviewSheet: View {
         return nil
     }
 
-    private static let mobileUserAgent =
+    fileprivate static let mobileUserAgent =
         "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
 }
 
@@ -467,6 +531,7 @@ private struct WebPreviewDownloadedMedia: Identifiable {
 
 private struct WebPreviewVideoPlayerSheet: View {
     let url: URL
+    let refererURL: URL
 
     @Environment(\.dismiss) private var dismiss
     @State private var player: AVPlayer?
@@ -490,7 +555,13 @@ private struct WebPreviewVideoPlayerSheet: View {
             }
         }
         .onAppear {
-            let player = AVPlayer(url: url)
+            let asset = AVURLAsset(url: url, options: [
+                AVURLAssetHTTPHeaderFieldsKey: [
+                    "User-Agent": InAppWebPreviewSheet.mobileUserAgent,
+                    "Referer": refererURL.absoluteString
+                ]
+            ])
+            let player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
             self.player = player
             player.play()
         }
