@@ -6596,28 +6596,50 @@ final class ChatViewModel {
         return [object]
     }
 
-    private static func normalizedLocalAlpineObject(_ object: Any, changed: inout Bool) -> Any {
+    private static func normalizedLocalAlpineObject(
+        _ object: Any,
+        changed: inout Bool,
+        compatibleToolEnvelope: Bool = false
+    ) -> Any {
         if let array = object as? [Any] {
-            return array.map { normalizedLocalAlpineObject($0, changed: &changed) }
+            return array.map {
+                normalizedLocalAlpineObject(
+                    $0,
+                    changed: &changed,
+                    compatibleToolEnvelope: compatibleToolEnvelope
+                )
+            }
         }
 
         guard var dict = object as? [String: Any] else { return object }
+        let currentIsCompatibleEnvelope = compatibleToolEnvelope
+            || localAlpineObjectLooksLikeCompatibleToolEnvelope(dict)
         for key in Array(dict.keys) {
             if let value = dict[key] {
-                dict[key] = normalizedLocalAlpineObject(value, changed: &changed)
+                dict[key] = normalizedLocalAlpineObject(
+                    value,
+                    changed: &changed,
+                    compatibleToolEnvelope: currentIsCompatibleEnvelope
+                        || localAlpineCompatibleToolEnvelopeKey(key)
+                )
             }
         }
-        return normalizedPythonWriteFilePayload(in: dict, changed: &changed)
+        return normalizedPythonWriteFilePayload(
+            in: dict,
+            changed: &changed,
+            compatibleToolEnvelope: currentIsCompatibleEnvelope
+        )
     }
 
     private static func normalizedPythonWriteFilePayload(
         in dict: [String: Any],
-        changed: inout Bool
+        changed: inout Bool,
+        compatibleToolEnvelope: Bool
     ) -> [String: Any] {
         guard let path = localAlpineWriteFilePath(from: dict),
               path.lowercased().hasSuffix(".py"),
               !hasStructuredLocalAlpinePayload(dict),
-              plainLocalAlpineContent(from: dict) != nil else {
+              let plainContent = plainLocalAlpineContent(from: dict) else {
             return dict
         }
 
@@ -6625,9 +6647,82 @@ final class ChatViewModel {
         ["content", "contents", "text", "body", "code"].forEach {
             updated.removeValue(forKey: $0)
         }
-        updated["iexa_rejected_python_plain_content"] = true
+        if compatibleToolEnvelope {
+            let normalized = plainContent
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+            updated["code_lines"] = normalized.components(separatedBy: "\n")
+        } else {
+            updated["iexa_rejected_python_plain_content"] = true
+        }
         changed = true
         return updated
+    }
+
+    private static func localAlpineCompatibleToolEnvelopeKey(_ key: String) -> Bool {
+        switch key {
+        case "tool_calls", "toolCalls", "calls",
+             "function_call", "functionCall",
+             "tool_use", "toolUse",
+             "tool_call", "toolCall":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func localAlpineObjectLooksLikeCompatibleToolEnvelope(_ dict: [String: Any]) -> Bool {
+        if let type = (dict["type"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased(),
+           ["tooluse", "tool_use", "toolcall", "tool_call", "function_call", "function"].contains(type) {
+            return true
+        }
+        if dict["function"] is [String: Any],
+           (dict["name"] != nil || dict["tool"] != nil || dict["tool_name"] != nil || dict["toolName"] != nil) {
+            return true
+        }
+        if let toolName = localAlpineCompatibleToolName(in: dict),
+           localAlpineCompatibleToolNameLooksStructured(toolName) {
+            return true
+        }
+        return false
+    }
+
+    private static func localAlpineCompatibleToolName(in dict: [String: Any]) -> String? {
+        ((dict["name"] as? String)
+            ?? (dict["tool"] as? String)
+            ?? (dict["action"] as? String)
+            ?? (dict["operation"] as? String)
+            ?? (dict["op"] as? String)
+            ?? (dict["toolName"] as? String)
+            ?? (dict["tool_name"] as? String)
+            ?? (dict["functionName"] as? String)
+            ?? (dict["function_name"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func localAlpineCompatibleToolNameLooksStructured(_ name: String) -> Bool {
+        let normalized = name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+        return [
+            "bash", "shell", "sh", "exec", "run", "command", "shell_execute",
+            "read", "read_file", "read_files", "cat", "open_file", "file_read",
+            "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write",
+            "edit", "edit_file", "edit_files", "replace_file",
+            "patch", "patch_file", "patch_files", "apply_patch",
+            "delete", "delete_file", "delete_files", "remove_file", "remove_files", "delete_dir", "remove_dir", "rm", "rmdir", "file_delete",
+            "list", "list_dir", "list_directory", "ls", "file_list", "directory_list",
+            "grep", "search", "search_files", "file_search",
+            "append", "append_file", "append_and_read",
+            "move_file", "rename_file", "copy_file", "mkdir",
+            "glob", "find", "find_files",
+            "verify", "check",
+            "browser_use", "browser", "browse", "web_fetch", "fetch_url", "open_url"
+        ].contains(normalized)
     }
 
     private static func localAlpineWriteFilePath(from dict: [String: Any]) -> String? {
