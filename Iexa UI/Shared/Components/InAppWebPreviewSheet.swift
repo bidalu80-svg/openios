@@ -395,12 +395,32 @@ struct InAppWebPreviewSheet: View {
 
     private func downloadMediaFile(from url: URL) async throws -> (URL, URLResponse) {
         var request = URLRequest(url: url, timeoutInterval: 300)
-        request.setValue(Self.mobileUserAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue("*/*", forHTTPHeaderField: "Accept")
-        request.setValue(activeURL.absoluteString, forHTTPHeaderField: "Referer")
+        applyMediaDownloadHeaders(to: &request, sourceURL: url)
         let (temporaryURL, response) = try await URLSession.shared.download(for: request)
         try validateDownloadedMedia(at: temporaryURL, response: response, sourceURL: url)
         return (temporaryURL, response)
+    }
+
+    private func applyMediaDownloadHeaders(to request: inout URLRequest, sourceURL: URL) {
+        if WebLinkContextResolver.isXiaohongshuURL(activeURL),
+           Self.isXiaohongshuCDNMediaURL(sourceURL) {
+            request.setValue(Self.xiaohongshuMediaUserAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue(
+                "image/avif,image/webp,image/apng,image/*,video/mp4,video/*,*/*;q=0.8",
+                forHTTPHeaderField: "Accept"
+            )
+            request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+            request.setValue("https://www.xiaohongshu.com", forHTTPHeaderField: "Origin")
+            request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
+            if Self.isVideoMediaURL(sourceURL) {
+                request.setValue("bytes=0-", forHTTPHeaderField: "Range")
+            }
+            return
+        }
+
+        request.setValue(Self.mobileUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        request.setValue(activeURL.absoluteString, forHTTPHeaderField: "Referer")
     }
 
     private func validateDownloadedMedia(at fileURL: URL, response: URLResponse, sourceURL: URL) throws {
@@ -432,12 +452,27 @@ struct InAppWebPreviewSheet: View {
     private func shouldValidateAsMP4(sourceURL: URL, response: URLResponse) -> Bool {
         let lower = sourceURL.absoluteString.lowercased()
         let contentType = ((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
-        return sourceURL.pathExtension.lowercased() == "mp4"
+        return Self.isVideoMediaURL(sourceURL)
             || lower.contains("sns-video")
             || lower.contains("sns-bak")
             || lower.contains("xhs-video")
             || lower.contains("aweme/v1/play")
             || contentType.contains("video/mp4")
+    }
+
+    private static func isXiaohongshuCDNMediaURL(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        return host == "ci.xiaohongshu.com" || host == "xhscdn.com" || host.hasSuffix(".xhscdn.com")
+    }
+
+    private static func isVideoMediaURL(_ url: URL) -> Bool {
+        let pathExtension = url.pathExtension.lowercased()
+        if ["mp4", "mov", "m4v"].contains(pathExtension) { return true }
+        let lower = url.absoluteString.lowercased()
+        return lower.contains("sns-video")
+            || lower.contains("sns-bak")
+            || lower.contains("xhs-video")
+            || lower.contains("downloader-api.bhwa233.com/api/download")
     }
 
     @MainActor
@@ -526,6 +561,8 @@ struct InAppWebPreviewSheet: View {
 
     fileprivate static let mobileUserAgent =
         "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+    fileprivate static let xiaohongshuMediaUserAgent =
+        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36 xiaohongshu"
 }
 
 @Observable
