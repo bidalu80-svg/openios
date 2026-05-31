@@ -51,6 +51,12 @@ struct LocalWorkspaceFileBrowserView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
 
+    private static let internalWorkspaceDirectories: Set<String> = [
+        ".iexa-context-offload",
+        ".iexa-terminal-scripts",
+        ".iexa_failed_writes",
+    ]
+
     @State private var location: LocalFileBrowserLocation = .workspace
     @State private var currentPath = "/"
     @State private var rootfsPath = "/"
@@ -479,7 +485,12 @@ struct LocalWorkspaceFileBrowserView: View {
         do {
             switch location {
             case .workspace:
-                items = try await LocalAlpineTerminalService.shared.listFiles(path: currentPath, includeHidden: true)
+                if Self.isInternalWorkspacePath(currentPath) {
+                    currentPath = "/"
+                    pathHistory.removeAll()
+                }
+                let loadedItems = try await LocalAlpineTerminalService.shared.listFiles(path: currentPath, includeHidden: true)
+                items = loadedItems.filter { !Self.isInternalWorkspacePath($0.path) }
             case .rootfs:
                 items = try await LocalAlpineTerminalService.shared.listRootFSFiles(path: rootfsPath, includeHidden: true)
             }
@@ -597,6 +608,34 @@ struct LocalWorkspaceFileBrowserView: View {
             return "\(kind.label) · \(size)"
         }
         return kind.label
+    }
+
+    private static func isInternalWorkspacePath(_ path: String) -> Bool {
+        let normalized = normalizedWorkspacePath(path)
+        guard normalized != "/" else { return false }
+        let firstComponent = normalized
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .first
+            .map(String.init)
+        return firstComponent.map { internalWorkspaceDirectories.contains($0) } ?? false
+    }
+
+    private static func normalizedWorkspacePath(_ path: String) -> String {
+        var normalized = path
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        if normalized.hasPrefix("/mnt/iexa/") {
+            normalized = String(normalized.dropFirst("/mnt/iexa".count))
+        } else if normalized == "/mnt/iexa" {
+            normalized = "/"
+        }
+        if !normalized.hasPrefix("/") {
+            normalized = "/" + normalized
+        }
+        while normalized.contains("//") {
+            normalized = normalized.replacingOccurrences(of: "//", with: "/")
+        }
+        return normalized
     }
 
     private var deleteWarningText: String {

@@ -96,6 +96,9 @@ struct ChatContextBudgetStatus: Sendable, Equatable {
 }
 
 private enum LocalContextOffloadStore {
+    private static let maximumStoredFiles = 24
+    private static let maximumFileAge: TimeInterval = 60 * 60 * 24 * 7
+
     static func modelText(label: String, text: String, maxInlineCharacters: Int) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count > maxInlineCharacters else { return text }
@@ -125,6 +128,7 @@ private enum LocalContextOffloadStore {
     private static func write(label: String, text: String) -> String? {
         do {
             let directory = try offloadDirectory()
+            cleanup(directory: directory.url)
             let fileName = "\(slug(label))-\(stableHash(text)).txt"
             let fileURL = directory.url.appendingPathComponent(fileName)
             if !FileManager.default.fileExists(atPath: fileURL.path) {
@@ -133,6 +137,37 @@ private enum LocalContextOffloadStore {
             return "\(directory.displayPath)/\(fileName)"
         } catch {
             return nil
+        }
+    }
+
+    private static func cleanup(directory: URL) {
+        let fileManager = FileManager.default
+        guard let urls = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        let now = Date()
+        let files = urls.compactMap { url -> (url: URL, modified: Date) in
+            guard url.pathExtension.lowercased() == "txt",
+                  let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                  values.isRegularFile == true else {
+                return nil
+            }
+            return (url, values.contentModificationDate ?? .distantPast)
+        }
+        for file in files where now.timeIntervalSince(file.modified) > maximumFileAge {
+            try? fileManager.removeItem(at: file.url)
+        }
+
+        let remaining = files
+            .filter { now.timeIntervalSince($0.modified) <= maximumFileAge }
+            .sorted { $0.modified > $1.modified }
+        for file in remaining.dropFirst(maximumStoredFiles) {
+            try? fileManager.removeItem(at: file.url)
         }
     }
 
