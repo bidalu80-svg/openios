@@ -2563,27 +2563,44 @@ struct AssistantMessageContent: View {
     /// property during body evaluation is safe because SwiftUI only tracks
     /// `@State`/`@Observable` value changes, not internal class mutations.
     private final class ParseCache {
+        var lastInputHash: Int = -1
+        var lastRenderableContent: String = ""
         var lastLength: Int = -1
         var lastResult: ToolCallParser.OrderedParseResult?
     }
 
     var body: some View {
+        let renderableContent: String = {
+            let inputHash = content.hashValue
+            if inputHash == parseCache.lastInputHash {
+                return parseCache.lastRenderableContent
+            }
+            var value = content
+            if InlineDataPayloadSanitizer.mayContainLargeInlinePayload(value) {
+                value = InlineDataPayloadSanitizer.sanitizedDisplayText(value)
+                value = InlineDataPayloadSanitizer.removingHiddenPayloadArtifacts(from: value)
+            }
+            parseCache.lastInputHash = inputHash
+            parseCache.lastRenderableContent = value
+            return value
+        }()
+
         // Cache key uses content hash so any change — including attribute
         // value changes like done="false" → done="true" that leave the byte
         // count identical — triggers a fresh parse. Previously using
         // content.utf8.count caused stale isDone=false results to be returned
         // after streaming completed, keeping the spinner running indefinitely
         // and blocking embed rendering (which is guarded by isDone == true).
-        let cacheKey = content.hashValue
+        let cacheKey = renderableContent.hashValue
         let ordered: ToolCallParser.OrderedParseResult = {
             if cacheKey == parseCache.lastLength, let cached = parseCache.lastResult {
                 return cached
             }
-            let result = ToolCallParser.parseOrdered(content)
+            let result = ToolCallParser.parseOrdered(renderableContent)
             parseCache.lastLength = cacheKey
             parseCache.lastResult = result
             // Log segment count and VIZ presence once per parse
-            let hasViz = content.contains("@@@VIZ-START")
+            let hasViz = renderableContent.contains("@@@VIZ-START")
             if hasViz {
                 let segTypes = result.segments.map { seg -> String in
                     switch seg {
@@ -2605,7 +2622,7 @@ struct AssistantMessageContent: View {
             // already renders the visualization — the tool call header and its giant
             // result/embed payload are redundant and cause lag as the large HTML blob
             // is parsed and laid out on every streaming tick.
-            let hasVizMarkers = content.contains("@@@VIZ-START")
+            let hasVizMarkers = renderableContent.contains("@@@VIZ-START")
             let base: [SegmentGroup] = hasVizMarkers ? rawBase.compactMap { group in
                 if case .toolCalls(let calls) = group {
                     let filtered = calls.filter { $0.name != "render_visualization" }
@@ -2854,6 +2871,9 @@ struct AssistantMessageContent: View {
     /// caller can short-circuit and render normally.
     static func splitInlineImages(_ text: String) -> [InlineImageSegment] {
         let sanitizedText = sanitizedInlineImageText(text)
+        guard sanitizedText.utf8.count <= 240_000 else {
+            return [.text(sanitizedText)]
+        }
         // Match ![alt text](url) where url contains /api/v1/files/{uuid}/content
         // The URL may be relative (/api/...) or absolute (https://host/api/...)
         let pattern = #"!\[([^\]]*)\]\(((?:https?://[^\s\)]+)?/api/(?:v1/)?files/([^/\)\s]+)/content|https?://[^\s\)]+)\)"#
@@ -2905,20 +2925,11 @@ struct AssistantMessageContent: View {
     }
 
     private static func sanitizedInlineImageText(_ text: String) -> String {
-        var cleaned = text
-        let patterns = [
-            #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
-            #"!\[[^\]]*\]\(\s*data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
-            #"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,}"#
-        ]
-        for pattern in patterns {
-            cleaned = cleaned.replacingOccurrences(
-                of: pattern,
-                with: "",
-                options: [.regularExpression, .caseInsensitive]
-            )
+        guard InlineDataPayloadSanitizer.mayContainLargeInlinePayload(text) else {
+            return text
         }
-        return cleaned
+        let cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(text)
+        return InlineDataPayloadSanitizer.removingHiddenPayloadArtifacts(from: cleaned)
     }
 }
 

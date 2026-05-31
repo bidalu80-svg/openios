@@ -3105,7 +3105,7 @@ final class ChatViewModel {
     private func adoptServerMessages(serverConversation: Conversation) {
         guard conversation != nil else {
             // No local conversation yet — just assign directly
-            conversation = serverConversation
+            conversation = Self.sanitizedConversationForDisplay(serverConversation)
             if let serverModel = serverConversation.model, selectedModelId != serverModel {
                 selectedModelId = serverModel
             }
@@ -3149,11 +3149,11 @@ final class ChatViewModel {
                             updated.content = localNode.content
                             updated.done = true
                         }
-                        conversation?.history.nodes[id] = updated
+                        conversation?.history.nodes[id] = Self.sanitizedHistoryNodeForDisplay(updated)
                     }
                 } else {
                     // New node from server — add directly
-                    conversation?.history.nodes[id] = serverNode
+                    conversation?.history.nodes[id] = Self.sanitizedHistoryNodeForDisplay(serverNode)
                 }
             }
             // Update currentId from server unless we're actively streaming
@@ -15832,7 +15832,7 @@ final class ChatViewModel {
             ? ""
             : Self.cleanedProviderCitationArtifacts(content)
         let safeDisplayContent = showInlineImageReceiveState
-            ? Self.inlineImageReceivePlaceholder
+            ? ""
             : Self.safeAssistantDisplayContent(displayContent)
         let shouldHandleLocalAlpineDisplay = terminalEnabled && selectedTerminalIsLocalAlpine
         let visibleAlpineDisplayContent: String? = {
@@ -16146,8 +16146,6 @@ final class ChatViewModel {
             )
         }
     }
-
-    private static let inlineImageReceivePlaceholder = "正在接收图片..."
 
     private static func shouldShowInlineImageReceiveState(for text: String) -> Bool {
         let lower = text.lowercased()
@@ -16508,15 +16506,18 @@ final class ChatViewModel {
             // server-side filter functions that add timing/performance stats after completion)
             if let index = conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) {
                 let localContent = conversation?.messages[index].content.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let serverContent = serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                let serverDisplayContent = Self.safeAssistantDisplayContent(
+                    Self.cleanedProviderCitationArtifacts(serverAssistant.content)
+                )
+                let serverContent = serverDisplayContent.trimmingCharacters(in: .whitespacesAndNewlines)
                 let rawLocalContent = conversation?.messages[index].content ?? ""
                 if !serverContent.isEmpty
                     && serverContent != localContent
                     && !CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
                         local: rawLocalContent,
-                        incoming: serverAssistant.content
+                        incoming: serverDisplayContent
                     ) {
-                    conversation?.messages[index].content = serverAssistant.content
+                    conversation?.messages[index].content = serverDisplayContent
                 }
                 // Copy usage stats from server — the server stores them after
                 // sendChatCompleted processes the chat. This is how app-sent
@@ -16936,14 +16937,12 @@ final class ChatViewModel {
 
     private static func cleanedAssistantInlineImagePayloads(_ content: String) -> String {
         var cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(content)
+        cleaned = InlineDataPayloadSanitizer.removingHiddenPayloadArtifacts(from: cleaned)
         let patterns = [
-            #"!?\[[^\]]*\]\(\s*(?:<已隐藏超长Base64内容>)?\s*\)"#,
             #"(?m)^\s*!?\[[^\]]*\]\(\s*$"#,
             #"!?\[[^\]]*\]\(\s*$"#,
             #"\!\[[^\]]*\]\(\s*https?://[^)\s]+(?:\s+["'][^)]*["'])?\s*\)"#,
             #"<img[^>]+src=["']https?://[^"']+["'][^>]*>"#,
-            #"<img[^>]+src=["'](?:<已隐藏超长Base64内容>)["'][^>]*>"#,
-            #"<已隐藏超长Base64内容>"#,
             #"(?:"url"|"image_url"|"display_url"|"download_url"|"image")\s*:\s*"https?:\\?/\\?/[^"]+""#
         ]
         for pattern in patterns {

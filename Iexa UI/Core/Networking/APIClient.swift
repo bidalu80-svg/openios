@@ -1559,11 +1559,11 @@ final class APIClient: @unchecked Sendable {
                isLikelyImageURL(trimmed) {
                 return trimmed
             }
-            if let markdownImage = firstImageReferenceInText(trimmed) {
-                return markdownImage
-            }
             if looksLikeBase64Image(trimmed) {
                 return "data:image/png;base64,\(trimmed)"
+            }
+            if let markdownImage = firstImageReferenceInText(trimmed) {
+                return markdownImage
             }
             return nil
         }
@@ -1628,16 +1628,17 @@ final class APIClient: @unchecked Sendable {
         if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
             return (allowsOpaqueImageURL || isLikelyImageURL(trimmed)) ? trimmed : nil
         }
-        if let markdownImage = firstImageReferenceInText(trimmed) {
-            return markdownImage
-        }
         if looksLikeBase64Image(trimmed) {
             return "data:image/png;base64,\(trimmed)"
+        }
+        if let markdownImage = firstImageReferenceInText(trimmed) {
+            return markdownImage
         }
         return nil
     }
 
     private func firstImageReferenceInText(_ text: String) -> String? {
+        guard text.utf8.count <= 240_000 else { return nil }
         let patterns = [
             #"!\[[^\]]*\]\(((?:data:image|image:data)/[^)\s]+)\)"#,
             #"!\[[^\]]*\]\((https?://[^)\s]+\.(?:png|jpe?g|webp|gif|bmp|avif|svg)(?:\?[^)\s]*)?)\)"#,

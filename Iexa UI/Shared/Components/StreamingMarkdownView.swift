@@ -139,6 +139,13 @@ struct StreamingMarkdownView: View {
         let renderContent = Self.normalizedApostropheFenceMarkers(content)
         guard !renderContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
 
+        if InlineDataPayloadSanitizer.mayContainInlineDataURI(renderContent) {
+            let safeText = Self.sanitizedMarkdownTextForDisplay(renderContent)
+            return safeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? []
+                : [.markdown(safeText)]
+        }
+
         if isStreaming {
             // ── VIZ marker path ───────────────────────────────────────────────
             let vizState = VizMarkerParser.streamingParse(renderContent)
@@ -476,41 +483,6 @@ struct StreamingMarkdownView: View {
         )
     }()
 
-    private static let directDataImagePattern: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: #"((?:data:image|image:data)/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{128,})"#,
-            options: [.caseInsensitive]
-        )
-    }()
-
-    private static let dataImageMarkdownPattern: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: #"!?\[[^\]]*\]\(\s*(?:data:image|image:data)/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}(?:\s+[^)]*)?\)"#,
-            options: [.caseInsensitive]
-        )
-    }()
-
-    private static let partialDataImageMarkdownPattern: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: #"!?\[[^\]]*\]\(\s*(?:data:image|image:data)/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_\-\s]{48,}"#,
-            options: [.caseInsensitive]
-        )
-    }()
-
-    private static let partialMarkdownImagePattern: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: #"!?\[[^\]]*\]\([^)]*$"#,
-            options: [.caseInsensitive]
-        )
-    }()
-
-    private static let orphanMarkdownImagePattern: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: #"(?m)^\s*!?\[[^\]]*\]\(\s*$"#,
-            options: [.caseInsensitive]
-        )
-    }()
-
     /// Data model for a parsed markdown image occurrence.
     private struct ParsedImage {
         let range: Range<String.Index>
@@ -612,34 +584,14 @@ struct StreamingMarkdownView: View {
 
     private static func sanitizedMarkdownTextForDisplay(_ text: String) -> String {
         var cleaned = text
+        if InlineDataPayloadSanitizer.mayContainLargeInlinePayload(cleaned)
+            || Self.containsPartialInlineDataImageReference(cleaned) {
+            cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(cleaned)
+            cleaned = InlineDataPayloadSanitizer.removingHiddenPayloadArtifacts(from: cleaned)
+        }
         cleaned = removeProviderCitationArtifacts(from: cleaned)
-        if Self.containsPartialInlineDataImageReference(cleaned) {
-            cleaned = "正在接收图片..."
-        }
         cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(cleaned)
-        cleaned = cleaned.replacingOccurrences(
-            of: #"!?\[[^\]]*\]\(\s*(?:<已隐藏超长Base64内容>)?\s*\)"#,
-            with: "",
-            options: .regularExpression
-        )
-        if let pattern = partialMarkdownImagePattern,
-           (cleaned.lowercased().contains("data:image/")
-            || cleaned.lowercased().contains("image:data/")) {
-            cleaned = pattern.stringByReplacingMatches(
-                in: cleaned,
-                options: [],
-                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
-                withTemplate: ""
-            )
-        }
-        if let pattern = orphanMarkdownImagePattern {
-            cleaned = pattern.stringByReplacingMatches(
-                in: cleaned,
-                options: [],
-                range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
-                withTemplate: ""
-            )
-        }
+        cleaned = InlineDataPayloadSanitizer.removingHiddenPayloadArtifacts(from: cleaned)
         cleaned = normalizedDisplayLinks(in: cleaned)
         return cleaned
     }
@@ -890,6 +842,9 @@ struct StreamingMarkdownView: View {
     private static func isLikelyDirtyClosingFenceSuffix(_ suffix: Substring) -> Bool {
         let trimmed = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
+        if trimmed.contains("```") || trimmed.contains("~~~") {
+            return true
+        }
 
         let markdownBlockStarters = [
             #"^#{1,6}(?:\s|$)"#,
@@ -909,7 +864,8 @@ struct StreamingMarkdownView: View {
             "关键", "说明", "建议", "注意", "总结", "备注", "解析", "修复", "执行", "运行", "输出", "结果", "效果", "方式", "下一步",
             "示例", "预期", "命令", "使用", "保存", "文件", "代码", "之后", "最终", "测试", "如下", "例如", "比如",
             "然后", "接着", "继续", "再", "访问", "返回", "会返回", "得到", "打开", "查看",
-            "但", "如果", "不过", "另外", "因此", "所以", "当前", "这里", "上面", "下面", "这个", "下面这个",
+            "但", "如果", "不过", "另外", "并且", "而且", "同时", "因此", "所以", "当前", "这里", "上面", "下面", "这个", "下面这个",
+            "已通过", "通过", "语法检查", "运行测试", "测试结果",
             "key", "notes", "note", "summary", "explanation", "recommendation", "next", "example",
             "output", "result", "results", "stdout", "stderr", "command", "usage", "expected", "then", "after",
             "visit", "open", "returns", "return", "response",
@@ -2087,70 +2043,54 @@ private struct KaTeXWebView: UIViewRepresentable {
 enum InlineDataPayloadSanitizer {
     private static let placeholder = "<已隐藏超长Base64内容>"
 
-    private static let inlineDataURIPattern: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: #"(?:(data:((?:image|audio|video)/[A-Za-z0-9.+-]+))|(image:data/([A-Za-z0-9.+-]+)));base64,([A-Za-z0-9+/=_\-\s]{256,})"#,
-            options: [.caseInsensitive]
-        )
-    }()
-
-    private static let base64FieldPatterns: [NSRegularExpression] = [
-        try! NSRegularExpression(
-            pattern: #"("(?:(?:b64_json)|(?:base64)|(?:image_base64)|(?:imageBase64)|(?:content_base64))"\s*:\s*")([A-Za-z0-9+/=_\-\s]{256,})(")"#,
-            options: [.caseInsensitive]
-        ),
-        try! NSRegularExpression(
-            pattern: #"((?m)^[A-Za-z0-9+/=]{1024,}\s*$)"#,
-            options: []
-        )
-    ]
-
     static func sanitizedDisplayText(_ text: String) -> String {
-        guard text.range(of: "base64", options: .caseInsensitive) != nil
-            || text.range(of: "data:image", options: .caseInsensitive) != nil
-            || text.range(of: "image:data", options: .caseInsensitive) != nil
-            || text.range(of: "data:video", options: .caseInsensitive) != nil
-            || text.range(of: "data:audio", options: .caseInsensitive) != nil else {
+        guard mayContainLargeInlinePayload(text) else {
             return text
         }
 
         var cleaned = replaceInlineDataURIs(in: text)
         cleaned = replaceLongBase64Runs(in: cleaned)
-
-        if cleaned.utf8.count <= 240_000 {
-            if let pattern = inlineDataURIPattern {
-                cleaned = pattern.stringByReplacingMatches(
-                    in: cleaned,
-                    options: [],
-                    range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
-                    withTemplate: placeholder
-                )
-            }
-
-            if base64FieldPatterns.count >= 1 {
-                cleaned = base64FieldPatterns[0].stringByReplacingMatches(
-                    in: cleaned,
-                    options: [],
-                    range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
-                    withTemplate: "$1\(placeholder)$3"
-                )
-            }
-
-            if base64FieldPatterns.count >= 2 {
-                cleaned = base64FieldPatterns[1].stringByReplacingMatches(
-                    in: cleaned,
-                    options: [],
-                    range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
-                    withTemplate: placeholder
-                )
-            }
-        }
-
         return cleaned
     }
 
+    static func mayContainLargeInlinePayload(_ text: String) -> Bool {
+        text.range(of: "base64", options: .caseInsensitive) != nil
+            || text.range(of: "data:image", options: .caseInsensitive) != nil
+            || text.range(of: "data:imag", options: .caseInsensitive) != nil
+            || text.range(of: "image:data", options: .caseInsensitive) != nil
+            || text.range(of: "data:video", options: .caseInsensitive) != nil
+            || text.range(of: "data:audio", options: .caseInsensitive) != nil
+    }
+
+    static func mayContainInlineDataURI(_ text: String) -> Bool {
+        text.range(of: "data:imag", options: .caseInsensitive) != nil
+            || text.range(of: "data:image", options: .caseInsensitive) != nil
+            || text.range(of: "image:data", options: .caseInsensitive) != nil
+            || text.range(of: "data:video", options: .caseInsensitive) != nil
+            || text.range(of: "data:audio", options: .caseInsensitive) != nil
+    }
+
+    static func removingHiddenPayloadArtifacts(from text: String) -> String {
+        guard text.contains(placeholder)
+            || text.contains("![")
+            || text.range(of: "<img", options: .caseInsensitive) != nil else {
+            return text
+        }
+
+        var cleaned = text
+        while let markerRange = cleaned.range(of: placeholder) {
+            if let removalRange = markdownImageShellRange(around: markerRange, in: cleaned)
+                ?? htmlImageShellRange(around: markerRange, in: cleaned) {
+                cleaned.removeSubrange(removalRange)
+            } else {
+                cleaned.removeSubrange(markerRange)
+            }
+        }
+        return collapseExcessBlankLines(in: cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private static func replaceInlineDataURIs(in text: String) -> String {
-        let markers = ["data:image/", "data:audio/", "data:video/", "image:data/"]
+        let markers = ["data:image/", "data:imag", "data:audio/", "data:video/", "image:data/", "image:data"]
         var result = ""
         var cursor = text.startIndex
         result.reserveCapacity(min(text.count, 8192))
@@ -2168,8 +2108,8 @@ enum InlineDataPayloadSanitizer {
                 options: .caseInsensitive,
                 range: markerRange.upperBound..<text.endIndex
             ) else {
-                result += String(text[markerRange])
-                cursor = markerRange.upperBound
+                result += placeholder
+                cursor = endOfInlinePayloadCandidate(in: text, from: markerRange.upperBound)
                 continue
             }
 
@@ -2183,6 +2123,66 @@ enum InlineDataPayloadSanitizer {
             cursor = payloadCursor
         }
 
+        return result
+    }
+
+    private static func endOfInlinePayloadCandidate(in text: String, from start: String.Index) -> String.Index {
+        var cursor = start
+        while cursor < text.endIndex {
+            let character = text[cursor]
+            if character.isWhitespace || character == ")" || character == "\"" || character == "'" || character == ">" {
+                break
+            }
+            cursor = text.index(after: cursor)
+        }
+        return cursor
+    }
+
+    private static func markdownImageShellRange(
+        around markerRange: Range<String.Index>,
+        in text: String
+    ) -> Range<String.Index>? {
+        let lineStart = text[..<markerRange.lowerBound].lastIndex(of: "\n")
+            .map { text.index(after: $0) } ?? text.startIndex
+        let lineEnd = text[markerRange.upperBound...].firstIndex(of: "\n") ?? text.endIndex
+        guard let open = text.range(of: "![", options: .backwards, range: lineStart..<markerRange.lowerBound),
+              text.range(of: "](", options: [], range: open.upperBound..<markerRange.lowerBound) != nil else {
+            return nil
+        }
+        let closeSearchEnd = lineEnd
+        let close = text.range(of: ")", options: [], range: markerRange.upperBound..<closeSearchEnd)
+        return open.lowerBound..<(close?.upperBound ?? markerRange.upperBound)
+    }
+
+    private static func htmlImageShellRange(
+        around markerRange: Range<String.Index>,
+        in text: String
+    ) -> Range<String.Index>? {
+        let lineStart = text[..<markerRange.lowerBound].lastIndex(of: "\n")
+            .map { text.index(after: $0) } ?? text.startIndex
+        let lineEnd = text[markerRange.upperBound...].firstIndex(of: "\n") ?? text.endIndex
+        guard let open = text.range(of: "<img", options: [.caseInsensitive, .backwards], range: lineStart..<markerRange.lowerBound) else {
+            return nil
+        }
+        let close = text.range(of: ">", options: [], range: markerRange.upperBound..<lineEnd)
+        return open.lowerBound..<(close?.upperBound ?? markerRange.upperBound)
+    }
+
+    private static func collapseExcessBlankLines(in text: String) -> String {
+        var result = ""
+        var consecutiveNewlines = 0
+        result.reserveCapacity(text.count)
+        for character in text {
+            if character == "\n" {
+                consecutiveNewlines += 1
+                if consecutiveNewlines <= 2 {
+                    result.append(character)
+                }
+            } else {
+                consecutiveNewlines = character.isWhitespace ? consecutiveNewlines : 0
+                result.append(character)
+            }
+        }
         return result
     }
 

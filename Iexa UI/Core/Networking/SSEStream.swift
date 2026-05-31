@@ -364,11 +364,11 @@ enum SSEEvent: Sendable {
             if trimmed.hasPrefix("data:image/") {
                 return trimmed
             }
-            if let inText = firstImageReferenceInText(trimmed) {
-                return inText
-            }
             if looksLikeBase64Image(trimmed) {
                 return "data:image/png;base64,\(trimmed)"
+            }
+            if let inText = firstImageReferenceInText(trimmed) {
+                return inText
             }
             return nil
         }
@@ -446,16 +446,17 @@ enum SSEEvent: Sendable {
         if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
             return (allowsOpaqueImageURL || isLikelyImageURL(trimmed)) ? trimmed : nil
         }
-        if let inText = firstImageReferenceInText(trimmed) {
-            return inText
-        }
         if looksLikeBase64Image(trimmed) {
             return "data:image/png;base64,\(trimmed)"
+        }
+        if let inText = firstImageReferenceInText(trimmed) {
+            return inText
         }
         return nil
     }
 
     private static func firstImageReferenceInText(_ text: String) -> String? {
+        guard text.utf8.count <= 240_000 else { return nil }
         let patterns = [
             #"!\[[^\]]*\]\((data:image/[^)\s]+)\)"#,
             #"<img[^>]+src=["'](data:image/[^"']+)["']"#,

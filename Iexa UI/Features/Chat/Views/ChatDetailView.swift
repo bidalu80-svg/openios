@@ -5528,8 +5528,11 @@ private struct IsolatedAssistantMessage: View {
         // Note: soft breaks are now handled natively by MarkdownView (renders
         // \n as line breaks instead of spaces), so no convertSoftBreaksToHard needed.
         let displayContent: String = {
-            if isActivelyStreaming { return rawContent }
-            let resolved = Self.resolveRelativeURLs(rawContent, baseURL: serverBaseURL)
+            if isActivelyStreaming {
+                return Self.safeAssistantRenderableContent(rawContent)
+            }
+            let safeRawContent = Self.safeAssistantRenderableContent(rawContent)
+            let resolved = Self.resolveRelativeURLs(safeRawContent, baseURL: serverBaseURL)
             let preferDomain = UserDefaults.standard.object(forKey: "citationShowDomain") as? Bool ?? true
             return Self.preprocessCitations(resolved, sources: effectiveSources, preferDomain: preferDomain)
         }()
@@ -5707,6 +5710,14 @@ private struct IsolatedAssistantMessage: View {
             || lower.contains("<|end_of_thought|>")
             || text.contains("◁think▷")
             || text.contains("◁/think▷")
+    }
+
+    private static func safeAssistantRenderableContent(_ content: String) -> String {
+        guard InlineDataPayloadSanitizer.mayContainLargeInlinePayload(content) else {
+            return content
+        }
+        let cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(content)
+        return InlineDataPayloadSanitizer.removingHiddenPayloadArtifacts(from: cleaned)
     }
 
     private static func containsCodeFence(_ text: String) -> Bool {
