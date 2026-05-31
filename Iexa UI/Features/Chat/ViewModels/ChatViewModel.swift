@@ -5653,14 +5653,13 @@ final class ChatViewModel {
     }
 
     private static func shouldKeepNativeLinkResolverOffLocalAlpine(_ text: String) -> Bool {
-        isDouyinLinkRequest(text) && !hasExplicitLocalAlpineRouteIntent(text.lowercased())
+        isNativeMediaLinkRequest(text) && !hasExplicitLocalAlpineRouteIntent(text.lowercased())
     }
 
-    private static func isDouyinLinkRequest(_ text: String) -> Bool {
+    private static func isNativeMediaLinkRequest(_ text: String) -> Bool {
         let urls = WebLinkContextResolver.extractHTTPURLs(from: text, limit: 5)
         return urls.contains { url in
-            let host = url.host?.lowercased() ?? ""
-            return host.contains("douyin.com") || host.contains("iesdouyin.com")
+            WebLinkContextResolver.isDouyinURL(url) || WebLinkContextResolver.isXiaohongshuURL(url)
         }
     }
 

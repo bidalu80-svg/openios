@@ -15,12 +15,14 @@ struct InAppWebPreviewSheet: View {
     @Environment(\.theme) private var theme
     @State private var state = InAppWebPreviewState()
     @State private var resolvedDouyinPost: ResolvedDouyinPost?
+    @State private var resolvedXiaohongshuPost: ResolvedXiaohongshuPost?
     @State private var isResolvingDouyin = false
     @State private var isDownloadingDouyin = false
     @State private var douyinErrorMessage: String?
     @State private var playingVideo: WebPreviewVideoItem?
     @State private var downloadedMedia: WebPreviewDownloadedMedia?
     @State private var resolvedDouyinSourceID = ""
+    @State private var resolvedXiaohongshuSourceID = ""
 
     var body: some View {
         NavigationStack {
@@ -73,17 +75,19 @@ struct InAppWebPreviewSheet: View {
             }
         }
         .task(id: douyinTaskID) {
-            await resolveDouyinIfNeeded()
+            await resolveSocialMediaIfNeeded()
         }
         .onChange(of: state.pageVideoURL) { _, _ in
-            if resolvedDouyinPost?.video == nil {
+            if resolvedDouyinPost?.video == nil && resolvedXiaohongshuPost?.video == nil {
                 douyinErrorMessage = nil
             }
         }
         .onChange(of: activeURL) { _, newURL in
-            guard !WebLinkContextResolver.isDouyinURL(newURL) else { return }
+            guard !isSupportedSocialMediaURL(newURL) else { return }
             resolvedDouyinPost = nil
+            resolvedXiaohongshuPost = nil
             resolvedDouyinSourceID = ""
+            resolvedXiaohongshuSourceID = ""
             douyinErrorMessage = nil
         }
         .sheet(item: $playingVideo) { item in
@@ -92,7 +96,7 @@ struct InAppWebPreviewSheet: View {
         .sheet(item: $downloadedMedia) { item in
             ShareSheetView(activityItems: item.urls)
         }
-        .alert("抖音解析失败", isPresented: Binding(
+        .alert("\(activeSocialPlatformName)解析失败", isPresented: Binding(
             get: { douyinErrorMessage != nil },
             set: { if !$0 { douyinErrorMessage = nil } }
         )) {
@@ -113,32 +117,76 @@ struct InAppWebPreviewSheet: View {
     }
 
     private var douyinTaskID: String {
-        guard WebLinkContextResolver.isDouyinURL(activeURL) else { return "" }
+        guard isSupportedSocialMediaURL(activeURL) else { return "" }
         return activeURL.absoluteString
     }
 
     private var shouldShowDouyinControls: Bool {
-        WebLinkContextResolver.isDouyinURL(activeURL)
+        isSupportedSocialMediaURL(activeURL)
             || resolvedDouyinPost?.hasMedia == true
+            || resolvedXiaohongshuPost?.hasMedia == true
             || state.pageVideoURL != nil
     }
 
     private var playableVideoURL: URL? {
+        if WebLinkContextResolver.isXiaohongshuURL(activeURL) {
+            if let raw = resolvedXiaohongshuPost?.video?.url, let url = URL(string: raw) {
+                return url
+            }
+            return state.pageVideoURL
+        }
+        if WebLinkContextResolver.isDouyinURL(activeURL) {
+            if let raw = resolvedDouyinPost?.video?.url, let url = URL(string: raw) {
+                return url
+            }
+            return state.pageVideoURL
+        }
         if let raw = resolvedDouyinPost?.video?.url, let url = URL(string: raw) {
+            return url
+        }
+        if let raw = resolvedXiaohongshuPost?.video?.url, let url = URL(string: raw) {
             return url
         }
         return state.pageVideoURL
     }
 
     private var resolvedImageCount: Int {
-        resolvedDouyinPost?.images.count ?? 0
+        activeResolvedImages.count
+    }
+
+    private var activeResolvedImages: [ResolvedWebImage] {
+        if WebLinkContextResolver.isXiaohongshuURL(activeURL) {
+            return resolvedXiaohongshuPost?.images ?? []
+        }
+        if WebLinkContextResolver.isDouyinURL(activeURL) {
+            return resolvedDouyinPost?.images ?? []
+        }
+        return resolvedXiaohongshuPost?.images ?? resolvedDouyinPost?.images ?? []
+    }
+
+    private var activeResolvedVideoTitle: String? {
+        if WebLinkContextResolver.isXiaohongshuURL(activeURL) {
+            return resolvedXiaohongshuPost?.video?.title
+        }
+        if WebLinkContextResolver.isDouyinURL(activeURL) {
+            return resolvedDouyinPost?.video?.title
+        }
+        return resolvedXiaohongshuPost?.video?.title ?? resolvedDouyinPost?.video?.title
+    }
+
+    private var activeSocialPlatformName: String {
+        WebLinkContextResolver.isXiaohongshuURL(activeURL) ? "小红书" : "抖音"
+    }
+
+    private func isSupportedSocialMediaURL(_ url: URL) -> Bool {
+        WebLinkContextResolver.isDouyinURL(url) || WebLinkContextResolver.isXiaohongshuURL(url)
     }
 
     private var douyinControlBar: some View {
         HStack(spacing: 10) {
             Image(systemName: douyinLeadingIconName)
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(resolvedDouyinPost?.hasMedia == true || playableVideoURL != nil ? theme.brandPrimary : theme.textSecondary)
+                .foregroundStyle(hasDownloadableDouyinMedia ? theme.brandPrimary : theme.textSecondary)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(resolvedDouyinTitle)
@@ -160,7 +208,7 @@ struct InAppWebPreviewSheet: View {
 
             Button {
                 guard let url = playableVideoURL else {
-                    Task { await resolveDouyinIfNeeded(force: true) }
+                    Task { await resolveSocialMediaIfNeeded(force: true) }
                     return
                 }
                 playingVideo = WebPreviewVideoItem(url: url)
@@ -196,22 +244,25 @@ struct InAppWebPreviewSheet: View {
     private var douyinStatusText: String {
         if isResolvingDouyin { return "正在解析可播放地址..." }
         if isDownloadingDouyin { return "正在下载..." }
-        if resolvedImageCount > 0 { return "已解析 \(resolvedImageCount) 张图片，可下载保存" }
         if playableVideoURL != nil { return "可在 App 内播放或下载" }
-        return "打开抖音链接后自动解析"
+        if resolvedImageCount > 0 { return "已解析 \(resolvedImageCount) 张图片，可下载保存" }
+        return "打开\(activeSocialPlatformName)链接后自动解析"
     }
 
     private var douyinLeadingIconName: String {
-        if resolvedImageCount > 0 { return "photo.on.rectangle.angled" }
         if playableVideoURL != nil { return "play.rectangle.fill" }
+        if resolvedImageCount > 0 { return "photo.on.rectangle.angled" }
         return "link.badge.plus"
     }
 
     private var resolvedDouyinTitle: String {
-        if let imageTitle = resolvedDouyinPost?.images.first?.title, resolvedImageCount > 0 {
+        if let title = activeResolvedVideoTitle, playableVideoURL != nil {
+            return title
+        }
+        if let imageTitle = activeResolvedImages.first?.title, resolvedImageCount > 0 {
             return imageTitle
         }
-        return resolvedDouyinPost?.video?.title ?? "抖音内容"
+        return activeResolvedVideoTitle ?? "\(activeSocialPlatformName)内容"
     }
 
     private var hasDownloadableDouyinMedia: Bool {
@@ -241,6 +292,37 @@ struct InAppWebPreviewSheet: View {
     }
 
     @MainActor
+    private func resolveXiaohongshuIfNeeded(force: Bool = false) async {
+        guard WebLinkContextResolver.isXiaohongshuURL(activeURL) else { return }
+        let sourceID = activeURL.absoluteString
+        guard force || resolvedXiaohongshuSourceID != sourceID else { return }
+        guard !isResolvingDouyin else { return }
+
+        isResolvingDouyin = true
+        defer { isResolvingDouyin = false }
+
+        do {
+            let post = try await WebLinkContextResolver().resolveXiaohongshuPost(activeURL)
+            resolvedXiaohongshuPost = post
+            resolvedXiaohongshuSourceID = sourceID
+            douyinErrorMessage = nil
+        } catch {
+            if force, state.pageVideoURL == nil {
+                douyinErrorMessage = "当前页面没有解析到可播放视频地址。你可以先让页面加载完成，再点刷新解析。"
+            }
+        }
+    }
+
+    @MainActor
+    private func resolveSocialMediaIfNeeded(force: Bool = false) async {
+        if WebLinkContextResolver.isXiaohongshuURL(activeURL) {
+            await resolveXiaohongshuIfNeeded(force: force)
+        } else {
+            await resolveDouyinIfNeeded(force: force)
+        }
+    }
+
+    @MainActor
     private func downloadDouyinMedia() async {
         guard hasDownloadableDouyinMedia else { return }
         guard !isDownloadingDouyin else { return }
@@ -249,23 +331,25 @@ struct InAppWebPreviewSheet: View {
         defer { isDownloadingDouyin = false }
 
         do {
-            if let images = resolvedDouyinPost?.images, !images.isEmpty {
-                let urls = try await downloadDouyinImages(images)
-                downloadedMedia = WebPreviewDownloadedMedia(urls: urls)
+            if let videoURL = playableVideoURL {
+                var request = URLRequest(url: videoURL, timeoutInterval: 300)
+                request.setValue(Self.mobileUserAgent, forHTTPHeaderField: "User-Agent")
+                request.setValue("*/*", forHTTPHeaderField: "Accept")
+                request.setValue(activeURL.absoluteString, forHTTPHeaderField: "Referer")
+                let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+                let destination = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(downloadFileName(response: response, url: videoURL))
+                try? FileManager.default.removeItem(at: destination)
+                try FileManager.default.moveItem(at: temporaryURL, to: destination)
+                downloadedMedia = WebPreviewDownloadedMedia(urls: [destination])
                 return
             }
 
-            guard let videoURL = playableVideoURL else { return }
-            var request = URLRequest(url: videoURL, timeoutInterval: 300)
-            request.setValue(Self.mobileUserAgent, forHTTPHeaderField: "User-Agent")
-            request.setValue("*/*", forHTTPHeaderField: "Accept")
-            request.setValue(activeURL.absoluteString, forHTTPHeaderField: "Referer")
-            let (temporaryURL, response) = try await URLSession.shared.download(for: request)
-            let destination = FileManager.default.temporaryDirectory
-                .appendingPathComponent(downloadFileName(response: response, url: videoURL))
-            try? FileManager.default.removeItem(at: destination)
-            try FileManager.default.moveItem(at: temporaryURL, to: destination)
-            downloadedMedia = WebPreviewDownloadedMedia(urls: [destination])
+            let images = activeResolvedImages
+            if !images.isEmpty {
+                let urls = try await downloadDouyinImages(images)
+                downloadedMedia = WebPreviewDownloadedMedia(urls: urls)
+            }
         } catch {
             douyinErrorMessage = "下载失败：\(error.localizedDescription)"
         }
@@ -273,8 +357,9 @@ struct InAppWebPreviewSheet: View {
 
     @MainActor
     private func downloadDouyinImages(_ images: [ResolvedWebImage]) async throws -> [URL] {
+        let platformDirectoryPrefix = WebLinkContextResolver.isXiaohongshuURL(activeURL) ? "xiaohongshu" : "douyin"
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("douyin-images-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("\(platformDirectoryPrefix)-images-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         var downloaded: [URL] = []
@@ -304,7 +389,7 @@ struct InAppWebPreviewSheet: View {
             return filename
         }
 
-        let title = resolvedDouyinPost?.video?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let title = activeResolvedVideoTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !title.isEmpty {
             return title.lowercased().hasSuffix(".mp4") ? title : "\(title).mp4"
         }
@@ -313,7 +398,7 @@ struct InAppWebPreviewSheet: View {
         if !last.isEmpty, last != "/" {
             return (last as NSString).pathExtension.isEmpty ? "\(last).mp4" : last
         }
-        return "douyin-video.mp4"
+        return WebLinkContextResolver.isXiaohongshuURL(activeURL) ? "xiaohongshu-video.mp4" : "douyin-video.mp4"
     }
 
     private func downloadImageFileName(image: ResolvedWebImage, response: URLResponse, url: URL) -> String {
@@ -332,7 +417,8 @@ struct InAppWebPreviewSheet: View {
         if !last.isEmpty, last != "/" {
             return (last as NSString).pathExtension.isEmpty ? "\(last).jpg" : last
         }
-        return "douyin-image-\(image.index).jpg"
+        let prefix = WebLinkContextResolver.isXiaohongshuURL(activeURL) ? "xiaohongshu-image" : "douyin-image"
+        return "\(prefix)-\(image.index).jpg"
     }
 
     private func filenameFromContentDisposition(_ disposition: String) -> String? {
@@ -485,6 +571,7 @@ private struct InAppWebPreviewRepresentable: UIViewRepresentable {
             state.isLoading = true
             state.currentURL = webView.url
             state.canGoBack = webView.canGoBack
+            state.pageVideoURL = nil
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -519,7 +606,8 @@ private struct InAppWebPreviewRepresentable: UIViewRepresentable {
         }
 
         private func extractPlayableVideoURL(from webView: WKWebView) {
-            guard let url = webView.url, WebLinkContextResolver.isDouyinURL(url) else { return }
+            guard let url = webView.url,
+                  WebLinkContextResolver.isDouyinURL(url) || WebLinkContextResolver.isXiaohongshuURL(url) else { return }
             let script = """
             (() => {
               const urls = [];
@@ -533,7 +621,7 @@ private struct InAppWebPreviewRepresentable: UIViewRepresentable {
               document.querySelectorAll('meta[property="og:video"], meta[property="og:video:url"], meta[name="twitter:player:stream"]').forEach(el => {
                 push(el.content);
               });
-              return urls.find(u => /\\.mp4|aweme\\/v1\\/play|video/i.test(u)) || urls[0] || '';
+              return urls.find(u => /\\.mp4|aweme\\/v1\\/play|sns-video|xhs-video|video/i.test(u)) || urls[0] || '';
             })();
             """
             webView.evaluateJavaScript(script) { [weak self] result, _ in

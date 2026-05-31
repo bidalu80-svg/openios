@@ -46,6 +46,21 @@ struct ResolvedDouyinPost: Sendable, Hashable {
     }
 }
 
+struct ResolvedXiaohongshuPost: Sendable, Hashable {
+    let sourceURL: String
+    let pageURL: String
+    let video: ResolvedWebVideo?
+    let images: [ResolvedWebImage]
+    let title: String
+    let author: String?
+    let description: String
+    let noteId: String?
+
+    var hasMedia: Bool {
+        video != nil || !images.isEmpty
+    }
+}
+
 struct WebLinkContextResolver: Sendable {
     private static let mobileUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
     private static let desktopUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
@@ -94,6 +109,18 @@ struct WebLinkContextResolver: Sendable {
         try await resolveDouyin(url)
     }
 
+    func resolveXiaohongshuVideo(_ url: URL) async throws -> ResolvedWebVideo {
+        let result = try await resolveXiaohongshu(url)
+        guard let video = result.video else {
+            throw URLError(.cannotParseResponse)
+        }
+        return video
+    }
+
+    func resolveXiaohongshuPost(_ url: URL) async throws -> ResolvedXiaohongshuPost {
+        try await resolveXiaohongshu(url)
+    }
+
     func resolve(from text: String, limit: Int = 3) async -> WebLinkContextResolution {
         let urls = Self.extractHTTPURLs(from: text, limit: limit)
         guard !urls.isEmpty else {
@@ -109,6 +136,15 @@ struct WebLinkContextResolver: Sendable {
                             return LinkFetchOutcome(
                                 index: index,
                                 block: self.douyinContextBlock(result: result, index: index + 1),
+                                video: result.video,
+                                images: result.images,
+                                success: true
+                            )
+                        } else if Self.isXiaohongshuURL(url) {
+                            let result = try await self.resolveXiaohongshu(url)
+                            return LinkFetchOutcome(
+                                index: index,
+                                block: self.xiaohongshuContextBlock(result: result, index: index + 1),
                                 video: result.video,
                                 images: result.images,
                                 success: true
@@ -248,6 +284,86 @@ struct WebLinkContextResolver: Sendable {
         )
     }
 
+    private func resolveXiaohongshu(_ url: URL) async throws -> ResolvedXiaohongshuPost {
+        let (initialData, initialResponse) = try await load(url, mobile: true)
+        var pageURL = initialResponse.url ?? url
+        var html = Self.decodeText(initialData)
+
+        if Self.isXiaohongshuShortURL(pageURL),
+           let embeddedURL = Self.firstEmbeddedXiaohongshuPageURL(in: html) {
+            let (pageData, pageResponse) = try await load(embeddedURL, mobile: true)
+            pageURL = pageResponse.url ?? embeddedURL
+            html = Self.decodeText(pageData)
+        }
+
+        let noteId = Self.xiaohongshuNoteId(from: pageURL) ?? Self.xiaohongshuNoteId(from: url)
+        let jsonObjects = Self.xiaohongshuJSONObjects(from: html)
+        let noteObject = jsonObjects.compactMap { Self.xiaohongshuNoteObject(in: $0, noteId: noteId) }.first
+        let primaryObject: Any? = noteObject ?? jsonObjects.first
+
+        let rawTitle = primaryObject.flatMap { Self.firstUsefulString(in: $0, keys: ["title", "desc", "description", "content"]) }
+            ?? Self.metaContent(in: html, name: "title")
+            ?? Self.metaContent(in: html, name: "description")
+            ?? Self.firstMatch(in: html, pattern: #"<title[^>]*>(.*?)</title>"#)
+            ?? "xiaohongshu_\(noteId ?? UUID().uuidString)"
+        let title = Self.cleanupText(rawTitle)
+        let description = Self.cleanupText(
+            primaryObject.flatMap { Self.firstUsefulString(in: $0, keys: ["desc", "description", "content", "title"]) }
+                ?? title
+        )
+        let author = primaryObject.flatMap { Self.firstUsefulString(in: $0, keys: ["nickname", "nickName", "userName", "authorName"]) }
+            .map(Self.cleanupText)
+
+        var videoCandidates: [String] = []
+        if let noteObject {
+            videoCandidates.append(contentsOf: Self.xiaohongshuURLs(in: noteObject, kind: .video))
+        }
+        for object in jsonObjects {
+            videoCandidates.append(contentsOf: Self.xiaohongshuURLs(in: object, kind: .video))
+        }
+        videoCandidates.append(contentsOf: Self.mediaURLCandidates(in: html, kind: .video))
+        videoCandidates = Self.sortedXiaohongshuVideoURLs(Self.uniqueMediaURLs(videoCandidates))
+
+        let resolvedVideo = videoCandidates.first.map { mediaURL in
+            ResolvedWebVideo(
+                title: Self.safeVideoFileName(title, fallback: "xiaohongshu-video"),
+                url: mediaURL,
+                sourceURL: url.absoluteString,
+                videoId: noteId
+            )
+        }
+
+        var imageCandidates: [String] = []
+        if let noteObject {
+            imageCandidates.append(contentsOf: Self.xiaohongshuURLs(in: noteObject, kind: .image))
+        }
+        for object in jsonObjects {
+            imageCandidates.append(contentsOf: Self.xiaohongshuURLs(in: object, kind: .image))
+        }
+        imageCandidates.append(contentsOf: Self.mediaURLCandidates(in: html, kind: .image))
+        let images = Self.resolvedXiaohongshuImages(
+            from: Self.uniqueMediaURLs(imageCandidates),
+            title: title,
+            sourceURL: url.absoluteString,
+            noteId: noteId
+        )
+
+        guard resolvedVideo != nil || !images.isEmpty else {
+            throw URLError(.cannotParseResponse)
+        }
+
+        return ResolvedXiaohongshuPost(
+            sourceURL: url.absoluteString,
+            pageURL: pageURL.absoluteString,
+            video: resolvedVideo,
+            images: images,
+            title: title,
+            author: author,
+            description: description,
+            noteId: noteId
+        )
+    }
+
     private func load(_ url: URL, mobile: Bool) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: url, timeoutInterval: 12)
         request.httpMethod = "GET"
@@ -313,11 +429,49 @@ struct WebLinkContextResolver: Sendable {
         return lines.joined(separator: "\n")
     }
 
+    private func xiaohongshuContextBlock(result: ResolvedXiaohongshuPost, index: Int) -> String {
+        var lines = [
+            result.images.isEmpty ? "### Link \(index): Xiaohongshu Video" : "### Link \(index): Xiaohongshu Image Post",
+            "Original URL: \(result.sourceURL)",
+            "Resolved page: \(result.pageURL)"
+        ]
+        if let noteId = result.noteId {
+            lines.append("Note ID: \(noteId)")
+        }
+        if let author = result.author, !author.isEmpty {
+            lines.append("Author: \(author)")
+        }
+        lines.append("Title/description: \(result.description)")
+        if let video = result.video {
+            lines.append("Video URL: \(video.url)")
+        }
+        if !result.images.isEmpty {
+            lines.append("Image count: \(result.images.count)")
+            for image in result.images.prefix(20) {
+                lines.append("Image \(image.index): \(image.url)")
+            }
+        }
+        lines.append("Client note: parsed Xiaohongshu media is attached to this assistant response when possible. Image posts can include multiple image URLs; video posts include a playable video URL when the page exposes one.")
+        return lines.joined(separator: "\n")
+    }
+
     static func isDouyinURL(_ url: URL) -> Bool {
         guard let host = url.host?.lowercased() else { return false }
         return host.contains("douyin.com")
             || host.contains("iesdouyin.com")
             || host.contains("amemv.com")
+    }
+
+    static func isXiaohongshuURL(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        return host.contains("xiaohongshu.com")
+            || host.contains("xhslink.com")
+            || host.contains("rednote.com")
+    }
+
+    private static func isXiaohongshuShortURL(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        return host.contains("xhslink.com")
     }
 
     private static func videoId(from url: URL) -> String? {
@@ -333,6 +487,290 @@ struct WebLinkContextResolver: Sendable {
         if components.contains("note") { return "note" }
         if components.contains("video") { return "video" }
         return nil
+    }
+
+    private enum XiaohongshuMediaKind {
+        case video
+        case image
+    }
+
+    private static func xiaohongshuNoteId(from url: URL) -> String? {
+        for component in url.pathComponents.reversed() {
+            let cleaned = component.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !cleaned.isEmpty else { continue }
+            if cleaned.range(of: #"^[0-9a-fA-F]{16,40}$"#, options: .regularExpression) != nil {
+                return cleaned
+            }
+        }
+
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            for name in ["note_id", "noteId", "id"] {
+                if let value = components.queryItems?.first(where: { $0.name == name })?.value,
+                   value.range(of: #"^[0-9a-fA-F]{16,40}$"#, options: .regularExpression) != nil {
+                    return value
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func firstEmbeddedXiaohongshuPageURL(in html: String) -> URL? {
+        mediaURLStrings(in: normalizedEmbeddedText(html))
+            .compactMap(URL.init(string:))
+            .first { url in
+                guard isXiaohongshuURL(url), !isXiaohongshuShortURL(url) else { return false }
+                let path = url.path.lowercased()
+                return path.contains("/explore/")
+                    || path.contains("/discovery/item/")
+                    || path.contains("/search_result/")
+            }
+    }
+
+    private static func xiaohongshuJSONObjects(from html: String) -> [Any] {
+        let patterns = [
+            #"window\.__INITIAL_STATE__\s*=\s*(\{.*?\})\s*;?\s*</script>"#,
+            #"window\.__INITIAL_SSR_STATE__\s*=\s*(\{.*?\})\s*;?\s*</script>"#,
+            #"window\.__SETUP_SERVER_STATE__\s*=\s*(\{.*?\})\s*;?\s*</script>"#,
+            #"<script[^>]+id=["']__NEXT_DATA__["'][^>]*>\s*(\{.*?\})\s*</script>"#
+        ]
+
+        var objects: [Any] = []
+        for pattern in patterns {
+            for raw in matches(in: html, pattern: pattern) {
+                if let object = jsonObject(fromJavaScriptObjectLiteral: raw) {
+                    objects.append(object)
+                }
+            }
+        }
+        return objects
+    }
+
+    private static func jsonObject(fromJavaScriptObjectLiteral raw: String) -> Any? {
+        let cleaned = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"(?<=[:\[,])\s*undefined(?=\s*[,}\]])"#, with: "null", options: .regularExpression)
+        guard let data = cleaned.data(using: .utf8) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data)
+    }
+
+    private static func xiaohongshuNoteObject(in object: Any, noteId: String?) -> [String: Any]? {
+        if let dict = object as? [String: Any] {
+            if let noteId,
+               let detailMap = dict["noteDetailMap"] as? [String: Any],
+               let detail = detailMap[noteId] as? [String: Any] {
+                if let note = detail["note"] as? [String: Any] {
+                    return note
+                }
+                return detail
+            }
+
+            let idValue = (dict["noteId"] as? String) ?? (dict["id"] as? String)
+            let hasNoteShape = dict["imageList"] != nil
+                || dict["video"] != nil
+                || dict["videoInfo"] != nil
+                || dict["media"] != nil
+            if hasNoteShape, noteId == nil || idValue == noteId {
+                return dict
+            }
+
+            if let note = dict["note"] as? [String: Any],
+               let found = xiaohongshuNoteObject(in: note, noteId: noteId) {
+                return found
+            }
+
+            for value in dict.values {
+                if let found = xiaohongshuNoteObject(in: value, noteId: noteId) {
+                    return found
+                }
+            }
+        } else if let array = object as? [Any] {
+            for item in array {
+                if let found = xiaohongshuNoteObject(in: item, noteId: noteId) {
+                    return found
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func firstUsefulString(in object: Any, keys: [String]) -> String? {
+        if let dict = object as? [String: Any] {
+            for key in keys {
+                if let value = dict[key] as? String,
+                   !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return value
+                }
+            }
+            for value in dict.values {
+                if let found = firstUsefulString(in: value, keys: keys) {
+                    return found
+                }
+            }
+        } else if let array = object as? [Any] {
+            for item in array {
+                if let found = firstUsefulString(in: item, keys: keys) {
+                    return found
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func xiaohongshuURLs(in object: Any, kind: XiaohongshuMediaKind) -> [String] {
+        var urls: [String] = []
+
+        func walk(_ value: Any) {
+            if let string = value as? String {
+                urls.append(contentsOf: mediaURLCandidates(in: string, kind: kind))
+                return
+            }
+
+            if let list = value as? [Any] {
+                for item in list {
+                    walk(item)
+                }
+                return
+            }
+
+            if let dict = value as? [String: Any] {
+                for value in dict.values {
+                    walk(value)
+                }
+            }
+        }
+
+        walk(object)
+        return uniqueMediaURLs(urls)
+    }
+
+    private static func mediaURLCandidates(in text: String, kind: XiaohongshuMediaKind) -> [String] {
+        mediaURLStrings(in: normalizedEmbeddedText(text)).filter { raw in
+            let lower = raw.lowercased()
+            switch kind {
+            case .video:
+                return lower.contains("sns-video")
+                    || lower.contains("xhs-video")
+                    || lower.contains("xhscdn.com/spectrum")
+                    || lower.contains(".mp4")
+                    || (lower.contains("xhscdn.com") && lower.contains("video"))
+            case .image:
+                guard !isXiaohongshuVideoURL(raw) else { return false }
+                return lower.contains("sns-img")
+                    || lower.contains("sns-webpic")
+                    || lower.contains("imageview2")
+                    || lower.contains(".jpg")
+                    || lower.contains(".jpeg")
+                    || lower.contains(".png")
+                    || lower.contains(".webp")
+                    || lower.contains(".avif")
+            }
+        }
+    }
+
+    private static func isXiaohongshuVideoURL(_ raw: String) -> Bool {
+        let lower = raw.lowercased()
+        return lower.contains("sns-video")
+            || lower.contains("xhs-video")
+            || lower.contains("xhscdn.com/spectrum")
+            || lower.contains(".mp4")
+    }
+
+    private static func mediaURLStrings(in text: String) -> [String] {
+        let pattern = #"https?://[^\s"'<>\\\]\[{}]+"#
+        let trimmingCharacters = trailingURLTrimCharacters.union(CharacterSet(charactersIn: "\"'`),;"))
+        return matches(in: text, pattern: pattern).map { raw in
+            raw.trimmingCharacters(in: trimmingCharacters)
+        }
+    }
+
+    private static func normalizedEmbeddedText(_ text: String) -> String {
+        var value = decodeHTMLEntities(text)
+        let replacements: [(String, String)] = [
+            ("\\u002F", "/"),
+            ("\\u002f", "/"),
+            ("\\/", "/"),
+            ("\\u003A", ":"),
+            ("\\u003a", ":"),
+            ("\\u0026", "&"),
+            ("\\u003D", "="),
+            ("\\u003d", "="),
+            ("\\u003F", "?"),
+            ("\\u003f", "?")
+        ]
+        for (needle, replacement) in replacements {
+            value = value.replacingOccurrences(of: needle, with: replacement)
+        }
+        return value
+    }
+
+    private static func uniqueMediaURLs(_ urls: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for raw in urls {
+            let normalized = raw
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\\u0026", with: "&")
+            guard let url = URL(string: normalized),
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else { continue }
+            let key = canonicalImageURLKey(normalized)
+            if seen.insert(key).inserted {
+                result.append(normalized)
+            }
+        }
+        return result
+    }
+
+    private static func sortedXiaohongshuVideoURLs(_ urls: [String]) -> [String] {
+        urls.enumerated()
+            .sorted { left, right in
+                let leftRank = xiaohongshuVideoURLRank(left.element)
+                let rightRank = xiaohongshuVideoURLRank(right.element)
+                if leftRank != rightRank {
+                    return leftRank < rightRank
+                }
+                return left.offset < right.offset
+            }
+            .map(\.element)
+    }
+
+    private static func xiaohongshuVideoURLRank(_ raw: String) -> Int {
+        let lower = raw.lowercased()
+        var rank = 50
+        if lower.contains("sns-video-v2.xhscdn.com") {
+            rank -= 25
+        } else if lower.contains("sns-video") || lower.contains("xhs-video") {
+            rank -= 15
+        }
+        if lower.contains("/259/") || lower.contains("_259.mp4") {
+            rank -= 10
+        }
+        if lower.contains("backup") || lower.contains("sns-bak") {
+            rank += 20
+        }
+        if lower.contains("watermark") || lower.contains("wm") {
+            rank += 30
+        }
+        return rank
+    }
+
+    private static func resolvedXiaohongshuImages(
+        from urls: [String],
+        title: String,
+        sourceURL: String,
+        noteId: String?
+    ) -> [ResolvedWebImage] {
+        let baseTitle = safeBaseFileName(title, fallback: "xiaohongshu-image")
+        return urls.prefix(40).enumerated().map { offset, url in
+            let ext = imageFileExtension(from: url)
+            return ResolvedWebImage(
+                title: "\(baseTitle)-\(offset + 1).\(ext)",
+                url: url,
+                sourceURL: sourceURL,
+                imageId: noteId,
+                index: offset + 1
+            )
+        }
     }
 
     private static func routerDataJSON(from html: String) -> Any? {
@@ -530,6 +968,20 @@ struct WebLinkContextResolver: Sendable {
         return String(text[range])
     }
 
+    private static func matches(in text: String, pattern: String) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: pattern,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        ) else { return [] }
+
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.matches(in: text, range: nsRange).compactMap { match in
+            let captureIndex = match.numberOfRanges > 1 ? 1 : 0
+            guard let range = Range(match.range(at: captureIndex), in: text) else { return nil }
+            return String(text[range])
+        }
+    }
+
     private static func decodeText(_ data: Data) -> String {
         String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .unicode)
@@ -562,6 +1014,11 @@ struct WebLinkContextResolver: Sendable {
 
     private static func safeVideoFileName(_ title: String) -> String {
         let base = safeBaseFileName(title, fallback: "douyin-video")
+        return base.lowercased().hasSuffix(".mp4") ? base : "\(base).mp4"
+    }
+
+    private static func safeVideoFileName(_ title: String, fallback: String) -> String {
+        let base = safeBaseFileName(title, fallback: fallback)
         return base.lowercased().hasSuffix(".mp4") ? base : "\(base).mp4"
     }
 

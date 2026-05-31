@@ -710,6 +710,9 @@ struct StreamingMarkdownView: View {
         if lowerHost.contains("douyin.com") || lowerHost.contains("iesdouyin.com") {
             return "抖音视频"
         }
+        if lowerHost.contains("xiaohongshu.com") || lowerHost.contains("xhslink.com") {
+            return "小红书笔记"
+        }
         if lowerHost.contains("snssdk.com") {
             return "MP4 播放地址"
         }

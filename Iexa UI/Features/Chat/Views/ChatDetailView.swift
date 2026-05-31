@@ -4950,6 +4950,8 @@ struct ChatDetailView: View {
         return lower.contains("aweme.snssdk.com/aweme/v1/play")
             || lower.contains("mime_type=video")
             || lower.contains("video_id=")
+            || lower.contains("sns-video")
+            || lower.contains("xhs-video")
     }
 
     private func suggestedFileName(from url: URL) -> String {
