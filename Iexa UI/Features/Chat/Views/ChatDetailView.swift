@@ -760,6 +760,7 @@ struct ChatDetailView: View {
     @State private var randomPrompts: [SuggestedPrompt] = []
     @State private var showAgentTaskPanel = false
     @State private var agentActivitySnapshot: [AgentActivityItem] = []
+    @State private var agentFloatingActivitySnapshot: AgentActivityItem?
     @State private var agentFloatingFilePreview: LocalAlpineWrittenFilePreviewItem?
     @State private var agentFloatingStepPreview: AgentFloatingStepPreviewItem?
     @State private var agentFloatingLoadingPath: String?
@@ -795,8 +796,20 @@ struct ChatDetailView: View {
     }
 
     private var currentTurnAgentActivityItems: [AgentActivityItem] {
+        currentTurnAgentActivityItems(includeInactive: false)
+    }
+
+    private func currentTurnAgentActivityItems(includeInactive: Bool) -> [AgentActivityItem] {
         guard viewModel.isStreaming || viewModel.streamingStore.isActive else {
-            return []
+            if !includeInactive { return [] }
+            let messages = viewModel.messages
+            guard !messages.isEmpty else { return [] }
+            let lastUserIndex = messages.lastIndex(where: { $0.role == .user })
+            let startIndex = lastUserIndex.map { messages.index(after: $0) } ?? messages.startIndex
+            guard startIndex < messages.endIndex else { return [] }
+            return messages[startIndex...]
+                .compactMap { activityItem(for: $0) }
+                .filter { $0.hasConcreteSteps || $0.isActive }
         }
         let messages = viewModel.messages
         guard !messages.isEmpty else { return [] }
@@ -883,30 +896,36 @@ struct ChatDetailView: View {
     }
 
     private var latestVisibleAgentActivity: AgentActivityItem? {
-        let turnItems = currentTurnAgentActivityItems
+        agentActivityWindowPreview(includeInactive: false)
+    }
 
+    private func agentActivityWindowPreview(includeInactive: Bool) -> AgentActivityItem? {
+        let turnItems = currentTurnAgentActivityItems(includeInactive: includeInactive)
+        let isLive = viewModel.isStreaming || viewModel.streamingStore.isActive
         if let merged = AgentActivityItem.mergedTurn(
             id: "turn-\(viewModel.messages.last?.id ?? "latest")",
             items: turnItems
         ), merged.hasConcreteSteps {
-            return merged.isActive || viewModel.isStreaming ? merged : nil
+            guard includeInactive || merged.isActive || isLive else { return nil }
+            return merged
         }
 
         guard let item = turnItems.reversed().first(where: { $0.hasConcreteSteps }) ?? turnItems.last else { return nil }
-        return item.isActive || viewModel.isStreaming ? item : nil
+        guard includeInactive || item.isActive || isLive else { return nil }
+        return item
     }
 
     private var visibleAgentActivityWindowPreview: AgentActivityItem? {
-        let items = currentTurnAgentActivityItems
-        guard !items.isEmpty else { return nil }
-        if let merged = AgentActivityItem.mergedTurn(
-            id: "window-\(items.first?.id ?? "empty")-\(items.last?.id ?? "latest")",
-            items: items
-        ), merged.hasConcreteSteps, merged.isActive || viewModel.isStreaming {
-            return merged.limitingSteps(to: Self.agentFloatingPreviewStepLimit)
+        if let live = agentActivityWindowPreview(includeInactive: false)?.limitingSteps(to: Self.agentFloatingPreviewStepLimit) {
+            return live
         }
+        return agentFloatingActivitySnapshot
+    }
 
-        return latestVisibleAgentActivity?.limitingSteps(to: Self.agentFloatingPreviewStepLimit)
+    private func refreshAgentFloatingActivitySnapshot(includeInactive: Bool) {
+        guard let item = agentActivityWindowPreview(includeInactive: includeInactive),
+              item.hasConcreteSteps else { return }
+        agentFloatingActivitySnapshot = item.limitingSteps(to: Self.agentFloatingPreviewStepLimit)
     }
 
     private func refreshAgentActivitySnapshot() {
@@ -2061,6 +2080,11 @@ struct ChatDetailView: View {
         // near the top of the viewport (ChatGPT-style).
         .onChange(of: viewModel.messages.count) { old, new in
             guard new > old else { return }
+            if viewModel.messages.last?.role == .user {
+                agentFloatingActivitySnapshot = nil
+            } else {
+                refreshAgentFloatingActivitySnapshot(includeInactive: !viewModel.isStreaming && !viewModel.streamingStore.isActive)
+            }
 
             // ── ALWAYS scroll to bottom when a new message is added ──
             // No matter where the user is scrolled, sending a message must
@@ -2094,8 +2118,18 @@ struct ChatDetailView: View {
         // scrolled up, respect that position and don't yank them back.
         .onChange(of: viewModel.isStreaming) { _, streaming in
             if streaming && !isScrolledUp {
+                refreshAgentFloatingActivitySnapshot(includeInactive: false)
                 // Already at bottom — ensure auto-scroll stays active.
                 scrollToLatestMessageWithoutAnimation(anchor: .bottom)
+            } else if !streaming {
+                refreshAgentFloatingActivitySnapshot(includeInactive: true)
+            }
+        }
+        .onChange(of: viewModel.streamingStore.isActive) { _, active in
+            if active {
+                refreshAgentFloatingActivitySnapshot(includeInactive: false)
+            } else {
+                refreshAgentFloatingActivitySnapshot(includeInactive: true)
             }
         }
         // Resume auto-scroll: when the user scrolls back to the bottom

@@ -2569,7 +2569,11 @@ actor LocalAlpineAgentService {
             return [LocalAlpineAgentFile(path: path, content: appendPayload, source: .editFile, mode: .append)]
         }
         guard let payload = Self.editRewritePayload(from: dict) else { return [] }
-        return [LocalAlpineAgentFile(path: path, content: payload, source: .editFile)]
+        return [LocalAlpineAgentFile(
+            path: path,
+            content: Self.normalizedCodeFilePayload(payload, path: path),
+            source: .editFile
+        )]
     }
 
     private nonisolated static func editAppendPayload(from dict: [String: Any]) -> String? {
@@ -2984,7 +2988,11 @@ actor LocalAlpineAgentService {
                 return nil
             }
             let source: LocalAlpineAgentFileSource = isCodeTarget(path) ? .codeLines : .content
-            return LocalAlpineAgentFile(path: path, content: content, source: source)
+            return LocalAlpineAgentFile(
+                path: path,
+                content: normalizedCodeFilePayload(content, path: path),
+                source: source
+            )
         }
     }
 
@@ -3020,10 +3028,48 @@ actor LocalAlpineAgentService {
             : payload.source
         return LocalAlpineAgentFile(
             path: path,
-            content: payload.content,
+            content: Self.normalizedCodeFilePayload(payload.content, path: path),
             source: source,
             mode: Self.writeFileMode(from: dict)
         )
+    }
+
+    private nonisolated static func normalizedCodeFilePayload(_ content: String, path: String) -> String {
+        guard isCodeTarget(path) else { return content }
+        return singleMarkdownCodeFenceBody(from: content) ?? content
+    }
+
+    private nonisolated static func singleMarkdownCodeFenceBody(from content: String) -> String? {
+        let normalized = content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lines = trimmed.components(separatedBy: "\n")
+        guard lines.count >= 2,
+              let openingLine = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return nil
+        }
+        let marker: String
+        if openingLine.hasPrefix("```") {
+            marker = "```"
+        } else if openingLine.hasPrefix("~~~") {
+            marker = "~~~"
+        } else {
+            return nil
+        }
+        guard let closingIndex = lines.dropFirst().firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines) == marker
+        }) else {
+            return nil
+        }
+        let bodyLines = lines[1..<closingIndex]
+        guard !bodyLines.isEmpty else { return nil }
+        var body = bodyLines.joined(separator: "\n")
+        if !body.hasSuffix("\n") {
+            body += "\n"
+        }
+        return body
     }
 
     private nonisolated static func writeFilePayload(
@@ -4385,7 +4431,7 @@ actor LocalAlpineAgentService {
                 writeFiles: [
                     LocalAlpineAgentFile(
                         path: opening.path,
-                        content: content,
+                        content: Self.normalizedCodeFilePayload(content, path: opening.path),
                         source: Self.isPythonTarget(opening.path) ? .codeLines : .contentLines
                     )
                 ]
@@ -4430,7 +4476,7 @@ actor LocalAlpineAgentService {
                 writeFiles: [
                     LocalAlpineAgentFile(
                         path: path,
-                        content: content,
+                        content: normalizedCodeFilePayload(content, path: path),
                         source: .codeLines
                     )
                 ]
@@ -4475,7 +4521,7 @@ actor LocalAlpineAgentService {
                 writeFiles: [
                     LocalAlpineAgentFile(
                         path: path,
-                        content: content,
+                        content: normalizedCodeFilePayload(content, path: path),
                         source: .codeLines
                     )
                 ]
@@ -4570,7 +4616,7 @@ actor LocalAlpineAgentService {
             writeFiles: [
                 LocalAlpineAgentFile(
                     path: path,
-                    content: decodeShellPrintfLiteral(rawContent),
+                    content: normalizedCodeFilePayload(decodeShellPrintfLiteral(rawContent), path: path),
                     source: .codeLines
                 )
             ]
