@@ -5049,21 +5049,25 @@ actor LocalAlpineAgentService {
         from shell: String,
         cwd: String? = nil
     ) -> [LocalAlpineAgentCommand]? {
-        let pattern = #"(?is)^\s*(?:python3?|python)\s+-\s+<<['"]?([A-Za-z0-9_]+)['"]?\s*\n([\s\S]*?)\n\1\s*(?:\n|\s)*(?:&&|;)?\s*([\s\S]*)$"#
+        let pattern = #"(?is)^\s*(?:cd\s+(['"]?)([^'"\s;&|]+)\1\s*&&\s*)?(?:python3?|python)(?:\s+-)?\s+<<['"]?([A-Za-z0-9_]+)['"]?\s*\n([\s\S]*?)\n\3\s*(?:\n|\s)*(?:&&|;)?\s*([\s\S]*)$"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let nsShell = shell as NSString
         let fullRange = NSRange(location: 0, length: nsShell.length)
         guard let match = regex.firstMatch(in: shell, range: fullRange) else { return nil }
 
-        let script = nsShell.substring(with: match.range(at: 2))
-        let remainder = match.range(at: 3).location == NSNotFound
+        let cdCwd: String? = match.range(at: 2).location == NSNotFound
+            ? nil
+            : nsShell.substring(with: match.range(at: 2))
+        let effectiveCWD = cwd ?? cdCwd
+        let script = nsShell.substring(with: match.range(at: 4))
+        let remainder = match.range(at: 5).location == NSNotFound
             ? ""
-            : nsShell.substring(with: match.range(at: 3)).trimmingCharacters(in: .whitespacesAndNewlines)
+            : nsShell.substring(with: match.range(at: 5)).trimmingCharacters(in: .whitespacesAndNewlines)
 
-        var commands = commandsFromPythonPathWrites(script, cwd: cwd)
+        var commands = commandsFromPythonPathWrites(script, cwd: effectiveCWD)
         guard !commands.isEmpty else { return nil }
         if !remainder.isEmpty {
-            commands.append(LocalAlpineAgentCommand(command: remainder, cwd: cwd))
+            commands.append(LocalAlpineAgentCommand(command: remainder, cwd: effectiveCWD))
         }
         return commands
     }
@@ -5073,6 +5077,9 @@ actor LocalAlpineAgentService {
         cwd: String?
     ) -> [LocalAlpineAgentCommand] {
         if let command = commandFromPythonPathLiteralWrite(script, cwd: cwd) {
+            return [command]
+        }
+        if let command = commandFromPythonPathVariableWrite(script, cwd: cwd) {
             return [command]
         }
         if let command = commandFromPythonPathReplaceWrite(script, cwd: cwd) {
@@ -5104,27 +5111,39 @@ actor LocalAlpineAgentService {
         )
     }
 
+    private nonisolated static func commandFromPythonPathVariableWrite(
+        _ script: String,
+        cwd: String?
+    ) -> LocalAlpineAgentCommand? {
+        let assignments = pythonStringAssignments(in: script)
+        guard !assignments.isEmpty,
+              let write = pythonPathWriteVariableTarget(in: script),
+              let content = assignments[write.variable] else {
+            return nil
+        }
+
+        return LocalAlpineAgentCommand(
+            command: nil,
+            cwd: cwd,
+            writeFiles: [
+                LocalAlpineAgentFile(
+                    path: write.path,
+                    content: content,
+                    source: Self.isPythonTarget(write.path) ? .codeLines : .contentLines
+                )
+            ]
+        )
+    }
+
     private nonisolated static func commandFromPythonPathReplaceWrite(
         _ script: String,
         cwd: String?
     ) -> LocalAlpineAgentCommand? {
-        let pathPattern = #"(?is)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*Path\s*\(\s*['"]([^'"]+)['"]\s*\)"#
-        guard let pathMatch = firstRegexMatch(pattern: pathPattern, in: script),
-              let variable = regexCapture(pathMatch, in: script, at: 1),
-              let path = regexCapture(pathMatch, in: script, at: 2) else {
+        guard let path = pythonPathWriteTarget(in: script) else {
             return nil
         }
-        let escapedVariable = NSRegularExpression.escapedPattern(for: variable)
-        guard script.range(
-            of: #"(?is)\#(escapedVariable)\s*\.write_text\s*\("#,
-            options: .regularExpression
-        ) != nil else {
-            return nil
-        }
-        let replacePattern = #"(?is)\.replace\s*\(\s*(['"])(.*?)\1\s*,\s*(['"])(.*?)\3\s*\)"#
-        guard let replaceMatch = firstRegexMatch(pattern: replacePattern, in: script),
-              let oldText = regexCapture(replaceMatch, in: script, at: 2),
-              let newText = regexCapture(replaceMatch, in: script, at: 4) else {
+        let replacements = pythonReplaceReplacements(in: script)
+        guard !replacements.isEmpty else {
             return nil
         }
         return LocalAlpineAgentCommand(
@@ -5133,17 +5152,200 @@ actor LocalAlpineAgentService {
             editFiles: [
                 LocalAlpineEditFileRequest(
                     path: path,
-                    replacements: [
-                        LocalAlpineEditReplacement(
-                            oldText: decodeShellPrintfLiteral(oldText),
-                            newText: decodeShellPrintfLiteral(newText),
-                            replaceAll: false,
-                            expectedCount: nil
-                        )
-                    ]
+                    replacements: replacements
                 )
             ]
         )
+    }
+
+    private nonisolated static func pythonPathWriteVariableTarget(in script: String) -> (path: String, variable: String)? {
+        let assignments = pythonPathAssignments(in: script)
+        for (variableName, path) in assignments {
+            let escapedVariable = NSRegularExpression.escapedPattern(for: variableName)
+            let pattern = #"(?is)\b\#(escapedVariable)\s*\.\s*(?:write_text|write_bytes)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)"#
+            if let match = firstRegexMatch(pattern: pattern, in: script),
+               let contentVariable = regexCapture(match, in: script, at: 1) {
+                return (path, contentVariable)
+            }
+        }
+
+        for (handle, path) in pythonOpenHandleAssignments(in: script) {
+            let escapedHandle = NSRegularExpression.escapedPattern(for: handle)
+            let pattern = #"(?is)\b\#(escapedHandle)\s*\.\s*write\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)"#
+            if let match = firstRegexMatch(pattern: pattern, in: script),
+               let contentVariable = regexCapture(match, in: script, at: 1) {
+                return (path, contentVariable)
+            }
+        }
+
+        let directPathPattern = #"(?is)Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.\s*(?:write_text|write_bytes)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)"#
+        if let match = firstRegexMatch(pattern: directPathPattern, in: script),
+           let path = regexCapture(match, in: script, at: 1),
+           let variable = regexCapture(match, in: script, at: 2) {
+            return (path, variable)
+        }
+
+        let openWritePattern = #"(?is)open\s*\(\s*['"]([^'"]+)['"][^)]*['"][wax]\+?['"][^)]*\)\s*\.\s*write\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)"#
+        if let match = firstRegexMatch(pattern: openWritePattern, in: script),
+           let path = regexCapture(match, in: script, at: 1),
+           let variable = regexCapture(match, in: script, at: 2) {
+            return (path, variable)
+        }
+
+        return nil
+    }
+
+    private nonisolated static func pythonPathWriteTarget(in script: String) -> String? {
+        for (variable, path) in pythonPathAssignments(in: script) {
+            let escapedVariable = NSRegularExpression.escapedPattern(for: variable)
+            if script.range(
+                of: #"(?is)\b\#(escapedVariable)\s*\.\s*(?:write_text|write_bytes)\s*\("#,
+                options: .regularExpression
+            ) != nil {
+                return path
+            }
+        }
+
+        for (handle, path) in pythonOpenHandleAssignments(in: script) {
+            let escapedHandle = NSRegularExpression.escapedPattern(for: handle)
+            if script.range(
+                of: #"(?is)\b\#(escapedHandle)\s*\.\s*write\s*\("#,
+                options: .regularExpression
+            ) != nil {
+                return path
+            }
+        }
+
+        let directPathPattern = #"(?is)Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.\s*(?:write_text|write_bytes)\s*\("#
+        if let match = firstRegexMatch(pattern: directPathPattern, in: script),
+           let path = regexCapture(match, in: script, at: 1) {
+            return path
+        }
+
+        let openWritePattern = #"(?is)open\s*\(\s*['"]([^'"]+)['"][^)]*['"][wax]\+?['"][^)]*\)\s*\.\s*write\s*\("#
+        if let match = firstRegexMatch(pattern: openWritePattern, in: script),
+           let path = regexCapture(match, in: script, at: 1) {
+            return path
+        }
+
+        return nil
+    }
+
+    private nonisolated static func pythonPathAssignments(in script: String) -> [(variable: String, path: String)] {
+        let variablePattern = #"(?is)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:Path|pathlib\.Path)\s*\(\s*['"]([^'"]+)['"]\s*\)"#
+        guard let regex = try? NSRegularExpression(pattern: variablePattern) else { return [] }
+
+        let nsScript = script as NSString
+        return regex.matches(in: script, range: NSRange(location: 0, length: nsScript.length))
+            .compactMap { match -> (variable: String, path: String)? in
+                guard let variable = regexCapture(match, in: script, at: 1),
+                      let path = regexCapture(match, in: script, at: 2) else {
+                    return nil
+                }
+                return (variable, path)
+            }
+    }
+
+    private nonisolated static func pythonOpenHandleAssignments(in script: String) -> [(handle: String, path: String)] {
+        let patterns = [
+            #"(?is)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*open\s*\(\s*['"]([^'"]+)['"][^)]*['"][wax]\+?['"][^)]*\)"#,
+            #"(?is)\bwith\s+open\s*\(\s*['"]([^'"]+)['"][^)]*['"][wax]\+?['"][^)]*\)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)\s*:"#
+        ]
+        var assignments: [(handle: String, path: String)] = []
+        let nsScript = script as NSString
+        for (index, pattern) in patterns.enumerated() {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let matches = regex.matches(in: script, range: NSRange(location: 0, length: nsScript.length))
+            for match in matches {
+                let handle: String?
+                let path: String?
+                if index == 0 {
+                    handle = regexCapture(match, in: script, at: 1)
+                    path = regexCapture(match, in: script, at: 2)
+                } else {
+                    path = regexCapture(match, in: script, at: 1)
+                    handle = regexCapture(match, in: script, at: 2)
+                }
+                guard let handle, let path else { continue }
+                assignments.append((handle, path))
+            }
+        }
+        return assignments
+    }
+
+    private nonisolated static func pythonReplaceReplacements(in script: String) -> [LocalAlpineEditReplacement] {
+        let assignments = pythonStringAssignments(in: script)
+        let pattern = #"(?is)\.replace\s*\(\s*(?:(['"])(.*?)\1|([A-Za-z_][A-Za-z0-9_]*))\s*,\s*(?:(['"])(.*?)\4|([A-Za-z_][A-Za-z0-9_]*))\s*(?:,\s*([0-9]+)\s*)?\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+
+        let nsScript = script as NSString
+        return regex.matches(in: script, range: NSRange(location: 0, length: nsScript.length))
+            .compactMap { match -> LocalAlpineEditReplacement? in
+                let oldText = pythonStringArgument(
+                    literal: regexCapture(match, in: script, at: 2),
+                    variable: regexCapture(match, in: script, at: 3),
+                    assignments: assignments
+                )
+                let newText = pythonStringArgument(
+                    literal: regexCapture(match, in: script, at: 5),
+                    variable: regexCapture(match, in: script, at: 6),
+                    assignments: assignments
+                )
+                guard let oldText, let newText, !oldText.isEmpty else { return nil }
+
+                let countText = regexCapture(match, in: script, at: 7)
+                let count = countText.flatMap(Int.init)
+                guard count == nil || count == 1 else { return nil }
+                return LocalAlpineEditReplacement(
+                    oldText: oldText,
+                    newText: newText,
+                    replaceAll: count == nil,
+                    expectedCount: nil
+                )
+            }
+    }
+
+    private nonisolated static func pythonStringAssignments(in script: String) -> [String: String] {
+        var assignments: [String: String] = [:]
+
+        let nsScript = script as NSString
+        let triplePattern = #"(?s)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:[rRuU])?("""|''')([\s\S]*?)\2"#
+        if let tripleRegex = try? NSRegularExpression(pattern: triplePattern) {
+            for match in tripleRegex.matches(in: script, range: NSRange(location: 0, length: nsScript.length)) {
+                guard let name = regexCapture(match, in: script, at: 1),
+                      let value = regexCapture(match, in: script, at: 3) else {
+                    continue
+                }
+                assignments[name] = decodeShellPrintfLiteral(value)
+            }
+        }
+
+        let singleLinePattern = #"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:[rRuU])?(['"])(.*?)\2\s*(?:#.*)?$"#
+        if let singleLineRegex = try? NSRegularExpression(pattern: singleLinePattern) {
+            for match in singleLineRegex.matches(in: script, range: NSRange(location: 0, length: nsScript.length)) {
+                guard let name = regexCapture(match, in: script, at: 1),
+                      assignments[name] == nil,
+                      let value = regexCapture(match, in: script, at: 3) else {
+                    continue
+                }
+                assignments[name] = decodeShellPrintfLiteral(value)
+            }
+        }
+        return assignments
+    }
+
+    private nonisolated static func pythonStringArgument(
+        literal: String?,
+        variable: String?,
+        assignments: [String: String]
+    ) -> String? {
+        if let literal {
+            return decodeShellPrintfLiteral(literal)
+        }
+        if let variable {
+            return assignments[variable]
+        }
+        return nil
     }
 
     private nonisolated static func firstRegexMatch(
