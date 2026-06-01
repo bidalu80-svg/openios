@@ -495,7 +495,6 @@ final class ChatViewModel {
     private var localAlpineContinuationTask: Task<Void, Never>?
     private var localAlpineAgentStopRequested = false
     private var localAlpineAutoExecutionPaused = false
-    private var localAlpineNoCommandContinuationRetries = 0
     private var localAlpineFailedCommands: [String: LocalAlpineAgentCommandFailure] = [:]
     private var localAlpineCompletedCommands: [String: LocalAlpineAgentCompletedCommand] = [:]
     private var localAlpineFailureSignatures: [String: Int] = [:]
@@ -515,7 +514,6 @@ final class ChatViewModel {
     @ObservationIgnored private var localAlpineToolEventFlushTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var localAlpineLastToolEventFlushAtByMessageId: [String: Date] = [:]
     private let localAlpineAgentMaxSteps = 10
-    private let localAlpineContinuationMaxNoCommandRetries = 1
     private let localAlpineNoProgressRepeatLimit = 2
     private let localAlpineToolEventFlushInterval: TimeInterval = 0.22
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
@@ -1754,7 +1752,7 @@ final class ChatViewModel {
         - Source file writes: never write code through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files.code_lines`, `content_lines`, `content_base64`, same-path `edit_file`, or `patch_file`.
         - Python writes: `.py`/`.pyw` must use `write_files.code_lines` or `content_base64`; localized Python repairs should prefer `read_file` then same-path `edit_file`/`patch_file`.
         - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
-        - Tool loop: one assistant turn emits at most one `iexa_alpine` block; the next turn must read the returned stdout/stderr/exit code before deciding whether to continue.
+        - Tool loop: one assistant turn emits at most one `iexa_alpine` block for one meaningful bounded step; the next turn must read the returned stdout/stderr/exit code before deciding whether to continue. For code creation, a structured file write plus one bounded syntax/run verification may share the same block only when they validate the same change.
         - Tool-call turn output: when emitting an `iexa_alpine` block, do not append success claims, guessed stdout, file contents, or final summaries after the block. The host will return the real Local Alpine observation in the next turn.
         - Visible preface: prefer no prose before the block. If needed, write one short progress sentence only. Never ask the user to send back local execution results; the host app returns results automatically.
         """
@@ -1784,7 +1782,7 @@ final class ChatViewModel {
             - If the task depends on unknown current files, first get a small workspace listing, then continue from that observation.
             - If the task depends on compilers or packages, use one focused probe only when the toolchain has not already been observed.
             - Use the BusyBox/ash command dialect. Prefer structured wrappers (`list_dir`, `glob`, `grep`, `verify`) over raw `find`/`grep`; never use known GNU/bash-only patterns like `find -printf`, `grep -P`, Bash `[[ ... ]]`, `source`, or process substitution.
-            - If the user asked to write/create/build/run code, combine file creation plus compile/run verification in the first useful tool call when practical. Do not stop after a dependency probe if the required tools are present.
+            - If the user asked to write/create/build/run code, do one meaningful bounded step at a time. A structured file write plus one bounded syntax/run verification may share the same tool block only when they validate the same change; do not bundle unrelated follow-up work into the same block.
             - If the user gave an explicit simple file operation target, combine the operation with a minimal `pwd`/`ls` verification instead of running a separate bootstrap.
             - Do not ask for confirmation for explicit operations bounded to `/mnt/iexa`; user wording such as delete/remove/modify/run/test/read/check is already confirmation. Ask only for paths outside `/mnt/iexa` or multiple unsafe targets.
             - Only treat run/test/build/fix/install/read/write/delete/search as an operation request when the user asks you to actually perform it. If the wording is asking for advice or feasibility, do not use the tool.
@@ -7393,7 +7391,6 @@ final class ChatViewModel {
         cancelLocalAlpineInput()
         localAlpineAgentStopRequested = false
         localAlpineAutoExecutionPaused = false
-        localAlpineNoCommandContinuationRetries = 0
         localAlpineFailedCommands.removeAll()
         localAlpineCompletedCommands.removeAll()
         localAlpineFailureSignatures.removeAll()
@@ -7433,7 +7430,6 @@ final class ChatViewModel {
         localAlpineContinuationWatchdogTask?.cancel()
         localAlpineContinuationWatchdogTask = nil
         cancelLocalAlpineInput()
-        localAlpineNoCommandContinuationRetries = 0
         localAlpineContinuationParentIds.removeAll()
         localAlpineContinuationRetryCounts.removeAll()
         localAlpineMissingToolCorrectionParentIds.removeAll()
@@ -9321,7 +9317,20 @@ final class ChatViewModel {
     ) async {
         acc.markReasoningDone()
 
+        let isLocalAlpineContinuationMessage = conversation?.messages
+            .first(where: { $0.id == assistantMessageId })?
+            .metadata?["iexa_local_alpine_continuation"] == "true"
+
         guard let chatId = effectiveChatId, let manager else {
+            if isLocalAlpineContinuationMessage {
+                await finishLocalAlpineContinuation(
+                    assistantMessageId: assistantMessageId,
+                    modelId: modelId,
+                    content: acc.content,
+                    usage: usage
+                )
+                return
+            }
             updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
             cleanupStreaming()
             return
@@ -9331,24 +9340,38 @@ final class ChatViewModel {
         for attempt in 1...5 {
             do {
                 let refreshed = try await manager.fetchConversation(id: chatId)
-                if let lastAssistant = refreshed.messages.last(where: { $0.role == .assistant }),
-                   !lastAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let refreshedAssistant = refreshed.messages.first(where: { $0.id == assistantMessageId })
+                    ?? (isLocalAlpineContinuationMessage
+                        ? nil
+                        : refreshed.messages.last(where: { $0.role == .assistant }))
+                if let refreshedAssistant,
+                   !refreshedAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     let localBody = acc.bodyContent
                     let localContent = localBody.isEmpty
                         ? (conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? "")
                         : localBody
                     let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
                         local: localContent,
-                        incoming: lastAssistant.content
-                    ) ? localContent : lastAssistant.content
+                        incoming: refreshedAssistant.content
+                    ) ? localContent : refreshedAssistant.content
                     acc.replace(protectedContent)
-                    logger.info("Server poll \(attempt): got content (\(lastAssistant.content.count) chars)")
+                    logger.info("Server poll \(attempt): got content (\(refreshedAssistant.content.count) chars)")
                     break
                 }
             } catch {
                 logger.warning("Poll attempt \(attempt) failed: \(error.localizedDescription)")
             }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+
+        if isLocalAlpineContinuationMessage {
+            await finishLocalAlpineContinuation(
+                assistantMessageId: assistantMessageId,
+                modelId: modelId,
+                content: acc.content,
+                usage: usage
+            )
+            return
         }
 
         updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
@@ -11528,7 +11551,6 @@ final class ChatViewModel {
         localAlpineContinuationWatchdogTask?.cancel()
         localAlpineContinuationWatchdogTask = nil
         cancelLocalAlpineInput()
-        localAlpineNoCommandContinuationRetries = 0
         localAlpineContinuationParentIds.removeAll()
         localAlpineContinuationRetryCounts.removeAll()
     }
@@ -13341,6 +13363,9 @@ final class ChatViewModel {
               message.metadata?["iexa_local_alpine_missing_tool_correction"] == nil else {
             return false
         }
+        if message.metadata?["iexa_local_alpine_continuation"] == "true" {
+            return false
+        }
         guard let latestUserText = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content,
@@ -14753,7 +14778,6 @@ final class ChatViewModel {
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
-        localAlpineNoCommandContinuationRetries = 0
         if repeatedLocalAlpineErrorShouldStop(after: result, parentId: resultMessageId) {
             localAlpineAgentStopRequested = true
         } else if repeatedLocalAlpineNoProgressShouldStop(after: result, parentId: resultMessageId) {
@@ -15222,12 +15246,36 @@ final class ChatViewModel {
         }
         let parentResultId = conversation?.history.nodes[assistantMessageId]?.parentId
         let parentNeedsFollowUp = parentResultId.map { self.localAlpineParentNeedsToolFollowUp($0) } ?? false
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let visibleFinalSummaryContent = isFinalSummary
+            ? Self.localAlpineFinalSummaryVisibleContent(from: content)
+            : nil
+        let trimmed = (visibleFinalSummaryContent ?? content).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             conversation?.messages.removeAll { $0.id == assistantMessageId }
             conversation?.history.removeSubtree(rootId: assistantMessageId)
             cleanupStreaming()
-            if parentNeedsFollowUp {
+            if isFinalSummary, let parentResultId {
+                let retryCount = localAlpineContinuationRetryCounts[parentResultId] ?? 0
+                if retryCount < 1 {
+                    localAlpineContinuationRetryCounts[parentResultId] = retryCount + 1
+                    localAlpineContinuationParentIds.remove(parentResultId)
+                    localAlpineFinalSummaryParentIds.remove(parentResultId)
+                    localAlpineFinishedContinuationMessageIds.remove(assistantMessageId)
+                    await persistLocalConversationIfNeeded()
+                    NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                    if scheduleLocalAlpineFinalSummary(after: parentResultId) {
+                        return
+                    }
+                }
+                localAlpineAgentStopRequested = true
+                localAlpineContinuationTask = nil
+                appendLocalAlpineNoProgressStopMessage(
+                    parentId: parentResultId,
+                    reason: "模型返回了空总结，没有生成最终回答。"
+                )
+                await persistLocalConversationIfNeeded()
+                NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            } else if parentNeedsFollowUp {
                 localAlpineAgentStopRequested = true
                 localAlpineContinuationTask = nil
                 if let parentResultId {
@@ -15246,7 +15294,7 @@ final class ChatViewModel {
         localAlpineFinishedContinuationMessageIds.insert(assistantMessageId)
 
         let rawContent = isFinalSummary
-            ? Self.localAlpineFinalSummaryVisibleContent(from: content)
+            ? (visibleFinalSummaryContent ?? "")
             : content
         let emittedLocalAlpineInstruction = !isFinalSummary && Self.contentContainsLocalAlpineInstruction(content)
         let doneDescription: String
@@ -15304,12 +15352,10 @@ final class ChatViewModel {
         if isFinalSummary {
             localAlpineAgentStopRequested = true
             localAlpineContinuationTask = nil
-            localAlpineNoCommandContinuationRetries = 0
             if let parentResultId {
                 localAlpineContinuationRetryCounts.removeValue(forKey: parentResultId)
             }
         } else if emittedLocalAlpineInstruction {
-            localAlpineNoCommandContinuationRetries = 0
             localAlpineContinuationTask = nil
             if let parentResultId {
                 localAlpineContinuationRetryCounts.removeValue(forKey: parentResultId)
@@ -15319,122 +15365,11 @@ final class ChatViewModel {
                 content: rawContent,
                 error: nil
             )
-        } else if !isFinalSummary,
-                  parentNeedsFollowUp,
-                  let parentResultId,
-                  retryLocalAlpineContinuationAfterMissingTool(parentResultId: parentResultId, after: assistantMessageId) {
-            localAlpineContinuationTask = nil
         } else {
-            localAlpineNoCommandContinuationRetries = 0
             localAlpineAgentStopRequested = true
             localAlpineContinuationTask = nil
         }
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
-    }
-
-    private func retryLocalAlpineContinuationAfterMissingTool(parentResultId: String, after assistantMessageId: String) -> Bool {
-        guard localAlpineNoCommandContinuationRetries < localAlpineContinuationMaxNoCommandRetries else {
-            return false
-        }
-        guard let executableContent = localAlpineFallbackExecutableContent(after: parentResultId) else {
-            return false
-        }
-
-        localAlpineNoCommandContinuationRetries += 1
-        let bridgeMessageId = appendAssistantResult(
-            parentId: assistantMessageId,
-            model: selectedModelId ?? "Local Alpine Agent",
-            content: "继续执行本地验证。",
-            metadata: [
-                "iexa_local_alpine_continuation": "true",
-                "iexa_local_alpine_auto_verify": parentResultId
-            ]
-        )
-        localAlpineAgentTask = Task { [weak self] in
-            await self?.executeLocalAlpineAgent(messageId: bridgeMessageId, content: executableContent)
-        }
-        return true
-    }
-
-    private func localAlpineFallbackExecutableContent(after resultMessageId: String) -> String? {
-        guard let message = conversation?.messages.first(where: { $0.id == resultMessageId }) else {
-            return nil
-        }
-        let latestUserText = conversation?.messages.last(where: {
-            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
-        })?.content ?? ""
-        guard Self.localAlpineUserRequestNeedsVerificationAfterSetup(latestUserText) else {
-            return nil
-        }
-
-        let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(message.metadata?["iexa_local_alpine_command_results"])
-        let combinedCommands = commandResults
-            .map { $0.command.lowercased() }
-            .joined(separator: "\n")
-        guard !Self.localAlpineCommandsContainGoalVerification(combinedCommands) else {
-            return nil
-        }
-
-        let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(message.metadata?["iexa_local_alpine_written_files"])
-        guard let path = Self.localAlpineRunnableWrittenPath(from: writtenFiles, latestUserText: latestUserText) else {
-            return nil
-        }
-        return Self.localAlpineVerifyInstructionBlock(path: path)
-    }
-
-    private static func localAlpineRunnableWrittenPath(
-        from writtenFiles: [LocalAlpineWrittenFile],
-        latestUserText: String
-    ) -> String? {
-        let runnableFiles = writtenFiles.filter { localAlpinePathLooksRunnable($0.path) }
-        guard !runnableFiles.isEmpty else { return nil }
-        let normalizedUserText = latestUserText.lowercased()
-        if let mentioned = runnableFiles.last(where: { file in
-            normalizedUserText.contains(file.fileName.lowercased())
-                || normalizedUserText.contains(file.path.lowercased())
-        }) {
-            return localAlpineRuntimePathForVerification(mentioned.path)
-        }
-        return runnableFiles.last.map { localAlpineRuntimePathForVerification($0.path) }
-    }
-
-    private static func localAlpinePathLooksRunnable(_ path: String) -> Bool {
-        let lower = path.lowercased()
-        let runnableSuffixes = [
-            ".py", ".pyw", ".lua", ".js", ".mjs", ".cjs", ".ts",
-            ".cpp", ".cc", ".cxx", ".c", ".sh", ".go", ".rs", ".rb", ".php"
-        ]
-        return runnableSuffixes.contains { lower.hasSuffix($0) }
-    }
-
-    private static func localAlpineRuntimePathForVerification(_ path: String) -> String {
-        let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\\", with: "/")
-        guard !normalized.isEmpty else { return "/mnt/iexa" }
-        if normalized == "/mnt/iexa" || normalized.hasPrefix("/mnt/iexa/") {
-            return normalized
-        }
-        if normalized.hasPrefix("/") {
-            return "/mnt/iexa\(normalized)"
-        }
-        return normalized
-    }
-
-    private static func localAlpineVerifyInstructionBlock(path: String) -> String? {
-        let object: [String: Any] = [
-            "cwd": "/mnt/iexa",
-            "verify": ["path": path]
-        ]
-        guard JSONSerialization.isValidJSONObject(object),
-              let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
-              let json = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        return """
-        ```iexa_alpine
-        \(json)
-        ```
-        """
     }
 
     private func localAlpineParentNeedsToolFollowUp(_ parentMessageId: String) -> Bool {
@@ -15874,14 +15809,15 @@ final class ChatViewModel {
             }
         }
 
-        updateAssistantMessage(
-            id: assistantMessageId,
-            content: conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? "",
-            isStreaming: false
+        let latestContent = conversation?.messages
+            .first(where: { $0.id == assistantMessageId })?
+            .content ?? ""
+        await finishLocalAlpineContinuation(
+            assistantMessageId: assistantMessageId,
+            modelId: modelId,
+            content: latestContent,
+            usage: nil
         )
-        localAlpineAgentStopRequested = true
-        localAlpineContinuationTask = nil
-        cleanupStreaming()
     }
 
     private static func appendLocalAlpineContinuationInstruction(to messages: inout [[String: Any]]) {
@@ -15892,7 +15828,7 @@ final class ChatViewModel {
         Controller policy:
         - Follow the `controller_verdict` in `[Local Alpine execution state]`.
         - If it is `ready_for_final_summary`, do not emit `iexa_alpine`; summarize the result normally.
-        - If it is `needs_next_tool_*`, emit exactly one bounded `iexa_alpine` step and wait for the next observation.
+        - If it is `needs_next_tool_*`, emit exactly one meaningful bounded `iexa_alpine` step and wait for the next observation. A write plus one direct verification is allowed only when it validates the same file/change.
         - If it is `tool_running`, report that the local command is still running or ask whether to stop it.
         - `iexa_alpine` is a Markdown fence intercepted by the host app, not a provider function. Never say it does not exist.
         - Never ask the user to send back local output; the host app returns Local Alpine output automatically.
@@ -15992,10 +15928,7 @@ final class ChatViewModel {
     private static func localAlpineFinalSummaryVisibleContent(from content: String) -> String {
         let visible = LocalAlpineAgentService.visibleContent(from: content)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !visible.isEmpty {
-            return visible
-        }
-        return "已完成本地操作。"
+        return visible
     }
 
     private func updateAssistantMessage(

@@ -825,6 +825,10 @@ struct ChatDetailView: View {
         viewModel.messages.filter { !shouldHideFromTranscript($0) }
     }
 
+    private var transcriptMessageIds: [String] {
+        transcriptMessages.map(\.id)
+    }
+
     private func agentActivity(for message: ChatMessage) -> AgentActivityItem? {
         if message.metadata?["iexa_local_alpine_final_summary"] != nil {
             return mergedLocalAlpineTurnActivity(through: message)
@@ -983,12 +987,24 @@ struct ChatDetailView: View {
                 && messageHasProcessOnlyStatus(message)
         }
         if metadata["iexa_local_alpine_final_summary"] != nil {
-            return message.error == nil
+            return !message.isStreaming
+                && message.error == nil
                 && message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         if metadata["iexa_local_alpine_continuation"] == "true",
            metadata["iexa_local_alpine_final_summary"] == nil {
-            return true
+            if metadata["iexa_local_alpine_auto_verify"] != nil
+                || metadata["iexa_local_alpine_missing_tool_correction"] != nil {
+                return true
+            }
+            if message.isStreaming {
+                return false
+            }
+            if contentContainsLocalAlpineInstruction(message.content) {
+                return true
+            }
+            return message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && messageHasProcessOnlyStatus(message)
         }
         if metadata["iexa_local_alpine_hidden_tool_parent"] == "true" {
             return true
@@ -2074,10 +2090,9 @@ struct ChatDetailView: View {
             // Snap instantly to bottom on chat open.
             scrollPosition.scrollTo(edge: .bottom)
         }
-        // Auto-scroll: when a new message arrives, scroll to bottom.
-        // The minHeight trick on the last conversation turn ensures that
-        // scrolling to bottom naturally places the user's sent message
-        // near the top of the viewport (ChatGPT-style).
+        // Keep agent activity state in sync with hidden/system messages.
+        // Actual transcript scrolling is driven by transcriptMessageIds below,
+        // because Local Alpine can append messages that are not rendered.
         .onChange(of: viewModel.messages.count) { old, new in
             guard new > old else { return }
             if viewModel.messages.last?.role == .user {
@@ -2085,27 +2100,43 @@ struct ChatDetailView: View {
             } else {
                 refreshAgentFloatingActivitySnapshot(includeInactive: !viewModel.isStreaming && !viewModel.streamingStore.isActive)
             }
+        }
+        // Auto-scroll only when the rendered transcript changes. This avoids
+        // scrolling to blank spacer space when hidden agent/tool messages are
+        // appended or removed behind the visible conversation.
+        .onChange(of: transcriptMessageIds) { oldIds, newIds in
+            guard !newIds.isEmpty else { return }
+            let tailChanged = oldIds.last != newIds.last || newIds.count > oldIds.count
+            guard tailChanged else { return }
 
-            // ── ALWAYS scroll to bottom when a new message is added ──
+            // ── ALWAYS bring the new visible turn into view ──
             // No matter where the user is scrolled, sending a message must
             // bring the new message into view. Re-engage auto-scroll so the
             // response streams in below it.
             isScrolledUp = false
             lastProgrammaticScrollTime = Date()
 
-            if old == 0 && keyboard.isVisible {
-                repinToLatestMessageIfFollowing(after: 0.06)
-                repinToLatestMessageIfFollowing(after: 0.18)
-            } else if old == 0 {
-                // First message in a new chat — smooth ease-out.
+            let latestVisibleRole = transcriptMessages.last?.role
+            if latestVisibleRole == .user {
+                if keyboard.isVisible {
+                    repinToCurrentTurnStartIfFollowing(after: 0.06)
+                    repinToCurrentTurnStartIfFollowing(after: 0.18)
+                } else {
+                    withAnimation(.easeOut(duration: 0.28)) {
+                        scrollToCurrentTurnStart(anchor: .top)
+                    }
+                }
+            } else if oldIds.isEmpty && !keyboard.isVisible {
+                // First visible assistant/content in a new chat — smooth ease-out.
                 withAnimation(.easeOut(duration: 0.3)) {
                     scrollPosition.scrollTo(edge: .bottom)
                 }
             } else if keyboard.isVisible {
-                // Keep the keyboard in place. Collapsing it while a new turn is
-                // inserted forces the transcript through two large relayouts,
-                // which is exactly where long chats can flash blank.
-                repinToLatestMessageIfFollowing(after: 0.08)
+                // Keep the keyboard in place and pin the turn start, not the
+                // ScrollView edge, so the viewport cannot land on spacer-only
+                // space while the input bar is settling.
+                repinToCurrentTurnStartIfFollowing(after: 0.06)
+                repinToCurrentTurnStartIfFollowing(after: 0.18)
             } else {
                 // Keyboard already hidden (follow-ups, etc.) — scroll now.
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
@@ -2119,8 +2150,15 @@ struct ChatDetailView: View {
         .onChange(of: viewModel.isStreaming) { _, streaming in
             if streaming && !isScrolledUp {
                 refreshAgentFloatingActivitySnapshot(includeInactive: false)
-                // Already at bottom — ensure auto-scroll stays active.
-                scrollToLatestMessageWithoutAnimation(anchor: .bottom)
+                // Already following the turn. If the keyboard is visible, or
+                // the assistant placeholder has not become visible yet, keep
+                // the user-sent turn start pinned instead of jumping to the
+                // ScrollView bottom.
+                if keyboard.isVisible || transcriptMessages.last?.role == .user {
+                    scrollToCurrentTurnStartWithoutAnimation(anchor: .top)
+                } else {
+                    scrollToLatestMessageWithoutAnimation(anchor: .bottom)
+                }
             } else if !streaming {
                 refreshAgentFloatingActivitySnapshot(includeInactive: true)
             }
@@ -2358,11 +2396,42 @@ struct ChatDetailView: View {
         }
     }
 
+    private func scrollToCurrentTurnStart(anchor: UnitPoint = .top) {
+        let turnStartId = transcriptMessages.last(where: { $0.role == .user })?.id
+            ?? transcriptMessages.last?.id
+        guard let turnStartId = turnStartId else {
+            scrollToBottomWithoutAnimation()
+            return
+        }
+        scrollPosition.scrollTo(id: turnStartId, anchor: anchor)
+    }
+
+    private func scrollToCurrentTurnStartWithoutAnimation(anchor: UnitPoint = .top) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollToCurrentTurnStart(anchor: anchor)
+        }
+    }
+
     private func repinToLatestMessageIfFollowing(after delay: TimeInterval = 0) {
         let action = {
             guard !viewModel.messages.isEmpty, !isScrolledUp else { return }
             lastProgrammaticScrollTime = Date()
             scrollToLatestMessageWithoutAnimation(anchor: .bottom)
+        }
+        if delay <= 0 {
+            DispatchQueue.main.async(execute: action)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
+        }
+    }
+
+    private func repinToCurrentTurnStartIfFollowing(after delay: TimeInterval = 0) {
+        let action = {
+            guard !transcriptMessages.isEmpty, !isScrolledUp else { return }
+            lastProgrammaticScrollTime = Date()
+            scrollToCurrentTurnStartWithoutAnimation(anchor: .top)
         }
         if delay <= 0 {
             DispatchQueue.main.async(execute: action)
