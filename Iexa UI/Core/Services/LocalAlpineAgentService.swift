@@ -801,6 +801,13 @@ actor LocalAlpineAgentService {
                     continue
                 }
 
+                if let repairNote = await repairRunnableFileCompatibilityIfNeeded(
+                    for: commandToExecute,
+                    cwd: effectiveCWD
+                ) {
+                    stepLines.append(repairNote)
+                }
+
                 if let warning = await runnableFileCompatibilityWarning(for: commandToExecute, cwd: effectiveCWD) {
                     let result = LocalAlpineCommandResult(
                         command: commandToExecute,
@@ -1570,7 +1577,7 @@ actor LocalAlpineAgentService {
              "append", "append_file", "append_and_read",
              "patch", "patch_file", "patch_files", "apply_patch",
              "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write",
-             "edit", "edit_file", "edit_files", "replace_file",
+             "edit", "edit_file", "edit_files", "replace_file", "file_edit",
              "verify", "check":
             return [
                 "path": [
@@ -1686,7 +1693,7 @@ actor LocalAlpineAgentService {
             merged["read_file"] = arguments
         case "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write":
             merged["write_file"] = arguments
-        case "edit", "edit_file", "edit_files", "replace_file":
+        case "edit", "edit_file", "edit_files", "replace_file", "file_edit":
             merged["edit_file"] = arguments
         case "patch", "patch_file", "patch_files", "apply_patch":
             merged["patch_file"] = arguments
@@ -1773,7 +1780,7 @@ actor LocalAlpineAgentService {
             merged["read_file"] = arguments["value"] ?? arguments
         case "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write":
             merged["write_file"] = arguments
-        case "edit", "edit_file", "edit_files", "replace_file":
+        case "edit", "edit_file", "edit_files", "replace_file", "file_edit":
             merged["edit_file"] = arguments
         case "patch", "patch_file", "patch_files", "apply_patch":
             merged["patch_file"] = arguments
@@ -1816,7 +1823,7 @@ actor LocalAlpineAgentService {
         "bash", "shell", "sh", "exec", "run", "command", "shell_execute",
         "read", "read_file", "read_files", "cat", "open_file", "file_read",
         "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write",
-        "edit", "edit_file", "edit_files", "replace_file",
+        "edit", "edit_file", "edit_files", "replace_file", "file_edit",
         "patch", "patch_file", "patch_files", "apply_patch",
         "delete", "delete_file", "delete_files", "remove_file", "remove_files", "delete_dir", "remove_dir", "rm", "rmdir", "file_delete",
         "list", "list_dir", "list_directory", "ls", "file_list", "directory_list",
@@ -2597,7 +2604,7 @@ actor LocalAlpineAgentService {
     }
 
     private nonisolated static func editFilesObject(from dict: [String: Any]) -> Any? {
-        if let object = dict["edit_file"] ?? dict["edit_files"] ?? dict["replace_file"] ?? dict["modify_file"] {
+        if let object = dict["edit_file"] ?? dict["edit_files"] ?? dict["replace_file"] ?? dict["modify_file"] ?? dict["file_edit"] {
             return object
         }
         if pathString(from: dict) == nil,
@@ -3952,12 +3959,20 @@ actor LocalAlpineAgentService {
             )
         }
         let originalContent = await existingTextFileContent(path: target)
-        let content: String
+        var notes = writeNotes(target: target)
+        var content: String
         if file.mode == .append {
             let prefix = originalContent ?? ""
             content = prefix + file.content
         } else {
             content = file.content
+        }
+        if Self.isPythonTarget(target) {
+            let repaired = Self.repairingPythonRuntimeCompatibility(content)
+            if repaired.replacementCount > 0 {
+                content = repaired.content
+                notes.append("已自动将 \(repaired.replacementCount) 处 Python `time.sleep()` 改为 iSH/BusyBox 兼容等待函数。")
+            }
         }
         guard let data = content.data(using: .utf8) else {
             return LocalAlpineProtectedWriteOutcome(
@@ -3975,7 +3990,7 @@ actor LocalAlpineAgentService {
                     target: target,
                     cwd: cwd,
                     source: file.source,
-                    initialNotes: writeNotes(target: target)
+                    initialNotes: notes
                 )
             }
             return await writeValidatedPythonFile(
@@ -3983,7 +3998,7 @@ actor LocalAlpineAgentService {
                 target: target,
                 cwd: cwd,
                 source: file.source,
-                initialNotes: writeNotes(target: target)
+                initialNotes: notes
             )
         }
 
@@ -3992,7 +4007,7 @@ actor LocalAlpineAgentService {
             content: content,
             target: target,
             source: file.source,
-            notes: writeNotes(target: target)
+            notes: notes
         )
         return writeOutcome
     }
@@ -4528,6 +4543,43 @@ actor LocalAlpineAgentService {
         """
     }
 
+    private func repairRunnableFileCompatibilityIfNeeded(for command: String, cwd: String) async -> String? {
+        guard let codePath = Self.firstCodePath(in: command) else { return nil }
+        guard !Self.isSyntaxOnlyVerificationCommand(command) else { return nil }
+        if codePath.hasPrefix("/"), !codePath.hasPrefix("/mnt/iexa/") {
+            return nil
+        }
+        let target = resolvedFilePath(codePath, cwd: cwd)
+        guard Self.isPythonTarget(target),
+              let data = try? await LocalAlpineTerminalService.shared.readFile(path: target),
+              let content = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        let repaired = Self.repairingPythonRuntimeCompatibility(content)
+        guard repaired.replacementCount > 0,
+              repaired.content != content,
+              let repairedData = repaired.content.data(using: .utf8) else {
+            return nil
+        }
+
+        let split = splitFilePath(target)
+        do {
+            try await LocalAlpineTerminalService.shared.writeFile(
+                data: repairedData,
+                fileName: split.fileName,
+                destinationPath: split.directory
+            )
+            let writtenData = try await LocalAlpineTerminalService.shared.readFile(path: target)
+            guard writtenData == repairedData else { return nil }
+            return """
+            运行前兼容修复
+            - `\(target)` 已自动将 \(repaired.replacementCount) 处 Python `time.sleep()` 改为 iSH/BusyBox 兼容等待函数。
+            """
+        } catch {
+            return nil
+        }
+    }
+
     private nonisolated static func isSyntaxOnlyVerificationCommand(_ command: String) -> Bool {
         var normalized = command
             .replacingOccurrences(of: "\\\n", with: " ")
@@ -4548,6 +4600,190 @@ actor LocalAlpineAgentService {
             || commandMatches(normalized, pattern: #"^ruby\s+-c\b"#)
             || commandMatches(normalized, pattern: #"^php\s+-l\b"#)
             || commandMatches(normalized, pattern: #"^perl\s+-c\b"#)
+    }
+
+    private nonisolated static func repairingPythonRuntimeCompatibility(
+        _ content: String
+    ) -> (content: String, replacementCount: Int) {
+        let replaced = replacingPythonTimeSleepCalls(in: content)
+        guard replaced.count > 0 else {
+            return (content, 0)
+        }
+        var repaired = replaced.content
+        if !repaired.contains("def _iexa_sleep(") {
+            repaired = insertingPythonIexaSleepHelper(into: repaired)
+        }
+        return (repaired, replaced.count)
+    }
+
+    private nonisolated static func replacingPythonTimeSleepCalls(
+        in content: String
+    ) -> (content: String, count: Int) {
+        let chars = Array(content)
+        let sleepPattern = Array("time.sleep(")
+        let tripleSingle = Array("'''")
+        let tripleDouble = Array("\"\"\"")
+        var output = ""
+        output.reserveCapacity(content.count + 512)
+        var index = 0
+        var replacementCount = 0
+
+        enum ScanState {
+            case normal
+            case comment
+            case singleQuote
+            case doubleQuote
+            case tripleSingleQuote
+            case tripleDoubleQuote
+        }
+        var state: ScanState = .normal
+
+        func matches(_ pattern: [Character], at start: Int) -> Bool {
+            guard start + pattern.count <= chars.count else { return false }
+            for offset in 0..<pattern.count where chars[start + offset] != pattern[offset] {
+                return false
+            }
+            return true
+        }
+
+        func isIdentifierCharacter(_ character: Character) -> Bool {
+            guard let scalar = String(character).unicodeScalars.first,
+                  String(character).unicodeScalars.count == 1 else {
+                return false
+            }
+            return CharacterSet.alphanumerics.contains(scalar) || scalar.value == 95
+        }
+
+        while index < chars.count {
+            let character = chars[index]
+            switch state {
+            case .normal:
+                if matches(sleepPattern, at: index) {
+                    let previousIsIdentifier = index > 0 && isIdentifierCharacter(chars[index - 1])
+                    let previousIsMember = index > 0 && chars[index - 1] == "."
+                    if !previousIsIdentifier && !previousIsMember {
+                        output += "_iexa_sleep("
+                        index += sleepPattern.count
+                        replacementCount += 1
+                        continue
+                    }
+                }
+                if matches(tripleSingle, at: index) {
+                    output += "'''"
+                    index += tripleSingle.count
+                    state = .tripleSingleQuote
+                    continue
+                }
+                if matches(tripleDouble, at: index) {
+                    output += "\"\"\""
+                    index += tripleDouble.count
+                    state = .tripleDoubleQuote
+                    continue
+                }
+                if character == "#" {
+                    state = .comment
+                } else if character == "'" {
+                    state = .singleQuote
+                } else if character == "\"" {
+                    state = .doubleQuote
+                }
+                output.append(character)
+                index += 1
+
+            case .comment:
+                output.append(character)
+                index += 1
+                if character == "\n" {
+                    state = .normal
+                }
+
+            case .singleQuote:
+                output.append(character)
+                index += 1
+                if character == "\\", index < chars.count {
+                    output.append(chars[index])
+                    index += 1
+                } else if character == "'" {
+                    state = .normal
+                }
+
+            case .doubleQuote:
+                output.append(character)
+                index += 1
+                if character == "\\", index < chars.count {
+                    output.append(chars[index])
+                    index += 1
+                } else if character == "\"" {
+                    state = .normal
+                }
+
+            case .tripleSingleQuote:
+                if matches(tripleSingle, at: index) {
+                    output += "'''"
+                    index += tripleSingle.count
+                    state = .normal
+                } else {
+                    output.append(character)
+                    index += 1
+                }
+
+            case .tripleDoubleQuote:
+                if matches(tripleDouble, at: index) {
+                    output += "\"\"\""
+                    index += tripleDouble.count
+                    state = .normal
+                } else {
+                    output.append(character)
+                    index += 1
+                }
+            }
+        }
+
+        return (output, replacementCount)
+    }
+
+    private nonisolated static func insertingPythonIexaSleepHelper(into content: String) -> String {
+        let helper = """
+        def _iexa_sleep(seconds):
+            try:
+                seconds = max(0.0, float(seconds))
+            except Exception:
+                return
+            whole = int(seconds)
+            if whole > 0:
+                try:
+                    import subprocess as _iexa_subprocess
+                    _iexa_subprocess.run(["/bin/sleep", str(whole)], check=False)
+                except Exception:
+                    pass
+            fractional = seconds - whole
+            if fractional > 0:
+                try:
+                    import time as _iexa_time
+                    deadline = _iexa_time.time() + fractional
+                    while _iexa_time.time() < deadline:
+                        pass
+                except Exception:
+                    pass
+
+        """
+
+        let normalized = content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        var lines = normalized.components(separatedBy: "\n")
+        var insertIndex = 0
+        if lines.first?.hasPrefix("#!") == true {
+            insertIndex = 1
+        }
+        if insertIndex < lines.count {
+            let lowerLine = lines[insertIndex].lowercased()
+            if lowerLine.contains("coding:") || lowerLine.contains("coding=") {
+                insertIndex += 1
+            }
+        }
+        lines.insert(helper, at: insertIndex)
+        return lines.joined(separator: "\n")
     }
 
     private nonisolated static func sourceCompatibilityIssue(
@@ -5571,10 +5807,18 @@ actor LocalAlpineAgentService {
             || lowered.contains("\"tool_use\"")
             || lowered.contains("\"toolcall\"")
             || lowered.contains("\"tool_call\"")
-            || lowered.contains("\"tool\"")
-            || lowered.contains("\"name\"")
-            || lowered.contains("\"command\"")
-            || lowered.contains("\"cmd\"") else {
+                || lowered.contains("\"tool\"")
+                || lowered.contains("\"name\"")
+                || lowered.contains("\"command\"")
+                || lowered.contains("\"cmd\"")
+                || lowered.contains("\"shell_execute\"")
+                || lowered.contains("\"file_read\"")
+                || lowered.contains("\"file_write\"")
+                || lowered.contains("\"file_edit\"")
+                || lowered.contains("\"read_file\"")
+                || lowered.contains("\"write_files\"")
+                || lowered.contains("\"write_file\"")
+                || lowered.contains("\"edit_file\"") else {
             return false
         }
 
@@ -5637,6 +5881,7 @@ actor LocalAlpineAgentService {
 
         let structuredKeys = [
             "read_file", "read_files", "write_file", "write_files", "edit_file", "patch_file",
+            "file_read", "file_write", "file_edit", "shell_execute",
             "delete_file", "list_dir", "glob", "grep", "browser_use"
         ]
         if structuredKeys.contains(where: { dict[$0] != nil }) {

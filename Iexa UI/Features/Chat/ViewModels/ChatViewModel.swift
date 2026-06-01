@@ -1662,7 +1662,7 @@ final class ChatViewModel {
         LocalAlpineToolCapability(
             name: "edit_file",
             description: "Modify an existing file by exact same-path replacements.",
-            arguments: ["path", "old_text/new_text", "replacements?", "replace_all?", "expected_count?"]
+            arguments: ["path", "old_text/old_string", "new_text/new_string", "replacements?", "replace_all?", "expected_count?", "alias: file_edit"]
         ),
         LocalAlpineToolCapability(
             name: "patch_file",
@@ -1672,7 +1672,7 @@ final class ChatViewModel {
         LocalAlpineToolCapability(
             name: "write_files",
             description: "Create files or perform complete same-path rewrites.",
-            arguments: ["path/file_path", "code_lines/content_lines/content_base64", "aliases: write_file/create_file/create_files/file_write"]
+            arguments: ["path/file_path", "content/code_lines/content_lines/content_base64", "aliases: write_file/create_file/create_files/file_write"]
         ),
         LocalAlpineToolCapability(
             name: "delete_file",
@@ -1718,7 +1718,7 @@ final class ChatViewModel {
         - Known bad patterns here: `find -printf`, `grep -P`, `sed -i ''`, Bash `[[ ... ]]`, `source`, `mapfile`, `readarray`, and process substitution `<(...)` or `>(...)`.
         - Safe replacements: `find PATH -type f -print | sed -n '1,200p'`, `grep -E`, `. ./script.sh`, `[ ... ]`, and `while IFS= read -r line; do ...; done`.
         - Waiting/polling: use the JSON `delay`/`delay_seconds` field on a `command`/`shell_execute` step instead of putting `sleep` in shell text or `time.sleep()` in generated scripts/tests.
-        - iSH/Python runtime quirk: `time.sleep()` can raise `OSError: [Errno 38] Function not implemented`; make generated Python tests deterministic and delay between tool steps through `delay`.
+        - iSH/Python runtime quirk: `time.sleep()` can raise `OSError: [Errno 38] Function not implemented`; make generated Python tests deterministic and delay between tool steps through `delay`. The host also auto-repairs common Python `time.sleep(...)` file writes/runs into an iSH-compatible helper instead of asking the user to fix it.
         """
 
     private static var localAlpineToolManifest: String {
@@ -1738,7 +1738,7 @@ final class ChatViewModel {
         - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
         - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`. Accepted delay keys are `delay`, `delay_seconds`, or `delaySeconds`; use them instead of shell/Python sleeps.
-        - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
+        - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `file_edit` -> `edit_file`, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
         - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls. `browser_use` supports optional `save_to`/`output` plus `open_preview:true` so large HTML/SVG/JSON responses can be written under `/mnt/iexa` and opened through the preview bridge instead of being pasted into chat.
         - In-app preview bridge: after creating a user-viewable file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
@@ -1750,9 +1750,9 @@ final class ChatViewModel {
         - Hard protocol rule: for any intermediate local-work step, pure prose means "stop and answer normally"; it will not be auto-upgraded into execution. Emit a real tool block only when you are intentionally requesting local execution.
         - JSON tool capabilities:
         \(capabilities)
-        - Source file writes: never write code through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files.code_lines`, `content_lines`, `content_base64`, same-path `edit_file`, or `patch_file`.
+        - Source file writes: never write code through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files`/`file_write` with `content`, `code_lines`, `content_lines`, or `content_base64`; use same-path `edit_file`/`file_edit` or `patch_file` for targeted modifications.
         - Generated scripts must be runtime-compatible before execution: Python should avoid `time.sleep()`; shell scripts must be BusyBox ash/POSIX, not bash. If a delay is needed, set `delay` on the next command step.
-        - Python writes: `.py`/`.pyw` must use `write_files.code_lines` or `content_base64`; localized Python repairs should prefer `read_file` then same-path `edit_file`/`patch_file`.
+        - Python writes: `.py`/`.pyw` must use structured `write_files`/`file_write` or same-path `edit_file`/`patch_file`; the host validates AST and writes UTF-8 bytes directly, preserving indentation without shell quoting.
         - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
         - Tool loop: one assistant turn emits at most one `iexa_alpine` block for one meaningful bounded step; the next turn must read the returned stdout/stderr/exit code before deciding whether to continue. For code creation, a structured file write plus one bounded syntax/run verification may share the same block only when they validate the same change.
         - Tool-call turn output: when emitting an `iexa_alpine` block, do not append success claims, guessed stdout, file contents, or final summaries after the block. The host will return the real Local Alpine observation in the next turn.
