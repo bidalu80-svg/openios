@@ -9,21 +9,64 @@ enum CodeSourceFormatter {
         let badHeaderTransitions: Int
     }
 
+    struct GenericCodeIndentationQuality {
+        let nonEmptyLines: Int
+        let indentedLines: Int
+    }
+
     static func shouldPreserveLocalCodeIndentation(local: String, incoming: String) -> Bool {
         guard !local.isEmpty, !incoming.isEmpty, local != incoming else { return false }
         let localQuality = pythonIndentationQuality(in: local)
         let incomingQuality = pythonIndentationQuality(in: incoming)
-        guard localQuality.hasPythonCode, incomingQuality.hasPythonCode else { return false }
-        guard localQuality.nonEmptyLines >= 8, incomingQuality.nonEmptyLines >= 8 else { return false }
-        guard localQuality.blockHeaders >= 2, incomingQuality.blockHeaders >= 2 else { return false }
+        if localQuality.hasPythonCode, incomingQuality.hasPythonCode,
+           localQuality.nonEmptyLines >= 8, incomingQuality.nonEmptyLines >= 8,
+           localQuality.blockHeaders >= 2, incomingQuality.blockHeaders >= 2 {
+            let localLooksStructured = localQuality.indentedLines >= 3
+                && localQuality.badHeaderTransitions <= max(1, localQuality.blockHeaders / 5)
+            let incomingLooksFlattened = incomingQuality.badHeaderTransitions >= max(2, incomingQuality.blockHeaders / 3)
+                || (incomingQuality.indentedLines + 6 < localQuality.indentedLines
+                    && incomingQuality.badHeaderTransitions > localQuality.badHeaderTransitions)
 
-        let localLooksStructured = localQuality.indentedLines >= 3
-            && localQuality.badHeaderTransitions <= max(1, localQuality.blockHeaders / 5)
-        let incomingLooksFlattened = incomingQuality.badHeaderTransitions >= max(2, incomingQuality.blockHeaders / 3)
-            || (incomingQuality.indentedLines + 6 < localQuality.indentedLines
-                && incomingQuality.badHeaderTransitions > localQuality.badHeaderTransitions)
+            if localLooksStructured && incomingLooksFlattened {
+                return true
+            }
+        }
 
-        return localLooksStructured && incomingLooksFlattened
+        return shouldPreserveGenericCodeIndentation(local: local, incoming: incoming)
+    }
+
+    private static func shouldPreserveGenericCodeIndentation(local: String, incoming: String) -> Bool {
+        guard let localCode = genericCodeForIndentationComparison(in: local),
+              let incomingCode = genericCodeForIndentationComparison(in: incoming) else {
+            return false
+        }
+        guard whitespaceInsensitiveCodeFingerprint(localCode) == whitespaceInsensitiveCodeFingerprint(incomingCode) else {
+            return false
+        }
+        let localQuality = genericCodeIndentationQuality(in: localCode)
+        let incomingQuality = genericCodeIndentationQuality(in: incomingCode)
+        guard localQuality.nonEmptyLines >= 8,
+              incomingQuality.nonEmptyLines >= 8,
+              localQuality.indentedLines >= 3 else {
+            return false
+        }
+        return incomingQuality.indentedLines + 6 < localQuality.indentedLines
+    }
+
+    private static func genericCodeForIndentationComparison(in content: String) -> String? {
+        let codeBlocks = fencedCodeBlocks(in: content).compactMap { block -> String? in
+            let language = normalizedLanguage(block.language)
+            guard isIndentationSensitiveCodeLanguage(language) else { return nil }
+            let trimmed = block.code.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if !codeBlocks.isEmpty {
+            return codeBlocks.joined(separator: "\n\n")
+        }
+
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard looksLikeGenericCode(trimmed) else { return nil }
+        return trimmed
     }
 
     private static func normalizedLanguage(_ language: String?) -> String {
@@ -42,6 +85,48 @@ enum CodeSourceFormatter {
         default:
             return normalized
         }
+    }
+
+    private static func isIndentationSensitiveCodeLanguage(_ language: String) -> Bool {
+        switch language {
+        case "bash", "zsh", "fish", "powershell", "ps1",
+             "javascript", "jsx", "typescript", "tsx",
+             "lua", "swift", "kotlin", "java", "go", "rust",
+             "c", "cpp", "c++", "objc", "objective-c",
+             "ruby", "php", "html", "css", "scss", "sass",
+             "yaml", "yml", "toml", "xml", "sql":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func looksLikeGenericCode(_ source: String) -> Bool {
+        let lines = source.components(separatedBy: "\n")
+        let nonEmpty = lines.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard nonEmpty.count >= 8 else { return false }
+        let joined = nonEmpty.joined(separator: "\n").lowercased()
+        let codeSignals = [
+            "function ", "class ", "struct ", "enum ", "func ", "let ", "const ", "var ",
+            "local ", " then", " do", " end", "#!/bin/", "<?php", "<html", "{", "}", ";"
+        ]
+        return codeSignals.contains { joined.contains($0) }
+    }
+
+    private static func genericCodeIndentationQuality(in code: String) -> GenericCodeIndentationQuality {
+        let lines = code
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+        let nonEmpty = lines.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return GenericCodeIndentationQuality(
+            nonEmptyLines: nonEmpty.count,
+            indentedLines: nonEmpty.map { splitLeadingWhitespace($0) }.filter { $0.columns > 0 }.count
+        )
+    }
+
+    private static func whitespaceInsensitiveCodeFingerprint(_ code: String) -> String {
+        String(code.filter { !$0.isWhitespace })
     }
 
     private static func pythonIndentationQuality(in content: String) -> PythonIndentationQuality {

@@ -489,6 +489,10 @@ final class ChatViewModel {
     /// Assistant message IDs whose Local Alpine command blocks have already
     /// been executed. Keeps refresh/retry paths from running shell commands twice.
     private var localAlpineAgentExecutedMessageIds: Set<String> = []
+    /// Executable Local Alpine instruction payloads already accepted in the
+    /// current user turn. Message-id de-dupe alone cannot catch the same tool
+    /// block being emitted again inside a follow-up assistant continuation.
+    private var localAlpineExecutedExecutableFingerprints: Set<String> = []
     /// Assistant message IDs whose local native iOS tool blocks have already run.
     private var localNativeToolExecutedMessageIds: Set<String> = []
     private var localAlpineAgentTask: Task<Void, Never>?
@@ -1852,9 +1856,9 @@ final class ChatViewModel {
         - Hard protocol rule: for any intermediate local-work step, pure prose means "stop and answer normally"; it will not be auto-upgraded into execution. Emit a real tool block only when you are intentionally requesting local execution.
         - JSON tool capabilities:
         \(capabilities)
-        - Source file writes: never write code through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files`/`file_write` with `content`, `code_lines`, `content_lines`, or `content_base64`; use same-path `edit_file`/`file_edit` or `patch_file` for targeted modifications.
+        - Source file writes: all code files (`.py`, `.js`, `.ts`, `.lua`, `.sh`, `.html`, `.css`, `.swift`, `.java`, `.go`, `.rs`, etc.) are indentation/escaping-sensitive. Never write them through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files`/`file_write` with `code_lines`, `content_lines`, or `content_base64`; use same-path `edit_file`/`file_edit` or `patch_file` for targeted modifications.
         - Generated scripts must be runtime-compatible before execution: Python should avoid `time.sleep()`; shell scripts must be BusyBox ash/POSIX, not bash. If a delay is needed, set `delay` on the next command step.
-        - Python writes: `.py`/`.pyw` must use structured `write_files`/`file_write` or same-path `edit_file`/`patch_file`; the host validates AST and writes UTF-8 bytes directly, preserving indentation without shell quoting.
+        - Code write validation: source files must be written as exact UTF-8 bytes through structured tools. Python additionally gets AST/compile validation, but the structured-write rule applies to every programming language, not only `.py`.
         - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
         - Tool loop: one assistant turn emits at most one `iexa_alpine` block for one meaningful bounded step; the next turn must read the returned stdout/stderr/exit code before deciding whether to continue. For code creation, a structured file write plus one bounded syntax/run verification may share the same block only when they validate the same change.
         - Tool-call turn output: when emitting an `iexa_alpine` block, do not append success claims, guessed stdout, file contents, or final summaries after the block. The host will return the real Local Alpine observation in the next turn.
@@ -1963,7 +1967,7 @@ final class ChatViewModel {
             }
             if localAlpineOutputHasPythonSyntaxIssue(content + "\n" + (rawResult ?? "")) {
                 lines.append("  required next action:")
-                lines.append(indentForSystemContext("Python syntax/indentation error detected. Inspect the target project file, then repair the original path in place through byte-preserving iexa_alpine JSON write_files and run a bounded verification command. Use a complete-file write only for the same target path when the Python write gate requires it. Do not create a replacement filename or repeat only the same failed command."))
+                lines.append(indentForSystemContext("Code syntax/indentation error detected. Inspect the target project file, then repair the original path in place through byte-preserving iexa_alpine JSON edit_file/patch_file/write_files and run a language-appropriate bounded verification command. For Python, keep the full file exact when the Python write gate requires a complete-file write. Do not create a replacement filename or repeat only the same failed command."))
             }
             if localAlpineOutputHasBusyBoxCompatibilityIssue(content + "\n" + (rawResult ?? "")) {
                 lines.append("  required next action:")
@@ -2014,7 +2018,7 @@ final class ChatViewModel {
         - Treat each tool turn as one ordered step. A structured write/edit plus one verification command is OK; do not pack multiple repair/run cycles into one block.
         - Treat `.iexa-terminal-scripts/command-*.sh` paths as internal one-shot host temp scripts. Never read, edit, verify, or mention them as user files.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
-        - If the latest result contains Python IndentationError or SyntaxError, inspect the target project file, then emit the corrected content to the same original path through byte-preserving `iexa_alpine` JSON `write_files`, then run a bounded verification command. Keep the file body complete and exact when the Python write gate requires a full-file write; do not create a sibling replacement file and do not repeat only the same failed command.
+        - If the latest result contains a code syntax/indentation error, inspect the target project file, then emit a same-path fix through byte-preserving `iexa_alpine` JSON `edit_file`, `patch_file`, or `write_files`, then run a language-appropriate bounded verification command. Python still requires AST/compile-safe full-file writes when the Python write gate asks for them; do not create a sibling replacement file and do not repeat only the same failed command.
         - If the latest result contains a BusyBox/ash compatibility error, rewrite the command using `list_dir`, `glob`, `grep`, `verify`, or POSIX sh/ash syntax. Do not repeat GNU/bash-only syntax.
         [/Local Alpine execution state]
         """
@@ -2224,6 +2228,24 @@ final class ChatViewModel {
 
     private static func contentContainsLocalAlpineInstruction(_ content: String) -> Bool {
         !localAlpineInstructionBlocks(from: content).isEmpty
+    }
+
+    private static func localAlpineExecutableFingerprint(from content: String) -> String {
+        let blocks = localAlpineInstructionBlocks(from: content)
+        let candidates = blocks.isEmpty ? [content] : blocks
+        let parts = candidates.compactMap { block -> String? in
+            let trimmed = block.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            if let data = trimmed.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data),
+               JSONSerialization.isValidJSONObject(object),
+               let normalizedData = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+               let normalized = String(data: normalizedData, encoding: .utf8) {
+                return "json:\(normalized)"
+            }
+            return "text:\(trimmed)"
+        }
+        return parts.joined(separator: "\n---iexa-alpine-block---\n")
     }
 
     private static func firstLocalAlpineCommand(from object: Any) -> ParsedLocalAlpineCommand? {
@@ -7536,6 +7558,7 @@ final class ChatViewModel {
         localAlpineAutoExecutionPaused = false
         localAlpineFailedCommands.removeAll()
         localAlpineCompletedCommands.removeAll()
+        localAlpineExecutedExecutableFingerprints.removeAll()
         localAlpineFailureSignatures.removeAll()
         localAlpineNoProgressSignatures.removeAll()
         localAlpineBlockedRepeatCommands.removeAll()
@@ -14146,11 +14169,29 @@ final class ChatViewModel {
             return
         }
 
+        let executableFingerprint = Self.localAlpineExecutableFingerprint(from: executableContent)
+        if !executableFingerprint.isEmpty,
+           localAlpineExecutedExecutableFingerprints.contains(executableFingerprint) {
+            localAlpineAgentExecutedMessageIds.insert(messageId)
+            localAlpineAgentStopRequested = true
+            appendLocalAlpineNoProgressStopMessage(
+                parentId: messageId,
+                reason: "模型重复请求同一个本地工具步骤，已跳过重复执行。"
+            )
+            return
+        }
+        if !executableFingerprint.isEmpty {
+            localAlpineExecutedExecutableFingerprints.insert(executableFingerprint)
+        }
+
         localAlpineAgentExecutedMessageIds.insert(messageId)
         localAlpineAgentTask = Task { [weak self] in
             let hasExecutableBlocks = await LocalAlpineAgentService.shared.hasExecutableBlocks(in: executableContent)
             guard hasExecutableBlocks else {
                 self?.localAlpineAgentExecutedMessageIds.remove(messageId)
+                if !executableFingerprint.isEmpty {
+                    self?.localAlpineExecutedExecutableFingerprints.remove(executableFingerprint)
+                }
                 return
             }
             await self?.executeLocalAlpineAgent(messageId: messageId, content: executableContent)
@@ -14706,11 +14747,13 @@ final class ChatViewModel {
     private func recordLocalAlpineCompletedCommands(from result: LocalAlpineAgentResult) {
         if result.editedFileCount > 0 || !result.writtenFiles.isEmpty {
             localAlpineCompletedCommands.removeAll()
+            localAlpineExecutedExecutableFingerprints.removeAll()
             return
         }
         for commandResult in result.commandResults where !commandResult.failed {
             if Self.localAlpineCommandMutatesState(commandResult.command) {
                 localAlpineCompletedCommands.removeAll()
+                localAlpineExecutedExecutableFingerprints.removeAll()
                 continue
             }
             let key = Self.localAlpineCommandKey(command: commandResult.command, cwd: commandResult.cwd)
@@ -14822,12 +14865,12 @@ final class ChatViewModel {
         if pythonSyntaxIssue {
             pythonRepairInstruction = """
 
-        Python syntax/indentation guard
-        已检测到 Python 缩进/语法错误。下一步不要只重复同一个失败命令。
+        Code syntax/indentation guard
+        已检测到代码缩进/语法错误。下一步不要只重复同一个失败命令。
         必须先定位并读取用户项目文件，然后修复同一个路径：
         1. 用 JSON `read_file` 读取目标文件（或执行带行号读取命令：`\(Self.localAlpineInspectCommand(forPythonFile: pythonFile))`）。
         2. 优先用 JSON `edit_file`/`patch_file` 修改原文件；只有大段重写时才用 `write_files` 写回同一路径。
-        3. 修改后直接运行脚本或一个有界验证命令。
+        3. 修改后直接运行脚本或一个有界验证命令。Python 仍需要额外的 AST/编译检查。
         """
         } else if failure.outputPreview.lowercased().contains("unsafe python file write blocked")
             || failure.outputPreview.lowercased().contains("unsafe code file write blocked") {
@@ -14906,11 +14949,11 @@ final class ChatViewModel {
         if Self.localAlpineOutputHasPythonSyntaxIssue(result.outputPreview) {
             pythonRepairInstruction = """
 
-            Python repair required:
+            Code repair required:
             不要让用户手动复制或敲命令。下一步必须由你自己发出 `iexa_alpine` JSON：
             1. 先 `read_file` 读取目标 `.py` 文件。
             2. 优先 `edit_file`/`patch_file` 修复原路径；大段重写才用 `write_files` 写回同一路径。
-            3. 同一条 action 里运行 `python3 -m py_compile <file> && python3 <file>`。
+            3. 同一条 action 里运行适合该语言的有界验证命令。Python 用 `python3 -m py_compile <file> && python3 <file>`。
             """
         } else {
             pythonRepairInstruction = ""
@@ -16759,8 +16802,10 @@ final class ChatViewModel {
 
         if let completedAssistantContentForAgent {
             scheduleLocalNativeToolIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
+            let didScheduleNativeTool = localNativeToolExecutedMessageIds.contains(id)
             let completedMessage = conversation?.messages.first(where: { $0.id == id })
-            if completedMessage.map(Self.isLocalAlpineAgentResult) != true,
+            if !didScheduleNativeTool,
+               completedMessage.map(Self.isLocalAlpineAgentResult) != true,
                completedMessage?.metadata?["iexa_local_alpine_final_summary"] == nil {
                 scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
                 if localAlpineAgentExecutedMessageIds.contains(id) != true {

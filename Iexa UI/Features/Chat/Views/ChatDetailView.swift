@@ -2435,11 +2435,8 @@ struct ChatDetailView: View {
     }
 
     private func scrollToTranscriptBottom(anchor: UnitPoint = .bottom) {
-        if let lastMessageId = transcriptMessages.last?.id {
-            scrollPosition.scrollTo(id: lastMessageId, anchor: anchor)
-        } else {
-            scrollPosition.scrollTo(edge: .bottom)
-        }
+        _ = anchor
+        scrollPosition.scrollTo(edge: .bottom)
     }
 
     private func scrollToLatestMessageWithoutAnimation(anchor: UnitPoint = .bottom) {

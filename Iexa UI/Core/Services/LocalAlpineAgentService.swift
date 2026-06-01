@@ -5098,13 +5098,17 @@ actor LocalAlpineAgentService {
               let rawContent = regexCapture(match, in: script, at: 4) else {
             return nil
         }
+        let content = normalizedPythonWriterContent(
+            decodeShellPrintfLiteral(rawContent),
+            targetPath: path
+        )
         return LocalAlpineAgentCommand(
             command: nil,
             cwd: cwd,
             writeFiles: [
                 LocalAlpineAgentFile(
                     path: path,
-                    content: decodeShellPrintfLiteral(rawContent),
+                    content: content,
                     source: .codeLines
                 )
             ]
@@ -5122,17 +5126,79 @@ actor LocalAlpineAgentService {
             return nil
         }
 
+        let normalizedContent = normalizedPythonWriterContent(content, targetPath: write.path)
         return LocalAlpineAgentCommand(
             command: nil,
             cwd: cwd,
             writeFiles: [
                 LocalAlpineAgentFile(
                     path: write.path,
-                    content: content,
+                    content: normalizedContent,
                     source: Self.isPythonTarget(write.path) ? .codeLines : .contentLines
                 )
             ]
         )
+    }
+
+    private nonisolated static func normalizedPythonWriterContent(
+        _ content: String,
+        targetPath: String
+    ) -> String {
+        guard isCodeTarget(targetPath) else { return content }
+        let normalized = content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        var lines = normalized.components(separatedBy: "\n")
+        let shouldEndWithNewline = normalized.hasSuffix("\n")
+
+        while lines.count > 1,
+              lines.first?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            lines.removeFirst()
+        }
+        while lines.count > 1,
+              lines.last?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            lines.removeLast()
+        }
+
+        let nonEmptyIndents = lines
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map { leadingWhitespaceCharacterCount(in: $0) }
+        guard nonEmptyIndents.count >= 2,
+              let commonIndent = nonEmptyIndents.min(),
+              commonIndent > 0 else {
+            var joined = lines.joined(separator: "\n")
+            if shouldEndWithNewline, !joined.hasSuffix("\n") {
+                joined += "\n"
+            }
+            return joined
+        }
+
+        var dedented = lines
+            .map { droppingLeadingWhitespaceCharacters(from: $0, count: commonIndent) }
+            .joined(separator: "\n")
+        if shouldEndWithNewline, !dedented.hasSuffix("\n") {
+            dedented += "\n"
+        }
+        return dedented
+    }
+
+    private nonisolated static func leadingWhitespaceCharacterCount(in line: String) -> Int {
+        line.prefix { $0 == " " || $0 == "\t" }.count
+    }
+
+    private nonisolated static func droppingLeadingWhitespaceCharacters(
+        from line: String,
+        count: Int
+    ) -> String {
+        var index = line.startIndex
+        var remaining = count
+        while remaining > 0, index < line.endIndex {
+            let character = line[index]
+            guard character == " " || character == "\t" else { break }
+            index = line.index(after: index)
+            remaining -= 1
+        }
+        return String(line[index...])
     }
 
     private nonisolated static func commandFromPythonPathReplaceWrite(
