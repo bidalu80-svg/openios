@@ -833,6 +833,9 @@ struct ChatDetailView: View {
         if message.metadata?["iexa_local_alpine_final_summary"] != nil {
             return mergedLocalAlpineTurnActivity(through: message)
         }
+        if isLocalAlpineResultMessage(message) {
+            return mergedLocalAlpineTurnActivity(through: message) ?? activityItem(for: message)
+        }
         return activityItem(for: message)
     }
 
@@ -848,14 +851,38 @@ struct ChatDetailView: View {
         guard let endIndex = viewModel.messages.firstIndex(where: { $0.id == message.id }) else {
             return nil
         }
-        let priorMessages = viewModel.messages[..<endIndex]
+        let endExclusive: Array<ChatMessage>.Index = isLocalAlpineResultMessage(message)
+            ? viewModel.messages.index(after: endIndex)
+            : endIndex
+        let priorMessages = viewModel.messages[..<endExclusive]
         let lastUserIndex = priorMessages.lastIndex(where: { $0.role == .user })
         let startIndex = lastUserIndex.map { viewModel.messages.index(after: $0) } ?? viewModel.messages.startIndex
-        guard startIndex < endIndex else { return nil }
+        guard startIndex < endExclusive else { return nil }
 
-        let turnItems = viewModel.messages[startIndex..<endIndex]
+        let turnItems = viewModel.messages[startIndex..<endExclusive]
             .compactMap { activityItem(for: $0) }
         return AgentActivityItem.mergedTurn(id: "inline-\(message.id)", items: turnItems)
+    }
+
+    private func hasLaterLocalAlpineTurnMessage(after message: ChatMessage) -> Bool {
+        guard let index = viewModel.messages.firstIndex(where: { $0.id == message.id }) else {
+            return false
+        }
+        let start = viewModel.messages.index(after: index)
+        guard start < viewModel.messages.endIndex else { return false }
+
+        for later in viewModel.messages[start...] {
+            if later.role == .user { return false }
+            if isLocalAlpineResultMessage(later) {
+                return true
+            }
+            if later.metadata?["iexa_local_alpine_final_summary"] != nil {
+                return later.isStreaming
+                    || later.error != nil
+                    || !later.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+        }
+        return false
     }
 
     private func hasLocalAlpineFinalSummary(after message: ChatMessage, requireRenderableContent: Bool) -> Bool {
@@ -974,6 +1001,9 @@ struct ChatDetailView: View {
         let metadata = message.metadata ?? [:]
         if isLocalAlpineResultMessage(message) {
             if hasVisibleLocalAlpineFinalSummary(after: message) {
+                return true
+            }
+            if hasLaterLocalAlpineTurnMessage(after: message) {
                 return true
             }
             let hasVisibleActivity = activityItem(for: message)?.hasConcreteSteps == true

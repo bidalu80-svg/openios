@@ -1702,7 +1702,7 @@ final class ChatViewModel {
         LocalAlpineToolCapability(
             name: "command",
             description: "Run one bounded shell command for list/search/run/install/build/test/verify.",
-            arguments: ["command/cmd/shell/bash/exec/run/shell_execute", "cwd/workdir/working_dir/directory/dir?"]
+            arguments: ["command/cmd/shell/bash/exec/run/shell_execute", "cwd/workdir/working_dir/directory/dir?", "delay/delay_seconds?"]
         ),
         LocalAlpineToolCapability(
             name: "browser_use",
@@ -1717,7 +1717,8 @@ final class ChatViewModel {
         - If raw `command` is necessary, write POSIX sh/ash only. Avoid GNU/macOS/bash-only syntax unless a prior command proves support.
         - Known bad patterns here: `find -printf`, `grep -P`, `sed -i ''`, Bash `[[ ... ]]`, `source`, `mapfile`, `readarray`, and process substitution `<(...)` or `>(...)`.
         - Safe replacements: `find PATH -type f -print | sed -n '1,200p'`, `grep -E`, `. ./script.sh`, `[ ... ]`, and `while IFS= read -r line; do ...; done`.
-        - iSH/Python runtime quirk: avoid `time.sleep()` in generated scripts/tests; make tests deterministic or use shell `sleep` only when a delay is truly required.
+        - Waiting/polling: use the JSON `delay`/`delay_seconds` field on a `command`/`shell_execute` step instead of putting `sleep` in shell text or `time.sleep()` in generated scripts/tests.
+        - iSH/Python runtime quirk: `time.sleep()` can raise `OSError: [Errno 38] Function not implemented`; make generated Python tests deterministic and delay between tool steps through `delay`.
         """
 
     private static var localAlpineToolManifest: String {
@@ -1736,7 +1737,7 @@ final class ChatViewModel {
           ```
         - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
-        - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`.
+        - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`. Accepted delay keys are `delay`, `delay_seconds`, or `delaySeconds`; use them instead of shell/Python sleeps.
         - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
         - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls. `browser_use` supports optional `save_to`/`output` plus `open_preview:true` so large HTML/SVG/JSON responses can be written under `/mnt/iexa` and opened through the preview bridge instead of being pasted into chat.
         - In-app preview bridge: after creating a user-viewable file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.
@@ -1750,6 +1751,7 @@ final class ChatViewModel {
         - JSON tool capabilities:
         \(capabilities)
         - Source file writes: never write code through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files.code_lines`, `content_lines`, `content_base64`, same-path `edit_file`, or `patch_file`.
+        - Generated scripts must be runtime-compatible before execution: Python should avoid `time.sleep()`; shell scripts must be BusyBox ash/POSIX, not bash. If a delay is needed, set `delay` on the next command step.
         - Python writes: `.py`/`.pyw` must use `write_files.code_lines` or `content_base64`; localized Python repairs should prefer `read_file` then same-path `edit_file`/`patch_file`.
         - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
         - Tool loop: one assistant turn emits at most one `iexa_alpine` block for one meaningful bounded step; the next turn must read the returned stdout/stderr/exit code before deciding whether to continue. For code creation, a structured file write plus one bounded syntax/run verification may share the same block only when they validate the same change.
@@ -1907,6 +1909,7 @@ final class ChatViewModel {
         - Missing `iexa_alpine` on a `needs_next_tool_*` state is invalid. Use the structured tools (`read_file`, `write_files`, `edit_file`, `patch_file`, `list_dir`, `glob`, `grep`, `verify`, `command`) instead of prose.
         - If prior observations already prove a tool/package exists, do not repeat a generic environment probe. Move to the user's concrete task.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
+        - Treat each tool turn as one ordered step. A structured write/edit plus one verification command is OK; do not pack multiple repair/run cycles into one block.
         - Treat `.iexa-terminal-scripts/command-*.sh` paths as internal one-shot host temp scripts. Never read, edit, verify, or mention them as user files.
         - If the latest user message is an interruption/meta question about the failure, answer that question and wait; do not auto-run another `iexa_alpine` block until the user explicitly asks to continue/fix/run.
         - If the latest result contains Python IndentationError or SyntaxError, inspect the target project file, then emit the corrected content to the same original path through byte-preserving `iexa_alpine` JSON `write_files`, then run a bounded verification command. Keep the file body complete and exact when the Python write gate requires a full-file write; do not create a sibling replacement file and do not repeat only the same failed command.
@@ -15415,6 +15418,9 @@ final class ChatViewModel {
             || toolCalls.contains(where: { $0.phase == .result && $0.failed }) {
             return true
         }
+        if normalized.contains("已暂缓") && normalized.contains("单步 agent") {
+            return true
+        }
         if localAlpineToolCallsShowCompletedGoal(
             toolCalls,
             commandResults: commandResults,
@@ -15681,6 +15687,10 @@ final class ChatViewModel {
         let verificationPatterns = [
             #"(?m)(^|[;&|]\s*)python3\s+(?:/|\./|[\w.-]+\.py\b|-m\s+(?!pip\b)|-\s)"#,
             #"(?m)(^|[;&|]\s*)python\s+(?:/|\./|[\w.-]+\.py\b|-m\s+(?!pip\b)|-\s)"#,
+            #"(?m)(^|[;&|]\s*)(?:lua|lua5(?:\.[1-4])?|luajit|ruby|php|perl|Rscript|julia|deno|bun)\s+(?:/|\./|[\w./-]+\.(?:lua|rb|php|pl|r|jl|m?js|cjs|ts|tsx)\b|-e\b|-c\b|-\s)"#,
+            #"(?m)(^|[;&|]\s*)(?:sh|bash|zsh|fish)\s+(?:/|\./|[\w./-]+\.(?:sh|bash|zsh|fish)\b|-c\b|-\s)"#,
+            #"(?m)(^|[;&|]\s*)java\s+(?:-jar\s+\S+\.jar\b|[\w.$]+)\b"#,
+            #"(?m)(^|[;&|]\s*)(?:javac|kotlinc|swift|ts-node|tsx)\s+(?!--version\b|--help\b)"#,
             #"(?m)(^|[;&|]\s*)node\s+(?:/|\./|[\w.-]+\.m?js\b)"#,
             #"(?m)(^|[;&|]\s*)npm\s+(?:test|run|start)\b"#,
             #"(?m)(^|[;&|]\s*)pytest\b"#,
@@ -15880,6 +15890,7 @@ final class ChatViewModel {
         - If files were created or changed, mention their paths.
         - If the command failed, explain the immediate error and the next fix path, but do not run another command until the user asks.
         Keep it short and based only on the real Local Alpine output.
+        Always output at least one visible sentence. Do not output JSON, code fences, tool blocks, or protocol tags.
         [/Local Alpine final summary]
         """
         appendSystemInstruction(instruction, marker: "[Local Alpine final summary]", to: &messages)

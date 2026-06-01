@@ -582,8 +582,9 @@ actor LocalAlpineAgentService {
 
         let uniqueCommands = Self.deduplicatedCommands(preparedCommands, defaultCWD: defaultCWD)
         let duplicateCount = max(0, preparedCommands.count - uniqueCommands.count)
-        let trimmedCommands = Array(uniqueCommands.prefix(maxCommandsPerResponse))
-        let skippedCount = max(0, uniqueCommands.count - trimmedCommands.count)
+        let (singleStepCommands, deferredStepCount) = Self.commandsForSingleAgentStep(uniqueCommands)
+        let trimmedCommands = Array(singleStepCommands.prefix(maxCommandsPerResponse))
+        let skippedCount = max(0, singleStepCommands.count - trimmedCommands.count)
         let toolRunId = UUID().uuidString
         var commandResults: [LocalAlpineAgentCommandResult] = []
         var writtenFiles: [LocalAlpineWrittenFile] = []
@@ -800,6 +801,23 @@ actor LocalAlpineAgentService {
                     continue
                 }
 
+                if let warning = await runnableFileCompatibilityWarning(for: commandToExecute, cwd: effectiveCWD) {
+                    let result = LocalAlpineCommandResult(
+                        command: commandToExecute,
+                        output: warning,
+                        exitCode: 126,
+                        interactiveRequest: nil
+                    )
+                    stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
+                    commandResults.append(Self.commandResult(
+                        command: commandToExecute,
+                        cwd: effectiveCWD,
+                        result: result
+                    ))
+                    stopRemainingCommands = true
+                    continue
+                }
+
                 let classifiedShellTool = Self.shellToolClassification(
                     for: commandToExecute,
                     fallbackName: command.shellToolName,
@@ -814,6 +832,9 @@ actor LocalAlpineAgentService {
                     filePaths: command.shellToolFilePaths
                 )
                 await emitTool(Self.toolCallStart(context))
+                if let delaySeconds = command.delaySeconds, delaySeconds > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delaySeconds) * 1_000_000_000)
+                }
                 var result = await LocalAlpineTerminalService.shared.execute(
                     command: commandToExecute,
                     cwd: effectiveCWD
@@ -903,6 +924,9 @@ actor LocalAlpineAgentService {
         if skippedCount > 0 {
             lines.append("- 已跳过 \(skippedCount) 条多余命令，避免一次执行过多。")
         }
+        if deferredStepCount > 0 {
+            lines.append("- 已暂缓 \(deferredStepCount) 条后续命令，按单步 agent 规则等待本轮观察结果后再继续。")
+        }
         if skippedUnsafeShellWriteCount > 0 {
             lines.append("- 已跳过 \(skippedUnsafeShellWriteCount) 条被结构化写入覆盖的 shell 文本写代码命令，避免 heredoc/重定向破坏源码缩进。")
         }
@@ -955,6 +979,62 @@ actor LocalAlpineAgentService {
             return false
         }
         return (filtered, skippedCount)
+    }
+
+    private nonisolated static func commandsForSingleAgentStep(
+        _ commands: [LocalAlpineAgentCommand]
+    ) -> ([LocalAlpineAgentCommand], Int) {
+        var accepted: [LocalAlpineAgentCommand] = []
+        var didAcceptShellExecution = false
+        var deferredCount = 0
+
+        for command in commands {
+            if didAcceptShellExecution {
+                deferredCount += 1
+                continue
+            }
+
+            if let newWriteTargets = pureStructuredWriteTargets(command), !newWriteTargets.isEmpty {
+                accepted.removeAll { previous in
+                    guard let previousTargets = pureStructuredWriteTargets(previous),
+                          !previousTargets.isEmpty else {
+                        return false
+                    }
+                    return previousTargets.isSubset(of: newWriteTargets)
+                }
+            }
+
+            accepted.append(command)
+            if commandHasShellExecution(command) {
+                didAcceptShellExecution = true
+            }
+        }
+
+        return (accepted, deferredCount)
+    }
+
+    private nonisolated static func commandHasShellExecution(_ command: LocalAlpineAgentCommand) -> Bool {
+        guard let shell = command.command?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return false
+        }
+        return !shell.isEmpty
+    }
+
+    private nonisolated static func pureStructuredWriteTargets(_ command: LocalAlpineAgentCommand) -> Set<String>? {
+        guard !commandHasShellExecution(command),
+              !command.writeFiles.isEmpty,
+              command.readFiles.isEmpty,
+              command.editFiles.isEmpty,
+              command.patchFiles.isEmpty,
+              command.deleteFiles.isEmpty else {
+            return nil
+        }
+
+        return Set(command.writeFiles.map {
+            $0.path
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+        }.filter { !$0.isEmpty })
     }
 
     private nonisolated static func deduplicatedCommands(
@@ -1250,6 +1330,7 @@ actor LocalAlpineAgentService {
             return leadingCommands + convertedCommands + nestedCommands
         }
         let generatedInput = Self.dictionaryByRemovingArrayOnlyToolWrappers(from: dict)
+        let commandDelaySeconds = Self.delaySeconds(from: dict)
         if let generatedToolCommand = Self.generatedShellCommand(from: generatedInput, shellCommand: shellCommand) {
             return leadingCommands + [LocalAlpineAgentCommand(
                 command: generatedToolCommand.command,
@@ -1259,6 +1340,7 @@ actor LocalAlpineAgentService {
                 editFiles: editFiles,
                 patchFiles: patchFiles,
                 deleteFiles: deleteFiles,
+                delaySeconds: commandDelaySeconds,
                 shellToolName: generatedToolCommand.toolName,
                 shellToolDetail: generatedToolCommand.detail,
                 shellToolFilePaths: generatedToolCommand.filePaths
@@ -1306,7 +1388,8 @@ actor LocalAlpineAgentService {
                 readFiles: readFiles,
                 editFiles: editFiles,
                 patchFiles: patchFiles,
-                deleteFiles: deleteFiles
+                deleteFiles: deleteFiles,
+                delaySeconds: commandDelaySeconds
             )] + nestedCommands
         }
 
@@ -1825,7 +1908,11 @@ actor LocalAlpineAgentService {
                 return []
             }
             let command = "mv \(Self.shellSingleQuotedStatic(source)) \(Self.shellSingleQuotedStatic(destination)) && test -e \(Self.shellSingleQuotedStatic(destination))"
-            return [LocalAlpineAgentCommand(command: command, cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa")]
+            return [LocalAlpineAgentCommand(
+                command: command,
+                cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa",
+                delaySeconds: Self.delaySeconds(from: arguments)
+            )]
 
         case "copy_file":
             guard let source = Self.stringValue(
@@ -1851,12 +1938,20 @@ actor LocalAlpineAgentService {
                 return []
             }
             let command = "cp \(Self.shellSingleQuotedStatic(source)) \(Self.shellSingleQuotedStatic(destination)) && test -e \(Self.shellSingleQuotedStatic(destination))"
-            return [LocalAlpineAgentCommand(command: command, cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa")]
+            return [LocalAlpineAgentCommand(
+                command: command,
+                cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa",
+                delaySeconds: Self.delaySeconds(from: arguments)
+            )]
 
         case "mkdir":
             guard let path = Self.pathString(from: arguments) else { return [] }
             let command = "mkdir -p \(Self.shellSingleQuotedStatic(path)) && test -d \(Self.shellSingleQuotedStatic(path))"
-            return [LocalAlpineAgentCommand(command: command, cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa")]
+            return [LocalAlpineAgentCommand(
+                command: command,
+                cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa",
+                delaySeconds: Self.delaySeconds(from: arguments)
+            )]
 
         default:
             return nil
@@ -2437,6 +2532,21 @@ actor LocalAlpineAgentService {
         for key in ["command", "cmd", "shell", "bash", "exec", "run", "shell_execute", "verify", "check", "browser_use"] {
             if let nested = dict[key] as? [String: Any],
                let value = cwdString(from: nested) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func delaySeconds(from dict: [String: Any]) -> Int? {
+        for key in ["delay", "delay_seconds", "delaySeconds", "wait_seconds", "waitSeconds"] {
+            if let value = intValue(dict[key]) {
+                return max(0, min(value, 300))
+            }
+        }
+        for key in ["command", "cmd", "shell", "bash", "exec", "run", "shell_execute", "verify", "check"] {
+            if let nested = dict[key] as? [String: Any],
+               let value = delaySeconds(from: nested) {
                 return value
             }
         }
@@ -4351,7 +4461,7 @@ actor LocalAlpineAgentService {
         if Self.commandMatches(normalized, pattern: #"\bfind\b[^;&|]*\s-printf\b"#) {
             issue = "`find -printf` is a GNU find extension; BusyBox find in this runtime does not support it."
             replacement = "Use `glob`/`list_dir`, or `find PATH -type f -print | sed -n '1,200p'`."
-        } else if Self.commandMatches(normalized, pattern: #"\bgrep\b[^;&|]*\s-P\b"#) {
+        } else if Self.commandMatches(normalized, pattern: #"\bgrep\b[^;&|]*\s-[A-Za-z]*P[A-Za-z]*\b"#) {
             issue = "`grep -P` requires PCRE grep; BusyBox grep does not provide it."
             replacement = "Use `grep` structured search, `grep -E`, or a small Python regex script if Python support is required."
         } else if Self.commandMatches(normalized, pattern: #"\bsed\b[^;&|]*\s-i\s+''"#) {
@@ -4371,7 +4481,7 @@ actor LocalAlpineAgentService {
             replacement = "Write a temporary file under `/mnt/iexa` or pipe commands directly."
         } else if Self.commandMatches(normalized, pattern: #"\btime\.sleep\s*\("#) {
             issue = "`time.sleep()` can raise `OSError: [Errno 38] Function not implemented` in this iSH-backed Python runtime."
-            replacement = "Avoid sleeps in generated scripts/tests; if a delay is truly required, use shell `sleep` outside Python."
+            replacement = "Avoid sleeps in generated scripts/tests; if a delay is truly required, set the JSON `delay` field on the next Local Alpine command step."
         } else {
             return nil
         }
@@ -4390,6 +4500,113 @@ actor LocalAlpineAgentService {
         - `verify` for bounded test/compile/run checks
         - `edit_file`/`patch_file`/`write_files` for file modifications
         """
+    }
+
+    private func runnableFileCompatibilityWarning(for command: String, cwd: String) async -> String? {
+        guard let codePath = Self.firstCodePath(in: command) else { return nil }
+        guard !Self.isSyntaxOnlyVerificationCommand(command) else { return nil }
+        if codePath.hasPrefix("/"), !codePath.hasPrefix("/mnt/iexa/") {
+            return nil
+        }
+        let target = resolvedFilePath(codePath, cwd: cwd)
+        guard let data = try? await LocalAlpineTerminalService.shared.readFile(path: target),
+              let content = String(data: data, encoding: .utf8),
+              let issue = Self.sourceCompatibilityIssue(content: content, path: target) else {
+            return nil
+        }
+
+        return """
+        Local runtime compatibility guard.
+
+        This command was not run because the script it would execute contains code that commonly fails in the Local Alpine BusyBox/ash/iSH runtime.
+
+        File: `\(target)`
+        Issue: \(issue.issue)
+        Rewrite: \(issue.replacement)
+
+        Re-send a structured `edit_file`/`patch_file`/`write_files` update for this file, then run the bounded verification again.
+        """
+    }
+
+    private nonisolated static func isSyntaxOnlyVerificationCommand(_ command: String) -> Bool {
+        var normalized = command
+            .replacingOccurrences(of: "\\\n", with: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return false }
+        normalized = normalized.replacingOccurrences(
+            of: #"^cd\s+(['"]?)[^;&|]+\1\s*&&\s*"#,
+            with: "",
+            options: .regularExpression
+        )
+        guard !commandMatches(normalized, pattern: #"(\s&&\s|;|\|)"#) else { return false }
+
+        return commandMatches(normalized, pattern: #"^python3?\s+-m\s+(py_compile|compileall)\b"#)
+            || commandMatches(normalized, pattern: #"^node\s+--check\b"#)
+            || commandMatches(normalized, pattern: #"^(sh|ash|bash)\s+-n\b"#)
+            || commandMatches(normalized, pattern: #"^luac\s+-p\b"#)
+            || commandMatches(normalized, pattern: #"^ruby\s+-c\b"#)
+            || commandMatches(normalized, pattern: #"^php\s+-l\b"#)
+            || commandMatches(normalized, pattern: #"^perl\s+-c\b"#)
+    }
+
+    private nonisolated static func sourceCompatibilityIssue(
+        content: String,
+        path: String
+    ) -> (issue: String, replacement: String)? {
+        let normalized = content
+            .replacingOccurrences(of: "\\\n", with: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let lowerPath = path.lowercased()
+        let isPython = lowerPath.hasSuffix(".py") || lowerPath.hasSuffix(".pyw")
+        let isShell = lowerPath.hasSuffix(".sh") || lowerPath.hasSuffix(".bash")
+
+        if isPython,
+           commandMatches(normalized, pattern: #"\btime\.sleep\s*\("#) {
+            return (
+                "`time.sleep()` can raise `OSError: [Errno 38] Function not implemented` in this runtime.",
+                "Remove sleeps from generated Python scripts/tests. If waiting is required between checks, set `delay`/`delay_seconds` on the Local Alpine command step."
+            )
+        }
+        if commandMatches(normalized, pattern: #"\bfind\b[^;&|]*\s-printf\b"#) {
+            return (
+                "`find -printf` is not supported by BusyBox find.",
+                "Use `find PATH -type f -print | sed -n '1,200p'`, or the structured `glob`/`list_dir` wrapper."
+            )
+        }
+        if commandMatches(normalized, pattern: #"\bgrep\b[^;&|]*\s-[A-Za-z]*P[A-Za-z]*\b"#) {
+            return (
+                "`grep -P` is not supported by BusyBox grep.",
+                "Use `grep -E`, the structured `grep` wrapper, or Python's `re` module."
+            )
+        }
+        if isShell && (normalized.contains("[[") || normalized.contains("]]")) {
+            return (
+                "`[[ ... ]]` is Bash-only; Local Alpine shell scripts run under BusyBox ash.",
+                "Use POSIX `[ ... ]`/`test`."
+            )
+        }
+        if isShell,
+           commandMatches(normalized, pattern: #"(^|[;&|]\s*)source\s+"#) {
+            return (
+                "`source` is Bash syntax; BusyBox ash uses `.`.",
+                "Use `. ./script.sh` if sourcing is required."
+            )
+        }
+        if isShell,
+           commandMatches(normalized, pattern: #"(^|[;&|]\s*)(mapfile|readarray)\b"#) {
+            return (
+                "`mapfile`/`readarray` are Bash builtins and are not available in BusyBox ash.",
+                "Use `while IFS= read -r line; do ...; done`."
+            )
+        }
+        if isShell && (normalized.contains("<(") || normalized.contains(">(")) {
+            return (
+                "Process substitution `<(...)`/`>(...)` is Bash-only.",
+                "Write a temporary file under `/mnt/iexa` or pipe commands directly."
+            )
+        }
+        return nil
     }
 
     private nonisolated static func commandMatches(_ command: String, pattern: String) -> Bool {
@@ -5019,10 +5236,12 @@ actor LocalAlpineAgentService {
             return cleanedVisibleProtocolNoise(from: content)
         }
 
-        if let firstToolRange = mergedRanges(removalRanges).min(by: { $0.location < $1.location }) {
-            return ""
+        var visible = content
+        for range in mergedRanges(removalRanges).sorted(by: { $0.location > $1.location }) {
+            guard let swiftRange = Range(range, in: visible) else { continue }
+            visible.removeSubrange(swiftRange)
         }
-        return ""
+        return cleanedVisibleToolPreface(from: visible)
     }
 
     nonisolated private static func cleanedVisibleToolPreface(from content: String) -> String {
@@ -5477,6 +5696,7 @@ private struct LocalAlpineAgentCommand: Sendable {
     let editFiles: [LocalAlpineEditFileRequest]
     let patchFiles: [LocalAlpinePatchFileRequest]
     let deleteFiles: [LocalAlpineDeleteFileRequest]
+    let delaySeconds: Int?
     let shellToolName: String?
     let shellToolDetail: String?
     let shellToolFilePaths: [String]
@@ -5489,6 +5709,7 @@ private struct LocalAlpineAgentCommand: Sendable {
         editFiles: [LocalAlpineEditFileRequest] = [],
         patchFiles: [LocalAlpinePatchFileRequest] = [],
         deleteFiles: [LocalAlpineDeleteFileRequest] = [],
+        delaySeconds: Int? = nil,
         shellToolName: String? = nil,
         shellToolDetail: String? = nil,
         shellToolFilePaths: [String] = []
@@ -5500,6 +5721,7 @@ private struct LocalAlpineAgentCommand: Sendable {
         self.editFiles = editFiles
         self.patchFiles = patchFiles
         self.deleteFiles = deleteFiles
+        self.delaySeconds = delaySeconds
         self.shellToolName = shellToolName
         self.shellToolDetail = shellToolDetail
         self.shellToolFilePaths = shellToolFilePaths

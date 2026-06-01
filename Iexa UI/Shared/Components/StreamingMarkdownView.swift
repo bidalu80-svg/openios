@@ -136,7 +136,9 @@ struct StreamingMarkdownView: View {
         // Keep raw content for structural parsing so fenced code blocks preserve
         // exact bytes (especially Python indentation). Markdown-only segments are
         // sanitized later at render time in `segmentView`.
-        let renderContent = Self.normalizedApostropheFenceMarkers(content)
+        let renderContent = normalizedInlineFenceOpenersAfterProse(
+            in: Self.normalizedApostropheFenceMarkers(content)
+        )
         guard !renderContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
 
         if InlineDataPayloadSanitizer.mayContainInlineDataURI(renderContent) {
@@ -230,8 +232,7 @@ struct StreamingMarkdownView: View {
 
         result.append(streamingCodeSegment(
             language: recoveredBlock.language,
-            code: recoveredBlock.content,
-            preceding: before
+            code: recoveredBlock.content
         ))
         return result
     }
@@ -275,20 +276,18 @@ struct StreamingMarkdownView: View {
         return ParsedBlock(language: "text", content: content)
     }
 
-    private func streamingCodeSegment(language: String, code: String, preceding: String = "") -> ContentSegment {
+    private func streamingCodeSegment(language: String, code: String) -> ContentSegment {
         codeSegmentForFence(
             language: language,
             code: code,
-            isStreamingBlock: true,
-            preceding: preceding
+            isStreamingBlock: true
         )
     }
 
     private func codeSegmentForFence(
         language: String,
         code: String,
-        isStreamingBlock: Bool,
-        preceding: String = ""
+        isStreamingBlock: Bool
     ) -> ContentSegment {
         let normalizedLanguage = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
@@ -320,8 +319,7 @@ struct StreamingMarkdownView: View {
             return .python(code)
         }
         if Self.isPlainTextFence(language: normalizedLanguage),
-           !Self.looksLikeSourceCode(code),
-           !Self.shouldPreservePlainTextFenceAsCode(code: code, preceding: preceding) {
+           !Self.looksLikeSourceCode(code) {
             return .markdown(code)
         }
         if !normalizedLanguage.isEmpty {
@@ -835,7 +833,7 @@ struct StreamingMarkdownView: View {
             }
             if prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                isLikelyDirtyClosingFenceSuffix(suffix) {
-                return fence
+                return fence.lowerBound..<lineEnd
             }
             cursor = fence.upperBound
         }
@@ -846,6 +844,9 @@ struct StreamingMarkdownView: View {
         let trimmed = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         if trimmed.contains("```") || trimmed.contains("~~~") {
+            return true
+        }
+        if recognizedFenceLanguageTokens.contains(trimmed.lowercased()) {
             return true
         }
 
@@ -1103,12 +1104,10 @@ struct StreamingMarkdownView: View {
             let isCompactModule = shouldRenderCompactCodeModule(language: lang, code: codeContent)
             let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
             let isPlainTextFence = Self.isPlainTextFence(language: lang)
-            let preservePlainTextFence = isPlainTextFence
-                && Self.shouldPreservePlainTextFenceAsCode(code: codeContent, preceding: preceding)
             let isStandardCodeBlock = normalizedBlock != nil
-                && (!isPlainTextFence || Self.looksLikeSourceCode(codeContent) || preservePlainTextFence)
+                && (!isPlainTextFence || Self.looksLikeSourceCode(codeContent))
 
-            if isPlainTextFence && !Self.looksLikeSourceCode(codeContent) && !preservePlainTextFence {
+            if isPlainTextFence && !Self.looksLikeSourceCode(codeContent) {
                 if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     units.append(.markdown(preceding))
                 }
@@ -1416,13 +1415,14 @@ struct StreamingMarkdownView: View {
             let prefixBeforeFence = searchArea[lineStart..<fence.lowerBound]
             let isAtFenceLineStart = prefixBeforeFence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let afterFence = searchArea[fence.upperBound...]
-            let suffixBeforeNewline = afterFence.prefix { $0 != "\n" && $0 != "\r" }
+            let lineEnd = afterFence.firstIndex { $0 == "\n" || $0 == "\r" } ?? searchArea.endIndex
+            let suffixBeforeNewline = afterFence[afterFence.startIndex..<lineEnd]
             let isFenceOnlyLine = suffixBeforeNewline.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if isAtFenceLineStart && isFenceOnlyLine {
                 return lineStart..<fence.upperBound
             }
             if isAtFenceLineStart && Self.isLikelyDirtyClosingFenceSuffix(suffixBeforeNewline) {
-                return lineStart..<fence.upperBound
+                return lineStart..<lineEnd
             }
             cursor = fence.upperBound
         }
@@ -1710,21 +1710,6 @@ struct StreamingMarkdownView: View {
         let lines = trimmed.components(separatedBy: .newlines)
         let indentedLines = lines.filter { $0.hasPrefix("    ") || $0.hasPrefix("\t") }.count
         return lines.count >= 3 && indentedLines >= 2
-    }
-
-    private static func shouldPreservePlainTextFenceAsCode(code: String, preceding: String) -> Bool {
-        guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        let context = preceding
-            .suffix(120)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        guard !context.isEmpty else { return false }
-        let outputSignals = [
-            "运行输出", "输出内容", "输出结果", "运行结果", "执行结果", "实际输出",
-            "关键输出", "示例输出", "预期输出", "输出类似", "输出大致", "输出是", "结果是",
-            "output", "result", "results", "stdout", "stderr", "expected output", "sample output"
-        ]
-        return outputSignals.contains { context.contains($0) }
     }
 
     private func isRecognizedCodeLanguage(_ language: String) -> Bool {
