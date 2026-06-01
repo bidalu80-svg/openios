@@ -491,6 +491,39 @@ private struct AgentActivityItem: Identifiable, Hashable {
 
     static func displayTitle(for call: LocalAlpineToolCall, file: LocalAlpineWrittenFile? = nil) -> String {
         let display = LocalAlpineToolDisplayRegistry.display(for: call.name)
+        let normalizedToolName = call.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let fileName: String? = {
+            if let fileName = file?.fileName.trimmingCharacters(in: .whitespacesAndNewlines),
+               !fileName.isEmpty {
+                return fileName
+            }
+            guard let path = call.filePaths.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !path.isEmpty else {
+                return nil
+            }
+            let name = (path as NSString).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? path : name
+        }()
+
+        switch normalizedToolName {
+        case "read_file", "read_files", "read", "file_read":
+            return fileName.map { "读取 \($0)" } ?? "读取文件"
+        case "edit_file", "edit_files", "replace_file", "edit", "patch_file", "patch_files", "apply_patch", "patch":
+            return fileName.map { "编辑 \($0)" } ?? display.title
+        case "write_files", "write_file", "write", "file_write":
+            return fileName.map { "写入 \($0)" } ?? display.title
+        case "delete_file", "delete_files", "remove_file", "remove_files", "delete", "rm", "file_delete":
+            return fileName.map { "删除 \($0)" } ?? display.title
+        default:
+            break
+        }
+
+        let actionHaystack = [
+            call.name,
+            call.title,
+            call.detail,
+            call.command ?? ""
+        ].joined(separator: " ").lowercased()
         let haystack = [
             call.name,
             call.title,
@@ -510,25 +543,11 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 ? "搜索网页"
                 : call.detail
         }
-        if let file {
-            switch call.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-            case "read_file", "read_files", "read", "file_read":
-                return "读取 \(file.fileName)"
-            case "edit_file", "edit_files", "replace_file", "edit", "patch_file", "patch_files", "apply_patch", "patch":
-                return "编辑 \(file.fileName)"
-            case "write_files", "write_file", "write", "file_write":
-                return "写入 \(file.fileName)"
-            case "delete_file", "delete_files", "remove_file", "remove_files", "delete", "rm", "file_delete":
-                return "删除 \(file.fileName)"
-            default:
-                break
-            }
-        }
-        if haystack.contains("fetch ")
-            || haystack.contains("navigate ")
-            || haystack.contains("browser:")
-            || haystack.contains("http://")
-            || haystack.contains("https://") {
+        if actionHaystack.contains("fetch ")
+            || actionHaystack.contains("navigate ")
+            || actionHaystack.contains("browser:")
+            || actionHaystack.contains("http://")
+            || actionHaystack.contains("https://") {
             return "读取网页内容"
         }
         return call.failed ? "\(display.title)失败" : display.title
@@ -1258,7 +1277,7 @@ struct ChatDetailView: View {
         if loadedCount > 0 {
             isScrolledUp = false
             try? await Task.sleep(nanoseconds: 60_000_000) // 60ms layout settle
-            scrollPosition.scrollTo(edge: .bottom)
+            scrollToTranscriptBottom(anchor: .bottom)
         }
         await viewModel.fetchPinnedModels()
         // Rebuild prompts after load() — models are now fetched with fresh
@@ -2117,8 +2136,8 @@ struct ChatDetailView: View {
             scrollToBottomFAB
         }
         .onAppear {
-            // Snap instantly to bottom on chat open.
-            scrollPosition.scrollTo(edge: .bottom)
+            // Snap instantly to the latest real message on chat open.
+            scrollToTranscriptBottom(anchor: .bottom)
         }
         // Keep agent activity state in sync with hidden/system messages.
         // Actual transcript scrolling is driven by transcriptMessageIds below,
@@ -2159,7 +2178,7 @@ struct ChatDetailView: View {
             } else if oldIds.isEmpty && !keyboard.isVisible {
                 // First visible assistant/content in a new chat — smooth ease-out.
                 withAnimation(.easeOut(duration: 0.3)) {
-                    scrollPosition.scrollTo(edge: .bottom)
+                    scrollToTranscriptBottom(anchor: .bottom)
                 }
             } else if keyboard.isVisible {
                 // Keep the keyboard in place and pin the turn start, not the
@@ -2170,7 +2189,7 @@ struct ChatDetailView: View {
             } else {
                 // Keyboard already hidden (follow-ups, etc.) — scroll now.
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
-                    scrollPosition.scrollTo(edge: .bottom)
+                    scrollToTranscriptBottom(anchor: .bottom)
                 }
             }
         }
@@ -2205,7 +2224,7 @@ struct ChatDetailView: View {
         // tokens keep the view anchored at the bottom.
         .onChange(of: isScrolledUp) { oldValue, newValue in
             if oldValue == true && newValue == false && viewModel.isStreaming {
-                scrollPosition.scrollTo(edge: .bottom)
+                scrollToTranscriptBottom(anchor: .bottom)
             }
         }
         .onChange(of: keyboard.height) { _, height in
@@ -2238,6 +2257,7 @@ struct ChatDetailView: View {
             .padding(.bottom, 8)
             .frame(maxWidth: iPadMaxContentWidth)
             .frame(maxWidth: .infinity)
+            .scrollTargetLayout()
             .transaction { $0.animation = nil }
         }
         .background(ScrollViewHorizontalLock())
@@ -2328,7 +2348,7 @@ struct ChatDetailView: View {
                         scrollToLatestMessageWithoutAnimation(anchor: .bottom)
                     } else {
                         withAnimation(.easeOut(duration: 0.15)) {
-                            scrollPosition.scrollTo(edge: .bottom)
+                            scrollToTranscriptBottom(anchor: .bottom)
                         }
                     }
                 }
@@ -2360,7 +2380,7 @@ struct ChatDetailView: View {
                     // doesn't fight the scroll animation we're about to start.
                     isScrolledUp = false
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
-                        scrollPosition.scrollTo(edge: .bottom)
+                        scrollToTranscriptBottom(anchor: .bottom)
                     }
                     Haptics.play(.light)
                 }
@@ -2410,6 +2430,14 @@ struct ChatDetailView: View {
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
+            scrollToTranscriptBottom(anchor: .bottom)
+        }
+    }
+
+    private func scrollToTranscriptBottom(anchor: UnitPoint = .bottom) {
+        if let lastMessageId = transcriptMessages.last?.id {
+            scrollPosition.scrollTo(id: lastMessageId, anchor: anchor)
+        } else {
             scrollPosition.scrollTo(edge: .bottom)
         }
     }
@@ -2509,6 +2537,7 @@ struct ChatDetailView: View {
                             .id(message.id)
                     }
                 }
+                .scrollTargetLayout()
                 .frame(minHeight: lastTurnMinHeight, alignment: .top)
             }
         }

@@ -265,6 +265,12 @@ struct ChatCompletionRequest: Sendable {
     /// When set, the backend injects terminal tools (execute_command, file management, etc.)
     /// into the model's tool-calling pipeline.
     var terminalId: String?
+    /// OpenAI-compatible native tool schemas. These are sent directly to
+    /// chat/completions providers and intentionally kept separate from Iexa
+    /// server-side `tool_ids` / `tool_servers`.
+    var tools: [[String: Any]]?
+    /// OpenAI-compatible native tool choice (`"auto"` or `"none"`).
+    var toolChoice: String?
     /// Iexa native server server-side parameters sent alongside the request.
     /// The server's `apply_params_to_form_data()` consumes these before forwarding
     /// to the LLM. Key use: `function_calling` — controls native vs default tool mode.
@@ -389,6 +395,12 @@ struct ChatCompletionRequest: Sendable {
         if let files, !files.isEmpty { data["files"] = files }
         if let streamOptions, !streamOptions.isEmpty {
             data["stream_options"] = streamOptions
+        }
+        if let tools, !tools.isEmpty {
+            data["tools"] = tools
+        }
+        if let toolChoice {
+            data["tool_choice"] = toolChoice
         }
 
         // Pass common generation controls through to OpenAI-compatible endpoints.
