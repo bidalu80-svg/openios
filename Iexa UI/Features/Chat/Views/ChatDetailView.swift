@@ -2234,9 +2234,11 @@ struct ChatDetailView: View {
                 scrollPosition.scrollTo(edge: .bottom)
             }
         }
-        .onChange(of: keyboard.height) { _, height in
-            guard height > 1, !viewModel.messages.isEmpty else { return }
-            let wasFollowingBottom = !isScrolledUp || distanceFromBottom <= 140
+        .onChange(of: keyboard.height) { oldHeight, height in
+            guard abs(height - oldHeight) > 1, !viewModel.messages.isEmpty else { return }
+            let maxValidOffset = max(0, viewState_contentHeight - viewState_containerHeight)
+            let offsetIsPastContent = lastScrollOffset > maxValidOffset + 24
+            let wasFollowingBottom = !isScrolledUp || distanceFromBottom <= 140 || offsetIsPastContent
             guard wasFollowingBottom else { return }
             isScrolledUp = false
 
@@ -2246,8 +2248,14 @@ struct ChatDetailView: View {
             // until the user drags. Repin to the last real message instead
             // of the ScrollView's edge while the keyboard is visible.
             let settleDelay = max(0.12, keyboard.animationDuration + 0.08)
-            repinToLatestMessageIfFollowing(after: settleDelay)
-            repinToLatestMessageIfFollowing(after: settleDelay + 0.18)
+            if offsetIsPastContent {
+                forceRepinToLatestMessage(after: 0.01)
+                forceRepinToLatestMessage(after: settleDelay)
+                forceRepinToLatestMessage(after: settleDelay + 0.18)
+            } else {
+                repinToLatestMessageIfFollowing(after: settleDelay)
+                repinToLatestMessageIfFollowing(after: settleDelay + 0.18)
+            }
         }
     }
 
@@ -2331,13 +2339,19 @@ struct ChatDetailView: View {
             // the bottom. If keyboard/layout changes move the viewport over
             // blank spacer space, snap back to the latest real message after
             // the new geometry is known.
+            let maxValidOffset = max(0, newSize.width - newSize.height)
+            let offsetIsPastContent = lastScrollOffset > maxValidOffset + 24
             if (contentChanged || containerChanged),
-               keyboard.height > 1,
-               !isScrolledUp {
+               (keyboard.height > 1 || offsetIsPastContent),
+               (!isScrolledUp || offsetIsPastContent) {
                 let now = Date()
                 if now.timeIntervalSince(lastLayoutRepinTime) > 0.08 {
                     lastLayoutRepinTime = now
-                    repinToLatestMessageIfFollowing(after: 0.01)
+                    if offsetIsPastContent {
+                        forceRepinToLatestMessage(after: 0.01)
+                    } else {
+                        repinToLatestMessageIfFollowing(after: 0.01)
+                    }
                 }
             }
 
@@ -2473,6 +2487,20 @@ struct ChatDetailView: View {
     private func repinToLatestMessageIfFollowing(after delay: TimeInterval = 0) {
         let action = {
             guard !viewModel.messages.isEmpty, !isScrolledUp else { return }
+            lastProgrammaticScrollTime = Date()
+            scrollToLatestMessageWithoutAnimation(anchor: .bottom)
+        }
+        if delay <= 0 {
+            DispatchQueue.main.async(execute: action)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
+        }
+    }
+
+    private func forceRepinToLatestMessage(after delay: TimeInterval = 0) {
+        let action = {
+            guard !transcriptMessages.isEmpty else { return }
+            isScrolledUp = false
             lastProgrammaticScrollTime = Date()
             scrollToLatestMessageWithoutAnimation(anchor: .bottom)
         }
