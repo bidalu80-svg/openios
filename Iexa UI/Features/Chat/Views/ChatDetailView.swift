@@ -8468,6 +8468,11 @@ private struct ScrollViewHorizontalLock: UIViewRepresentable {
         private var observation: NSKeyValueObservation?
         weak var observedScrollView: UIScrollView?
         private var panBlocker: UIPanGestureRecognizer?
+        private var keyboardObservers: [NSObjectProtocol] = []
+        private var preservedOffsetY: CGFloat?
+        private var preserveOffsetUntil: Date?
+        private var previousInsetAdjustmentBehavior: UIScrollView.ContentInsetAdjustmentBehavior?
+        private var previousAutomaticallyAdjustsScrollIndicatorInsets: Bool?
 
         func attach(to view: UIView) {
             guard observedScrollView == nil else { return }
@@ -8480,13 +8485,27 @@ private struct ScrollViewHorizontalLock: UIViewRepresentable {
                     scrollView.alwaysBounceHorizontal = false
                     scrollView.showsHorizontalScrollIndicator = false
                     scrollView.isDirectionalLockEnabled = true
+                    previousInsetAdjustmentBehavior = scrollView.contentInsetAdjustmentBehavior
+                    previousAutomaticallyAdjustsScrollIndicatorInsets = scrollView.automaticallyAdjustsScrollIndicatorInsets
+                    scrollView.contentInsetAdjustmentBehavior = .never
+                    scrollView.automaticallyAdjustsScrollIndicatorInsets = false
 
-                    // KVO: snap contentOffset.x to 0 on every change
+                    installKeyboardOffsetPreservation(for: scrollView)
+
+                    // KVO: snap contentOffset.x to 0 on every change and keep
+                    // the vertical offset stable during keyboard frame changes.
                     observation = scrollView.observe(\.contentOffset, options: [.new]) { [weak self] sv, change in
-                        guard self != nil, let offset = change.newValue else { return }
+                        guard let self, let offset = change.newValue else { return }
                         if abs(offset.x) > 0.5 {
                             // Use setContentOffset to avoid triggering another KVO notification loop
                             sv.contentOffset = CGPoint(x: 0, y: offset.y)
+                        } else if self.shouldPreserveVerticalOffset(in: sv),
+                                  let preservedY = self.preservedOffsetY,
+                                  abs(offset.y - preservedY) > 0.5 {
+                            sv.setContentOffset(
+                                CGPoint(x: 0, y: self.clampedOffsetY(preservedY, in: sv)),
+                                animated: false
+                            )
                         }
                     }
 
@@ -8506,9 +8525,21 @@ private struct ScrollViewHorizontalLock: UIViewRepresentable {
         func detach() {
             observation?.invalidate()
             observation = nil
+            keyboardObservers.forEach { NotificationCenter.default.removeObserver($0) }
+            keyboardObservers.removeAll()
+            preservedOffsetY = nil
+            preserveOffsetUntil = nil
             if let blocker = panBlocker, let sv = observedScrollView {
                 sv.removeGestureRecognizer(blocker)
+                if let previousInsetAdjustmentBehavior {
+                    sv.contentInsetAdjustmentBehavior = previousInsetAdjustmentBehavior
+                }
+                if let previousAutomaticallyAdjustsScrollIndicatorInsets {
+                    sv.automaticallyAdjustsScrollIndicatorInsets = previousAutomaticallyAdjustsScrollIndicatorInsets
+                }
             }
+            previousInsetAdjustmentBehavior = nil
+            previousAutomaticallyAdjustsScrollIndicatorInsets = nil
             panBlocker = nil
             observedScrollView = nil
         }
@@ -8528,6 +8559,68 @@ private struct ScrollViewHorizontalLock: UIViewRepresentable {
                 return false // never let our blocker actually begin
             }
             return true
+        }
+
+        private func installKeyboardOffsetPreservation(for scrollView: UIScrollView) {
+            guard keyboardObservers.isEmpty else { return }
+            let names: [Notification.Name] = [
+                UIResponder.keyboardWillShowNotification,
+                UIResponder.keyboardWillHideNotification,
+                UIResponder.keyboardWillChangeFrameNotification
+            ]
+            keyboardObservers = names.map { name in
+                NotificationCenter.default.addObserver(
+                    forName: name,
+                    object: nil,
+                    queue: .main
+                ) { [weak self, weak scrollView] notification in
+                    guard let self, let scrollView else { return }
+                    self.beginPreservingVerticalOffset(for: scrollView, notification: notification)
+                }
+            }
+        }
+
+        private func beginPreservingVerticalOffset(for scrollView: UIScrollView, notification: Notification) {
+            guard !scrollView.isDragging, !scrollView.isTracking, !scrollView.isDecelerating else { return }
+            let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+            preservedOffsetY = scrollView.contentOffset.y
+            preserveOffsetUntil = Date().addingTimeInterval(duration + 0.18)
+
+            restorePreservedVerticalOffset(in: scrollView)
+            DispatchQueue.main.async { [weak self, weak scrollView] in
+                guard let self, let scrollView else { return }
+                self.restorePreservedVerticalOffset(in: scrollView)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.06) { [weak self, weak scrollView] in
+                guard let self, let scrollView else { return }
+                self.restorePreservedVerticalOffset(in: scrollView)
+            }
+        }
+
+        private func shouldPreserveVerticalOffset(in scrollView: UIScrollView) -> Bool {
+            guard let until = preserveOffsetUntil, Date() < until else {
+                preservedOffsetY = nil
+                preserveOffsetUntil = nil
+                return false
+            }
+            return !scrollView.isDragging && !scrollView.isTracking && !scrollView.isDecelerating
+        }
+
+        private func restorePreservedVerticalOffset(in scrollView: UIScrollView) {
+            guard shouldPreserveVerticalOffset(in: scrollView),
+                  let preservedY = preservedOffsetY else { return }
+            let targetY = clampedOffsetY(preservedY, in: scrollView)
+            guard abs(scrollView.contentOffset.y - targetY) > 0.5 else { return }
+            scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: false)
+        }
+
+        private func clampedOffsetY(_ y: CGFloat, in scrollView: UIScrollView) -> CGFloat {
+            let minY = -scrollView.adjustedContentInset.top
+            let maxY = max(
+                minY,
+                scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+            )
+            return min(max(y, minY), maxY)
         }
     }
 }
