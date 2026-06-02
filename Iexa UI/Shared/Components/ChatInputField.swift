@@ -514,7 +514,6 @@ struct ChatInputField: View {
     private func submitMessage() {
         guard canSend else { return }
         onSend()
-        dismissKeyboardAfterSubmit()
     }
 
     // MARK: - Inline Terminal Button
