@@ -5490,6 +5490,7 @@ private struct ImageGenerationPlaceholderView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isActive = false
+    @State private var hasEntered = false
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -5513,10 +5514,31 @@ private struct ImageGenerationPlaceholderView: View {
         .frame(maxWidth: 340)
         .padding(.top, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { isActive = scenePhase == .active }
+        .opacity(hasEntered ? 1 : 0)
+        .scaleEffect(hasEntered ? 1 : 0.985, anchor: .topLeading)
+        .offset(y: hasEntered ? 0 : 8)
+        .animation(
+            reduceMotion ? nil : .interactiveSpring(response: 0.46, dampingFraction: 0.88, blendDuration: 0.08),
+            value: hasEntered
+        )
+        .onAppear {
+            isActive = scenePhase == .active
+            beginEntranceIfNeeded()
+        }
         .onDisappear { isActive = false }
         .onChange(of: scenePhase) { _, phase in
             isActive = phase == .active
+        }
+    }
+
+    private func beginEntranceIfNeeded() {
+        guard !hasEntered else { return }
+        if reduceMotion {
+            hasEntered = true
+            return
+        }
+        DispatchQueue.main.async {
+            hasEntered = true
         }
     }
 }
