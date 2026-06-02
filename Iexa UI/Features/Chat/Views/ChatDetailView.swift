@@ -2168,7 +2168,8 @@ struct ChatDetailView: View {
             let latestVisibleRole = transcriptMessages.last?.role
             if latestVisibleRole == .user {
                 if keyboard.isVisible {
-                    dismissKeyboardThenScrollToBottom()
+                    repinToCurrentTurnStartIfFollowing(after: 0.06)
+                    repinToCurrentTurnStartIfFollowing(after: 0.18)
                 } else {
                     withAnimation(.easeOut(duration: 0.28)) {
                         scrollToCurrentTurnStart(anchor: .top)
@@ -2180,7 +2181,11 @@ struct ChatDetailView: View {
                     scrollPosition.scrollTo(edge: .bottom)
                 }
             } else if keyboard.isVisible {
-                dismissKeyboardThenScrollToBottom()
+                // Keep the keyboard in place and pin the turn start, not the
+                // ScrollView edge, so the viewport cannot land on spacer-only
+                // space while the input bar is settling.
+                repinToCurrentTurnStartIfFollowing(after: 0.06)
+                repinToCurrentTurnStartIfFollowing(after: 0.18)
             } else {
                 // Keyboard already hidden (follow-ups, etc.) — scroll now.
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
@@ -2426,18 +2431,6 @@ struct ChatDetailView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             scrollPosition.scrollTo(edge: .bottom)
-        }
-    }
-
-    private func dismissKeyboardThenScrollToBottom() {
-        UIApplication.shared.sendAction(
-            #selector(UIResponder.resignFirstResponder),
-            to: nil, from: nil, for: nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            lastProgrammaticScrollTime = Date()
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
-                scrollPosition.scrollTo(edge: .bottom)
-            }
         }
     }
 
