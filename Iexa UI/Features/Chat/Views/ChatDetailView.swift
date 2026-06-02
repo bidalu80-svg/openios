@@ -1208,7 +1208,7 @@ struct ChatDetailView: View {
     private var ambientBackgroundMode: ChatAmbientBackgroundMode {
         let isFirstTurn = viewModel.messages.count <= 2
         guard isFirstTurn else { return .normal }
-        return .idleFirstTurn
+        return hasActiveFirstTurnStream ? .activeFirstTurn : .idleFirstTurn
     }
 
     private var hasActiveFirstTurnStream: Bool {
@@ -2124,10 +2124,10 @@ struct ChatDetailView: View {
             if !viewModel.isLoadingConversation && viewModel.messages.isEmpty {
                 if let folder = _folderWorkspace {
                     folderWelcomeView(folder: folder)
-                        .transition(.identity)
+                        .transition(.opacity.animation(.easeInOut(duration: 0.2)))
                 } else {
                     welcomeView
-                        .transition(.identity)
+                        .transition(.opacity.animation(.easeInOut(duration: 0.2)))
                 }
             }
         }
