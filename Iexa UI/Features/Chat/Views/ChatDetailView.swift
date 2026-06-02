@@ -7796,19 +7796,11 @@ struct UserMessageContentView: View {
                     )
                 }
             }
-            .mask {
+            .overlay(alignment: .bottom) {
                 if shouldCollapse && !isExpanded {
-                    VStack(spacing: 0) {
-                        Rectangle().fill(Color.black)
-                        LinearGradient(
-                            colors: [Color.black, Color.clear],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                        .frame(height: 42)
-                    }
-                } else {
-                    Rectangle().fill(Color.black)
+                    collapsedTextFade
+                        .frame(height: 46)
+                        .allowsHitTesting(false)
                 }
             }
 
@@ -7837,6 +7829,18 @@ struct UserMessageContentView: View {
                 .accessibilityLabel(isExpanded ? "收起长文本" : "展开长文本")
             }
         }
+    }
+
+    private var collapsedTextFade: LinearGradient {
+        LinearGradient(
+            stops: [
+                .init(color: .clear, location: 0.0),
+                .init(color: theme.chatBubbleUser.opacity(theme.isDark ? 0.14 : 0.20), location: 0.34),
+                .init(color: theme.chatBubbleUser.opacity(theme.isDark ? 0.46 : 0.68), location: 1.0)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
     }
 }
 
