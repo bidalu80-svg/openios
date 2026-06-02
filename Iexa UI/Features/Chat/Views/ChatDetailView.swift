@@ -2166,10 +2166,9 @@ struct ChatDetailView: View {
             lastProgrammaticScrollTime = Date()
 
             let latestVisibleRole = transcriptMessages.last?.role
-            let isFirstVisibleTurn = oldIds.count <= 1 && newIds.count <= 2
             if latestVisibleRole == .user {
                 if keyboard.isVisible {
-                    if oldIds.isEmpty || isFirstVisibleTurn {
+                    if oldIds.isEmpty {
                         repinToLatestMessageIfFollowing(after: 0.06)
                         repinToLatestMessageIfFollowing(after: 0.18)
                     } else {
@@ -2190,13 +2189,8 @@ struct ChatDetailView: View {
                 // Keep the keyboard in place and pin the turn start, not the
                 // ScrollView edge, so the viewport cannot land on spacer-only
                 // space while the input bar is settling.
-                if isFirstVisibleTurn {
-                    repinToLatestMessageIfFollowing(after: 0.06)
-                    repinToLatestMessageIfFollowing(after: 0.18)
-                } else {
-                    repinToCurrentTurnStartIfFollowing(after: 0.06)
-                    repinToCurrentTurnStartIfFollowing(after: 0.18)
-                }
+                repinToCurrentTurnStartIfFollowing(after: 0.06)
+                repinToCurrentTurnStartIfFollowing(after: 0.18)
             } else {
                 // Keyboard already hidden (follow-ups, etc.) — scroll now.
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
