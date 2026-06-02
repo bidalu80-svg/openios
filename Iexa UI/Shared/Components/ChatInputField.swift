@@ -487,14 +487,6 @@ struct ChatInputField: View {
         resignFirstResponder()
     }
 
-    private func dismissKeyboardAfterSubmit() {
-        dismissInlinePickers()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
-            isFocused = false
-            resignFirstResponder()
-        }
-    }
-
     private func dismissInlinePickers() {
         onHashDismiss?()
         onAtDismiss?()
@@ -513,8 +505,8 @@ struct ChatInputField: View {
 
     private func submitMessage() {
         guard canSend else { return }
+        dismissKeyboard()
         onSend()
-        dismissKeyboardAfterSubmit()
     }
 
     // MARK: - Inline Terminal Button

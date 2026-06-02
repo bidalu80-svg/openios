@@ -495,6 +495,9 @@ final class ChatViewModel {
     private var localAlpineExecutedExecutableFingerprints: Set<String> = []
     /// Assistant message IDs whose local native iOS tool blocks have already run.
     private var localNativeToolExecutedMessageIds: Set<String> = []
+    /// Assistant message IDs whose Local Alpine native tool calls have already run.
+    /// Prevents the Markdown fallback parser from executing the same model step again.
+    private var localAlpineNativeToolExecutedMessageIds: Set<String> = []
     private var localAlpineAgentTask: Task<Void, Never>?
     private var localAlpineContinuationTask: Task<Void, Never>?
     private var localAlpineAgentStopRequested = false
@@ -7559,6 +7562,7 @@ final class ChatViewModel {
         localAlpineFailedCommands.removeAll()
         localAlpineCompletedCommands.removeAll()
         localAlpineExecutedExecutableFingerprints.removeAll()
+        localAlpineNativeToolExecutedMessageIds.removeAll()
         localAlpineFailureSignatures.removeAll()
         localAlpineNoProgressSignatures.removeAll()
         localAlpineBlockedRepeatCommands.removeAll()
@@ -9115,6 +9119,7 @@ final class ChatViewModel {
         _ call: LocalAlpineNativeToolCall,
         assistantMessageId: String
     ) async -> LocalAlpineAgentResult {
+        localAlpineNativeToolExecutedMessageIds.insert(assistantMessageId)
         let content = Self.localAlpineNativeToolEnvelopeContent(for: call)
         let toolResult = await LocalAlpineTerminalAgentRunner.run(
             .executableContent(content),
@@ -14174,10 +14179,6 @@ final class ChatViewModel {
            localAlpineExecutedExecutableFingerprints.contains(executableFingerprint) {
             localAlpineAgentExecutedMessageIds.insert(messageId)
             localAlpineAgentStopRequested = true
-            appendLocalAlpineNoProgressStopMessage(
-                parentId: messageId,
-                reason: "模型重复请求同一个本地工具步骤，已跳过重复执行。"
-            )
             return
         }
         if !executableFingerprint.isEmpty {
@@ -16803,8 +16804,10 @@ final class ChatViewModel {
         if let completedAssistantContentForAgent {
             scheduleLocalNativeToolIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)
             let didScheduleNativeTool = localNativeToolExecutedMessageIds.contains(id)
+            let didScheduleLocalAlpineNativeTool = localAlpineNativeToolExecutedMessageIds.contains(id)
             let completedMessage = conversation?.messages.first(where: { $0.id == id })
             if !didScheduleNativeTool,
+               !didScheduleLocalAlpineNativeTool,
                completedMessage.map(Self.isLocalAlpineAgentResult) != true,
                completedMessage?.metadata?["iexa_local_alpine_final_summary"] == nil {
                 scheduleLocalAlpineAgentIfNeeded(messageId: id, content: completedAssistantContentForAgent, error: error)

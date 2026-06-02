@@ -78,6 +78,29 @@ private struct AgentActivityStep: Identifiable, Hashable {
             || normalizedId.contains("get_readable")
             || normalizedId.contains("readable")
     }
+
+    var semanticDedupKey: String {
+        let normalizedCommand = (command ?? detail)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        switch kind {
+        case .file:
+            let path = file?.path.trimmingCharacters(in: .whitespacesAndNewlines) ?? detail
+            return "file:\(path)"
+        case .command:
+            return "command:\(cwd ?? ""):\(normalizedCommand):\(failed)"
+        case .tool:
+            if let path = file?.path.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+                return "tool-file:\(path):\(failed)"
+            }
+            if !normalizedCommand.isEmpty {
+                return "tool-command:\(cwd ?? ""):\(normalizedCommand):\(failed)"
+            }
+            return "tool:\(title):\(detail):\(failed)"
+        case .status:
+            return "status:\(title):\(detail):\(isRunning)"
+        }
+    }
 }
 
 private struct AgentActivityItem: Identifiable, Hashable {
@@ -659,12 +682,19 @@ private struct AgentActivityItem: Identifiable, Hashable {
         let activeOrConcreteItems = items.filter { $0.hasConcreteSteps || $0.isActive }
         guard !activeOrConcreteItems.isEmpty else { return nil }
 
-        var seenStepIds = Set<String>()
+        var stepIndexByKey: [String: Int] = [:]
         var mergedSteps: [AgentActivityStep] = []
         for item in activeOrConcreteItems {
             for step in item.steps {
-                let key = "\(item.id)::\(step.id)"
-                guard seenStepIds.insert(key).inserted else { continue }
+                let key = step.semanticDedupKey
+                if let existingIndex = stepIndexByKey[key] {
+                    let existing = mergedSteps[existingIndex]
+                    if existing.isRunning && !step.isRunning {
+                        mergedSteps[existingIndex] = step
+                    }
+                    continue
+                }
+                stepIndexByKey[key] = mergedSteps.count
                 mergedSteps.append(step)
             }
         }
@@ -672,8 +702,11 @@ private struct AgentActivityItem: Identifiable, Hashable {
             mergedSteps.removeAll { $0.isLocalStatusPlaceholder }
         }
 
-        let fileCount = activeOrConcreteItems.reduce(0) { $0 + $1.fileCount }
-        let commandCount = activeOrConcreteItems.reduce(0) { $0 + $1.commandCount }
+        let fileCount = mergedSteps.filter { $0.kind == .file || $0.file != nil }.count
+        let commandCount = mergedSteps.filter {
+            $0.kind == .command
+                || $0.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }.count
         let summaryParts = [
             fileCount > 0 ? "文件 \(fileCount)" : nil,
             commandCount > 0 ? "命令 \(commandCount)" : nil
@@ -966,6 +999,11 @@ struct ChatDetailView: View {
     }
 
     private var visibleAgentActivityWindowPreview: AgentActivityItem? {
+        if !isScrolledUp,
+           let lastMessage = transcriptMessages.last,
+           hasAgentToolPreview(for: lastMessage) {
+            return nil
+        }
         if let live = agentActivityWindowPreview(includeInactive: false)?.limitingSteps(to: Self.agentFloatingPreviewStepLimit) {
             return live
         }
@@ -2168,11 +2206,11 @@ struct ChatDetailView: View {
             let latestVisibleRole = transcriptMessages.last?.role
             if latestVisibleRole == .user {
                 if keyboard.isVisible {
-                    repinToCurrentTurnStartIfFollowing(after: 0.06)
-                    repinToCurrentTurnStartIfFollowing(after: 0.18)
+                    repinToTranscriptBottomIfFollowing(after: 0.06)
+                    repinToTranscriptBottomIfFollowing(after: 0.18)
                 } else {
                     withAnimation(.easeOut(duration: 0.28)) {
-                        scrollToCurrentTurnStart(anchor: .top)
+                        scrollToTranscriptBottom(anchor: .bottom)
                     }
                 }
             } else if oldIds.isEmpty && !keyboard.isVisible {
@@ -2181,11 +2219,11 @@ struct ChatDetailView: View {
                     scrollToTranscriptBottom(anchor: .bottom)
                 }
             } else if keyboard.isVisible {
-                // Keep the keyboard in place and pin the turn start, not the
-                // ScrollView edge, so the viewport cannot land on spacer-only
-                // space while the input bar is settling.
-                repinToCurrentTurnStartIfFollowing(after: 0.06)
-                repinToCurrentTurnStartIfFollowing(after: 0.18)
+                // Keep the keyboard in place and pin the rendered transcript
+                // bottom. The last-turn minHeight then keeps the active turn
+                // visible without targeting spacer-only layout.
+                repinToTranscriptBottomIfFollowing(after: 0.06)
+                repinToTranscriptBottomIfFollowing(after: 0.18)
             } else {
                 // Keyboard already hidden (follow-ups, etc.) — scroll now.
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
@@ -2199,15 +2237,9 @@ struct ChatDetailView: View {
         .onChange(of: viewModel.isStreaming) { _, streaming in
             if streaming && !isScrolledUp {
                 refreshAgentFloatingActivitySnapshot(includeInactive: false)
-                // Already following the turn. If the keyboard is visible, or
-                // the assistant placeholder has not become visible yet, keep
-                // the user-sent turn start pinned instead of jumping to the
-                // ScrollView bottom.
-                if keyboard.isVisible || transcriptMessages.last?.role == .user {
-                    scrollToCurrentTurnStartWithoutAnimation(anchor: .top)
-                } else {
-                    scrollToLatestMessageWithoutAnimation(anchor: .bottom)
-                }
+                // Already following the turn. Pin the transcript bottom so all
+                // streaming and agent updates use the same stable anchor.
+                scrollToBottomWithoutAnimation()
             } else if !streaming {
                 refreshAgentFloatingActivitySnapshot(includeInactive: true)
             }
@@ -2233,14 +2265,12 @@ struct ChatDetailView: View {
             guard wasFollowingBottom else { return }
             isScrolledUp = false
 
-            // Opening the keyboard should not force the transcript to the
-            // bottom. With the last-turn spacer that can align blank spacer
-            // space into the viewport, making the conversation look empty
-            // until the user drags. Repin to the last real message instead
-            // of the ScrollView's edge while the keyboard is visible.
+            // Keyboard transitions can update the visible container after the
+            // message insert. Re-pin the same transcript-bottom target after
+            // the geometry settles so send placement stays stable.
             let settleDelay = max(0.12, keyboard.animationDuration + 0.08)
-            repinToLatestMessageIfFollowing(after: settleDelay)
-            repinToLatestMessageIfFollowing(after: settleDelay + 0.18)
+            repinToTranscriptBottomIfFollowing(after: settleDelay)
+            repinToTranscriptBottomIfFollowing(after: settleDelay + 0.18)
         }
     }
 
@@ -2322,16 +2352,15 @@ struct ChatDetailView: View {
             }
 
             // Correct IME and layout drift whenever the user is still near
-            // the bottom. If keyboard/layout changes move the viewport over
-            // blank spacer space, snap back to the latest real message after
-            // the new geometry is known.
+            // the bottom. Use the same transcript-bottom target after the new
+            // geometry is known so send placement stays stable.
             if (contentChanged || containerChanged),
                keyboard.height > 1,
                !isScrolledUp {
                 let now = Date()
                 if now.timeIntervalSince(lastLayoutRepinTime) > 0.08 {
                     lastLayoutRepinTime = now
-                    repinToLatestMessageIfFollowing(after: 0.01)
+                    repinToTranscriptBottomIfFollowing(after: 0.01)
                 }
             }
 
@@ -2345,7 +2374,7 @@ struct ChatDetailView: View {
                 if now.timeIntervalSince(lastProgrammaticScrollTime) > 0.2 {
                     lastProgrammaticScrollTime = now
                     if keyboard.height > 1 {
-                        scrollToLatestMessageWithoutAnimation(anchor: .bottom)
+                        scrollToBottomWithoutAnimation()
                     } else {
                         withAnimation(.easeOut(duration: 0.15)) {
                             scrollToTranscriptBottom(anchor: .bottom)
@@ -2439,54 +2468,11 @@ struct ChatDetailView: View {
         scrollPosition.scrollTo(edge: .bottom)
     }
 
-    private func scrollToLatestMessageWithoutAnimation(anchor: UnitPoint = .bottom) {
-        guard let lastMessageId = transcriptMessages.last?.id else {
-            scrollToBottomWithoutAnimation()
-            return
-        }
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            scrollPosition.scrollTo(id: lastMessageId, anchor: anchor)
-        }
-    }
-
-    private func scrollToCurrentTurnStart(anchor: UnitPoint = .top) {
-        let turnStartId = transcriptMessages.last(where: { $0.role == .user })?.id
-            ?? transcriptMessages.last?.id
-        guard let turnStartId = turnStartId else {
-            scrollToBottomWithoutAnimation()
-            return
-        }
-        scrollPosition.scrollTo(id: turnStartId, anchor: anchor)
-    }
-
-    private func scrollToCurrentTurnStartWithoutAnimation(anchor: UnitPoint = .top) {
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            scrollToCurrentTurnStart(anchor: anchor)
-        }
-    }
-
-    private func repinToLatestMessageIfFollowing(after delay: TimeInterval = 0) {
-        let action = {
-            guard !viewModel.messages.isEmpty, !isScrolledUp else { return }
-            lastProgrammaticScrollTime = Date()
-            scrollToLatestMessageWithoutAnimation(anchor: .bottom)
-        }
-        if delay <= 0 {
-            DispatchQueue.main.async(execute: action)
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
-        }
-    }
-
-    private func repinToCurrentTurnStartIfFollowing(after delay: TimeInterval = 0) {
+    private func repinToTranscriptBottomIfFollowing(after delay: TimeInterval = 0) {
         let action = {
             guard !transcriptMessages.isEmpty, !isScrolledUp else { return }
             lastProgrammaticScrollTime = Date()
-            scrollToCurrentTurnStartWithoutAnimation(anchor: .top)
+            scrollToBottomWithoutAnimation()
         }
         if delay <= 0 {
             DispatchQueue.main.async(execute: action)
