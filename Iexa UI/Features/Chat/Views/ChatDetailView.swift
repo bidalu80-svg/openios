@@ -2264,7 +2264,6 @@ struct ChatDetailView: View {
             .padding(.bottom, 8)
             .frame(maxWidth: iPadMaxContentWidth)
             .frame(maxWidth: .infinity)
-            .scrollTargetLayout()
             .transaction { $0.animation = nil }
         }
         .background(ScrollViewHorizontalLock())
