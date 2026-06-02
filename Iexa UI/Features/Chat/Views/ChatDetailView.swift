@@ -7796,15 +7796,19 @@ struct UserMessageContentView: View {
                     )
                 }
             }
-            .overlay(alignment: .bottom) {
+            .mask {
                 if shouldCollapse && !isExpanded {
-                    LinearGradient(
-                        colors: [.clear, theme.chatBubbleUser.opacity(0.92)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .frame(height: 36)
-                    .allowsHitTesting(false)
+                    VStack(spacing: 0) {
+                        Rectangle().fill(Color.black)
+                        LinearGradient(
+                            colors: [Color.black, Color.clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 42)
+                    }
+                } else {
+                    Rectangle().fill(Color.black)
                 }
             }
 
