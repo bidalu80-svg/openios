@@ -2262,9 +2262,6 @@ struct ChatDetailView: View {
                 forceRepinToPinnedTranscriptTarget(after: 0.01)
                 forceRepinToPinnedTranscriptTarget(after: settleDelay)
                 forceRepinToPinnedTranscriptTarget(after: settleDelay + 0.18)
-            } else {
-                repinToLatestMessageIfFollowing(after: settleDelay)
-                repinToLatestMessageIfFollowing(after: settleDelay + 0.18)
             }
         }
     }
@@ -2345,23 +2342,17 @@ struct ChatDetailView: View {
                 viewState_containerHeight = newSize.height
             }
 
-            // Correct IME and layout drift whenever the user is still near
-            // the bottom. If keyboard/layout changes move the viewport over
-            // blank spacer space, snap back to the latest real message after
-            // the new geometry is known.
+            // Correct IME and layout drift whenever the viewport is known to
+            // be outside the real content. During keyboard resize, keep the
+            // active target stable instead of switching between turn-start
+            // and bottom anchors.
             let maxValidOffset = max(0, newSize.width - newSize.height)
             let offsetIsPastContent = lastScrollOffset > maxValidOffset + 24
-            if (contentChanged || containerChanged),
-               (keyboard.height > 1 || offsetIsPastContent),
-               (!isScrolledUp || offsetIsPastContent) {
+            if (contentChanged || containerChanged), offsetIsPastContent {
                 let now = Date()
                 if now.timeIntervalSince(lastLayoutRepinTime) > 0.08 {
                     lastLayoutRepinTime = now
-                    if offsetIsPastContent {
-                        forceRepinToPinnedTranscriptTarget(after: 0.01)
-                    } else {
-                        repinToLatestMessageIfFollowing(after: 0.01)
-                    }
+                    forceRepinToPinnedTranscriptTarget(after: 0.01)
                 }
             }
 
@@ -2450,12 +2441,10 @@ struct ChatDetailView: View {
         let containerHeight = max(viewState_containerHeight, 0)
         guard containerHeight > 1 else { return 0 }
 
-        // ChatGPT-style last-turn fill is useful while reading with the
-        // keyboard hidden. When the keyboard is visible, the viewport is
-        // already constrained and the spacer can align blank space into view.
-        if keyboard.height > 1 {
-            return 0
-        }
+        // Keep the last turn filling the currently visible ScrollView
+        // viewport. Collapsing this while the keyboard is visible makes the
+        // transcript jump because SwiftUI keeps the old scroll offset while
+        // the content height changes.
         return containerHeight
     }
 
