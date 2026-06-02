@@ -2168,8 +2168,13 @@ struct ChatDetailView: View {
             let latestVisibleRole = transcriptMessages.last?.role
             if latestVisibleRole == .user {
                 if keyboard.isVisible {
-                    repinToCurrentTurnStartIfFollowing(after: 0.06)
-                    repinToCurrentTurnStartIfFollowing(after: 0.18)
+                    if oldIds.isEmpty {
+                        repinToLatestMessageIfFollowing(after: 0.06)
+                        repinToLatestMessageIfFollowing(after: 0.18)
+                    } else {
+                        repinToCurrentTurnStartIfFollowing(after: 0.06)
+                        repinToCurrentTurnStartIfFollowing(after: 0.18)
+                    }
                 } else {
                     withAnimation(.easeOut(duration: 0.28)) {
                         scrollToCurrentTurnStart(anchor: .top)
@@ -2203,7 +2208,9 @@ struct ChatDetailView: View {
                 // the assistant placeholder has not become visible yet, keep
                 // the user-sent turn start pinned instead of jumping to the
                 // ScrollView bottom.
-                if keyboard.isVisible || transcriptMessages.last?.role == .user {
+                if viewModel.messages.count <= 2 {
+                    scrollToLatestMessageWithoutAnimation(anchor: .bottom)
+                } else if keyboard.isVisible || transcriptMessages.last?.role == .user {
                     scrollToCurrentTurnStartWithoutAnimation(anchor: .top)
                 } else {
                     scrollToLatestMessageWithoutAnimation(anchor: .bottom)
