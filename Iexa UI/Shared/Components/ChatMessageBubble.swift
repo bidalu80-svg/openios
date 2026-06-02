@@ -6,9 +6,8 @@ import SwiftUI
 /// sender role (user vs assistant).
 ///
 /// ## Design
-/// - **User messages**: Right-aligned pill with brand accent color and
-///   asymmetric corner radius (iMessage-style — smaller bottom-right corner
-///   gives the classic "tail" feel without needing actual tail geometry).
+/// - **User messages**: Right-aligned glassy accent capsule that wraps its
+///   content without stretching to the full row.
 /// - **Assistant messages**: Full-width, no background — clean like
 ///   Claude.ai and ChatGPT native. Only a subtle label/avatar above.
 /// - **System messages**: Center-aligned muted label.
@@ -57,7 +56,15 @@ struct ChatMessageBubble<Content: View>: View {
                     .foregroundStyle(theme.chatBubbleUserText)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(theme.chatBubbleUser)
+                    .background {
+                        UserBubbleShape()
+                            .fill(userBubbleGlassFill)
+                    }
+                    .overlay {
+                        UserBubbleShape()
+                            .stroke(userBubbleGlassBorder, lineWidth: 0.7)
+                    }
+                    .shadow(color: userBubbleGlassShadow, radius: 5, x: 0, y: 2)
                     .clipShape(UserBubbleShape())
 
                 if showTimestamp, let ts = timestamp {
@@ -71,6 +78,25 @@ struct ChatMessageBubble<Content: View>: View {
         }
         .padding(.horizontal, Spacing.screenPadding)
         .padding(.vertical, 2)
+    }
+
+    private var userBubbleGlassFill: LinearGradient {
+        LinearGradient(
+            colors: [
+                theme.chatBubbleUser.opacity(theme.isDark ? 0.60 : 0.82),
+                theme.chatBubbleUser.opacity(theme.isDark ? 0.44 : 0.66)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var userBubbleGlassBorder: Color {
+        Color.white.opacity(theme.isDark ? 0.18 : 0.36)
+    }
+
+    private var userBubbleGlassShadow: Color {
+        Color.black.opacity(theme.isDark ? 0.20 : 0.08)
     }
 
     // MARK: - Assistant Content (no bubble — clean full-width)
@@ -111,23 +137,18 @@ struct ChatMessageBubble<Content: View>: View {
     }
 }
 
-// MARK: - User Bubble Shape (iMessage-style asymmetric corners)
+// MARK: - User Bubble Shape (glass capsule)
 
-/// A rounded rectangle with asymmetric corner radii that mimics the
-/// iMessage bubble tail effect — all corners are 18pt except the
-/// bottom-right which is 4pt, giving a subtle directional cue without
-/// an actual tail/triangle.
+/// A rounded shape that keeps short user messages pill-like while long
+/// messages remain compact rounded rectangles.
 private struct UserBubbleShape: Shape {
-    // Standard corners
-    private let largeRadius: CGFloat = 18
-    // The "tail" corner — small to indicate message origin
-    private let tailRadius: CGFloat = 4
+    private let radius: CGFloat = 18
 
     func path(in rect: CGRect) -> Path {
-        let tl = largeRadius   // top-left
-        let tr = largeRadius   // top-right
-        let bl = largeRadius   // bottom-left
-        let br = tailRadius    // bottom-right (tail)
+        let tl = radius
+        let tr = radius
+        let bl = radius
+        let br = radius
 
         return Path { p in
             // Start at top-left arc
@@ -141,7 +162,7 @@ private struct UserBubbleShape: Shape {
                 endAngle: .degrees(0),
                 clockwise: false
             )
-            // Right edge → bottom-right arc (tail)
+            // Right edge -> bottom-right arc
             p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - br))
             p.addArc(
                 center: CGPoint(x: rect.maxX - br, y: rect.maxY - br),
@@ -365,7 +386,7 @@ struct MessageActionBar: View {
                 Text("Hello! How can I help you today? I'm ready to assist with anything you need.")
             }
 
-            // User message (iMessage-style bubble)
+            // User message (glass capsule)
             ChatMessageBubble(role: .user) {
                 Text("Tell me about SwiftUI theming")
             }
