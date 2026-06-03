@@ -305,7 +305,9 @@ private struct DiagnosticLogFileView: View {
     }
 
     private func copyAllEntries() {
-        UIPasteboard.general.string = entries.map(DiagnosticLogFormatter.line).joined(separator: "\n")
+        UIPasteboard.general.string = entries
+            .map { DiagnosticLogFormatter.line($0) }
+            .joined(separator: "\n")
     }
 
     private func shareFile() {
@@ -369,7 +371,7 @@ private struct DiagnosticLogEntryRow: View {
 
                 Spacer()
 
-                Text(DiagnosticLogFormatter.time.string(from: entry.date))
+                Text(DiagnosticLogFormatter.timeString(from: entry.date))
                     .scaledFont(size: 12, weight: .medium)
                     .foregroundStyle(.secondary)
             }
@@ -391,7 +393,7 @@ private struct DiagnosticLogEntryDetailView: View {
             Section("信息") {
                 LabeledContent("级别", value: entry.level.label)
                 LabeledContent("分类", value: entry.category)
-                LabeledContent("时间", value: DiagnosticLogFormatter.full.string(from: entry.date))
+                LabeledContent("时间", value: DiagnosticLogFormatter.fullString(from: entry.date))
             }
 
             Section("内容") {
@@ -417,22 +419,23 @@ private struct DiagnosticLogEntryDetailView: View {
 }
 
 private enum DiagnosticLogFormatter {
-    static let time: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        return formatter
-    }()
+    static func timeString(from date: Date) -> String {
+        formatter("HH:mm:ss").string(from: date)
+    }
 
-    static let full: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        return formatter
-    }()
+    static func fullString(from date: Date) -> String {
+        formatter("yyyy-MM-dd HH:mm:ss.SSS").string(from: date)
+    }
 
     static func line(_ entry: DiagnosticLogEntry) -> String {
-        "[\(full.string(from: entry.date))] [\(entry.level.rawValue)] [\(entry.category)] \(entry.message)"
+        "[\(fullString(from: entry.date))] [\(entry.level.rawValue)] [\(entry.category)] \(entry.message)"
+    }
+
+    private static func formatter(_ dateFormat: String) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.dateFormat = dateFormat
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
     }
 }
 

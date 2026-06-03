@@ -157,7 +157,7 @@ private final class DiagnosticLogStorage: @unchecked Sendable {
 
     var totalLogSize: Int64 {
         flush()
-        logFileURLs().reduce(0) { total, url in
+        return logFileURLs().reduce(Int64(0)) { total, url in
             let size = (try? fileManager.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
             return total + size
         }
@@ -165,7 +165,7 @@ private final class DiagnosticLogStorage: @unchecked Sendable {
 
     var logFileCount: Int {
         flush()
-        logFileURLs().count
+        return logFileURLs().count
     }
 
     func append(level: DiagnosticLogLevel, category: String, message: String) {

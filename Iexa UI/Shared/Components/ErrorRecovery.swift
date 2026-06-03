@@ -406,13 +406,14 @@ final class CrashLogger: @unchecked Sendable {
             context: context
         )
 
-        let diagnosticMessage = [
-            message,
-            error?.localizedDescription.map { "error=\($0)" },
-            context.map { "context=\($0)" }
-        ]
-        .compactMap { $0 }
-        .joined(separator: " | ")
+        var diagnosticParts = [message]
+        if let errorDescription = error?.localizedDescription {
+            diagnosticParts.append("error=\(errorDescription)")
+        }
+        if let context {
+            diagnosticParts.append("context=\(context)")
+        }
+        let diagnosticMessage = diagnosticParts.joined(separator: " | ")
         switch level {
         case .debug:
             DiagnosticLogManager.shared.debug(diagnosticMessage, category: "Crash")
