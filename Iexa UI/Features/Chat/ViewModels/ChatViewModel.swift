@@ -1884,6 +1884,12 @@ final class ChatViewModel {
             Current user goal:
             \(indentForSystemContext(clippedForSystemContext(latestUserGoal ?? "（未提供）", maxCharacters: 1_500)))
 
+            Agent loop frame:
+            - phase: 目标 -> 规范 -> 执行
+            - objective: satisfy the current user goal through real Local Alpine observations, not guessed prose.
+            - norms before every tool step: use structured writes for code, BusyBox/ash-compatible commands, one bounded step, and direct verification when code/files are changed or run.
+            - first next step: if the goal needs local files, runtime, dependencies, terminal, or workspace state, emit the smallest useful `iexa_alpine` block now; otherwise answer normally.
+
             First-turn bootstrap policy:
             - Do not spend a turn only restating that you will inspect the environment. If inspection is needed, emit the actual `iexa_alpine` block immediately.
             - If the user asks for rootfs/system/runtime dependencies, check the Alpine rootfs directly (`apk info`, `command -v`, version commands, `/usr/lib`, Python site-packages, pip list). Do not limit the answer to `/mnt/iexa` project files.
@@ -1985,13 +1991,23 @@ final class ChatViewModel {
                 toolCalls: toolCalls,
                 latestUserText: latestUserGoal
             )
+            let hasFailure = containsLocalAlpineFailureMarker(normalizedObservation)
+            let loopDecision = localAlpineAgentLoopDecision(
+                isStreaming: message.isStreaming,
+                needsFollowUp: needsFollowUp,
+                hasFailure: hasFailure,
+                commandResults: commandResults,
+                toolCalls: toolCalls,
+                writtenFiles: writtenFiles,
+                latestUserText: latestUserGoal
+            )
             let verdict: String
             let controllerPolicy: String
             if message.isStreaming {
                 verdict = "tool_running"
                 controllerPolicy = "Wait for the Local Alpine result before making another tool call."
             } else if needsFollowUp {
-                verdict = containsLocalAlpineFailureMarker(normalizedObservation)
+                verdict = hasFailure
                     ? "needs_next_tool_after_failure"
                     : "needs_next_tool_after_incomplete_observation"
                 controllerPolicy = "Inspect the observation, choose one different bounded iexa_alpine step, and continue the agent loop."
@@ -1999,6 +2015,13 @@ final class ChatViewModel {
                 verdict = "ready_for_final_summary"
                 controllerPolicy = "Do not emit another iexa_alpine block unless the user asks for more work. Summarize the verified result."
             }
+            let objectiveStatus = (needsFollowUp || message.isStreaming)
+                ? "not_satisfied_yet"
+                : "ready_to_report"
+            lines.append("  objective_status: \(objectiveStatus)")
+            lines.append("  agent_loop_phase: \(loopDecision.phase)")
+            lines.append("  required_next_step:")
+            lines.append(indentForSystemContext(loopDecision.requiredNextStep))
             lines.append("  controller_verdict: \(verdict)")
             lines.append("  controller_policy:")
             lines.append(indentForSystemContext(controllerPolicy))
@@ -2012,6 +2035,11 @@ final class ChatViewModel {
         \(blocks.joined(separator: "\n\n"))
 
         Rules for this state:
+        - Run the local agent as: 目标 -> 规范 -> 执行 -> 检查 -> 修复 -> 继续执行 -> 总结.
+        - `agent_loop_phase` and `required_next_step` are the controller's next-phase hint. Follow them unless the latest user message is clearly interrupting or changing the goal.
+        - 目标: keep the latest user goal as the only objective for this turn.
+        - 规范: before each tool step, enforce structured code writes, BusyBox/ash compatibility, no repeated completed command, and one bounded action with direct verification when needed.
+        - 执行/检查/修复/继续执行: use exactly one `iexa_alpine` block for the next real step, then wait for the next Local Alpine observation.
         - If state is running, tell the user the Local Alpine command is still running or ask whether to stop it; do not apologize that no executable block was emitted.
         - If result output is present, answer from that output as the source of truth.
         - Follow controller_verdict: `needs_next_tool_*` means continue with exactly one new `iexa_alpine` block; `ready_for_final_summary` means stop tool use and summarize; `tool_running` means wait or report running status.
@@ -16021,6 +16049,71 @@ final class ChatViewModel {
         return containsLocalAlpineFailureMarker(normalized)
     }
 
+    private static func localAlpineAgentLoopDecision(
+        isStreaming: Bool,
+        needsFollowUp: Bool,
+        hasFailure: Bool,
+        commandResults: [LocalAlpineAgentCommandResult],
+        toolCalls: [LocalAlpineToolCall],
+        writtenFiles: [LocalAlpineWrittenFile],
+        latestUserText: String?
+    ) -> (phase: String, requiredNextStep: String) {
+        if isStreaming {
+            return (
+                "执行中",
+                "Wait for the current Local Alpine observation. Do not emit another tool block until stdout/stderr/exit code returns."
+            )
+        }
+        if !needsFollowUp {
+            return (
+                "总结",
+                "Stop tool use and give a concise final answer based only on the latest verified Local Alpine observation."
+            )
+        }
+        let observedFailure = hasFailure
+            || commandResults.contains(where: { $0.failed })
+            || toolCalls.contains(where: { $0.phase == .result && $0.failed })
+        if observedFailure {
+            return (
+                "修复",
+                "Inspect the failed observation, change approach, and emit one bounded repair step. Do not repeat the exact failed command. Prefer structured edit_file/patch_file/write_files for code and BusyBox-safe wrappers for shell checks."
+            )
+        }
+
+        let completedToolNames = Set(toolCalls
+            .filter { $0.phase == .result && !$0.failed }
+            .map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
+        let commandText = commandResults
+            .map { $0.command.lowercased() }
+            .joined(separator: "\n")
+        let didWrite = !writtenFiles.isEmpty
+            || !completedToolNames.isDisjoint(with: [
+                "write_files", "write_file", "file_write",
+                "edit_file", "file_edit", "patch_file", "patch_files"
+            ])
+        let didVerify = localAlpineCommandsContainGoalVerification(commandText)
+            || !completedToolNames.isDisjoint(with: [
+                "verify", "verify_exists", "verify_absent",
+                "run", "run_script", "test", "compile", "build"
+            ])
+        if didWrite && !didVerify && localAlpineUserRequestWantsVerification(latestUserText ?? "") {
+            return (
+                "检查",
+                "The change/write has happened but the user goal still needs verification. Emit one bounded language-appropriate verify/run/test step for the changed file."
+            )
+        }
+        if commandResults.isEmpty && toolCalls.isEmpty {
+            return (
+                "规划",
+                "Choose the smallest next Local Alpine action that can observe or advance the goal, then emit exactly one tool block."
+            )
+        }
+        return (
+            "继续执行",
+            "The goal is not satisfied yet. Use the latest observation to choose one new bounded next step that advances the same objective."
+        )
+    }
+
     private static func localAlpineToolCallsShowCompletedGoal(
         _ toolCalls: [LocalAlpineToolCall],
         commandResults: [LocalAlpineAgentCommandResult],
@@ -16412,8 +16505,18 @@ final class ChatViewModel {
         [Local Alpine continuation]
         You are in a continuous Local Alpine agent loop. Read the latest real Local Alpine result above.
 
+        Agent loop contract:
+        - Work as 目标 -> 规范 -> 执行 -> 检查 -> 修复 -> 继续执行 -> 总结.
+        - 目标: satisfy the latest user goal, not a side quest or generic environment probe.
+        - 规范: before any tool call, enforce structured code writes, BusyBox/ash-compatible commands, no repeated completed command, and one bounded step.
+        - 执行: emit exactly one useful `iexa_alpine` block when the controller asks for the next tool.
+        - 检查: after writes/runs, verify with the smallest language-appropriate command.
+        - 修复: on failure, inspect the actual output and change approach; do not repeat the same failed command.
+        - 继续执行: if the goal is incomplete, continue with the next concrete step; if complete, summarize.
+
         Controller policy:
         - Follow the `controller_verdict` in `[Local Alpine execution state]`.
+        - Follow `agent_loop_phase` and `required_next_step` as the next-phase hint.
         - If it is `ready_for_final_summary`, do not emit `iexa_alpine`; summarize the result normally.
         - If it is `needs_next_tool_*`, emit exactly one meaningful bounded `iexa_alpine` step and wait for the next observation. A write plus one direct verification is allowed only when it validates the same file/change.
         - If it is `tool_running`, report that the local command is still running or ask whether to stop it.
@@ -16442,6 +16545,7 @@ final class ChatViewModel {
         \(clippedForSystemContext(assistantContent, maxCharacters: 2_000))
 
         Correction policy:
+        - Apply the same loop: 目标 -> 规范 -> 执行 -> 检查 -> 修复 -> 继续执行.
         - Emit exactly one fenced Markdown block with language `iexa_alpine`.
         - Do not ask for confirmation when the user already used imperative wording such as read, check, delete, modify, change, replace, run, rerun, test, or execute.
         - Resolve "this/it/这个/它/删了/换一个/再跑/继续" from the latest Local Alpine observation and recent written files.
