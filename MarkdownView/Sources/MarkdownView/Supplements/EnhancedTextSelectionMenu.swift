@@ -11,6 +11,7 @@ enum EnhancedTextSelectionAction: String, CaseIterable {
     case ask
     case lookUp
     case searchWeb
+    case translate
     case share
 
     var title: String {
@@ -21,6 +22,8 @@ enum EnhancedTextSelectionAction: String, CaseIterable {
             "查询"
         case .searchWeb:
             "搜索网页"
+        case .translate:
+            "翻译"
         case .share:
             "分享"
         }
@@ -34,6 +37,8 @@ enum EnhancedTextSelectionAction: String, CaseIterable {
             #selector(LTXLabel.iexaLookUpSelectedText)
         case .searchWeb:
             #selector(LTXLabel.iexaSearchSelectedTextOnWeb)
+        case .translate:
+            #selector(LTXLabel.iexaTranslateSelectedText)
         case .share:
             #selector(LTXLabel.iexaShareSelectedText)
         }
@@ -213,6 +218,10 @@ fileprivate extension LTXLabel {
 
     @objc func iexaShareSelectedText(_ sender: Any?) {
         iexa_performSelectionAction(.share)
+    }
+
+    @objc func iexaTranslateSelectedText(_ sender: Any?) {
+        iexa_performSelectionAction(.translate)
     }
 
     @objc func iexaLookUpSelectedText(_ sender: Any?) {

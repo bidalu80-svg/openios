@@ -4,6 +4,7 @@ enum TextSelectionAction: String {
     case ask
     case lookUp
     case searchWeb
+    case translate
     case share
 }
 

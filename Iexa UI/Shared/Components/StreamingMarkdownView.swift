@@ -2784,6 +2784,7 @@ private final class NoCaretSourceTextView: UITextView {
         case ask
         case lookUp
         case searchWeb
+        case translate
         case share
 
         var title: String {
@@ -2791,6 +2792,7 @@ private final class NoCaretSourceTextView: UITextView {
             case .ask: "询问 Iexa"
             case .lookUp: "查询"
             case .searchWeb: "搜索网页"
+            case .translate: "翻译"
             case .share: "分享"
             }
         }
@@ -2800,6 +2802,7 @@ private final class NoCaretSourceTextView: UITextView {
             case .ask: #selector(NoCaretSourceTextView.askSelectedSourceText)
             case .lookUp: #selector(NoCaretSourceTextView.lookUpSelectedSourceText)
             case .searchWeb: #selector(NoCaretSourceTextView.searchSelectedSourceTextOnWeb)
+            case .translate: #selector(NoCaretSourceTextView.translateSelectedSourceText)
             case .share: #selector(NoCaretSourceTextView.shareSelectedSourceText)
             }
         }
@@ -2898,6 +2901,10 @@ private final class NoCaretSourceTextView: UITextView {
 
     @objc private func shareSelectedSourceText(_ sender: Any?) {
         performSourceSelectionAction(.share)
+    }
+
+    @objc private func translateSelectedSourceText(_ sender: Any?) {
+        performSourceSelectionAction(.translate)
     }
 
     @objc private func lookUpSelectedSourceText(_ sender: Any?) {

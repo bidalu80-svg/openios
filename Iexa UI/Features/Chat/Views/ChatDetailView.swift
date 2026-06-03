@@ -6,6 +6,7 @@ import AVKit
 import QuickLook
 import PDFKit
 import MarkdownView
+import Translation
 import os.log
 
 // MARK: - Chat Detail View
@@ -1177,6 +1178,8 @@ struct ChatDetailView: View {
     /// Code preview from MarkdownView's eye button (fullscreen code view)
     @State private var codePreviewCode: String?
     @State private var codePreviewLanguage: String = ""
+    @State private var selectedTextForTranslation = ""
+    @State private var showSelectedTextTranslation = false
 
     // MARK: Init
 
@@ -1517,6 +1520,10 @@ struct ChatDetailView: View {
         .onReceive(NotificationCenter.default.publisher(for: .textSelectionActionRequested)) { notification in
             handleTextSelectionAction(notification)
         }
+        .translationPresentation(
+            isPresented: $showSelectedTextTranslation,
+            text: selectedTextForTranslation
+        )
         .overlay {
             if isDownloadingFile {
                 ZStack {
@@ -4862,6 +4869,9 @@ struct ChatDetailView: View {
             )
         case .searchWeb, .lookUp:
             openSearchForSelectedText(text)
+        case .translate:
+            selectedTextForTranslation = text
+            showSelectedTextTranslation = true
         case .share:
             messageShareItem = MessageShareItem(text: text)
             Haptics.play(.light)
