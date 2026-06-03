@@ -243,10 +243,20 @@ struct SettingsView: View {
                         SettingsCell(
                             icon: "lock.shield",
                             title: "隐私与安全",
-                            showDivider: false,
+                            showDivider: true,
                             accessory: .chevron
                         ) {
                             navigationPath.append(SettingsDestination.privacySecurity)
+                        }
+                        SettingsCell(
+                            icon: "stethoscope",
+                            title: "诊断日志",
+                            subtitle: DiagnosticLogManager.shared.summaryText,
+                            iconColor: .orange,
+                            showDivider: false,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.diagnosticLogs)
                         }
                     }
 
@@ -324,6 +334,8 @@ struct SettingsView: View {
                     .navigationBarTitleDisplayMode(.inline)
                 case .privacySecurity:
                     PrivacySecurityView()
+                case .diagnosticLogs:
+                    DiagnosticLogsView()
                 case .about:
                     AboutView(viewModel: viewModel)
                 case .chatSettings:
@@ -588,6 +600,7 @@ enum SettingsDestination: Hashable {
     case serverManagement
     case serverSwitcher
     case privacySecurity
+    case diagnosticLogs
     case about
     case chatSettings
     case usageStats
@@ -714,6 +727,10 @@ struct ChatSettingsView: View {
     @AppStorage("expandThinkingWhileStreaming") private var expandThinkingWhileStreaming = true
     @AppStorage("citationShowDomain") private var citationShowDomain: Bool = true
     @AppStorage("performanceWindowEnabled") private var performanceWindowEnabled = true
+    @AppStorage("performanceWindowShowCPU") private var performanceWindowShowCPU = true
+    @AppStorage("performanceWindowShowFPS") private var performanceWindowShowFPS = true
+    @AppStorage("performanceWindowShowLatency") private var performanceWindowShowLatency = true
+    @AppStorage("performanceWindowShowNetworkSpeed") private var performanceWindowShowNetworkSpeed = true
     @AppStorage("desktopPetEnabled") private var desktopPetEnabled = false
     @AppStorage("chatWebSearchEnabled") private var chatWebSearchEnabled = false
     @AppStorage("quickPills") private var quickPillsData: String = ""
@@ -732,6 +749,16 @@ struct ChatSettingsView: View {
 
     private var selectedPillIds: Set<String> {
         Set(quickPillsData.components(separatedBy: ",").filter { !$0.isEmpty })
+    }
+
+    private var performanceMetricSummary: String {
+        let items = [
+            performanceWindowShowCPU ? "CPU" : nil,
+            performanceWindowShowFPS ? "FPS" : nil,
+            performanceWindowShowLatency ? "延迟" : nil,
+            performanceWindowShowNetworkSpeed ? "速度" : nil
+        ].compactMap { $0 }
+        return items.isEmpty ? "未选择" : items.joined(separator: "、")
     }
 
     private func togglePill(_ id: String) {
@@ -821,10 +848,21 @@ struct ChatSettingsView: View {
             Section {
                 Toggle("性能窗口", isOn: $performanceWindowEnabled)
                     .tint(theme.brandPrimary)
+                NavigationLink {
+                    PerformanceWindowMetricOptionsView()
+                } label: {
+                    HStack {
+                        Text("显示项目")
+                        Spacer()
+                        Text(performanceMetricSummary)
+                            .scaledFont(size: 14, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                }
             } header: {
                 Text("性能窗口")
             } footer: {
-                Text("开启后对话界面右上角会显示 CPU 和 FPS。")
+                Text("开启后对话界面右上角会显示你选择的指标；未选择任何项目时窗口不会显示。")
             }
 
             Section {
@@ -919,6 +957,106 @@ struct ChatSettingsView: View {
             availableTools = try await manager.fetchTools()
         } catch {}
         isLoadingTools = false
+    }
+}
+
+private struct PerformanceWindowMetricOptionsView: View {
+    @Environment(\.theme) private var theme
+    @AppStorage("performanceWindowShowCPU") private var showCPU = true
+    @AppStorage("performanceWindowShowFPS") private var showFPS = true
+    @AppStorage("performanceWindowShowLatency") private var showLatency = true
+    @AppStorage("performanceWindowShowNetworkSpeed") private var showNetworkSpeed = true
+
+    private var selectedCount: Int {
+        [showCPU, showFPS, showLatency, showNetworkSpeed].filter { $0 }.count
+    }
+
+    var body: some View {
+        List {
+            Section {
+                metricOptionRow(
+                    title: "CPU 使用率",
+                    subtitle: "显示当前应用的处理器占用",
+                    icon: "cpu",
+                    isSelected: showCPU
+                ) {
+                    showCPU.toggle()
+                }
+
+                metricOptionRow(
+                    title: "FPS 帧率",
+                    subtitle: "显示界面刷新帧率",
+                    icon: "speedometer",
+                    isSelected: showFPS
+                ) {
+                    showFPS.toggle()
+                }
+
+                metricOptionRow(
+                    title: "网络延迟",
+                    subtitle: "显示到当前站点的轻量探测延迟",
+                    icon: "timer",
+                    isSelected: showLatency
+                ) {
+                    showLatency.toggle()
+                }
+
+                metricOptionRow(
+                    title: "网络速度",
+                    subtitle: "显示本次轻量探测的下载速度估算",
+                    icon: "arrow.down.circle",
+                    isSelected: showNetworkSpeed
+                ) {
+                    showNetworkSpeed.toggle()
+                }
+            } footer: {
+                Text(selectedCount == 0 ? "未选择任何项目时，性能窗口不会显示。" : "已选择 \(selectedCount) 个显示项目。")
+            }
+        }
+        .navigationTitle("显示项目")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func metricOptionRow(
+        title: String,
+        subtitle: String,
+        icon: String,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.15)) {
+                action()
+            }
+            Haptics.play(.light)
+        } label: {
+            HStack(spacing: Spacing.md) {
+                Image(systemName: icon)
+                    .scaledFont(size: 14, weight: .medium)
+                    .foregroundStyle(isSelected ? theme.brandPrimary : theme.textSecondary)
+                    .frame(width: 28, height: 28)
+                    .background((isSelected ? theme.brandPrimary : theme.textSecondary).opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .scaledFont(size: 16)
+                        .foregroundStyle(theme.textPrimary)
+
+                    Text(subtitle)
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                }
+
+                Spacer()
+
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .scaledFont(size: 20)
+                    .foregroundStyle(isSelected ? theme.brandPrimary : theme.textTertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

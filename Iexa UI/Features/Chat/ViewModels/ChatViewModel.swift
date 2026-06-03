@@ -5059,6 +5059,10 @@ final class ChatViewModel {
         let currentText = text
         let currentAttachments = processedAttachments
         errorMessage = nil
+        DiagnosticLogManager.shared.info(
+            "Sending message provider=\(currentProviderType?.rawValue ?? "unknown") model=\(modelId) chars=\(currentText.count) attachments=\(currentAttachments.count) temporary=\(isTemporaryChat)",
+            category: "Chat"
+        )
 
         await persistExplicitMemoryRequestIfNeeded(from: currentText)
 
@@ -5074,6 +5078,10 @@ final class ChatViewModel {
            processedAttachments.isEmpty,
            shouldSendTextDirectlyToLocalAlpine(normalizedLocalAlpineText),
            localAlpineModeForThisTurn {
+            DiagnosticLogManager.shared.info(
+                "Routing message directly to Local Alpine model=\(modelId) chars=\(currentText.count)",
+                category: "Chat"
+            )
             await sendDirectLocalAlpineCommand(currentText, modelId: modelId)
             return
         }
@@ -5214,6 +5222,10 @@ final class ChatViewModel {
                 } catch {
                     fallbackUploadFailure = error.localizedDescription
                     logger.error("Upload failed: \(error.localizedDescription)")
+                    DiagnosticLogManager.shared.error(
+                        "Fallback attachment upload failed attachments=\(currentAttachments.count) error=\(error.localizedDescription)",
+                        category: "Chat"
+                    )
                     break
                 }
             }
@@ -5622,6 +5634,10 @@ final class ChatViewModel {
                         } catch {
                             guard self.shouldFallbackToChatForImageGeneration(error) else { throw error }
                             self.logger.warning("Direct image endpoint failed; falling back to chat-native image output: \(error.localizedDescription)")
+                            DiagnosticLogManager.shared.warning(
+                                "Direct image endpoint failed; falling back to chat-native output model=\(modelId) error=\(error.localizedDescription)",
+                                category: "Chat"
+                            )
                         }
                     }
 
@@ -5685,6 +5701,10 @@ final class ChatViewModel {
                     }
                 } catch {
                     if !Task.isCancelled {
+                        DiagnosticLogManager.shared.error(
+                            "OpenAI-compatible stream failed model=\(modelId) error=\(Self.localizedGenerationError(error))",
+                            category: "Chat"
+                        )
                         self.updateAssistantMessage(
                             id: assistantMessageId,
                             content: acc.content,
@@ -12012,33 +12032,43 @@ final class ChatViewModel {
             case .video: return max(1, mediaCount) * 12_000
             }
         }()
+        let resolvedInputTokens = exactInput ?? estimatedInput
+        let resolvedOutputTokens = exactOutput ?? estimatedOutput
+        let resolvedCachedTokens = exactCached ?? 0
+        let usageIsExact = exactInput != nil || exactOutput != nil
+        let providerName = currentProviderType?.rawValue ?? "unknown"
+        let usageModelName = selectedModel?.shortName ?? selectedModel?.name ?? selectedModelId ?? conversation?.model ?? "unknown"
 
         NotificationCenter.default.post(
             name: .chatTokenUsageDidAccumulate,
             object: nil,
             userInfo: [
-                "input": exactInput ?? estimatedInput,
-                "output": exactOutput ?? estimatedOutput,
-                "cached": exactCached ?? 0,
+                "input": resolvedInputTokens,
+                "output": resolvedOutputTokens,
+                "cached": resolvedCachedTokens,
                 "image": mediaTokens,
                 "imageCount": mediaKind == .image ? mediaCount : 0,
                 "videoCount": mediaKind == .video ? mediaCount : 0,
-                "exact": (exactInput != nil || exactOutput != nil) ? 1 : 0,
-                "estimated": (exactInput == nil && exactOutput == nil) ? 1 : 0
+                "exact": usageIsExact ? 1 : 0,
+                "estimated": usageIsExact ? 0 : 1
             ]
         )
 
         TokenUsageHistoryStore.shared.record(
-            provider: currentProviderType?.rawValue ?? "unknown",
-            model: selectedModel?.shortName ?? selectedModel?.name ?? selectedModelId ?? conversation?.model ?? "unknown",
-            inputTokens: exactInput ?? estimatedInput,
-            outputTokens: exactOutput ?? estimatedOutput,
-            cachedTokens: exactCached ?? 0,
+            provider: providerName,
+            model: usageModelName,
+            inputTokens: resolvedInputTokens,
+            outputTokens: resolvedOutputTokens,
+            cachedTokens: resolvedCachedTokens,
             mediaTokens: mediaTokens,
             imageCount: mediaKind == .image ? mediaCount : 0,
             videoCount: mediaKind == .video ? mediaCount : 0,
-            isExact: exactInput != nil || exactOutput != nil,
+            isExact: usageIsExact,
             usage: usage
+        )
+        DiagnosticLogManager.shared.info(
+            "Turn completed provider=\(providerName) model=\(usageModelName) input=\(resolvedInputTokens) output=\(resolvedOutputTokens) cached=\(resolvedCachedTokens) media=\(mediaTokens) exact=\(usageIsExact)",
+            category: "Chat"
         )
     }
 

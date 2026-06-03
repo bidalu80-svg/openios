@@ -105,6 +105,12 @@ final class NetworkManager: NSObject, Sendable {
         }
 
         super.init()
+
+        let host = serverConfig.apiBaseURL?.host ?? URL(string: serverConfig.url)?.host ?? "unknown"
+        DiagnosticLogManager.shared.info(
+            "Initialized provider=\(serverConfig.providerType.rawValue) host=\(host) selfSigned=\(serverConfig.allowSelfSignedCertificates) customHeaders=\(serverConfig.customHeaders.count)",
+            category: "Network"
+        )
     }
 
     // MARK: - Request Building
@@ -467,11 +473,19 @@ final class NetworkManager: NSObject, Sendable {
                     )
                     lastError = apiError
                     guard apiError.isRetryable, attempt < maxRetries else {
+                        DiagnosticLogManager.shared.error(
+                            "Streaming HTTP error status=\(httpResponse.statusCode) path=\(path) error=\(apiError.localizedDescription)",
+                            category: "Network"
+                        )
                         throw apiError
                     }
 
                     let delay = baseDelay * pow(2.0, Double(attempt))
                     logger.warning("Streaming request got retryable HTTP error \(httpResponse.statusCode) on attempt \(attempt + 1)/\(maxRetries + 1), retrying in \(delay)s")
+                    DiagnosticLogManager.shared.warning(
+                        "Retrying stream path=\(path) after HTTP \(httpResponse.statusCode) attempt=\(attempt + 1)/\(maxRetries + 1) delay=\(String(format: "%.1f", delay))s",
+                        category: "Network"
+                    )
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                     continue
                 }
@@ -481,11 +495,19 @@ final class NetworkManager: NSObject, Sendable {
                 lastError = error
                 let apiError = APIError.from(error)
                 guard apiError.isRetryable, attempt < maxRetries else {
+                    DiagnosticLogManager.shared.error(
+                        "Streaming request failed path=\(path) error=\(apiError.localizedDescription)",
+                        category: "Network"
+                    )
                     throw error
                 }
 
                 let delay = baseDelay * pow(2.0, Double(attempt))
                 logger.warning("Streaming request failed on attempt \(attempt + 1)/\(maxRetries + 1): \(apiError.localizedDescription), retrying in \(delay)s")
+                DiagnosticLogManager.shared.warning(
+                    "Retrying stream path=\(path) after failure attempt=\(attempt + 1)/\(maxRetries + 1) error=\(apiError.localizedDescription) delay=\(String(format: "%.1f", delay))s",
+                    category: "Network"
+                )
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
@@ -645,7 +667,12 @@ final class NetworkManager: NSObject, Sendable {
         do {
             return try await session.data(for: request)
         } catch {
-            throw APIError.from(error)
+            let apiError = APIError.from(error)
+            DiagnosticLogManager.shared.error(
+                "Request failed \(diagnosticRequestLabel(for: request)) error=\(apiError.localizedDescription)",
+                category: "Network"
+            )
+            throw apiError
         }
     }
 
@@ -666,6 +693,10 @@ final class NetworkManager: NSObject, Sendable {
                    httpResponse.statusCode >= 500 && attempt < maxRetries {
                     let delay = baseDelay * pow(2.0, Double(attempt))
                     logger.warning("Server error \(httpResponse.statusCode) on attempt \(attempt + 1)/\(maxRetries + 1), retrying in \(delay)s")
+                    DiagnosticLogManager.shared.warning(
+                        "Retrying \(diagnosticRequestLabel(for: request)) after HTTP \(httpResponse.statusCode) attempt=\(attempt + 1)/\(maxRetries + 1) delay=\(String(format: "%.1f", delay))s",
+                        category: "Network"
+                    )
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                     lastError = parseHTTPError(
                         statusCode: httpResponse.statusCode,
@@ -687,6 +718,10 @@ final class NetworkManager: NSObject, Sendable {
 
                 let delay = baseDelay * pow(2.0, Double(attempt))
                 logger.warning("Request failed (attempt \(attempt + 1)/\(maxRetries + 1)): \(apiError.localizedDescription), retrying in \(delay)s")
+                DiagnosticLogManager.shared.warning(
+                    "Retrying \(diagnosticRequestLabel(for: request)) after failure attempt=\(attempt + 1)/\(maxRetries + 1) error=\(apiError.localizedDescription) delay=\(String(format: "%.1f", delay))s",
+                    category: "Network"
+                )
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
@@ -705,15 +740,36 @@ final class NetworkManager: NSObject, Sendable {
         }
 
         let statusCode = httpResponse.statusCode
+        let responsePath = path ?? httpResponse.url?.path ?? "-"
 
         if [302, 307, 308].contains(statusCode) {
             let location = httpResponse.value(forHTTPHeaderField: "Location")
+            DiagnosticLogManager.shared.warning(
+                "Redirect detected status=\(statusCode) path=\(responsePath) location=\(location ?? "-")",
+                category: "Network"
+            )
             throw APIError.redirectDetected(location: location)
         }
 
         guard (200..<400).contains(statusCode) else {
-            throw parseHTTPError(statusCode: statusCode, data: data, path: path, authenticated: authenticated)
+            let apiError = parseHTTPError(statusCode: statusCode, data: data, path: path, authenticated: authenticated)
+            DiagnosticLogManager.shared.error(
+                "HTTP error status=\(statusCode) path=\(responsePath) authenticated=\(authenticated) error=\(apiError.localizedDescription)",
+                category: "Network"
+            )
+            throw apiError
         }
+    }
+
+    private func diagnosticRequestLabel(for request: URLRequest) -> String {
+        let method = request.httpMethod ?? "-"
+        let path: String
+        if let url = request.url {
+            path = url.path.isEmpty ? (url.host ?? "-") : url.path
+        } else {
+            path = "-"
+        }
+        return "\(method) \(path)"
     }
 
     private func parseHTTPError(

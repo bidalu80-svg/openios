@@ -3068,10 +3068,15 @@ struct MainChatView: View {
 // MARK: - Performance Window
 
 struct PerformanceWindowView: View {
+    @Environment(AppDependencyContainer.self) private var dependencies
     @Environment(\.theme) private var theme
     @StateObject private var monitor = PerformanceWindowMonitor()
     @AppStorage("performanceWindowOffsetX") private var storedOffsetX = 0.0
     @AppStorage("performanceWindowOffsetY") private var storedOffsetY = 0.0
+    @AppStorage("performanceWindowShowCPU") private var showCPU = true
+    @AppStorage("performanceWindowShowFPS") private var showFPS = true
+    @AppStorage("performanceWindowShowLatency") private var showLatency = true
+    @AppStorage("performanceWindowShowNetworkSpeed") private var showNetworkSpeed = true
     @State private var dragOffset: CGSize = .zero
     @State private var isDragging = false
 
@@ -3093,34 +3098,79 @@ struct PerformanceWindowView: View {
     }
 
     var body: some View {
-        GeometryReader { proxy in
-            ZStack(alignment: .topTrailing) {
-                hudBody
-                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .scaleEffect(isDragging ? 1.035 : 1)
-                    .offset(currentOffset(in: proxy.size))
-                    .padding(.top, topInset)
-                    .padding(.trailing, trailingInset)
-                    .gesture(dragGesture(in: proxy.size))
-                    .animation(.spring(response: 0.22, dampingFraction: 0.82), value: isDragging)
+        Group {
+            if hasVisibleMetrics {
+                GeometryReader { proxy in
+                    ZStack(alignment: .topTrailing) {
+                        hudBody
+                            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .scaleEffect(isDragging ? 1.035 : 1)
+                            .offset(currentOffset(in: proxy.size))
+                            .padding(.top, topInset)
+                            .padding(.trailing, trailingInset)
+                            .gesture(dragGesture(in: proxy.size))
+                            .animation(.spring(response: 0.22, dampingFraction: 0.82), value: isDragging)
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topTrailing)
+                }
             }
-            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topTrailing)
         }
     }
 
     private var hudBody: some View {
         VStack(alignment: .leading, spacing: 5) {
-            metricRow(label: "CPU", value: monitor.cpuText, tint: cpuTint)
-            metricRow(label: "FPS", value: "\(monitor.fps)", tint: fpsTint)
+            if showCPU {
+                metricRow(label: "CPU", value: monitor.cpuText, tint: cpuTint)
+            }
+            if showFPS {
+                metricRow(label: "FPS", value: "\(monitor.fps)", tint: fpsTint)
+            }
+            if showLatency {
+                metricRow(label: "PING", value: monitor.latencyText, tint: latencyTint)
+            }
+            if showNetworkSpeed {
+                metricRow(label: "NET", value: monitor.networkSpeedText, tint: networkTint)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .frame(minWidth: 86)
+        .frame(minWidth: 112)
         .iexaToolbarGlass(cornerRadius: 14, compact: true)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("性能窗口 CPU \(monitor.cpuText) FPS \(monitor.fps)")
-        .onAppear { monitor.start() }
+        .accessibilityLabel(accessibilityText)
+        .onAppear {
+            monitor.configureNetworkTarget(activeNetworkProbeBaseURL)
+            monitor.start()
+        }
+        .onChange(of: activeNetworkProbeBaseURL) { _, newValue in
+            monitor.configureNetworkTarget(newValue)
+        }
         .onDisappear { monitor.stop() }
+    }
+
+    private var accessibilityText: String {
+        var parts = ["性能窗口"]
+        if showCPU { parts.append("CPU \(monitor.cpuText)") }
+        if showFPS { parts.append("FPS \(monitor.fps)") }
+        if showLatency { parts.append("网络延迟 \(monitor.latencyText)") }
+        if showNetworkSpeed { parts.append("网络速度 \(monitor.networkSpeedText)") }
+        return parts.joined(separator: " ")
+    }
+
+    private var hasVisibleMetrics: Bool {
+        showCPU || showFPS || showLatency || showNetworkSpeed
+    }
+
+    private var visibleMetricCount: Int {
+        [showCPU, showFPS, showLatency, showNetworkSpeed].filter { $0 }.count
+    }
+
+    private var activeNetworkProbeBaseURL: String? {
+        (showLatency || showNetworkSpeed) ? networkProbeBaseURL : nil
+    }
+
+    private var networkProbeBaseURL: String? {
+        dependencies.apiClient?.baseURL ?? dependencies.serverConfigStore.activeServer?.url
     }
 
     private var cpuTint: Color {
@@ -3135,6 +3185,26 @@ struct PerformanceWindowView: View {
         monitor.fps >= 50 ? .green : (monitor.fps >= 30 ? .orange : .red)
     }
 
+    private var latencyTint: Color {
+        guard let latency = monitor.latencyMS else {
+            return monitor.networkIsReachable ? .secondary : .red
+        }
+        switch latency {
+        case 0..<250: return .green
+        case 250..<800: return .orange
+        default: return .red
+        }
+    }
+
+    private var networkTint: Color {
+        guard monitor.networkIsReachable else { return .red }
+        guard let bytesPerSecond = monitor.networkBytesPerSecond else { return .secondary }
+        switch bytesPerSecond {
+        case 0..<32_000: return .orange
+        default: return .green
+        }
+    }
+
     private func metricRow(label: String, value: String, tint: Color) -> some View {
         HStack(spacing: 6) {
             Circle()
@@ -3144,13 +3214,13 @@ struct PerformanceWindowView: View {
             Text(label)
                 .scaledFont(size: 10, weight: .bold)
                 .foregroundStyle(theme.textTertiary)
-                .frame(width: 24, alignment: .leading)
+                .frame(width: 30, alignment: .leading)
 
             Text(value)
                 .scaledFont(size: 11, weight: .semibold)
                 .monospacedDigit()
                 .foregroundStyle(theme.textPrimary)
-                .frame(minWidth: 34, alignment: .trailing)
+                .frame(minWidth: 48, alignment: .trailing)
         }
         .lineLimit(1)
     }
@@ -3191,7 +3261,10 @@ struct PerformanceWindowView: View {
     }
 
     private func boundedOffset(_ proposed: CGSize, in containerSize: CGSize) -> CGSize {
-        let estimatedHUDSize = CGSize(width: 92, height: 54)
+        let estimatedHUDSize = CGSize(
+            width: 122,
+            height: max(40, CGFloat(visibleMetricCount) * 18 + 22)
+        )
         let maxLeft = -max(0, containerSize.width - estimatedHUDSize.width - leadingInset - trailingInset)
         let maxRight: CGFloat = 0
         let maxUp = -max(0, topInset - leadingInset)
@@ -3207,15 +3280,73 @@ struct PerformanceWindowView: View {
 private final class PerformanceWindowMonitor: NSObject, ObservableObject {
     @Published private(set) var fps = 0
     @Published private(set) var cpuUsage: Double = 0
+    @Published private(set) var latencyMS: Int?
+    @Published private(set) var networkBytesPerSecond: Double?
+    @Published private(set) var networkIsReachable = false
+    @Published private(set) var networkIsProbing = false
 
     private var displayLink: CADisplayLink?
     private var cpuTimer: Timer?
+    private var networkTimer: Timer?
+    private var networkDataTask: URLSessionDataTask?
+    private var networkProbeBaseURL: URL?
+    private let networkSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 4
+        configuration.timeoutIntervalForResource = 4
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.waitsForConnectivity = false
+        configuration.httpCookieStorage = .shared
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.httpShouldSetCookies = true
+        return URLSession(configuration: configuration)
+    }()
     private var frameCount = 0
     private var lastFPSUpdate: CFTimeInterval = 0
     private var isRunning = false
 
     var cpuText: String {
         "\(Int(cpuUsage.rounded()))%"
+    }
+
+    var latencyText: String {
+        if let latencyMS {
+            return "\(latencyMS)ms"
+        }
+        return networkIsProbing ? "..." : "—"
+    }
+
+    var networkSpeedText: String {
+        guard networkIsReachable else {
+            return networkIsProbing ? "..." : "离线"
+        }
+        guard let networkBytesPerSecond, networkBytesPerSecond > 0 else {
+            return "—"
+        }
+        if networkBytesPerSecond >= 1_048_576 {
+            return String(format: "%.1fM/s", networkBytesPerSecond / 1_048_576)
+        }
+        if networkBytesPerSecond >= 1024 {
+            return "\(Int(networkBytesPerSecond / 1024))K/s"
+        }
+        return "\(Int(networkBytesPerSecond))B/s"
+    }
+
+    func configureNetworkTarget(_ baseURLString: String?) {
+        let newURL = Self.normalizedNetworkProbeBaseURL(from: baseURLString)
+        guard newURL != networkProbeBaseURL else { return }
+        networkProbeBaseURL = newURL
+        networkDataTask?.cancel()
+        networkDataTask = nil
+        latencyMS = nil
+        networkBytesPerSecond = nil
+        networkIsReachable = false
+        networkIsProbing = false
+
+        if isRunning {
+            restartNetworkTimer()
+        }
     }
 
     func start() {
@@ -3234,6 +3365,8 @@ private final class PerformanceWindowMonitor: NSObject, ObservableObject {
         }
         RunLoop.main.add(timer, forMode: .common)
         cpuTimer = timer
+
+        restartNetworkTimer()
     }
 
     func stop() {
@@ -3242,6 +3375,11 @@ private final class PerformanceWindowMonitor: NSObject, ObservableObject {
         displayLink = nil
         cpuTimer?.invalidate()
         cpuTimer = nil
+        networkTimer?.invalidate()
+        networkTimer = nil
+        networkDataTask?.cancel()
+        networkDataTask = nil
+        networkIsProbing = false
         frameCount = 0
         lastFPSUpdate = 0
     }
@@ -3267,6 +3405,90 @@ private final class PerformanceWindowMonitor: NSObject, ObservableObject {
 
     private func sampleCPU() {
         cpuUsage = Self.currentProcessCPUUsage()
+    }
+
+    private func restartNetworkTimer() {
+        networkTimer?.invalidate()
+        networkTimer = nil
+        networkDataTask?.cancel()
+        networkDataTask = nil
+
+        guard networkProbeBaseURL != nil else { return }
+        sampleNetwork()
+
+        let timer = Timer(timeInterval: 3.0, repeats: true) { [weak self] _ in
+            self?.sampleNetwork()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        networkTimer = timer
+    }
+
+    private func sampleNetwork() {
+        guard networkDataTask == nil,
+              let baseURL = networkProbeBaseURL,
+              let probeURL = Self.probeURL(from: baseURL)
+        else { return }
+
+        var request = URLRequest(url: probeURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 4
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("bytes=0-32767", forHTTPHeaderField: "Range")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue("image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        networkIsProbing = true
+        networkDataTask = networkSession.dataTask(with: request) { [weak self] data, response, error in
+            let elapsed = max(0.001, ProcessInfo.processInfo.systemUptime - startedAt)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode
+            let bytes = data?.count ?? 0
+            let succeeded = error == nil && statusCode != nil
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard self.isRunning, self.networkProbeBaseURL == baseURL else { return }
+                self.networkDataTask = nil
+                self.networkIsProbing = false
+
+                if succeeded {
+                    self.latencyMS = Int((elapsed * 1_000).rounded())
+                    self.networkBytesPerSecond = bytes > 0 ? Double(bytes) / elapsed : nil
+                    self.networkIsReachable = true
+                } else {
+                    self.latencyMS = nil
+                    self.networkBytesPerSecond = nil
+                    self.networkIsReachable = false
+                }
+            }
+        }
+        networkDataTask?.resume()
+    }
+
+    private static func normalizedNetworkProbeBaseURL(from value: String?) -> URL? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty,
+              var components = URLComponents(string: value)
+        else { return nil }
+        if components.scheme == nil {
+            components.scheme = "https"
+        }
+        guard components.host != nil else { return nil }
+        components.path = ""
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
+    private static func probeURL(from baseURL: URL) -> URL? {
+        guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        components.path = "/favicon.ico"
+        components.queryItems = [
+            URLQueryItem(name: "iexa_perf", value: "\(Int(Date().timeIntervalSince1970))")
+        ]
+        return components.url
     }
 
     private static func currentProcessCPUUsage() -> Double {

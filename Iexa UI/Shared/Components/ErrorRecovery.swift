@@ -406,6 +406,26 @@ final class CrashLogger: @unchecked Sendable {
             context: context
         )
 
+        let diagnosticMessage = [
+            message,
+            error?.localizedDescription.map { "error=\($0)" },
+            context.map { "context=\($0)" }
+        ]
+        .compactMap { $0 }
+        .joined(separator: " | ")
+        switch level {
+        case .debug:
+            DiagnosticLogManager.shared.debug(diagnosticMessage, category: "Crash")
+        case .info:
+            DiagnosticLogManager.shared.info(diagnosticMessage, category: "Crash")
+        case .warning:
+            DiagnosticLogManager.shared.warning(diagnosticMessage, category: "Crash")
+        case .error:
+            DiagnosticLogManager.shared.error(diagnosticMessage, category: "Crash")
+        case .fatal:
+            DiagnosticLogManager.shared.error("FATAL | \(diagnosticMessage)", category: "Crash")
+        }
+
         queue.async { [weak self] in
             guard let self else { return }
             self.entries.append(entry)

@@ -115,6 +115,13 @@ struct Iexa_UIApp: App {
         UINavigationBar.appearance().standardAppearance = navBarAppearance
         UINavigationBar.appearance().scrollEdgeAppearance = navBarAppearance
         UINavigationBar.appearance().compactAppearance = navBarAppearance
+
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
+        DiagnosticLogManager.shared.info(
+            "App launched version=\(version) build=\(build)",
+            category: "App"
+        )
     }
 
     var body: some Scene {
@@ -132,6 +139,7 @@ struct Iexa_UIApp: App {
                 .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
                 .onChange(of: scenePhase) { _, newPhase in
                     if newPhase == .active {
+                        DiagnosticLogManager.shared.debug("Scene phase active", category: "App")
                         // Process pending actions after a short delay so that
                         // MainChatView / iPadMainChatView have time to mount
                         // their .onReceive handlers before we post notifications.
@@ -151,6 +159,7 @@ struct Iexa_UIApp: App {
                         }
                     }
                     if newPhase == .inactive || newPhase == .background {
+                        DiagnosticLogManager.shared.debug("Scene phase \(newPhase == .background ? "background" : "inactive")", category: "App")
                         // Stop Kokoro TTS and unload model before backgrounding to prevent
                         // Metal GPU crash (kIOGPUCommandBufferCallbackErrorBackgroundExecutionNotPermitted).
                         // .inactive fires before .background, giving us time to release GPU resources.
