@@ -48,6 +48,11 @@ enum EnhancedTextSelectionMenu {
             replacement: #selector(UIMenuController.iexa_showMenu(from:rect:))
         )
         swizzle(
+            cls: UIMenuController.self,
+            original: #selector(setter: UIMenuController.menuItems),
+            replacement: #selector(UIMenuController.iexa_setMenuItems(_:))
+        )
+        swizzle(
             cls: LTXLabel.self,
             original: #selector(LTXLabel.canPerformAction(_:withSender:)),
             replacement: #selector(LTXLabel.iexa_canPerformAction(_:withSender:))
@@ -80,7 +85,21 @@ enum EnhancedTextSelectionMenu {
 
     static func augmentCurrentMenu() {
         let menuController = UIMenuController.shared
-        let existing = menuController.menuItems ?? []
+        menuController.menuItems = augmentedMenuItems(from: menuController.menuItems)
+    }
+
+    static func shouldAugmentMenuItems(_ items: [UIMenuItem]?) -> Bool {
+        guard let items, !items.isEmpty else { return false }
+        let litextSelectors = Set([
+            "copyMenuItemTapped",
+            "selectAllTapped",
+            "shareMenuItemTapped"
+        ])
+        return items.contains { litextSelectors.contains(NSStringFromSelector($0.action)) }
+    }
+
+    static func augmentedMenuItems(from items: [UIMenuItem]?) -> [UIMenuItem] {
+        let existing = items ?? []
         var seen = Set(existing.map { NSStringFromSelector($0.action) })
 
         let customItems = EnhancedTextSelectionAction.allCases.compactMap { action -> UIMenuItem? in
@@ -90,8 +109,8 @@ enum EnhancedTextSelectionMenu {
             return UIMenuItem(title: action.title, action: action.selector)
         }
 
-        guard !customItems.isEmpty else { return }
-        menuController.menuItems = [customItems[0]] + existing + Array(customItems.dropFirst())
+        guard !customItems.isEmpty else { return existing }
+        return [customItems[0]] + existing + Array(customItems.dropFirst())
     }
 
     static func post(_ action: EnhancedTextSelectionAction, text: String) {
@@ -173,6 +192,14 @@ fileprivate extension LTXLabel {
 }
 
 fileprivate extension UIMenuController {
+    @objc func iexa_setMenuItems(_ menuItems: [UIMenuItem]?) {
+        guard EnhancedTextSelectionMenu.shouldAugmentMenuItems(menuItems) else {
+            iexa_setMenuItems(menuItems)
+            return
+        }
+        iexa_setMenuItems(EnhancedTextSelectionMenu.augmentedMenuItems(from: menuItems))
+    }
+
     @objc func iexa_showMenu(from targetView: UIView, rect targetRect: CGRect) {
         if targetView is LTXLabel {
             EnhancedTextSelectionMenu.augmentCurrentMenu()
