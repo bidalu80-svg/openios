@@ -19,6 +19,7 @@ struct SettingsView: View {
     @State private var availableModels: [AIModel] = []
     @State private var defaultModelId: String?
     @State private var isLoadingModels = false
+    @State private var usageStore = TokenUsageHistoryStore.shared
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -109,10 +110,20 @@ struct SettingsView: View {
                             icon: "bubble.left.and.bubble.right",
                             title: "聊天行为",
                             subtitle: "触感、标题、联网搜索",
-                            showDivider: false,
+                            showDivider: true,
                             accessory: .chevron
                         ) {
                             navigationPath.append(SettingsDestination.chatSettings)
+                        }
+                        SettingsCell(
+                            icon: "chart.bar.xaxis",
+                            title: "用量统计",
+                            subtitle: usageStore.todaySummaryText,
+                            iconColor: .purple,
+                            showDivider: false,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.usageStats)
                         }
                     }
 
@@ -239,6 +250,17 @@ struct SettingsView: View {
                         }
                     }
 
+                    // Official channel
+                    SettingsSection {
+                        TelegramSettingsCell(
+                            title: "官方频道",
+                            subtitle: "Telegram 频道群",
+                            showDivider: false
+                        ) {
+                            openOfficialChannel()
+                        }
+                    }
+
                     // About
                     SettingsSection(header: "关于") {
                         SettingsCell(
@@ -306,6 +328,8 @@ struct SettingsView: View {
                     AboutView(viewModel: viewModel)
                 case .chatSettings:
                     ChatSettingsView()
+                case .usageStats:
+                    TokenUsageStatisticsView()
                 case .ttsSettings:
                     TTSSettingsView()
                 case .sttSettings:
@@ -461,6 +485,98 @@ struct SettingsView: View {
               imageURL.hasPrefix("data:") else { return nil }
         return imageURL
     }
+
+    private func openOfficialChannel() {
+        guard let url = URL(string: "https://t.me/liunewapi") else { return }
+        Haptics.play(.light)
+        UIApplication.shared.open(url)
+    }
+}
+
+private struct TelegramSettingsCell: View {
+    let title: String
+    var subtitle: String? = nil
+    var showDivider: Bool = true
+    let action: () -> Void
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 0) {
+                HStack(spacing: Spacing.md) {
+                    TelegramIcon()
+                        .frame(width: IconSize.lg, height: IconSize.lg)
+
+                    VStack(alignment: .leading, spacing: Spacing.xxs) {
+                        Text(LocalizedStringKey(title))
+                            .scaledFont(size: 16)
+                            .foregroundStyle(theme.textPrimary)
+
+                        if let subtitle {
+                            Text(LocalizedStringKey(subtitle))
+                                .scaledFont(size: 12, weight: .medium)
+                                .foregroundStyle(theme.textTertiary)
+                        }
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .scaledFont(size: 12, weight: .semibold)
+                        .foregroundStyle(theme.textTertiary)
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, Spacing.chatBubblePadding)
+                .contentShape(Rectangle())
+
+                if showDivider {
+                    Divider()
+                        .padding(.leading, Spacing.md + IconSize.lg + Spacing.md)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+    }
+}
+
+private struct TelegramIcon: View {
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.20, green: 0.67, blue: 0.95),
+                            Color(red: 0.08, green: 0.47, blue: 0.86)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+
+            TelegramPlaneShape()
+                .fill(.white)
+                .frame(width: 18, height: 16)
+                .offset(x: -0.5, y: 0.5)
+        }
+    }
+}
+
+private struct TelegramPlaneShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.midY + rect.height * 0.03))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - rect.width * 0.24, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.midX + rect.width * 0.02, y: rect.maxY - rect.height * 0.30))
+        path.addLine(to: CGPoint(x: rect.midX - rect.width * 0.17, y: rect.maxY - rect.height * 0.08))
+        path.addLine(to: CGPoint(x: rect.midX - rect.width * 0.11, y: rect.maxY - rect.height * 0.39))
+        path.closeSubpath()
+        return path
+    }
 }
 
 // MARK: - Settings Navigation Destinations
@@ -474,6 +590,7 @@ enum SettingsDestination: Hashable {
     case privacySecurity
     case about
     case chatSettings
+    case usageStats
     case ttsSettings
     case sttSettings
     case notifications
@@ -596,6 +713,7 @@ struct ChatSettingsView: View {
     @AppStorage("temporaryChatDefault") private var temporaryChatDefault = false
     @AppStorage("expandThinkingWhileStreaming") private var expandThinkingWhileStreaming = true
     @AppStorage("citationShowDomain") private var citationShowDomain: Bool = true
+    @AppStorage("performanceWindowEnabled") private var performanceWindowEnabled = true
     @AppStorage("desktopPetEnabled") private var desktopPetEnabled = false
     @AppStorage("chatWebSearchEnabled") private var chatWebSearchEnabled = false
     @AppStorage("quickPills") private var quickPillsData: String = ""
@@ -698,6 +816,15 @@ struct ChatSettingsView: View {
                 Text("引用")
             } footer: {
                 Text("开启后引用徽标显示网站域名；关闭后显示页面标题。")
+            }
+
+            Section {
+                Toggle("性能窗口", isOn: $performanceWindowEnabled)
+                    .tint(theme.brandPrimary)
+            } header: {
+                Text("性能窗口")
+            } footer: {
+                Text("开启后对话界面右上角会显示 CPU 和 FPS。")
             }
 
             Section {

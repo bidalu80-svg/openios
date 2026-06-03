@@ -111,6 +111,7 @@ struct iPadMainChatView: View {
 
     /// Whether the terminal file browser panel is visible (independent of terminal being enabled).
     @State private var showTerminalBrowser: Bool = true
+    @AppStorage("performanceWindowEnabled") private var performanceWindowEnabled = true
 
     private var usesDirectProvider: Bool {
         dependencies.conversationManager?.usesLocalConversationStore == true
@@ -431,74 +432,88 @@ struct iPadMainChatView: View {
 
     @ViewBuilder
     private func detailContent(voiceCallBinding: Binding<Bool>) -> some View {
-        if isTerminalActiveInCurrentChat {
-            // Three-column layout: chat + terminal browser side by side
-            HStack(spacing: 0) {
-                chatDetailContent
-                    .frame(maxWidth: .infinity)
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if isTerminalActiveInCurrentChat {
+                    // Three-column layout: chat + terminal browser side by side
+                    HStack(spacing: 0) {
+                        chatDetailContent
+                            .frame(maxWidth: .infinity)
 
-                if showTerminalBrowser {
-                    Divider()
+                        if showTerminalBrowser {
+                            Divider()
 
-                    Group {
-                        if terminalBrowserVM.usesLocalAlpine {
-                            LocalAlpineWorkspacePanelView(
-                                viewModel: terminalBrowserVM,
-                                onDismiss: {
-                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                                        showTerminalBrowser = false
-                                    }
+                            Group {
+                                if terminalBrowserVM.usesLocalAlpine {
+                                    LocalAlpineWorkspacePanelView(
+                                        viewModel: terminalBrowserVM,
+                                        onDismiss: {
+                                            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                                showTerminalBrowser = false
+                                            }
+                                        }
+                                    )
+                                    .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+                                } else {
+                                    TerminalBrowserView(
+                                        viewModel: terminalBrowserVM,
+                                        onDismiss: {
+                                            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                                showTerminalBrowser = false
+                                            }
+                                        }
+                                    )
                                 }
-                            )
-                            .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
-                        } else {
-                            TerminalBrowserView(
-                                viewModel: terminalBrowserVM,
-                                onDismiss: {
-                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                                        showTerminalBrowser = false
-                                    }
-                                }
-                            )
-                        }
-                    }
-                    .frame(width: 340)
-                    .background(theme.background)
-                    .transition(.move(edge: .trailing))
-                    .onAppear {
-                        configureTerminalBrowserIfNeeded()
-                        terminalBrowserVM.refresh()
-                    }
-                }
-            }
-            // ChatDetailView handles its own keyboard via KeyboardTracker.
-            // TerminalBrowserView is a fixed side column — no keyboard adjustment needed.
-            .ignoresSafeArea(.keyboard)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                            if showTerminalBrowser {
-                                showTerminalBrowser = false
-                            } else {
+                            }
+                            .frame(width: 340)
+                            .background(theme.background)
+                            .transition(.move(edge: .trailing))
+                            .onAppear {
                                 configureTerminalBrowserIfNeeded()
-                                showTerminalBrowser = true
                                 terminalBrowserVM.refresh()
                             }
                         }
-                        Haptics.play(.light)
-                    } label: {
-                        Image(systemName: showTerminalBrowser ? "sidebar.right" : "sidebar.right")
-                            .scaledFont(size: 14, weight: .medium)
-                            .foregroundStyle(showTerminalBrowser ? theme.brandPrimary : theme.textSecondary)
-                            .symbolVariant(showTerminalBrowser ? .fill : .none)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(showTerminalBrowser ? "隐藏文件" : "显示文件")
+                    // ChatDetailView handles its own keyboard via KeyboardTracker.
+                    // TerminalBrowserView is a fixed side column — no keyboard adjustment needed.
+                    .ignoresSafeArea(.keyboard)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                    if showTerminalBrowser {
+                                        showTerminalBrowser = false
+                                    } else {
+                                        configureTerminalBrowserIfNeeded()
+                                        showTerminalBrowser = true
+                                        terminalBrowserVM.refresh()
+                                    }
+                                }
+                                Haptics.play(.light)
+                            } label: {
+                                Image(systemName: showTerminalBrowser ? "sidebar.right" : "sidebar.right")
+                                    .scaledFont(size: 14, weight: .medium)
+                                    .foregroundStyle(showTerminalBrowser ? theme.brandPrimary : theme.textSecondary)
+                                    .symbolVariant(showTerminalBrowser ? .fill : .none)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(showTerminalBrowser ? "隐藏文件" : "显示文件")
+                        }
+                    }
+                } else {
+                    chatDetailContent
                 }
             }
-        } else {
-            chatDetailContent
+
+            if performanceWindowEnabled && activeChannelId == nil {
+                PerformanceWindowView(
+                    topInset: 12,
+                    trailingInset: isTerminalActiveInCurrentChat && showTerminalBrowser ? 352 : 12,
+                    bottomInset: 24
+                )
+                    .transition(.opacity)
+                    .zIndex(5)
+            }
         }
     }
 

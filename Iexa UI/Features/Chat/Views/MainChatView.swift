@@ -1,3 +1,7 @@
+import Combine
+import Darwin
+import Foundation
+import QuartzCore
 import SwiftUI
 
 /// The primary authenticated view that shows the chat screen as the
@@ -125,6 +129,7 @@ struct MainChatView: View {
     @State private var fileBrowserDragOffset: CGFloat = 0
     @State private var isDraggingFileBrowser = false
     @State private var terminalBrowserVM = TerminalBrowserViewModel()
+    @AppStorage("performanceWindowEnabled") private var performanceWindowEnabled = true
     @AppStorage("desktopPetEnabled") private var desktopPetEnabled = false
     @AppStorage("desktopPetOffsetX") private var desktopPetOffsetX = 0.0
     @AppStorage("desktopPetOffsetY") private var desktopPetOffsetY = 0.0
@@ -444,6 +449,12 @@ struct MainChatView: View {
                     }
             )
             } // end if isTerminalActiveInCurrentChat
+
+            if performanceWindowEnabled && activeChannelId == nil && drawerFraction < 0.01 && fileBrowserFraction < 0.01 {
+                PerformanceWindowView(topInset: 58, trailingInset: 12, bottomInset: 116)
+                    .transition(.opacity)
+                    .zIndex(18)
+            }
 
             if desktopPetEnabled && desktopPetExpanded && activeChannelId == nil && drawerFraction < 0.01 && fileBrowserFraction < 0.01 {
                 Color.clear
@@ -3051,6 +3062,250 @@ struct MainChatView: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Performance Window
+
+struct PerformanceWindowView: View {
+    @Environment(\.theme) private var theme
+    @StateObject private var monitor = PerformanceWindowMonitor()
+    @AppStorage("performanceWindowOffsetX") private var storedOffsetX = 0.0
+    @AppStorage("performanceWindowOffsetY") private var storedOffsetY = 0.0
+    @State private var dragOffset: CGSize = .zero
+    @State private var isDragging = false
+
+    let topInset: CGFloat
+    let trailingInset: CGFloat
+    let bottomInset: CGFloat
+    let leadingInset: CGFloat
+
+    init(
+        topInset: CGFloat = 58,
+        trailingInset: CGFloat = 12,
+        bottomInset: CGFloat = 116,
+        leadingInset: CGFloat = 12
+    ) {
+        self.topInset = topInset
+        self.trailingInset = trailingInset
+        self.bottomInset = bottomInset
+        self.leadingInset = leadingInset
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .topTrailing) {
+                hudBody
+                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .scaleEffect(isDragging ? 1.035 : 1)
+                    .offset(currentOffset(in: proxy.size))
+                    .padding(.top, topInset)
+                    .padding(.trailing, trailingInset)
+                    .gesture(dragGesture(in: proxy.size))
+                    .animation(.spring(response: 0.22, dampingFraction: 0.82), value: isDragging)
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topTrailing)
+        }
+    }
+
+    private var hudBody: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            metricRow(label: "CPU", value: monitor.cpuText, tint: cpuTint)
+            metricRow(label: "FPS", value: "\(monitor.fps)", tint: fpsTint)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(minWidth: 86)
+        .iexaToolbarGlass(cornerRadius: 14, compact: true)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("性能窗口 CPU \(monitor.cpuText) FPS \(monitor.fps)")
+        .onAppear { monitor.start() }
+        .onDisappear { monitor.stop() }
+    }
+
+    private var cpuTint: Color {
+        switch monitor.cpuUsage {
+        case 0..<45: .green
+        case 45..<80: .orange
+        default: .red
+        }
+    }
+
+    private var fpsTint: Color {
+        monitor.fps >= 50 ? .green : (monitor.fps >= 30 ? .orange : .red)
+    }
+
+    private func metricRow(label: String, value: String, tint: Color) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(tint)
+                .frame(width: 5, height: 5)
+
+            Text(label)
+                .scaledFont(size: 10, weight: .bold)
+                .foregroundStyle(theme.textTertiary)
+                .frame(width: 24, alignment: .leading)
+
+            Text(value)
+                .scaledFont(size: 11, weight: .semibold)
+                .monospacedDigit()
+                .foregroundStyle(theme.textPrimary)
+                .frame(minWidth: 34, alignment: .trailing)
+        }
+        .lineLimit(1)
+    }
+
+    private func dragGesture(in containerSize: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+            .onChanged { value in
+                dragOffset = value.translation
+                isDragging = abs(value.translation.width) > 2 || abs(value.translation.height) > 2
+            }
+            .onEnded { value in
+                let didDrag = abs(value.translation.width) > 4 || abs(value.translation.height) > 4
+                let stored = CGSize(width: storedOffsetX, height: storedOffsetY)
+                let proposed = CGSize(
+                    width: stored.width + value.translation.width,
+                    height: stored.height + value.translation.height
+                )
+                let bounded = boundedOffset(proposed, in: containerSize)
+                storedOffsetX = Double(bounded.width)
+                storedOffsetY = Double(bounded.height)
+
+                dragOffset = .zero
+                isDragging = false
+
+                if didDrag {
+                    Haptics.play(.light)
+                }
+            }
+    }
+
+    private func currentOffset(in containerSize: CGSize) -> CGSize {
+        let stored = CGSize(width: storedOffsetX, height: storedOffsetY)
+        let proposed = CGSize(
+            width: stored.width + dragOffset.width,
+            height: stored.height + dragOffset.height
+        )
+        return boundedOffset(proposed, in: containerSize)
+    }
+
+    private func boundedOffset(_ proposed: CGSize, in containerSize: CGSize) -> CGSize {
+        let estimatedHUDSize = CGSize(width: 92, height: 54)
+        let maxLeft = -max(0, containerSize.width - estimatedHUDSize.width - leadingInset - trailingInset)
+        let maxRight: CGFloat = 0
+        let maxUp = -max(0, topInset - leadingInset)
+        let maxDown = max(0, containerSize.height - estimatedHUDSize.height - topInset - bottomInset)
+
+        return CGSize(
+            width: min(maxRight, max(maxLeft, proposed.width)),
+            height: min(maxDown, max(maxUp, proposed.height))
+        )
+    }
+}
+
+private final class PerformanceWindowMonitor: NSObject, ObservableObject {
+    @Published private(set) var fps = 0
+    @Published private(set) var cpuUsage: Double = 0
+
+    private var displayLink: CADisplayLink?
+    private var cpuTimer: Timer?
+    private var frameCount = 0
+    private var lastFPSUpdate: CFTimeInterval = 0
+    private var isRunning = false
+
+    var cpuText: String {
+        "\(Int(cpuUsage.rounded()))%"
+    }
+
+    func start() {
+        guard !isRunning else { return }
+        isRunning = true
+        frameCount = 0
+        lastFPSUpdate = 0
+
+        let link = CADisplayLink(target: self, selector: #selector(displayLinkTick(_:)))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+
+        sampleCPU()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.sampleCPU()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        cpuTimer = timer
+    }
+
+    func stop() {
+        isRunning = false
+        displayLink?.invalidate()
+        displayLink = nil
+        cpuTimer?.invalidate()
+        cpuTimer = nil
+        frameCount = 0
+        lastFPSUpdate = 0
+    }
+
+    deinit {
+        stop()
+    }
+
+    @objc private func displayLinkTick(_ link: CADisplayLink) {
+        if lastFPSUpdate == 0 {
+            lastFPSUpdate = link.timestamp
+            return
+        }
+
+        frameCount += 1
+        let elapsed = link.timestamp - lastFPSUpdate
+        guard elapsed >= 0.5 else { return }
+
+        fps = Int((Double(frameCount) / elapsed).rounded())
+        frameCount = 0
+        lastFPSUpdate = link.timestamp
+    }
+
+    private func sampleCPU() {
+        cpuUsage = Self.currentProcessCPUUsage()
+    }
+
+    private static func currentProcessCPUUsage() -> Double {
+        var threadList: thread_act_array_t?
+        var threadCount = mach_msg_type_number_t(0)
+        let result = task_threads(mach_task_self_, &threadList, &threadCount)
+        guard result == KERN_SUCCESS, let threadList else { return 0 }
+        defer {
+            vm_deallocate(
+                mach_task_self_,
+                vm_address_t(UInt(bitPattern: threadList)),
+                vm_size_t(Int(threadCount) * MemoryLayout<thread_t>.stride)
+            )
+        }
+
+        var totalUsage: Double = 0
+        for index in 0..<Int(threadCount) {
+            var threadInfo = thread_basic_info_data_t()
+            var threadInfoCount = mach_msg_type_number_t(
+                MemoryLayout<thread_basic_info_data_t>.size / MemoryLayout<integer_t>.size
+            )
+            let infoResult = withUnsafeMutablePointer(to: &threadInfo) { pointer in
+                pointer.withMemoryRebound(to: integer_t.self, capacity: Int(threadInfoCount)) { reboundPointer in
+                    thread_info(
+                        threadList[index],
+                        thread_flavor_t(THREAD_BASIC_INFO),
+                        reboundPointer,
+                        &threadInfoCount
+                    )
+                }
+            }
+            guard infoResult == KERN_SUCCESS else { continue }
+
+            guard (threadInfo.flags & TH_FLAGS_IDLE) == 0 else { continue }
+
+            totalUsage += Double(threadInfo.cpu_usage) / Double(TH_USAGE_SCALE) * 100.0
+        }
+
+        return min(max(totalUsage, 0), 999)
     }
 }
 

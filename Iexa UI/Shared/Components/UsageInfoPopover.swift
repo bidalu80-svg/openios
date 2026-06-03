@@ -1,3 +1,4 @@
+import Charts
 import SwiftUI
 
 // MARK: - Usage Info Popover
@@ -249,6 +250,577 @@ private struct UsageRow {
     let formattedValue: String
     let indent: Int
     let isHeader: Bool
+}
+
+// MARK: - Token Usage History
+
+struct TokenUsageRecord: Codable, Identifiable, Hashable, Sendable {
+    let id: UUID
+    let date: Date
+    let provider: String
+    let model: String
+    let inputTokens: Int
+    let outputTokens: Int
+    let cachedTokens: Int
+    let mediaTokens: Int
+    let totalTokens: Int
+    let imageCount: Int
+    let videoCount: Int
+    let isExact: Bool
+
+    var dayKey: String {
+        Self.dayKey(for: date)
+    }
+
+    private static func dayKey(for date: Date) -> String {
+        let components = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(
+            format: "%04d-%02d-%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0
+        )
+    }
+}
+
+struct TokenUsageDailySummary: Identifiable, Sendable {
+    let day: String
+    let date: Date
+    let inputTokens: Int
+    let outputTokens: Int
+    let cachedTokens: Int
+    let mediaTokens: Int
+    let totalTokens: Int
+    let requestCount: Int
+
+    var id: String { day }
+}
+
+struct TokenUsageModelSummary: Identifiable, Sendable {
+    let provider: String
+    let model: String
+    let totalTokens: Int
+    let requestCount: Int
+
+    var id: String { "\(provider)/\(model)" }
+    var displayName: String { model.isEmpty ? provider : model }
+}
+
+@MainActor
+@Observable
+final class TokenUsageHistoryStore {
+    static let shared = TokenUsageHistoryStore()
+
+    private(set) var records: [TokenUsageRecord] = []
+
+    private let fileURL: URL
+    private let retentionDays = 90
+
+    private init() {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let directory = appSupport.appendingPathComponent("IexaUsage", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        fileURL = directory.appendingPathComponent("token-usage.json")
+        load()
+        pruneOldRecords()
+    }
+
+    var todaySummaryText: String {
+        let today = Self.dayKey(for: Date())
+        let todayRecords = records.filter { $0.dayKey == today }
+        guard !todayRecords.isEmpty else { return "暂无今日数据" }
+        let total = todayRecords.reduce(0) { $0 + $1.totalTokens }
+        return "今日 \(Self.compactTokenCount(total)) · \(todayRecords.count) 次"
+    }
+
+    func record(
+        provider: String,
+        model: String,
+        inputTokens: Int,
+        outputTokens: Int,
+        cachedTokens: Int,
+        mediaTokens: Int,
+        imageCount: Int,
+        videoCount: Int,
+        isExact: Bool,
+        usage: [String: Any]?
+    ) {
+        let explicitTotal = Self.firstIntValue(in: usage, keys: [
+            "total_tokens", "totalTokens", "total_token_count", "totalTokenCount"
+        ])
+        let computedTotal = max(0, inputTokens) + max(0, outputTokens) + max(0, mediaTokens)
+        let total = max(explicitTotal ?? 0, computedTotal)
+        guard total > 0 else { return }
+
+        let record = TokenUsageRecord(
+            id: UUID(),
+            date: Date(),
+            provider: provider.isEmpty ? "unknown" : provider,
+            model: model.isEmpty ? "unknown" : model,
+            inputTokens: max(0, inputTokens),
+            outputTokens: max(0, outputTokens),
+            cachedTokens: max(0, cachedTokens),
+            mediaTokens: max(0, mediaTokens),
+            totalTokens: total,
+            imageCount: max(0, imageCount),
+            videoCount: max(0, videoCount),
+            isExact: isExact
+        )
+        records.append(record)
+        pruneOldRecords()
+        save()
+    }
+
+    func clearAll() {
+        records = []
+        save()
+    }
+
+    func dailySummaries(days: Int) -> [TokenUsageDailySummary] {
+        let cutoff = Calendar.current.date(byAdding: .day, value: -days + 1, to: Calendar.current.startOfDay(for: Date()))
+            ?? Date()
+        let filtered = records.filter { $0.date >= cutoff }
+        let grouped = Dictionary(grouping: filtered, by: \.dayKey)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+
+        return grouped.map { day, dayRecords in
+            TokenUsageDailySummary(
+                day: day,
+                date: formatter.date(from: day) ?? Date(),
+                inputTokens: dayRecords.reduce(0) { $0 + $1.inputTokens },
+                outputTokens: dayRecords.reduce(0) { $0 + $1.outputTokens },
+                cachedTokens: dayRecords.reduce(0) { $0 + $1.cachedTokens },
+                mediaTokens: dayRecords.reduce(0) { $0 + $1.mediaTokens },
+                totalTokens: dayRecords.reduce(0) { $0 + $1.totalTokens },
+                requestCount: dayRecords.count
+            )
+        }
+        .sorted { $0.day < $1.day }
+    }
+
+    func modelSummaries(days: Int) -> [TokenUsageModelSummary] {
+        let cutoff = Calendar.current.date(byAdding: .day, value: -days + 1, to: Calendar.current.startOfDay(for: Date()))
+            ?? Date()
+        let filtered = records.filter { $0.date >= cutoff }
+        let grouped = Dictionary(grouping: filtered) { "\($0.provider)/\($0.model)" }
+        return grouped.map { _, records in
+            let first = records[0]
+            return TokenUsageModelSummary(
+                provider: first.provider,
+                model: first.model,
+                totalTokens: records.reduce(0) { $0 + $1.totalTokens },
+                requestCount: records.count
+            )
+        }
+        .sorted { $0.totalTokens > $1.totalTokens }
+    }
+
+    private func load() {
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let decoded = try? decoder.decode([TokenUsageRecord].self, from: data) {
+            records = decoded
+        }
+    }
+
+    private func save() {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(records) else { return }
+        try? data.write(to: fileURL, options: .atomic)
+    }
+
+    private func pruneOldRecords() {
+        let cutoff = Calendar.current.date(byAdding: .day, value: -retentionDays, to: Date()) ?? Date()
+        let originalCount = records.count
+        records.removeAll { $0.date < cutoff }
+        if records.count != originalCount {
+            save()
+        }
+    }
+
+    private static func dayKey(for date: Date) -> String {
+        let components = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(
+            format: "%04d-%02d-%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0
+        )
+    }
+
+    static func compactTokenCount(_ count: Int) -> String {
+        if count >= 1_000_000 {
+            return String(format: "%.1fM", Double(count) / 1_000_000)
+        }
+        if count >= 1_000 {
+            return String(format: "%.1fK", Double(count) / 1_000)
+        }
+        return "\(count)"
+    }
+
+    private static func firstIntValue(in usage: [String: Any]?, keys: [String]) -> Int? {
+        guard let usage else { return nil }
+        for key in keys {
+            if let value = usage[key] {
+                if let intValue = value as? Int { return intValue }
+                if let doubleValue = value as? Double { return Int(doubleValue) }
+                if let stringValue = value as? String, let intValue = Int(stringValue) { return intValue }
+                if let numberValue = value as? NSNumber { return numberValue.intValue }
+            }
+        }
+        return nil
+    }
+}
+
+private enum TokenUsageRange: Int, CaseIterable, Identifiable {
+    case week = 7
+    case twoWeeks = 14
+    case month = 30
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .week: return "7 天"
+        case .twoWeeks: return "14 天"
+        case .month: return "30 天"
+        }
+    }
+}
+
+struct TokenUsageStatisticsView: View {
+    @Environment(\.theme) private var theme
+    @State private var store = TokenUsageHistoryStore.shared
+    @State private var selectedRange: TokenUsageRange = .week
+    @State private var showClearConfirmation = false
+
+    private var summaries: [TokenUsageDailySummary] {
+        store.dailySummaries(days: selectedRange.rawValue)
+    }
+
+    private var recordsInRange: [TokenUsageRecord] {
+        let cutoff = Calendar.current.date(
+            byAdding: .day,
+            value: -selectedRange.rawValue + 1,
+            to: Calendar.current.startOfDay(for: Date())
+        ) ?? Date()
+        return store.records.filter { $0.date >= cutoff }
+    }
+
+    private var totalTokens: Int {
+        recordsInRange.reduce(0) { $0 + $1.totalTokens }
+    }
+
+    private var totalRequests: Int {
+        recordsInRange.count
+    }
+
+    private var exactRatioText: String {
+        guard totalRequests > 0 else { return "0%" }
+        let exactCount = recordsInRange.filter(\.isExact).count
+        return "\(Int((Double(exactCount) / Double(totalRequests) * 100).rounded()))%"
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                summaryGrid
+                rangePicker
+                dailyChart
+                modelBreakdown
+                recentRequests
+                clearButton
+            }
+            .padding(.horizontal, Spacing.screenPadding)
+            .padding(.vertical, Spacing.md)
+        }
+        .background(theme.background.ignoresSafeArea())
+        .navigationTitle("用量统计")
+        .navigationBarTitleDisplayMode(.inline)
+        .alert("清除用量统计？", isPresented: $showClearConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("清除", role: .destructive) {
+                store.clearAll()
+            }
+        } message: {
+            Text("这只会清除本机保存的统计记录，不会删除任何聊天。")
+        }
+    }
+
+    private var summaryGrid: some View {
+        LazyVGrid(columns: [
+            GridItem(.flexible(), spacing: 10),
+            GridItem(.flexible(), spacing: 10),
+            GridItem(.flexible(), spacing: 10)
+        ], spacing: 10) {
+            metricCard(
+                title: "总 Token",
+                value: TokenUsageHistoryStore.compactTokenCount(totalTokens),
+                icon: "number.circle.fill",
+                tint: theme.brandPrimary
+            )
+            metricCard(
+                title: "请求",
+                value: "\(totalRequests)",
+                icon: "arrow.up.arrow.down.circle.fill",
+                tint: .cyan
+            )
+            metricCard(
+                title: "精确记录",
+                value: exactRatioText,
+                icon: "checkmark.seal.fill",
+                tint: theme.success
+            )
+        }
+    }
+
+    private var rangePicker: some View {
+        Picker("范围", selection: $selectedRange) {
+            ForEach(TokenUsageRange.allCases) { range in
+                Text(range.title).tag(range)
+            }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    private var dailyChart: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("每日 Token", icon: "chart.bar.xaxis")
+
+            if summaries.isEmpty {
+                emptyState("暂无用量数据", icon: "chart.bar.xaxis")
+                    .frame(height: 220)
+            } else {
+                Chart {
+                    ForEach(summaries) { summary in
+                        BarMark(
+                            x: .value("日期", summary.date, unit: .day),
+                            y: .value("输入", summary.inputTokens)
+                        )
+                        .foregroundStyle(theme.brandPrimary.gradient)
+
+                        BarMark(
+                            x: .value("日期", summary.date, unit: .day),
+                            y: .value("输出", summary.outputTokens)
+                        )
+                        .foregroundStyle(Color.cyan.gradient)
+
+                        if summary.mediaTokens > 0 {
+                            BarMark(
+                                x: .value("日期", summary.date, unit: .day),
+                                y: .value("媒体", summary.mediaTokens)
+                            )
+                            .foregroundStyle(Color.purple.gradient)
+                        }
+                    }
+                }
+                .chartYAxis {
+                    AxisMarks { value in
+                        AxisGridLine().foregroundStyle(theme.divider.opacity(0.5))
+                        AxisValueLabel {
+                            if let intValue = value.as(Int.self) {
+                                Text(TokenUsageHistoryStore.compactTokenCount(intValue))
+                                    .scaledFont(size: 10)
+                                    .foregroundStyle(theme.textTertiary)
+                            }
+                        }
+                    }
+                }
+                .frame(height: 220)
+            }
+        }
+        .usagePanel(theme: theme)
+    }
+
+    private var modelBreakdown: some View {
+        let models = store.modelSummaries(days: selectedRange.rawValue)
+        let maxTokens = max(models.first?.totalTokens ?? 1, 1)
+
+        return VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("模型占比", icon: "cpu")
+
+            if models.isEmpty {
+                emptyState("还没有模型记录", icon: "cpu")
+            } else {
+                ForEach(models.prefix(8)) { model in
+                    VStack(spacing: 6) {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(color(for: model))
+                                .frame(width: 8, height: 8)
+                            Text(model.displayName)
+                                .scaledFont(size: 13, weight: .semibold)
+                                .foregroundStyle(theme.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Text(TokenUsageHistoryStore.compactTokenCount(model.totalTokens))
+                                .scaledFont(size: 12, weight: .semibold)
+                                .monospacedDigit()
+                                .foregroundStyle(theme.textSecondary)
+                            Text("\(model.requestCount) 次")
+                                .scaledFont(size: 11, weight: .medium)
+                                .foregroundStyle(theme.textTertiary)
+                        }
+
+                        GeometryReader { proxy in
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(color(for: model).opacity(0.32))
+                                .frame(width: proxy.size.width * CGFloat(model.totalTokens) / CGFloat(maxTokens))
+                        }
+                        .frame(height: 6)
+                    }
+                }
+            }
+        }
+        .usagePanel(theme: theme)
+    }
+
+    private var recentRequests: some View {
+        let recent = Array(store.records.suffix(10).reversed())
+
+        return VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("最近请求", icon: "clock.arrow.circlepath")
+
+            if recent.isEmpty {
+                emptyState("完成一次对话后会显示在这里", icon: "bubble.left.and.text.bubble.right")
+            } else {
+                ForEach(recent) { record in
+                    HStack(spacing: 10) {
+                        Image(systemName: record.isExact ? "checkmark.circle.fill" : "questionmark.circle.fill")
+                            .scaledFont(size: 14, weight: .semibold)
+                            .foregroundStyle(record.isExact ? theme.success : theme.warning)
+                            .frame(width: 22)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(record.model)
+                                .scaledFont(size: 13, weight: .semibold)
+                                .foregroundStyle(theme.textPrimary)
+                                .lineLimit(1)
+                            Text(record.date.formatted(date: .abbreviated, time: .shortened))
+                                .scaledFont(size: 11, weight: .medium)
+                                .foregroundStyle(theme.textTertiary)
+                        }
+
+                        Spacer()
+
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(TokenUsageHistoryStore.compactTokenCount(record.totalTokens))
+                                .scaledFont(size: 13, weight: .semibold)
+                                .monospacedDigit()
+                                .foregroundStyle(theme.textPrimary)
+                            Text(record.provider)
+                                .scaledFont(size: 11, weight: .medium)
+                                .foregroundStyle(theme.textTertiary)
+                        }
+                    }
+
+                    if record.id != recent.last?.id {
+                        Divider().overlay(theme.divider.opacity(0.5))
+                    }
+                }
+            }
+        }
+        .usagePanel(theme: theme)
+    }
+
+    private var clearButton: some View {
+        Button(role: .destructive) {
+            showClearConfirmation = true
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "trash")
+                Text("清除本机统计")
+            }
+            .scaledFont(size: 14, weight: .semibold)
+            .foregroundStyle(theme.error)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(theme.error.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.button, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(store.records.isEmpty)
+        .opacity(store.records.isEmpty ? 0.45 : 1)
+    }
+
+    private func metricCard(title: String, value: String, icon: String, tint: Color) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon)
+                .scaledFont(size: 18, weight: .semibold)
+                .foregroundStyle(tint)
+            Text(value)
+                .scaledFont(size: 17, weight: .bold)
+                .monospacedDigit()
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(title)
+                .scaledFont(size: 10, weight: .medium)
+                .foregroundStyle(theme.textTertiary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 14)
+        .background(theme.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.button, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: CornerRadius.button, style: .continuous)
+                .strokeBorder(theme.cardBorder, lineWidth: 0.5)
+        )
+    }
+
+    private func sectionTitle(_ title: String, icon: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .scaledFont(size: 13, weight: .semibold)
+                .foregroundStyle(theme.brandPrimary)
+            Text(title)
+                .scaledFont(size: 15, weight: .semibold)
+                .foregroundStyle(theme.textPrimary)
+            Spacer()
+        }
+    }
+
+    private func emptyState(_ title: String, icon: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon)
+                .scaledFont(size: 28, weight: .medium)
+                .foregroundStyle(theme.textTertiary)
+            Text(title)
+                .scaledFont(size: 13, weight: .medium)
+                .foregroundStyle(theme.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
+    }
+
+    private func color(for model: TokenUsageModelSummary) -> Color {
+        let palette: [Color] = [theme.brandPrimary, .cyan, theme.success, .purple, .pink, .orange, .mint, .indigo]
+        let index = abs(model.id.hashValue) % palette.count
+        return palette[index]
+    }
+}
+
+private extension View {
+    func usagePanel(theme: AppTheme) -> some View {
+        self
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(theme.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous)
+                    .strokeBorder(theme.cardBorder, lineWidth: 0.5)
+            )
+    }
 }
 
 // MARK: - Preview

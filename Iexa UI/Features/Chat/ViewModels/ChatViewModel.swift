@@ -12027,6 +12027,19 @@ final class ChatViewModel {
                 "estimated": (exactInput == nil && exactOutput == nil) ? 1 : 0
             ]
         )
+
+        TokenUsageHistoryStore.shared.record(
+            provider: currentProviderType?.rawValue ?? "unknown",
+            model: selectedModel?.shortName ?? selectedModel?.name ?? selectedModelId ?? conversation?.model ?? "unknown",
+            inputTokens: exactInput ?? estimatedInput,
+            outputTokens: exactOutput ?? estimatedOutput,
+            cachedTokens: exactCached ?? 0,
+            mediaTokens: mediaTokens,
+            imageCount: mediaKind == .image ? mediaCount : 0,
+            videoCount: mediaKind == .video ? mediaCount : 0,
+            isExact: exactInput != nil || exactOutput != nil,
+            usage: usage
+        )
     }
 
     private static func estimatedTokenCount(for text: String) -> Int {

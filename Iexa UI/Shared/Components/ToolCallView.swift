@@ -5,6 +5,64 @@ import UniformTypeIdentifiers
 
 private let vizLog = Logger(subsystem: "com.openui", category: "VizPipeline")
 
+fileprivate struct ToolCallPresentation {
+    let title: String
+    let subtitle: String
+    let symbol: String
+    let tint: Color
+
+    static func resolve(name: String, arguments: String?) -> ToolCallPresentation {
+        let displayName = Self.displayName(for: name)
+        let normalized = displayName
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+            .lowercased()
+
+        if normalized.contains("web_search") || normalized.contains("search_web") {
+            return ToolCallPresentation(title: "网页搜索", subtitle: displayName, symbol: "magnifyingglass", tint: .cyan)
+        }
+        if normalized.contains("browser") || normalized.contains("fetch") || normalized.contains("read_page") {
+            return ToolCallPresentation(title: "读取网页", subtitle: displayName, symbol: "safari", tint: .blue)
+        }
+        if normalized.contains("python") {
+            return ToolCallPresentation(title: "Python 执行", subtitle: displayName, symbol: "terminal", tint: .green)
+        }
+        if normalized.contains("code") || normalized.contains("shell") || normalized.contains("terminal") {
+            return ToolCallPresentation(title: "代码执行", subtitle: displayName, symbol: "chevron.left.forwardslash.chevron.right", tint: .green)
+        }
+        if normalized.contains("image") || normalized.contains("photo") || normalized.contains("camera") {
+            return ToolCallPresentation(title: "图像处理", subtitle: displayName, symbol: "photo", tint: .purple)
+        }
+        if normalized.contains("calendar") {
+            return ToolCallPresentation(title: "日历", subtitle: displayName, symbol: "calendar", tint: .orange)
+        }
+        if normalized.contains("weather") {
+            return ToolCallPresentation(title: "天气", subtitle: displayName, symbol: "cloud.sun", tint: .blue)
+        }
+        if normalized.contains("memory") {
+            return ToolCallPresentation(title: "记忆", subtitle: displayName, symbol: "brain.head.profile", tint: .purple)
+        }
+        if normalized.contains("file") || normalized.contains("document") {
+            return ToolCallPresentation(title: "文件", subtitle: displayName, symbol: "doc.text", tint: .indigo)
+        }
+        if normalized.contains("url") || normalized.contains("link") {
+            return ToolCallPresentation(title: "打开链接", subtitle: displayName, symbol: "link", tint: .cyan)
+        }
+        if normalized.contains("mail") || normalized.contains("email") {
+            return ToolCallPresentation(title: "邮件", subtitle: displayName, symbol: "envelope", tint: .blue)
+        }
+
+        return ToolCallPresentation(title: displayName, subtitle: "工具调用", symbol: "wrench.and.screwdriver", tint: .teal)
+    }
+
+    private static func displayName(for name: String) -> String {
+        let raw = name.split(separator: "__").last.map(String.init) ?? name
+        return raw
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+    }
+}
+
 // MARK: - Tool Call Data
 
 /// Represents a parsed tool call extracted from `<details>` HTML blocks
@@ -22,6 +80,10 @@ struct ToolCallData: Identifiable {
     /// A display-friendly name (replaces underscores with spaces).
     var displayName: String {
         name.replacingOccurrences(of: "_", with: " ")
+    }
+
+    fileprivate var presentation: ToolCallPresentation {
+        ToolCallPresentation.resolve(name: name, arguments: arguments)
     }
 }
 
@@ -2166,6 +2228,7 @@ struct ToolCallView: View {
     private var hasEmbeds: Bool { !toolCall.embeds.isEmpty }
 
     var body: some View {
+        let presentation = toolCall.presentation
         VStack(alignment: .leading, spacing: 0) {
             // ── Header (tappable to expand/collapse) ─────────────────────
             Button {
@@ -2173,35 +2236,38 @@ struct ToolCallView: View {
                     isExpanded.toggle()
                 }
             } label: {
-                HStack(spacing: 8) {
-                    // Status indicator
-                    if toolCall.isDone {
-                        Image(systemName: "checkmark.circle.fill")
-                            .scaledFont(size: 14)
-                            .foregroundStyle(theme.success)
-                    } else {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .tint(theme.brandPrimary)
+                HStack(spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(presentation.tint.opacity(0.14))
+                            .frame(width: 30, height: 30)
+                        Image(systemName: presentation.symbol)
+                            .scaledFont(size: 13, weight: .semibold)
+                            .foregroundStyle(presentation.tint)
                     }
 
-                    // "View Result from tool_name" — matches Iexa native server web UI pattern
-                    (Text("View Result from ")
-                        .foregroundStyle(theme.textTertiary)
-                     + Text(toolCall.name)
-                        .foregroundStyle(theme.textPrimary)
-                        .fontWeight(.semibold))
-                        .scaledFont(size: 13, weight: .medium)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(presentation.title)
+                            .scaledFont(size: 13, weight: .semibold)
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+
+                        Text(presentation.subtitle)
+                            .scaledFont(size: 11, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
 
                     Spacer()
+
+                    toolStatusPill
 
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                         .scaledFont(size: 10, weight: .semibold)
                         .foregroundStyle(theme.textTertiary)
                 }
-                .padding(.vertical, 10)
+                .padding(.vertical, 8)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -2262,6 +2328,27 @@ struct ToolCallView: View {
             }
         }
     }
+
+    private var toolStatusPill: some View {
+        HStack(spacing: 4) {
+            if toolCall.isDone {
+                Image(systemName: "checkmark")
+                    .scaledFont(size: 9, weight: .bold)
+                Text("完成")
+            } else {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(theme.brandPrimary)
+                Text("运行中")
+            }
+        }
+        .scaledFont(size: 10, weight: .semibold)
+        .foregroundStyle(toolCall.isDone ? theme.success : theme.brandPrimary)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background((toolCall.isDone ? theme.success : theme.brandPrimary).opacity(0.10))
+        .clipShape(Capsule())
+    }
 }
 
 // MARK: - Collapsed Tool Call Group
@@ -2286,11 +2373,16 @@ private struct CollapsedToolCallGroup: View {
         var seen = Set<String>()
         var unique: [String] = []
         for call in calls {
-            if seen.insert(call.name).inserted {
-                unique.append(call.name)
+            let title = call.presentation.title
+            if seen.insert(title).inserted {
+                unique.append(title)
             }
         }
         return unique.joined(separator: ", ")
+    }
+
+    private var groupTint: Color {
+        calls.first?.presentation.tint ?? theme.brandPrimary
     }
 
     var body: some View {
@@ -2301,36 +2393,38 @@ private struct CollapsedToolCallGroup: View {
                     isExpanded.toggle()
                 }
             } label: {
-                HStack(spacing: 8) {
-                    if allDone {
-                        Image(systemName: "checkmark.circle.fill")
-                            .scaledFont(size: 14)
-                            .foregroundStyle(theme.success)
-                    } else {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .tint(theme.brandPrimary)
+                HStack(spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(groupTint.opacity(0.14))
+                            .frame(width: 30, height: 30)
+                        Image(systemName: "wrench.and.screwdriver.fill")
+                            .scaledFont(size: 13, weight: .semibold)
+                            .foregroundStyle(groupTint)
                     }
 
-                    (Text("Explored ")
-                        .foregroundStyle(theme.textTertiary)
-                     + Text("\(calls.count) ")
-                        .foregroundStyle(theme.textPrimary)
-                        .fontWeight(.semibold)
-                     + Text(groupLabel)
-                        .foregroundStyle(theme.textPrimary)
-                        .fontWeight(.semibold))
-                        .scaledFont(size: 13, weight: .medium)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("执行了 \(calls.count) 个工具")
+                            .scaledFont(size: 13, weight: .semibold)
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+
+                        Text(groupLabel)
+                            .scaledFont(size: 11, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
 
                     Spacer()
+
+                    groupStatusPill
 
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                         .scaledFont(size: 10, weight: .semibold)
                         .foregroundStyle(theme.textTertiary)
                 }
-                .padding(.vertical, 10)
+                .padding(.vertical, 8)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -2354,6 +2448,27 @@ private struct CollapsedToolCallGroup: View {
             }
         }
         .padding(.horizontal, 12)
+    }
+
+    private var groupStatusPill: some View {
+        HStack(spacing: 4) {
+            if allDone {
+                Image(systemName: "checkmark")
+                    .scaledFont(size: 9, weight: .bold)
+                Text("完成")
+            } else {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(theme.brandPrimary)
+                Text("运行中")
+            }
+        }
+        .scaledFont(size: 10, weight: .semibold)
+        .foregroundStyle(allDone ? theme.success : theme.brandPrimary)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background((allDone ? theme.success : theme.brandPrimary).opacity(0.10))
+        .clipShape(Capsule())
     }
 }
 
