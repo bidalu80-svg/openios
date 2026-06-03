@@ -7860,11 +7860,11 @@ struct UserMessageContentView: View {
                     )
                 }
             }
-            .overlay(alignment: .bottom) {
+            .mask {
                 if shouldCollapse && !isExpanded {
-                    collapsedTextFade
-                        .frame(height: 46)
-                        .allowsHitTesting(false)
+                    collapsedTextMask
+                } else {
+                    Rectangle().fill(.white)
                 }
             }
 
@@ -7895,12 +7895,13 @@ struct UserMessageContentView: View {
         }
     }
 
-    private var collapsedTextFade: LinearGradient {
+    private var collapsedTextMask: LinearGradient {
         LinearGradient(
             stops: [
-                .init(color: .clear, location: 0.0),
-                .init(color: theme.chatBubbleUser.opacity(theme.isDark ? 0.14 : 0.20), location: 0.34),
-                .init(color: theme.chatBubbleUser.opacity(theme.isDark ? 0.46 : 0.68), location: 1.0)
+                .init(color: .white, location: 0.0),
+                .init(color: .white, location: 0.68),
+                .init(color: .white.opacity(0.82), location: 0.82),
+                .init(color: .clear, location: 1.0)
             ],
             startPoint: .top,
             endPoint: .bottom
