@@ -499,9 +499,13 @@ struct SettingsView: View {
     }
 
     private func openOfficialChannel() {
-        guard let url = URL(string: "https://t.me/liunewapi") else { return }
+        guard let telegramURL = URL(string: "tg://resolve?domain=liunewapi"),
+              let webURL = URL(string: "https://t.me/liunewapi") else { return }
         Haptics.play(.light)
-        UIApplication.shared.open(url)
+        UIApplication.shared.open(telegramURL) { didOpen in
+            guard !didOpen else { return }
+            UIApplication.shared.open(webURL)
+        }
     }
 }
 
