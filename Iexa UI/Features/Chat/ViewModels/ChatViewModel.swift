@@ -1555,6 +1555,206 @@ final class ChatViewModel {
         return trimmed
     }
 
+    private static func initialConversationTitle(
+        from text: String,
+        files: [ChatMessageFile] = [],
+        fallback: String = "新对话"
+    ) -> String {
+        let seed = normalizedConversationTitleSeed(text)
+        guard !seed.isEmpty else {
+            return initialConversationTitleFromFile(files.first) ?? fallback
+        }
+
+        let lower = seed.lowercased()
+        func has(_ keywords: [String]) -> Bool {
+            keywords.contains { lower.contains($0.lowercased()) }
+        }
+        func title(_ value: String) -> String {
+            clampedConversationTitle(value, fallback: fallback)
+        }
+
+        if has(["你好", "您好", "hello", "hi", "在吗"]) && seed.count <= 12 {
+            return "回复问候"
+        }
+        if has(["你会什么", "能做什么", "可以做什么"]) {
+            return "询问能力"
+        }
+        if has(["天气", "weather"]) {
+            if let location = conversationTitleKeywordPrefix(in: seed, keyword: "天气") {
+                return title("查询\(location)天气")
+            }
+            return "查询天气"
+        }
+        if has(["小红书", "xhs", "xhslink"]) && has(["解析", "无水印", "下载", "链接", "视频", "图文"]) {
+            return has(["无水印"]) ? "解析小红书无水印" : "解析小红书链接"
+        }
+        if has(["抖音", "douyin"]) && has(["解析", "口令", "无水印", "下载", "链接", "视频"]) {
+            return has(["口令"]) ? "解析抖音口令" : "解析抖音链接"
+        }
+        if has(["minis"]) && has(["源码", "兼容", "对比", "怎么做"]) {
+            return "对比 Minis 源码"
+        }
+        if has(["agent", "智能体", "local alpine", "busybox", "工具调用"]) {
+            if has(["兼容", "busybox"]) { return "优化 Agent 兼容" }
+            if has(["重复", "两遍"]) { return "修复 Agent 重复执行" }
+            return "优化 Agent 体验"
+        }
+        if has(["闪屏", "白屏", "卡顿", "掉帧", "看不见", "空白", "滑动才回来", "键盘"]) {
+            return "修复聊天 UI"
+        }
+        if has(["崩溃", "闪退", "crash"]) {
+            return "修复崩溃问题"
+        }
+        if has(["修复", "报错", "bug", "错误"]) {
+            return has(["代码", ".py", ".swift", "lua", "python"]) ? "修复代码问题" : "修复问题"
+        }
+        if has(["画", "生图", "生成图片", "生成一张", "改图", "图生图", "编辑图片"]) {
+            return has(["改图", "图生图", "编辑图片", "换成"]) ? "编辑图片" : "生成图片"
+        }
+        if has(["apk", "反编译"]) {
+            return "分析 APK 功能"
+        }
+        if has(["编译", "github actions", "actions", "run"]) {
+            return "编译测试"
+        }
+        if has(["联网", "搜索", "查一下", "查询", "最新", "来源"]) {
+            return compactIntentTitle(from: seed, defaultTitle: "联网查询", leadingVerb: "查询")
+        }
+        if has(["翻译", "translate"]) {
+            return "翻译内容"
+        }
+        if has(["总结", "整理", "归纳"]) {
+            return "总结内容"
+        }
+        if has(["删除", "删掉", "移除"]) {
+            return "删除文件"
+        }
+        if has(["爬虫"]) {
+            return "编写爬虫"
+        }
+        if has(["写", "创建", "生成", "运行", "脚本", "代码", "python", "lua", "swift", ".py", ".lua", ".swift"]) {
+            if let language = conversationTitleCodeLanguage(in: lower) {
+                if has(["运行", "执行"]) { return "运行\(language)脚本" }
+                if has(["修改", "改写", "重构"]) { return "修改\(language)代码" }
+                return "编写\(language)代码"
+            }
+            return has(["运行", "执行"]) ? "运行脚本" : "编写代码"
+        }
+        if has(["pwd", "ls ", "ls -", "目录", "文件列表"]) {
+            return "列出目录"
+        }
+
+        return title(compactConversationTitleSeed(seed))
+    }
+
+    private static func normalizedConversationTitleSeed(_ text: String) -> String {
+        var seed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !seed.isEmpty else { return "" }
+
+        let replacements: [(String, String)] = [
+            (#"```[\s\S]*?```"#, " "),
+            (#"!\[[^\]]*\]\([^)]+\)"#, " "),
+            (#"\[([^\]]{1,48})\]\([^)]+\)"#, "$1"),
+            (#"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+"#, " "),
+            (#"https?://[^\s，。！？!?)）\]]+"#, " "),
+            (#"\s+"#, " ")
+        ]
+        for (pattern, replacement) in replacements {
+            seed = seed.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
+        }
+
+        let sentenceSeparators = CharacterSet(charactersIn: "\n\r。！？!?；;")
+        let firstSentence = seed
+            .components(separatedBy: sentenceSeparators)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? seed
+        return removeConversationTitleFillers(firstSentence)
+    }
+
+    private static func initialConversationTitleFromFile(_ file: ChatMessageFile?) -> String? {
+        guard let file else { return nil }
+        let name = file.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let ext = (name as NSString).pathExtension.lowercased()
+        let base = (name as NSString).deletingPathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if file.type == "image" || file.contentType?.hasPrefix("image/") == true {
+            return "查看图片"
+        }
+        if ext == "pdf" {
+            return "阅读 PDF"
+        }
+        if ["py", "lua", "swift", "js", "ts", "java", "kt", "go", "rs", "cpp", "c", "h", "html", "css", "json", "md"].contains(ext) {
+            return base.isEmpty ? "查看代码文件" : clampedConversationTitle("查看\(base)", fallback: "查看代码文件")
+        }
+        return base.isEmpty ? "查看文件" : clampedConversationTitle("查看\(base)", fallback: "查看文件")
+    }
+
+    private static func conversationTitleCodeLanguage(in lowercasedText: String) -> String? {
+        let pairs: [(String, String)] = [
+            ("python", "Python"), (".py", "Python"),
+            ("lua", "Lua"), (".lua", "Lua"),
+            ("swift", "Swift"), (".swift", "Swift"),
+            ("javascript", "JavaScript"), ("js", "JavaScript"),
+            ("typescript", "TypeScript"), ("ts", "TypeScript"),
+            ("java", "Java"), ("kotlin", "Kotlin"),
+            ("shell", "Shell"), ("bash", "Shell"), ("sh", "Shell")
+        ]
+        return pairs.first { lowercasedText.contains($0.0) }?.1
+    }
+
+    private static func conversationTitleKeywordPrefix(in seed: String, keyword: String) -> String? {
+        guard let range = seed.range(of: keyword) else { return nil }
+        let prefix = removeConversationTitleFillers(String(seed[..<range.lowerBound]))
+            .replacingOccurrences(of: "预报", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard prefix.count >= 2, prefix.count <= 10 else { return nil }
+        return prefix
+    }
+
+    private static func compactIntentTitle(from seed: String, defaultTitle: String, leadingVerb: String) -> String {
+        let compact = compactConversationTitleSeed(seed)
+        guard !compact.isEmpty else { return defaultTitle }
+        if compact.hasPrefix(leadingVerb) {
+            return clampedConversationTitle(compact, fallback: defaultTitle)
+        }
+        return clampedConversationTitle("\(leadingVerb)\(compact)", fallback: defaultTitle)
+    }
+
+    private static func compactConversationTitleSeed(_ seed: String) -> String {
+        var value = removeConversationTitleFillers(seed)
+        let separators = CharacterSet(charactersIn: "，,：:、|/\\()（）[]【】{}<>《》\"“”'‘’")
+        value = value.components(separatedBy: separators).first ?? value
+        value = removeConversationTitleFillers(value)
+        return clampedConversationTitle(value, fallback: "")
+    }
+
+    private static func removeConversationTitleFillers(_ text: String) -> String {
+        var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixes = [
+            "帮我", "给我", "请帮我", "请", "麻烦你", "麻烦", "你能不能", "能不能",
+            "我想", "我要", "我需要", "把这个", "把那个", "把", "这个", "那个",
+            "查一下", "查下", "查询一下", "查询", "搜索一下", "搜索", "看一下", "看看",
+            "一下", "继续", "然后", "还有就是", "还有"
+        ]
+        var changed = true
+        while changed {
+            changed = false
+            for prefix in prefixes where value.hasPrefix(prefix) {
+                value.removeFirst(prefix.count)
+                value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                changed = true
+            }
+        }
+        return value
+    }
+
+    private static func clampedConversationTitle(_ value: String, fallback: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return fallback }
+        if trimmed.count <= 18 { return trimmed }
+        return String(trimmed.prefix(18))
+    }
+
     private func inlineImageDataURL(data: Data, fileName: String) -> String {
         let capped = FileAttachmentService.downsampleForUpload(data: data)
         return "data:image/jpeg;base64,\(capped.base64EncodedString())"
@@ -5104,10 +5304,7 @@ final class ChatViewModel {
 
         // Ensure conversation exists on server (skip for temporary chats)
         if conversation == nil {
-            let chatTitleSource = messageText.isEmpty
-                ? (messageFiles.first?.name ?? "文件")
-                : messageText
-            let chatTitle = String(chatTitleSource.prefix(50))
+            let chatTitle = Self.initialConversationTitle(from: messageText, files: messageFiles)
             var serverId: String?
             if !isTemporaryChat && !isOpenAICompatibleProvider {
                 do {
@@ -7107,7 +7304,7 @@ final class ChatViewModel {
         })?.id
 
         if conversation == nil {
-            let chatTitle = String(userMessage.content.prefix(50))
+            let chatTitle = Self.initialConversationTitle(from: userMessage.content, fallback: "本地命令")
             conversation = Conversation(
                 id: isTemporaryChat ? "local:\(UUID().uuidString)" : UUID().uuidString,
                 title: chatTitle,
@@ -7347,7 +7544,7 @@ final class ChatViewModel {
         })?.id
 
         if conversation == nil {
-            let title = userMessage.content.isEmpty ? "运行代码" : String(userMessage.content.prefix(50))
+            let title = Self.initialConversationTitle(from: userMessage.content, fallback: "运行代码")
             conversation = Conversation(
                 id: isTemporaryChat ? "local:\(UUID().uuidString)" : UUID().uuidString,
                 title: title,
