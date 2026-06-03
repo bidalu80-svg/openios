@@ -11,6 +11,7 @@ enum EnhancedTextSelectionAction: String, CaseIterable {
     case ask
     case lookUp
     case searchWeb
+    case share
 
     var title: String {
         switch self {
@@ -20,6 +21,8 @@ enum EnhancedTextSelectionAction: String, CaseIterable {
             "查询"
         case .searchWeb:
             "搜索网页"
+        case .share:
+            "分享"
         }
     }
 
@@ -31,6 +34,8 @@ enum EnhancedTextSelectionAction: String, CaseIterable {
             #selector(LTXLabel.iexaLookUpSelectedText)
         case .searchWeb:
             #selector(LTXLabel.iexaSearchSelectedTextOnWeb)
+        case .share:
+            #selector(LTXLabel.iexaShareSelectedText)
         }
     }
 }
@@ -51,6 +56,11 @@ enum EnhancedTextSelectionMenu {
             cls: UIMenuController.self,
             original: #selector(setter: UIMenuController.menuItems),
             replacement: #selector(UIMenuController.iexa_setMenuItems(_:))
+        )
+        swizzle(
+            cls: LTXLabel.self,
+            original: #selector(UIResponder.buildMenu(with:)),
+            replacement: #selector(LTXLabel.iexa_buildMenu(with:))
         )
         swizzle(
             cls: LTXLabel.self,
@@ -86,16 +96,37 @@ enum EnhancedTextSelectionMenu {
     static func augmentCurrentMenu() {
         let menuController = UIMenuController.shared
         menuController.menuItems = augmentedMenuItems(from: menuController.menuItems)
+        menuController.update()
     }
 
     static func shouldAugmentMenuItems(_ items: [UIMenuItem]?) -> Bool {
         guard let items, !items.isEmpty else { return false }
         let litextSelectors = Set([
             "copyMenuItemTapped",
+            "copyMenuItemTapped:",
             "selectAllTapped",
-            "shareMenuItemTapped"
+            "selectAllTapped:",
+            "shareMenuItemTapped",
+            "shareMenuItemTapped:",
+            "copy:",
+            "selectAll:",
+            "_share:"
         ])
-        return items.contains { litextSelectors.contains(NSStringFromSelector($0.action)) }
+        if items.contains(where: { litextSelectors.contains(NSStringFromSelector($0.action)) }) {
+            return true
+        }
+
+        let selectionTitles = Set([
+            "Copy",
+            "Select All",
+            "Share",
+            "复制",
+            "拷贝",
+            "全选",
+            "共享",
+            "分享"
+        ])
+        return items.contains { selectionTitles.contains($0.title) }
     }
 
     static func augmentedMenuItems(from items: [UIMenuItem]?) -> [UIMenuItem] {
@@ -111,6 +142,23 @@ enum EnhancedTextSelectionMenu {
 
         guard !customItems.isEmpty else { return existing }
         return [customItems[0]] + existing + Array(customItems.dropFirst())
+    }
+
+    static func commands() -> [UIMenuElement] {
+        EnhancedTextSelectionAction.allCases.map { action in
+            UICommand(title: action.title, action: action.selector)
+        }
+    }
+
+    static func installCommands(into builder: UIMenuBuilder) {
+        let menu = UIMenu(
+            title: "",
+            identifier: .iexaTextSelectionActions,
+            options: .displayInline,
+            children: commands()
+        )
+        builder.remove(menu: .iexaTextSelectionActions)
+        builder.insertChild(menu, atStartOfMenu: .standardEdit)
     }
 
     static func post(_ action: EnhancedTextSelectionAction, text: String) {
@@ -163,6 +211,10 @@ fileprivate extension LTXLabel {
         iexa_performSelectionAction(.searchWeb)
     }
 
+    @objc func iexaShareSelectedText(_ sender: Any?) {
+        iexa_performSelectionAction(.share)
+    }
+
     @objc func iexaLookUpSelectedText(_ sender: Any?) {
         guard let text = EnhancedTextSelectionMenu.selectedText(from: self) else { return }
         UIMenuController.shared.setMenuVisible(false, animated: true)
@@ -189,6 +241,12 @@ fileprivate extension LTXLabel {
         }
         return iexa_canPerformAction(action, withSender: sender)
     }
+
+    @objc func iexa_buildMenu(with builder: UIMenuBuilder) {
+        iexa_buildMenu(with: builder)
+        guard EnhancedTextSelectionMenu.selectedText(from: self) != nil else { return }
+        EnhancedTextSelectionMenu.installCommands(into: builder)
+    }
 }
 
 fileprivate extension UIMenuController {
@@ -201,11 +259,41 @@ fileprivate extension UIMenuController {
     }
 
     @objc func iexa_showMenu(from targetView: UIView, rect targetRect: CGRect) {
-        if targetView is LTXLabel {
+        if targetView.iexaSelectionLabel != nil {
             EnhancedTextSelectionMenu.augmentCurrentMenu()
+            DispatchQueue.main.async {
+                EnhancedTextSelectionMenu.augmentCurrentMenu()
+            }
         }
         iexa_showMenu(from: targetView, rect: targetRect)
     }
+}
+
+fileprivate extension UIView {
+    var iexaSelectionLabel: LTXLabel? {
+        if let label = self as? LTXLabel {
+            return label
+        }
+
+        var ancestor = superview
+        while let current = ancestor {
+            if let label = current as? LTXLabel {
+                return label
+            }
+            ancestor = current.superview
+        }
+
+        for subview in subviews {
+            if let label = subview.iexaSelectionLabel {
+                return label
+            }
+        }
+        return nil
+    }
+}
+
+fileprivate extension UIMenu.Identifier {
+    static let iexaTextSelectionActions = UIMenu.Identifier("com.openui.textSelection.actions")
 }
 
 fileprivate extension UIResponder {
