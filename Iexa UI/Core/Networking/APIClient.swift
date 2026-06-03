@@ -4710,6 +4710,50 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: - Title Generation
 
+    /// Generates a concise conversation title through the active chat completion provider.
+    /// This is intentionally separate from the legacy task endpoint so local/direct
+    /// providers can title chats without any extra background service.
+    func generateConversationTitle(model: String, messages: [[String: Any]]) async throws -> String? {
+        guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let transcript = Self.conversationTitleTranscript(from: messages)
+        guard !transcript.isEmpty else { return nil }
+
+        let systemPrompt = """
+        You generate concise chat titles.
+        Return only a raw JSON object: {"title":"..."}
+        Use the conversation's primary language.
+        Make the title specific to the actual topic, not a generic greeting.
+        Do not copy the first user sentence verbatim unless it is already a good title.
+        Keep Chinese titles within 6-18 characters, and English titles within 3-8 words.
+        Do not use emoji, markdown, quotes outside JSON, or trailing punctuation.
+        """
+        let userPrompt = """
+        Conversation:
+        <conversation>
+        \(transcript)
+        </conversation>
+        """
+
+        let request = ChatCompletionRequest(
+            model: model,
+            messages: [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": userPrompt]
+            ],
+            stream: false
+        )
+
+        let json = try await network.requestJSON(
+            path: chatCompletionsPath,
+            method: .post,
+            body: chatCompletionBody(for: request),
+            timeout: 20
+        )
+
+        guard let responseText = extractAssistantText(from: json) else { return nil }
+        return Self.parseGeneratedConversationTitle(responseText)
+    }
+
     /// Generates a title via `POST /api/v1/tasks/title/completions`.
     /// Handles multiple response formats across Iexa native server versions.
     func generateTitle(model: String, messages: [[String: Any]], chatId: String? = nil) async throws -> String? {
@@ -4908,6 +4952,105 @@ final class APIClient: @unchecked Sendable {
         }
 
         return nil
+    }
+
+    private static func conversationTitleTranscript(from messages: [[String: Any]]) -> String {
+        messages.prefix(8).compactMap { message -> String? in
+            guard let rawRole = message["role"] as? String else { return nil }
+            let role = rawRole.lowercased()
+            guard role == "user" || role == "assistant" else { return nil }
+            let content = titleContentText(from: message["content"])
+            guard !content.isEmpty else { return nil }
+            let label = role == "assistant" ? "Assistant" : "User"
+            return "\(label): \(clippedTitleContext(content, maxCharacters: 1_500))"
+        }.joined(separator: "\n\n")
+    }
+
+    private static func titleContentText(from value: Any?) -> String {
+        if let text = value as? String {
+            return normalizedTitleContent(text)
+        }
+        if let parts = value as? [[String: Any]] {
+            let text = parts.compactMap { part -> String? in
+                if let text = part["text"] as? String { return text }
+                if let text = part["content"] as? String { return text }
+                return nil
+            }.joined(separator: "\n")
+            return normalizedTitleContent(text)
+        }
+        return ""
+    }
+
+    private static func normalizedTitleContent(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: #"```[\s\S]*?```"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"<details[\s\S]*?</details>"#, with: " ", options: [.regularExpression, .caseInsensitive])
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func clippedTitleContext(_ text: String, maxCharacters: Int) -> String {
+        guard text.count > maxCharacters else { return text }
+        return String(text.prefix(maxCharacters)) + "..."
+    }
+
+    private static func parseGeneratedConversationTitle(_ raw: String) -> String? {
+        let trimmed = raw
+            .replacingOccurrences(of: "```json", with: "")
+            .replacingOccurrences(of: "```JSON", with: "")
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let title = generatedConversationTitle(fromJSONString: trimmed) {
+            return cleanedGeneratedConversationTitle(title)
+        }
+
+        if let start = trimmed.firstIndex(of: "{"),
+           let end = trimmed.lastIndex(of: "}"),
+           start <= end,
+           let title = generatedConversationTitle(fromJSONString: String(trimmed[start...end])) {
+            return cleanedGeneratedConversationTitle(title)
+        }
+
+        return cleanedGeneratedConversationTitle(trimmed)
+    }
+
+    private static func generatedConversationTitle(fromJSONString value: String) -> String? {
+        guard let data = value.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        for key in ["title", "name", "conversation_title", "conversationTitle"] {
+            if let title = json[key] as? String, !title.isEmpty {
+                return title
+            }
+        }
+        return nil
+    }
+
+    private static func cleanedGeneratedConversationTitle(_ value: String) -> String? {
+        var title = value
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let prefixes = ["标题：", "标题:", "Title:", "title:"]
+        for prefix in prefixes where title.hasPrefix(prefix) {
+            title = String(title.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        var trimSet = CharacterSet.whitespacesAndNewlines
+        trimSet.formUnion(CharacterSet(charactersIn: "\"'“”‘’`*_#"))
+        title = title.trimmingCharacters(in: trimSet)
+
+        let lowercased = title.lowercased()
+        guard !title.isEmpty,
+              lowercased != "new chat",
+              lowercased != "untitled chat",
+              lowercased != "chat" else {
+            return nil
+        }
+
+        return title.count > 40 ? String(title.prefix(40)) : title
     }
 
     private static func parseGeneratedSearchQueries(_ raw: String, maxQueries: Int) -> [String] {

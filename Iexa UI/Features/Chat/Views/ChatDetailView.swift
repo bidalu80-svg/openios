@@ -1514,6 +1514,9 @@ struct ChatDetailView: View {
                 Task { await viewModel.sendMessage() }
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .textSelectionActionRequested)) { notification in
+            handleTextSelectionAction(notification)
+        }
         .overlay {
             if isDownloadingFile {
                 ZStack {
@@ -4841,6 +4844,45 @@ struct ChatDetailView: View {
         let text = cleanedMessageTextForSharing(message)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         messageShareItem = MessageShareItem(text: text)
+        Haptics.play(.light)
+    }
+
+    private func handleTextSelectionAction(_ notification: Notification) {
+        guard let rawAction = notification.userInfo?["action"] as? String,
+              let selectedText = notification.userInfo?["text"] as? String else {
+            return
+        }
+        let text = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        switch TextSelectionAction(rawValue: rawAction) {
+        case .ask:
+            stageSelectedTextPrompt(
+                "请基于下面选中的内容回答或解释：\n\n\(text)"
+            )
+        case .searchWeb, .lookUp:
+            openSearchForSelectedText(text)
+        case .share:
+            messageShareItem = MessageShareItem(text: text)
+            Haptics.play(.light)
+        case .none:
+            break
+        }
+    }
+
+    private func stageSelectedTextPrompt(_ prompt: String) {
+        viewModel.inputText = prompt
+        Haptics.play(.light)
+        NotificationCenter.default.post(name: .chatInputFieldRequestFocus, object: nil)
+    }
+
+    private func openSearchForSelectedText(_ text: String) {
+        let encoded = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
+        guard let url = URL(string: "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans") else {
+            stageSelectedTextPrompt("搜索网页：\(text)")
+            return
+        }
+        previewWebURL = WebPreviewURL(url: url)
         Haptics.play(.light)
     }
 

@@ -2780,8 +2780,41 @@ private final class NoCaretSourceTextView: UITextView {
     var minimumContentWidth: CGFloat = 0
     var wrapLines = true
 
+    private enum SourceSelectionAction: String, CaseIterable {
+        case ask
+        case lookUp
+        case searchWeb
+        case share
+
+        var title: String {
+            switch self {
+            case .ask: "询问 Iexa"
+            case .lookUp: "查询"
+            case .searchWeb: "搜索网页"
+            case .share: "分享"
+            }
+        }
+
+        var selector: Selector {
+            switch self {
+            case .ask: #selector(NoCaretSourceTextView.askSelectedSourceText)
+            case .lookUp: #selector(NoCaretSourceTextView.lookUpSelectedSourceText)
+            case .searchWeb: #selector(NoCaretSourceTextView.searchSelectedSourceTextOnWeb)
+            case .share: #selector(NoCaretSourceTextView.shareSelectedSourceText)
+            }
+        }
+    }
+
     override func caretRect(for position: UITextPosition) -> CGRect {
         .zero
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let didBecome = super.becomeFirstResponder()
+        if didBecome {
+            installSourceSelectionMenuItems()
+        }
+        return didBecome
     }
 
     override func layoutSubviews() {
@@ -2816,13 +2849,89 @@ private final class NoCaretSourceTextView: UITextView {
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
         guard selectionEnabled else { return false }
+        if Self.isSourceSelectionAction(action) {
+            return selectedSourceText() != nil
+        }
         return super.canPerformAction(action, withSender: sender)
+    }
+
+    private func installSourceSelectionMenuItems() {
+        let existing = UIMenuController.shared.menuItems ?? []
+        var seen = Set(existing.map { NSStringFromSelector($0.action) })
+        let customItems = SourceSelectionAction.allCases.compactMap { action -> UIMenuItem? in
+            let selectorName = NSStringFromSelector(action.selector)
+            guard !seen.contains(selectorName) else { return nil }
+            seen.insert(selectorName)
+            return UIMenuItem(title: action.title, action: action.selector)
+        }
+        guard !customItems.isEmpty else { return }
+        UIMenuController.shared.menuItems = [customItems[0]] + existing + Array(customItems.dropFirst())
+    }
+
+    private static func isSourceSelectionAction(_ selector: Selector) -> Bool {
+        SourceSelectionAction.allCases.contains { $0.selector == selector }
+    }
+
+    private func selectedSourceText() -> String? {
+        guard let range = selectedTextRange, !range.isEmpty,
+              let text = text(in: range)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else {
+            return nil
+        }
+        return text
+    }
+
+    private func performSourceSelectionAction(_ action: TextSelectionAction) {
+        guard let text = selectedSourceText() else { return }
+        selectedTextRange = nil
+        UIMenuController.shared.setMenuVisible(false, animated: true)
+        TextSelectionActionBridge.post(action, text: text)
+    }
+
+    @objc private func askSelectedSourceText(_ sender: Any?) {
+        performSourceSelectionAction(.ask)
+    }
+
+    @objc private func searchSelectedSourceTextOnWeb(_ sender: Any?) {
+        performSourceSelectionAction(.searchWeb)
+    }
+
+    @objc private func shareSelectedSourceText(_ sender: Any?) {
+        performSourceSelectionAction(.share)
+    }
+
+    @objc private func lookUpSelectedSourceText(_ sender: Any?) {
+        guard let text = selectedSourceText() else { return }
+        selectedTextRange = nil
+        UIMenuController.shared.setMenuVisible(false, animated: true)
+        if UIReferenceLibraryViewController.dictionaryHasDefinition(forTerm: text),
+           let presenter = iexa_parentViewController {
+            DispatchQueue.main.async {
+                let lookup = UIReferenceLibraryViewController(term: text)
+                presenter.present(lookup, animated: true)
+            }
+        } else {
+            TextSelectionActionBridge.post(.lookUp, text: text)
+        }
     }
 }
 
 private extension CGFloat {
     func nonZero(or fallback: CGFloat) -> CGFloat {
         self > 1 ? self : fallback
+    }
+}
+
+private extension UIResponder {
+    var iexa_parentViewController: UIViewController? {
+        var responder: UIResponder? = self
+        while let current = responder {
+            if let viewController = current as? UIViewController {
+                return viewController
+            }
+            responder = current.next
+        }
+        return nil
     }
 }
 

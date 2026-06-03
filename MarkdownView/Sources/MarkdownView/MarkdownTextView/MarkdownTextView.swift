@@ -59,6 +59,9 @@ import MarkdownParser
         public init(viewProvider: ReusableViewProvider = .init()) {
             self.viewProvider = viewProvider
             super.init(frame: .zero)
+            #if os(iOS) && !os(tvOS) && !os(watchOS)
+            EnhancedTextSelectionMenu.installIfNeeded()
+            #endif
             textView.isSelectable = true
             textView.backgroundColor = .clear
             textView.selectionBackgroundColor = theme.colors.selectionBackground

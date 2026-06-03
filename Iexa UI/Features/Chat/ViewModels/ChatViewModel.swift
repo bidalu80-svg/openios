@@ -435,6 +435,9 @@ final class ChatViewModel {
     /// The post-streaming completion task (chatCompleted + file polling + metadata refresh).
     /// Cancelled when a new message is sent so it doesn't overwrite newer messages.
     private var completionTask: Task<Void, Never>?
+    private var generatedTitleConversationIds: Set<String> = []
+    private var titleGenerationInFlightConversationIds: Set<String> = []
+    private var initialAutoTitlesByConversationId: [String: String] = [:]
     /// In-flight model config fetch from selectModel(). Stored so
     /// sendMessage/regenerateResponse can await it before reading
     /// functionCallingMode — prevents the race where the user selects
@@ -4591,14 +4594,7 @@ final class ChatViewModel {
                 newTitle = t
             }
             if let newTitle {
-                conversation?.title = newTitle
-                if let chatId {
-                    NotificationCenter.default.post(
-                        name: .conversationTitleUpdated,
-                        object: nil,
-                        userInfo: ["conversationId": chatId, "title": newTitle]
-                    )
-                }
+                applyGeneratedConversationTitle(newTitle, chatId: chatId)
             }
             return
 
@@ -5329,6 +5325,7 @@ final class ChatViewModel {
             if isOpenAICompatibleProvider {
                 activeChatStore?.promoteNewChat(to: localId)
             }
+            initialAutoTitlesByConversationId[localId] = chatTitle
             // Update active conversation ID so notifications are suppressed
             // while the user is viewing this newly created chat
             NotificationService.shared.activeConversationId = localId
@@ -5901,6 +5898,9 @@ final class ChatViewModel {
                                         await manager.sendChatCompleted(chatId: chatId, messageId: assistantMessageId, model: modelId, sessionId: socketSessionId, messages: self.buildSimpleAPIMessages())
                                         try? await self.refreshConversationMetadata(chatId: chatId, assistantMessageId: assistantMessageId)
                                         self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
+                                        Task { @MainActor [weak self] in
+                                            await self?.ensureGeneratedConversationTitle(chatId: chatId, modelId: modelId)
+                                        }
                                         self.cleanupStreaming()
                                         let finalContent = self.conversation?.messages
                                             .first(where: { $0.id == assistantMessageId })?.content ?? serverContent
@@ -9550,20 +9550,12 @@ final class ChatViewModel {
                 }
             }
             if let newTitle {
-                conversation?.title = newTitle
+                applyGeneratedConversationTitle(newTitle, chatId: effectiveChatId)
                 logger.info("Title updated: \(newTitle)")
                 // NOTE: We do NOT persist the title back to the server here.
                 // The server generated this title via background_tasks and already
                 // has it stored. Writing it back would be redundant and could race
                 // with the server's own save.
-                if let chatId = effectiveChatId {
-                    // Notify the conversation list to update
-                    NotificationCenter.default.post(
-                        name: .conversationTitleUpdated,
-                        object: nil,
-                        userInfo: ["conversationId": chatId, "title": newTitle]
-                    )
-                }
             }
 
         case "chat:tags":
@@ -9966,6 +9958,9 @@ final class ChatViewModel {
                         chatId: chatId, assistantMessageId: assistantMessageId)
                     self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
                 }
+                Task { @MainActor [weak self] in
+                    await self?.ensureGeneratedConversationTitle(chatId: chatId, modelId: modelId)
+                }
             }
             // NOTE: Do NOT call saveConversationToServer() here.
             // The server already has the authoritative state after chatCompleted
@@ -10010,6 +10005,142 @@ final class ChatViewModel {
             // Non-critical — just skip the emoji suggestion
             logger.debug("Emoji generation failed: \(error.localizedDescription)")
         }
+    }
+
+    private func ensureGeneratedConversationTitle(chatId: String, modelId: String) async {
+        let titleGenerationEnabled = UserDefaults.standard.object(forKey: "titleGenerationEnabled") as? Bool ?? true
+        guard titleGenerationEnabled else { return }
+        guard let manager else { return }
+        guard conversation?.id == chatId else { return }
+        guard !isTemporaryChat else { return }
+        guard !generatedTitleConversationIds.contains(chatId),
+              !titleGenerationInFlightConversationIds.contains(chatId) else {
+            return
+        }
+        guard shouldReplaceConversationTitleAutomatically(chatId: chatId) else { return }
+        guard let messages = conversationTitleSourceMessages() else { return }
+
+        titleGenerationInFlightConversationIds.insert(chatId)
+        defer { titleGenerationInFlightConversationIds.remove(chatId) }
+
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        guard !Task.isCancelled else { return }
+        guard conversation?.id == chatId,
+              shouldReplaceConversationTitleAutomatically(chatId: chatId),
+              !generatedTitleConversationIds.contains(chatId) else {
+            return
+        }
+
+        do {
+            guard let rawTitle = try await manager.apiClient.generateConversationTitle(
+                model: modelId,
+                messages: messages
+            ) else {
+                return
+            }
+            guard let title = sanitizedGeneratedConversationTitle(rawTitle),
+                  shouldReplaceConversationTitleAutomatically(chatId: chatId) else {
+                return
+            }
+
+            conversation?.title = title
+            generatedTitleConversationIds.insert(chatId)
+            initialAutoTitlesByConversationId.removeValue(forKey: chatId)
+
+            try? await manager.renameConversation(id: chatId, title: title)
+            NotificationCenter.default.post(
+                name: .conversationTitleUpdated,
+                object: nil,
+                userInfo: ["conversationId": chatId, "title": title]
+            )
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        } catch {
+            logger.debug("Conversation title generation failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func conversationTitleSourceMessages() -> [[String: Any]]? {
+        guard let messages = conversation?.messages else { return nil }
+        let visibleMessages = messages.filter {
+            !$0.isStreaming
+                && !Self.isLocalWorkspaceAgentResult($0)
+                && !Self.isLocalAlpineAgentResult($0)
+                && !Self.isLocalNativeToolResult($0)
+        }
+        guard visibleMessages.filter({ $0.role == .user }).count == 1,
+              let firstUser = visibleMessages.first(where: { $0.role == .user }),
+              let firstAssistant = visibleMessages.first(where: { $0.role == .assistant }) else {
+            return nil
+        }
+
+        let userText = firstUser.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let assistantText = Self.safeAssistantDisplayContent(firstAssistant.content)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !userText.isEmpty, assistantText.count >= 20 else { return nil }
+
+        return [
+            ["role": "user", "content": Self.clippedForSystemContext(userText, maxCharacters: 1_200)],
+            ["role": "assistant", "content": Self.clippedForSystemContext(assistantText, maxCharacters: 2_000)]
+        ]
+    }
+
+    private func shouldReplaceConversationTitleAutomatically(chatId: String) -> Bool {
+        let currentTitle = conversation?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !currentTitle.isEmpty else { return true }
+        if let initialTitle = initialAutoTitlesByConversationId[chatId] {
+            return currentTitle == initialTitle
+        }
+
+        let genericTitles: Set<String> = [
+            "新对话", "New Chat", "Untitled Chat", "Chat",
+            "回复问候", "询问能力"
+        ]
+        return genericTitles.contains(currentTitle)
+    }
+
+    private func applyGeneratedConversationTitle(_ value: String, chatId: String?) {
+        guard let title = sanitizedGeneratedConversationTitle(value) else { return }
+        let previousTitle = conversation?.title
+        if previousTitle != title {
+            conversation?.title = title
+        }
+        if let chatId {
+            if initialAutoTitlesByConversationId[chatId] != title {
+                generatedTitleConversationIds.insert(chatId)
+                initialAutoTitlesByConversationId.removeValue(forKey: chatId)
+            }
+            if previousTitle != title {
+                NotificationCenter.default.post(
+                    name: .conversationTitleUpdated,
+                    object: nil,
+                    userInfo: ["conversationId": chatId, "title": title]
+                )
+            }
+        }
+    }
+
+    private func sanitizedGeneratedConversationTitle(_ value: String) -> String? {
+        var title = value
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let prefixes = ["标题：", "标题:", "Title:", "title:"]
+        for prefix in prefixes where title.hasPrefix(prefix) {
+            title = String(title.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        var trimSet = CharacterSet.whitespacesAndNewlines
+        trimSet.formUnion(CharacterSet(charactersIn: "\"'“”‘’`*_#"))
+        title = title.trimmingCharacters(in: trimSet)
+
+        guard !title.isEmpty else { return nil }
+        let lowercased = title.lowercased()
+        guard lowercased != "new chat",
+              lowercased != "untitled chat",
+              lowercased != "chat" else {
+            return nil
+        }
+        return title.count > 32 ? String(title.prefix(32)) : title
     }
 
     /// Polls the server for content when the done signal arrives with empty content.
@@ -10128,6 +10259,10 @@ final class ChatViewModel {
         normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
         finalAssistantContent = conversation?.messages
             .first(where: { $0.id == assistantMessageId })?.content ?? finalAssistantContent
+
+        Task { @MainActor [weak self] in
+            await self?.ensureGeneratedConversationTitle(chatId: chatId, modelId: modelId)
+        }
 
         // NOTE: Do NOT call saveConversationToServer() here — same reason
         // as finishStreamingSuccessfully. The server's chatCompleted has the
@@ -17376,7 +17511,7 @@ final class ChatViewModel {
 
         // Update title
         if !refreshed.title.isEmpty && refreshed.title != "New Chat" {
-            conversation?.title = refreshed.title
+            applyGeneratedConversationTitle(refreshed.title, chatId: chatId)
         }
 
         // Update sources, follow-ups, and files from refreshed assistant message.

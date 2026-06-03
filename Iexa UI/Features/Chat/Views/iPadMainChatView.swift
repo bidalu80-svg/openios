@@ -635,7 +635,7 @@ struct iPadMainChatView: View {
                 ["role": msg.role.rawValue, "content": msg.content]
             }
             let model = fullConv.model ?? dependencies.activeChatStore.cachedSelectedModelId ?? ""
-            if let title = try await api.generateTitle(model: model, messages: messages, chatId: conversation.id) {
+            if let title = try await api.generateConversationTitle(model: model, messages: messages) {
                 renameText = title
             }
         } catch {}
