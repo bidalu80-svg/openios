@@ -736,7 +736,8 @@ struct ChatDetailView: View {
     @State private var viewState_containerHeight: CGFloat = 0
     /// Stable viewport height used by the last-turn spacer while the keyboard animates.
     @State private var stableLastTurnViewportHeight: CGFloat = 0
-    @State private var keyboardViewportFreezeUntil: Date = .distantPast
+    @State private var isKeyboardViewportFrozen = false
+    @State private var keyboardViewportFreezeGeneration = 0
     /// Last time a layout/IME correction repinned the transcript.
     @State private var lastLayoutRepinTime: Date = .distantPast
     /// Keeps a newly sent turn anchored at the top of the viewport until
@@ -2218,7 +2219,16 @@ struct ChatDetailView: View {
             if viewState_containerHeight > 1 {
                 stableLastTurnViewportHeight = max(stableLastTurnViewportHeight, viewState_containerHeight)
             }
-            keyboardViewportFreezeUntil = Date().addingTimeInterval(settleDelay + 0.18)
+            isKeyboardViewportFrozen = true
+            keyboardViewportFreezeGeneration += 1
+            let freezeGeneration = keyboardViewportFreezeGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay + 0.18) {
+                guard freezeGeneration == keyboardViewportFreezeGeneration else { return }
+                isKeyboardViewportFrozen = false
+                if viewState_containerHeight > 1 {
+                    stableLastTurnViewportHeight = viewState_containerHeight
+                }
+            }
 
             guard !viewModel.messages.isEmpty else { return }
             let maxValidOffset = max(0, viewState_contentHeight - viewState_containerHeight)
@@ -2314,9 +2324,8 @@ struct ChatDetailView: View {
             }
             if containerChanged {
                 viewState_containerHeight = newSize.height
-                let now = Date()
                 if stableLastTurnViewportHeight <= 1
-                    || (!keyboard.isVisible && keyboard.height <= 1 && now >= keyboardViewportFreezeUntil) {
+                    || (!keyboard.isVisible && keyboard.height <= 1 && !isKeyboardViewportFrozen) {
                     stableLastTurnViewportHeight = newSize.height
                 }
             }
@@ -2424,7 +2433,7 @@ struct ChatDetailView: View {
         // viewport. During keyboard animations, freeze this at the last
         // stable viewport height so the last-turn spacer does not shrink or
         // grow underneath SwiftUI's bottom scroll anchor.
-        if keyboard.isVisible || keyboard.height > 1 || Date() < keyboardViewportFreezeUntil {
+        if keyboard.isVisible || keyboard.height > 1 || isKeyboardViewportFrozen {
             let stableHeight = stableLastTurnViewportHeight > 1
                 ? stableLastTurnViewportHeight
                 : containerHeight
@@ -2551,10 +2560,9 @@ struct ChatDetailView: View {
     ///
     /// The **last turn** is defined as the last user message plus any
     /// assistant/system messages that follow it. This group is wrapped in a
-    /// `VStack` with `minHeight: viewportHeight, alignment: .top` — the
-    /// ChatGPT-style trick that makes scroll-to-bottom place the user's
-    /// sent message near the **top** of the viewport, with the AI response
-    /// streaming in below it.
+    /// `VStack` with `minHeight: viewportHeight, alignment: .top`. This keeps
+    /// the user's sent message near the **top** of the viewport, with the AI
+    /// response streaming in below it.
     ///
     /// All earlier messages render at their natural height.
     private var messagesList: some View {
