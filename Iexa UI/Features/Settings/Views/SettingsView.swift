@@ -191,36 +191,14 @@ struct SettingsView: View {
                     // Personalization
                     SettingsSection(header: "个性化") {
                         SettingsCell(
-                            icon: "point.3.connected.trianglepath.dotted",
-                            title: "MCP 智能体",
-                            subtitle: "本地角色、记忆和工具入口",
-                            iconColor: .cyan,
-                            showDivider: true,
-                            accessory: .chevron
-                        ) {
-                            navigationPath.append(SettingsDestination.mcpAgents)
-                        }
-
-                        SettingsCell(
-                            icon: "cube.box",
-                            title: "技能",
-                            subtitle: "本地技能、开关和创建",
-                            iconColor: .green,
-                            showDivider: true,
-                            accessory: .chevron
-                        ) {
-                            navigationPath.append(SettingsDestination.skills)
-                        }
-
-                        SettingsCell(
-                            icon: "brain",
-                            title: "记忆",
-                            subtitle: "AI 记住的与你有关的信息",
-                            iconColor: .purple,
+                            icon: "person.crop.circle.badge.checkmark",
+                            title: "本地智能体",
+                            subtitle: "SOUL、技能、记忆和本地工具",
+                            iconColor: .indigo,
                             showDivider: false,
                             accessory: .chevron
                         ) {
-                            navigationPath.append(SettingsDestination.memories)
+                            navigationPath.append(SettingsDestination.localAgentCenter)
                         }
                     }
 
@@ -350,6 +328,8 @@ struct SettingsView: View {
                     NotificationSettingsView()
                 case .adminConsole:
                     AdminConsoleView()
+                case .localAgentCenter:
+                    LocalAgentCenterView()
                 case .mcpAgents:
                     LocalMCPAgentSettingsView()
                 case .skills:
@@ -612,6 +592,7 @@ enum SettingsDestination: Hashable {
     case sttSettings
     case notifications
     case adminConsole
+    case localAgentCenter
     case mcpAgents
     case skills
     case memories

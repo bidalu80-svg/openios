@@ -13795,6 +13795,7 @@ final class ChatViewModel {
             ? Self.localAlpineExecutionStateSystemContext(from: conversation.messages)
             : nil
         let webSearchToolContext: String? = nil
+        let localSoulContext = LocalSoulService.shared.contextPrompt()
         let localSkillsContext = LocalSkillsService.shared.contextPrompt()
         let localNativeToolContext = latestUserTextForLocalAlpine.map(Self.shouldExposeLocalNativeTools)
             == true ? Self.localNativeToolSystemContext() : nil
@@ -13803,7 +13804,7 @@ final class ChatViewModel {
             modelId: selectedModelId ?? conversation.model
         )
         let feedbackPreferenceContext = AssistantFeedbackPreferenceStore.systemContext()
-        let combinedSystemPrompt = [asyncEffectiveSP, modelCapabilityContext, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localNativeToolContext, localSkillsContext, memoryContext, feedbackPreferenceContext]
+        let combinedSystemPrompt = [asyncEffectiveSP, modelCapabilityContext, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localNativeToolContext, localSoulContext, localSkillsContext, memoryContext, feedbackPreferenceContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
