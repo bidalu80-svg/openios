@@ -12634,7 +12634,7 @@ final class ChatViewModel {
 
         Current device time: \(nowText), timezone: \(timezoneName). For relative requests such as "今天", "现在", "明天", or "查看日历", calculate the date range from this current device time. Do not reuse stale sample dates.
 
-        Use them only when the user asks to read device status/info, read/write clipboard text, show a local notification, get/use their current location, query current local weather, query local calendar events, create/delete a calendar event, or directly create an Excel/PPT file. Do not emit this tool for ordinary conversation.
+        Use them only when the user asks to read device status/info, read/write clipboard text, show a local notification, get/use their current location, query current local weather, query local calendar events, create/delete a calendar event, or directly create an Excel/PPT/Word file. Do not emit this tool for ordinary conversation.
         For code execution, Python scripts, package installs, project edits, or "write/run Python to generate a file", use Local Alpine when available instead of the Office actions. The Office actions are for productized file creation from a document draft, not for replacing the Python/terminal agent.
         To call a local native tool, output exactly one fenced `iexa_native` JSON block and no fake tool-call syntax.
 
@@ -12674,6 +12674,9 @@ final class ChatViewModel {
         ```
         ```iexa_native
         {"action":"office.create_ppt","title":"产品介绍","file_name":"产品介绍.pptx","subtitle":"本地生成演示稿","slides":[{"layout":"cover","title":"产品介绍","subtitle":"2026 年规划"},{"layout":"bullets","title":"核心能力","bullets":["本地自动化","多模型接入","文件生成"]},{"layout":"table","title":"计划","table":[["阶段","目标"],["MVP","生成并预览"],["增强","模板和图片"]]}]}
+        ```
+        ```iexa_native
+        {"action":"office.create_word","title":"产品方案","file_name":"产品方案.docx","subtitle":"本地生成文档","sections":[{"heading":"背景","paragraphs":["目标用户需要一个本地优先的智能工作流。"]},{"heading":"核心能力","bullets":["多模型接入","本地文件生成","移动端预览和分享"]}]}
         ```
 
         For Office actions, build a concise structured draft from the user's natural language and attachments. If a key requirement is missing, choose a safe default instead of asking many setup questions. After Iexa appends the native tool result, continue from that real result and answer normally. If permissions are denied, location is not ready, notification permission is disabled, WeatherKit entitlement is unavailable, or Office generation fails, explain the exact local permission/state issue.
@@ -14853,7 +14856,7 @@ final class ChatViewModel {
         }
 
         let fileName = document.fileName.isEmpty
-            ? "\(document.title).\(document.kind == .powerPoint ? "pptx" : "xlsx")"
+            ? "\(document.title).\(localOfficeFileExtension(for: document.kind))"
             : document.fileName
         let previewLine = document.previewCount > 0
             ? "已生成 \(document.previewCount) 张预览图。"
@@ -14864,6 +14867,17 @@ final class ChatViewModel {
         return [titleLine, summary, previewLine, attachmentLine]
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n\n")
+    }
+
+    private func localOfficeFileExtension(for kind: LocalNativeOfficeKind) -> String {
+        switch kind {
+        case .excel:
+            return "xlsx"
+        case .powerPoint:
+            return "pptx"
+        case .word:
+            return "docx"
+        }
     }
 
     private func updateLocalOfficeGenerationMessage(
@@ -15279,11 +15293,12 @@ final class ChatViewModel {
             "日历", "日程", "行程", "事件", "提醒", "会议", "预约", "安排",
             "excel", "xlsx", "表格文件", "电子表格", "报表文件", "生成报表", "做报表",
             "ppt", "pptx", "powerpoint", "slides", "幻灯片", "演示文稿", "汇报文件", "课件",
+            "word", "docx", "文档", "word文档", "写文档", "生成文档", "产品方案",
             "device status", "device info", "battery", "clipboard", "pasteboard",
             "copy to clipboard", "read clipboard", "notification", "notify me",
             "calendar", "event", "schedule", "reminder", "location", "where am i",
             "weather", "temperature", "rain", "wind", "humidity",
-            "spreadsheet", "presentation", "slide deck", "make a deck"
+            "spreadsheet", "presentation", "slide deck", "make a deck", "word document", "docx", "document"
         ]
         return markers.contains { lower.contains($0) }
     }

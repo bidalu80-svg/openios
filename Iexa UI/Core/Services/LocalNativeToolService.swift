@@ -12,6 +12,7 @@ struct LocalNativeToolRunResult: Sendable {
 enum LocalNativeOfficeKind: String, Sendable, Equatable {
     case excel
     case powerPoint
+    case word
 
     var displayName: String {
         switch self {
@@ -19,6 +20,8 @@ enum LocalNativeOfficeKind: String, Sendable, Equatable {
             return "Excel"
         case .powerPoint:
             return "PPT"
+        case .word:
+            return "Word"
         }
     }
 
@@ -28,6 +31,8 @@ enum LocalNativeOfficeKind: String, Sendable, Equatable {
             return "正在生成本地 Excel..."
         case .powerPoint:
             return "正在生成本地 PPT..."
+        case .word:
+            return "正在生成本地 Word..."
         }
     }
 }
@@ -108,6 +113,17 @@ final class LocalNativeToolService {
             || lower.range(of: #""name"\s*:\s*"excel""#, options: .regularExpression) != nil {
             return .excel
         }
+        if lower.contains("office.create_word")
+            || lower.contains("office.create_docx")
+            || lower.contains("office_create_word")
+            || lower.contains("create_word")
+            || lower.contains("create_docx")
+            || lower.contains("word.create")
+            || lower.contains("docx.create")
+            || lower.range(of: #""action"\s*:\s*"word""#, options: .regularExpression) != nil
+            || lower.range(of: #""name"\s*:\s*"word""#, options: .regularExpression) != nil {
+            return .word
+        }
         return nil
     }
 
@@ -139,6 +155,8 @@ final class LocalNativeToolService {
             return await executeCreateExcel(call)
         case "office.create_ppt", "office.create_powerpoint", "office_create_ppt", "create_ppt", "create_powerpoint", "ppt.create", "powerpoint.create", "ppt":
             return await executeCreatePowerPoint(call)
+        case "office.create_word", "office.create_docx", "office_create_word", "create_word", "create_docx", "word.create", "docx.create", "word", "docx":
+            return await executeCreateWord(call)
         default:
             return [
                 "action": action.isEmpty ? "unknown" : action,
@@ -172,6 +190,21 @@ final class LocalNativeToolService {
         } catch {
             return [
                 "action": "office.create_ppt",
+                "ok": false,
+                "error": error.localizedDescription
+            ]
+        }
+    }
+
+    private func executeCreateWord(_ call: [String: Any]) async -> [String: Any] {
+        do {
+            let result = try await LocalOfficeDocumentService.shared.createWord(from: call)
+            var payload = result.payload
+            payload["action"] = "office.create_word"
+            return payload
+        } catch {
+            return [
+                "action": "office.create_word",
                 "ok": false,
                 "error": error.localizedDescription
             ]
@@ -216,6 +249,8 @@ final class LocalNativeToolService {
                 kind = .powerPoint
             } else if action.contains("excel") || documentType == "excel" {
                 kind = .excel
+            } else if action.contains("word") || action.contains("docx") || documentType == "word" {
+                kind = .word
             } else {
                 kind = nil
             }

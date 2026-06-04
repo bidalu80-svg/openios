@@ -111,6 +111,31 @@ final class LocalOfficeDocumentService {
         )
     }
 
+    func createWord(from call: [String: Any]) async throws -> LocalOfficeDocumentResult {
+        let spec = WordSpec(call: call)
+        let folder = try makeOutputFolder(prefix: "word")
+        let fileName = safeFileName(spec.fileName, fallback: "\(spec.title).docx", fileExtension: "docx")
+        let documentURL = folder.appendingPathComponent(fileName)
+        let draftURL = folder.appendingPathComponent("draft.json")
+        let previewURL = folder.appendingPathComponent("preview-1.png")
+
+        let docx = try WordOpenXMLBuilder(spec: spec).build()
+        try OfficeZipWriter(entries: docx).write(to: documentURL)
+        try writeJSON(call, to: draftURL)
+        try writePNG(WordPreviewRenderer.render(spec: spec), to: previewURL)
+
+        return LocalOfficeDocumentResult(
+            documentURL: documentURL,
+            previewURLs: [previewURL],
+            draftURL: draftURL,
+            contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            documentType: "word",
+            title: spec.title,
+            summary: "已生成 Word：\(fileName)，共 \(spec.sections.count) 个章节。",
+            previewText: spec.previewText
+        )
+    }
+
     private func makeOutputFolder(prefix: String) throws -> URL {
         let root = try officeRootDirectory()
         let formatter = DateFormatter()
@@ -394,6 +419,55 @@ private struct SlideSpec: Sendable {
     let note: String?
 }
 
+private struct WordSpec: Sendable {
+    let title: String
+    let fileName: String?
+    let subtitle: String
+    let sections: [WordSectionSpec]
+
+    init(call: [String: Any]) {
+        title = JSONValue.string(call["title"], fallback: "文档")
+        fileName = JSONValue.string(call["file_name"]).nilIfEmpty
+        subtitle = JSONValue.string(call["subtitle"])
+        let rawSections = JSONValue.array(call["sections"])
+        if rawSections.isEmpty {
+            let paragraphs = JSONValue.stringArray(call["paragraphs"] ?? call["content"] ?? call["body"])
+            let bullets = JSONValue.stringArray(call["bullets"] ?? call["points"])
+            sections = [
+                WordSectionSpec(
+                    heading: JSONValue.string(call["heading"], fallback: paragraphs.isEmpty && bullets.isEmpty ? "概述" : ""),
+                    paragraphs: paragraphs.isEmpty && bullets.isEmpty ? ["这是由 Iexa 本地 Office Agent 生成的 Word 文档初稿。"] : paragraphs,
+                    bullets: bullets
+                )
+            ]
+        } else {
+            sections = rawSections.enumerated().map { index, raw in
+                WordSectionSpec(
+                    heading: JSONValue.string(raw["heading"] ?? raw["title"], fallback: "第 \(index + 1) 节"),
+                    paragraphs: JSONValue.stringArray(raw["paragraphs"] ?? raw["content"] ?? raw["body"]),
+                    bullets: JSONValue.stringArray(raw["bullets"] ?? raw["points"])
+                )
+            }
+        }
+    }
+
+    var previewText: String {
+        sections.map { section in
+            let paragraphs = section.paragraphs.prefix(3).joined(separator: " ")
+            let bullets = section.bullets.prefix(4).joined(separator: "；")
+            return [section.heading, paragraphs, bullets]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: "：")
+        }.joined(separator: "\n")
+    }
+}
+
+private struct WordSectionSpec: Sendable {
+    let heading: String
+    let paragraphs: [String]
+    let bullets: [String]
+}
+
 private struct RenderedSlide: Sendable {
     let slide: SlideSpec
     let previewURL: URL
@@ -570,6 +644,107 @@ private struct SlidePreviewRenderer {
     }
 }
 
+private struct WordPreviewRenderer {
+    static func render(spec: WordSpec) -> UIImage {
+        let size = CGSize(width: 1000, height: 1300)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { context in
+            UIColor(hex: "EEF2F7").setFill()
+            context.cgContext.fill(CGRect(origin: .zero, size: size))
+
+            let page = CGRect(x: 88, y: 64, width: 824, height: 1160)
+            UIColor.white.setFill()
+            UIBezierPath(roundedRect: page, cornerRadius: 18).fill()
+            UIColor(hex: "D1D5DB").setStroke()
+            UIBezierPath(roundedRect: page, cornerRadius: 18).stroke()
+
+            var y = page.minY + 72
+            drawText(
+                spec.title,
+                in: CGRect(x: page.minX + 64, y: y, width: page.width - 128, height: 72),
+                font: .systemFont(ofSize: 42, weight: .bold),
+                color: UIColor(hex: "111827")
+            )
+            y += 78
+
+            if !spec.subtitle.isEmpty {
+                drawText(
+                    spec.subtitle,
+                    in: CGRect(x: page.minX + 64, y: y, width: page.width - 128, height: 42),
+                    font: .systemFont(ofSize: 22, weight: .medium),
+                    color: UIColor(hex: "6B7280")
+                )
+                y += 56
+            }
+
+            UIColor(hex: "2563EB").setFill()
+            UIBezierPath(roundedRect: CGRect(x: page.minX + 64, y: y, width: 96, height: 6), cornerRadius: 3).fill()
+            y += 34
+
+            for section in spec.sections.prefix(4) {
+                if !section.heading.isEmpty {
+                    drawText(
+                        section.heading,
+                        in: CGRect(x: page.minX + 64, y: y, width: page.width - 128, height: 40),
+                        font: .systemFont(ofSize: 26, weight: .semibold),
+                        color: UIColor(hex: "1F2937")
+                    )
+                    y += 46
+                }
+
+                for paragraph in section.paragraphs.prefix(3) {
+                    let rect = CGRect(x: page.minX + 64, y: y, width: page.width - 128, height: 58)
+                    drawText(
+                        paragraph,
+                        in: rect,
+                        font: .systemFont(ofSize: 19, weight: .regular),
+                        color: UIColor(hex: "374151")
+                    )
+                    y += 62
+                }
+
+                for bullet in section.bullets.prefix(4) {
+                    UIColor(hex: "2563EB").setFill()
+                    UIBezierPath(ovalIn: CGRect(x: page.minX + 72, y: y + 11, width: 9, height: 9)).fill()
+                    drawText(
+                        bullet,
+                        in: CGRect(x: page.minX + 96, y: y, width: page.width - 160, height: 34),
+                        font: .systemFont(ofSize: 19, weight: .medium),
+                        color: UIColor(hex: "374151")
+                    )
+                    y += 40
+                }
+
+                y += 16
+                if y > page.maxY - 140 { break }
+            }
+
+            let footerAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 16, weight: .medium),
+                .foregroundColor: UIColor(hex: "9CA3AF")
+            ]
+            "Iexa Office Agent · Word 文档预览".draw(
+                in: CGRect(x: page.minX + 64, y: page.maxY - 64, width: page.width - 128, height: 24),
+                withAttributes: footerAttrs
+            )
+        }
+    }
+
+    private static func drawText(_ text: String, in rect: CGRect, font: UIFont, color: UIColor) {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        style.lineSpacing = 5
+        (text as NSString).draw(
+            in: rect,
+            withAttributes: [
+                .font: font,
+                .foregroundColor: color,
+                .paragraphStyle: style
+            ]
+        )
+    }
+}
+
 private extension Array {
     subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
@@ -690,6 +865,153 @@ private struct ExcelOpenXMLBuilder {
     }
 }
 
+private struct WordOpenXMLBuilder {
+    let spec: WordSpec
+
+    func build() throws -> [OfficeZipEntry] {
+        [
+            .text("[Content_Types].xml", contentTypes),
+            .text("_rels/.rels", packageRelationships),
+            .text("docProps/core.xml", corePropertiesXML),
+            .text("docProps/app.xml", appPropertiesXML),
+            .text("word/document.xml", documentXML),
+            .text("word/_rels/document.xml.rels", documentRelationships),
+            .text("word/styles.xml", stylesXML),
+            .text("word/settings.xml", settingsXML),
+            .text("word/fontTable.xml", fontTableXML)
+        ]
+    }
+
+    private var contentTypes: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+        <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+        <Default Extension="xml" ContentType="application/xml"/>
+        <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+        <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+        <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+        <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+        <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>
+        <Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>
+        </Types>
+        """
+    }
+
+    private var packageRelationships: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+        <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+        <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+        </Relationships>
+        """
+    }
+
+    private var documentRelationships: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+        <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>
+        <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>
+        </Relationships>
+        """
+    }
+
+    private var documentXML: String {
+        let paragraphs = documentParagraphs.joined(separator: "\n")
+        return """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <w:body>
+        \(paragraphs)
+        <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/><w:cols w:space="708"/><w:docGrid w:linePitch="360"/></w:sectPr>
+        </w:body>
+        </w:document>
+        """
+    }
+
+    private var documentParagraphs: [String] {
+        var items: [String] = [
+            paragraph(spec.title, style: "Title")
+        ]
+        if !spec.subtitle.isEmpty {
+            items.append(paragraph(spec.subtitle, style: "Subtitle"))
+        }
+        for section in spec.sections {
+            if !section.heading.isEmpty {
+                items.append(paragraph(section.heading, style: "Heading1"))
+            }
+            for text in section.paragraphs {
+                items.append(paragraph(text, style: "Normal"))
+            }
+            for bullet in section.bullets {
+                items.append(paragraph("• \(bullet)", style: "ListParagraph"))
+            }
+        }
+        return items
+    }
+
+    private func paragraph(_ text: String, style: String) -> String {
+        """
+        <w:p><w:pPr><w:pStyle w:val="\(style)"/></w:pPr><w:r><w:t>\(xmlEscape(text))</w:t></w:r></w:p>
+        """
+    }
+
+    private var stylesXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Aptos" w:eastAsia="PingFang SC" w:hAnsi="Aptos"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
+        <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>
+        <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:qFormat/><w:pPr><w:spacing w:after="280"/></w:pPr><w:rPr><w:b/><w:sz w:val="52"/><w:szCs w:val="52"/><w:color w:val="111827"/></w:rPr></w:style>
+        <w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Normal"/><w:qFormat/><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/><w:color w:val="6B7280"/></w:rPr></w:style>
+        <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:spacing w:before="360" w:after="160"/></w:pPr><w:rPr><w:b/><w:sz w:val="34"/><w:szCs w:val="34"/><w:color w:val="1F2937"/></w:rPr></w:style>
+        <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:qFormat/><w:pPr><w:ind w:left="420"/></w:pPr></w:style>
+        </w:styles>
+        """
+    }
+
+    private var settingsXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/><w:defaultTabStop w:val="720"/><w:characterSpacingControl w:val="doNotCompress"/></w:settings>
+        """
+    }
+
+    private var fontTableXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:font w:name="Aptos"><w:family w:val="swiss"/></w:font>
+        <w:font w:name="PingFang SC"><w:family w:val="swiss"/></w:font>
+        </w:fonts>
+        """
+    }
+
+    private var corePropertiesXML: String {
+        let title = xmlEscape(spec.title)
+        return """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        <dc:title>\(title)</dc:title><dc:creator>Iexa</dc:creator><cp:lastModifiedBy>Iexa</cp:lastModifiedBy><cp:revision>1</cp:revision>
+        <dcterms:created xsi:type="dcterms:W3CDTF">2026-06-04T00:00:00Z</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">2026-06-04T00:00:00Z</dcterms:modified>
+        </cp:coreProperties>
+        """
+    }
+
+    private var appPropertiesXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+        <Application>Iexa</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop><Company></Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>16.0000</AppVersion>
+        </Properties>
+        """
+    }
+}
+
 private struct PowerPointOpenXMLBuilder {
     let spec: PresentationSpec
     let renderedSlides: [RenderedSlide]
@@ -698,9 +1020,18 @@ private struct PowerPointOpenXMLBuilder {
         var entries: [OfficeZipEntry] = []
         entries.append(.text("[Content_Types].xml", contentTypes))
         entries.append(.text("_rels/.rels", packageRelationships))
+        entries.append(.text("docProps/core.xml", corePropertiesXML))
+        entries.append(.text("docProps/app.xml", appPropertiesXML))
         entries.append(.text("ppt/presentation.xml", presentationXML))
         entries.append(.text("ppt/_rels/presentation.xml.rels", presentationRelationships))
+        entries.append(.text("ppt/presProps.xml", presentationPropertiesXML))
+        entries.append(.text("ppt/viewProps.xml", viewPropertiesXML))
+        entries.append(.text("ppt/tableStyles.xml", tableStylesXML))
         entries.append(.text("ppt/theme/theme1.xml", themeXML))
+        entries.append(.text("ppt/slideMasters/slideMaster1.xml", slideMasterXML))
+        entries.append(.text("ppt/slideMasters/_rels/slideMaster1.xml.rels", slideMasterRelationships))
+        entries.append(.text("ppt/slideLayouts/slideLayout1.xml", slideLayoutXML))
+        entries.append(.text("ppt/slideLayouts/_rels/slideLayout1.xml.rels", slideLayoutRelationships))
         for (index, rendered) in renderedSlides.enumerated() {
             entries.append(.text("ppt/slides/slide\(index + 1).xml", slideXML(index: index)))
             entries.append(.text("ppt/slides/_rels/slide\(index + 1).xml.rels", slideRelationships(index: index)))
@@ -717,8 +1048,15 @@ private struct PowerPointOpenXMLBuilder {
         <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
         <Default Extension="xml" ContentType="application/xml"/>
         <Default Extension="png" ContentType="image/png"/>
+        <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+        <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
         <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+        <Override PartName="/ppt/presProps.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presProps+xml"/>
+        <Override PartName="/ppt/viewProps.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.viewProps+xml"/>
+        <Override PartName="/ppt/tableStyles.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml"/>
         <Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
+        <Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
+        <Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>
         \(renderedSlides.indices.map { "<Override PartName=\"/ppt/slides/slide\($0 + 1).xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>" }.joined(separator: "\n"))
         </Types>
         """
@@ -729,6 +1067,8 @@ private struct PowerPointOpenXMLBuilder {
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
         <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+        <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+        <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
         </Relationships>
         """
     }
@@ -736,12 +1076,19 @@ private struct PowerPointOpenXMLBuilder {
     private var presentationXML: String {
         """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" saveSubsetFonts="1" autoCompressPictures="0">
+        <p:sldMasterIdLst>
+        <p:sldMasterId id="2147483648" r:id="rId1"/>
+        </p:sldMasterIdLst>
         <p:sldIdLst>
-        \(renderedSlides.indices.map { "<p:sldId id=\"\(256 + $0)\" r:id=\"rId\($0 + 1)\"/>" }.joined(separator: "\n"))
+        \(renderedSlides.indices.map { "<p:sldId id=\"\(256 + $0)\" r:id=\"rId\($0 + 6)\"/>" }.joined(separator: "\n"))
         </p:sldIdLst>
         <p:sldSz cx="12192000" cy="6858000" type="screen16x9"/>
         <p:notesSz cx="6858000" cy="9144000"/>
+        <p:defaultTextStyle>
+        <a:defPPr><a:defRPr lang="zh-CN"/></a:defPPr>
+        <a:lvl1pPr marL="0" algn="l" defTabSz="457200" rtl="0" eaLnBrk="1" latinLnBrk="0" hangingPunct="1"><a:defRPr sz="1800" kern="1200"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/><a:cs typeface="+mn-cs"/></a:defRPr></a:lvl1pPr>
+        </p:defaultTextStyle>
         </p:presentation>
         """
     }
@@ -750,8 +1097,12 @@ private struct PowerPointOpenXMLBuilder {
         """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-        \(renderedSlides.indices.map { "<Relationship Id=\"rId\($0 + 1)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide\($0 + 1).xml\"/>" }.joined(separator: "\n"))
-        <Relationship Id="rId\(renderedSlides.count + 1)" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+        <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/presProps" Target="presProps.xml"/>
+        <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/viewProps" Target="viewProps.xml"/>
+        <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
+        <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles" Target="tableStyles.xml"/>
+        \(renderedSlides.indices.map { "<Relationship Id=\"rId\($0 + 6)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide\($0 + 1).xml\"/>" }.joined(separator: "\n"))
         </Relationships>
         """
     }
@@ -761,11 +1112,135 @@ private struct PowerPointOpenXMLBuilder {
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Iexa Office Agent">
         <a:themeElements>
-        <a:clrScheme name="Iexa"><a:dk1><a:srgbClr val="111827"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:accent1><a:srgbClr val="\(spec.theme.accentHex)"/></a:accent1></a:clrScheme>
-        <a:fontScheme name="Iexa"><a:majorFont><a:latin typeface="Aptos Display"/></a:majorFont><a:minorFont><a:latin typeface="Aptos"/></a:minorFont></a:fontScheme>
-        <a:fmtScheme name="Iexa"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme>
+        <a:clrScheme name="Iexa">
+        <a:dk1><a:srgbClr val="\(spec.theme.textHex)"/></a:dk1>
+        <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+        <a:dk2><a:srgbClr val="111827"/></a:dk2>
+        <a:lt2><a:srgbClr val="\(spec.theme.backgroundHex)"/></a:lt2>
+        <a:accent1><a:srgbClr val="\(spec.theme.accentHex)"/></a:accent1>
+        <a:accent2><a:srgbClr val="14B8A6"/></a:accent2>
+        <a:accent3><a:srgbClr val="22C55E"/></a:accent3>
+        <a:accent4><a:srgbClr val="F59E0B"/></a:accent4>
+        <a:accent5><a:srgbClr val="A855F7"/></a:accent5>
+        <a:accent6><a:srgbClr val="EF4444"/></a:accent6>
+        <a:hlink><a:srgbClr val="2563EB"/></a:hlink>
+        <a:folHlink><a:srgbClr val="7C3AED"/></a:folHlink>
+        </a:clrScheme>
+        <a:fontScheme name="Iexa">
+        <a:majorFont><a:latin typeface="Aptos Display"/><a:ea typeface="PingFang SC"/><a:cs typeface="Arial"/></a:majorFont>
+        <a:minorFont><a:latin typeface="Aptos"/><a:ea typeface="PingFang SC"/><a:cs typeface="Arial"/></a:minorFont>
+        </a:fontScheme>
+        <a:fmtScheme name="Iexa">
+        <a:fillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"/></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"><a:lumMod val="80000"/><a:lumOff val="20000"/></a:schemeClr></a:gs></a:gsLst><a:lin ang="5400000" scaled="0"/></a:gradFill>
+        <a:solidFill><a:schemeClr val="phClr"><a:lumMod val="90000"/></a:schemeClr></a:solidFill>
+        </a:fillStyleLst>
+        <a:lnStyleLst>
+        <a:ln w="6350" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+        <a:ln w="12700" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+        <a:ln w="19050" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+        </a:lnStyleLst>
+        <a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>
+        <a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst>
+        </a:fmtScheme>
         </a:themeElements>
         </a:theme>
+        """
+    }
+
+    private var slideMasterXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <p:cSld><p:bg><p:bgRef idx="1001"><a:schemeClr val="bg1"/></p:bgRef></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld>
+        <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+        <p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst>
+        <p:txStyles>
+        <p:titleStyle><a:lvl1pPr algn="l"><a:defRPr sz="4400" kern="1200"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mj-lt"/><a:ea typeface="+mj-ea"/></a:defRPr></a:lvl1pPr></p:titleStyle>
+        <p:bodyStyle><a:lvl1pPr marL="342900" indent="-342900"><a:defRPr sz="2800" kern="1200"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/></a:defRPr></a:lvl1pPr></p:bodyStyle>
+        <p:otherStyle><a:lvl1pPr><a:defRPr sz="1800" kern="1200"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea"/></a:defRPr></a:lvl1pPr></p:otherStyle>
+        </p:txStyles>
+        </p:sldMaster>
+        """
+    }
+
+    private var slideMasterRelationships: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+        <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>
+        </Relationships>
+        """
+    }
+
+    private var slideLayoutXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" type="blank" preserve="1">
+        <p:cSld name="Blank"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld>
+        <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+        </p:sldLayout>
+        """
+    }
+
+    private var slideLayoutRelationships: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+        </Relationships>
+        """
+    }
+
+    private var presentationPropertiesXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <p:presentationPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <p:extLst><p:ext uri="{E76CE94A-603C-4142-B9EB-6D1370010A27}"><p14:discardImageEditData xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" val="0"/></p:ext><p:ext uri="{D31A062A-798A-4329-ABDD-BBA856620510}"><p14:defaultImageDpi xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" val="0"/></p:ext></p:extLst>
+        </p:presentationPr>
+        """
+    }
+
+    private var viewPropertiesXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <p:viewPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" lastView="sldThumbnailView">
+        <p:normalViewPr><p:restoredLeft sz="15620"/><p:restoredTop sz="94660"/></p:normalViewPr>
+        <p:slideViewPr><p:cSldViewPr snapToGrid="0" snapToObjects="1"><p:cViewPr varScale="1"><p:scale><a:sx n="100" d="100"/><a:sy n="100" d="100"/></p:scale><p:origin x="0" y="0"/></p:cViewPr></p:cSldViewPr></p:slideViewPr>
+        <p:gridSpacing cx="76200" cy="76200"/>
+        </p:viewPr>
+        """
+    }
+
+    private var tableStylesXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" def="{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}"/>
+        """
+    }
+
+    private var corePropertiesXML: String {
+        let title = xmlEscape(spec.title)
+        return """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        <dc:title>\(title)</dc:title><dc:creator>Iexa</dc:creator><cp:lastModifiedBy>Iexa</cp:lastModifiedBy><cp:revision>1</cp:revision>
+        <dcterms:created xsi:type="dcterms:W3CDTF">2026-06-04T00:00:00Z</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">2026-06-04T00:00:00Z</dcterms:modified>
+        </cp:coreProperties>
+        """
+    }
+
+    private var appPropertiesXML: String {
+        """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+        <Application>Iexa</Application><PresentationFormat>On-screen Show (16:9)</PresentationFormat><Slides>\(renderedSlides.count)</Slides><Notes>0</Notes><HiddenSlides>0</HiddenSlides><MMClips>0</MMClips><ScaleCrop>false</ScaleCrop>
+        <HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Slide Titles</vt:lpstr></vt:variant><vt:variant><vt:i4>\(renderedSlides.count)</vt:i4></vt:variant></vt:vector></HeadingPairs>
+        <TitlesOfParts><vt:vector size="\(max(renderedSlides.count, 1))" baseType="lpstr">\(renderedSlides.isEmpty ? "<vt:lpstr>\(xmlEscape(spec.title))</vt:lpstr>" : renderedSlides.map { "<vt:lpstr>\(xmlEscape($0.slide.title))</vt:lpstr>" }.joined())</vt:vector></TitlesOfParts>
+        <Company></Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>16.0000</AppVersion>
+        </Properties>
         """
     }
 
@@ -773,7 +1248,8 @@ private struct PowerPointOpenXMLBuilder {
         """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image\(index + 1).png"/>
+        <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+        <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image\(index + 1).png"/>
         </Relationships>
         """
     }
@@ -787,8 +1263,8 @@ private struct PowerPointOpenXMLBuilder {
         <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
         <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
         <p:pic>
-        <p:nvPicPr><p:cNvPr id="2" name="slide-preview-\(index + 1).png"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
-        <p:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+        <p:nvPicPr><p:cNvPr id="2" name="Picture \(index + 1)" descr="slide-preview-\(index + 1).png"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>
+        <p:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
         <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="12192000" cy="6858000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
         </p:pic>
         </p:spTree>
