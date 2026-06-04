@@ -87,7 +87,7 @@ final class NetworkManager: NSObject, Sendable {
         }
 
         var headers = configuration.httpAdditionalHeaders ?? [:]
-        applyDefaultHTTPHeaders(to: &headers)
+        Self.applyDefaultHTTPHeaders(to: &headers, serverConfig: serverConfig)
         for (key, value) in serverConfig.customHeaders {
             headers[key] = value
         }
@@ -537,7 +537,7 @@ final class NetworkManager: NSObject, Sendable {
         config.httpShouldSetCookies = true
 
         var headers = config.httpAdditionalHeaders ?? [:]
-        applyDefaultHTTPHeaders(to: &headers)
+        Self.applyDefaultHTTPHeaders(to: &headers, serverConfig: serverConfig)
         for (key, value) in serverConfig.customHeaders {
             headers[key] = value
         }
@@ -557,7 +557,7 @@ final class NetworkManager: NSObject, Sendable {
         _streamingSession
     }
 
-    private var defaultExternalUserAgent: String? {
+    private static func defaultExternalUserAgent(for serverConfig: ServerConfig) -> String? {
         if let cfUserAgent = serverConfig.cfUserAgent?.trimmingCharacters(in: .whitespacesAndNewlines),
            !cfUserAgent.isEmpty {
             return cfUserAgent
@@ -571,21 +571,24 @@ final class NetworkManager: NSObject, Sendable {
         }
     }
 
-    private var hasCustomUserAgent: Bool {
+    private static func hasCustomUserAgent(in serverConfig: ServerConfig) -> Bool {
         serverConfig.customHeaders.keys.contains {
             $0.caseInsensitiveCompare("User-Agent") == .orderedSame
         }
     }
 
-    private func applyDefaultHTTPHeaders(to headers: inout [AnyHashable: Any]) {
-        guard !hasCustomUserAgent, let userAgent = defaultExternalUserAgent else { return }
+    private static func applyDefaultHTTPHeaders(to headers: inout [AnyHashable: Any], serverConfig: ServerConfig) {
+        guard !hasCustomUserAgent(in: serverConfig),
+              let userAgent = defaultExternalUserAgent(for: serverConfig) else {
+            return
+        }
         headers["User-Agent"] = userAgent
     }
 
     private func applyDefaultHeaders(to request: inout URLRequest) {
-        guard !hasCustomUserAgent,
+        guard !Self.hasCustomUserAgent(in: serverConfig),
               request.value(forHTTPHeaderField: "User-Agent") == nil,
-              let userAgent = defaultExternalUserAgent else {
+              let userAgent = Self.defaultExternalUserAgent(for: serverConfig) else {
             return
         }
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
