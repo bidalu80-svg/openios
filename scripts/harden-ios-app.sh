@@ -41,6 +41,16 @@ done < <(
   \) -print
 )
 
+while IFS= read -r artifact; do
+  rm -rf "$artifact"
+done < <(
+  find "$APP_PATH" \( \
+    -name ".DS_Store" -o \
+    -name "*.xcuserstate" -o \
+    -name "*.xcuserdatad" \
+  \) -print
+)
+
 while IFS= read -r executable; do
   strip_macho "$executable"
 done < <(find "$APP_PATH" -type f -perm -111 -print)

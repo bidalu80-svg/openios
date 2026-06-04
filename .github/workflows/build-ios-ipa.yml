@@ -372,7 +372,9 @@ jobs:
             ENABLE_TESTABILITY=NO \
             STRIP_INSTALLED_PRODUCT=YES \
             STRIP_SWIFT_SYMBOLS=YES \
+            SWIFT_REFLECTION_METADATA_LEVEL=without-names \
             SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO \
+            GCC_INLINES_ARE_PRIVATE_EXTERN=YES \
             archive
           APP_BINARY="$RUNNER_TEMP/Iexa.xcarchive/Products/Applications/Iexa.app/Iexa"
           if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
@@ -411,7 +413,9 @@ jobs:
             ENABLE_TESTABILITY=NO \
             STRIP_INSTALLED_PRODUCT=YES \
             STRIP_SWIFT_SYMBOLS=YES \
+            SWIFT_REFLECTION_METADATA_LEVEL=without-names \
             SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO \
+            GCC_INLINES_ARE_PRIVATE_EXTERN=YES \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -435,12 +439,24 @@ jobs:
 
           cp -R "$APP_PATH" "$RUNNER_TEMP/unsigned-ipa/Payload/"
           cd "$RUNNER_TEMP/unsigned-ipa"
-          /usr/bin/zip -qry "$RUNNER_TEMP/exported/Iexa-unsigned.ipa" Payload
+          /usr/bin/zip -Xqry "$RUNNER_TEMP/exported/Iexa-unsigned.ipa" Payload
 
       - name: Mark fallback artifact
         if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outcome != 'success' || steps.export_signed.outcome != 'success'
         run: |
           echo "Built unsigned IPA fallback because signing was disabled, unavailable, or export failed." > "$RUNNER_TEMP/exported/README.txt"
+
+      - name: Audit IPA hardening
+        run: |
+          shopt -s nullglob
+          ipas=("$RUNNER_TEMP"/exported/*.ipa)
+          if [ "${#ipas[@]}" -eq 0 ]; then
+            echo "::error::No IPA was produced for hardening audit"
+            exit 1
+          fi
+          for ipa in "${ipas[@]}"; do
+            bash scripts/audit-ios-ipa.sh "$ipa"
+          done
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
