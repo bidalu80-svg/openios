@@ -322,36 +322,6 @@ final class ChatViewModel {
             }
         }
     }
-    var openAIFileSearchEnabled: Bool = OpenAIResponsesNativeToolSettings.boolValue(
-        for: OpenAIResponsesNativeToolSettings.fileSearchEnabledKey
-    ) {
-        didSet {
-            UserDefaults.standard.set(
-                openAIFileSearchEnabled,
-                forKey: OpenAIResponsesNativeToolSettings.fileSearchEnabledKey
-            )
-        }
-    }
-    var openAIMCPEnabled: Bool = OpenAIResponsesNativeToolSettings.boolValue(
-        for: OpenAIResponsesNativeToolSettings.mcpEnabledKey
-    ) {
-        didSet {
-            UserDefaults.standard.set(
-                openAIMCPEnabled,
-                forKey: OpenAIResponsesNativeToolSettings.mcpEnabledKey
-            )
-        }
-    }
-    var openAIToolSearchEnabled: Bool = OpenAIResponsesNativeToolSettings.boolValue(
-        for: OpenAIResponsesNativeToolSettings.toolSearchEnabledKey
-    ) {
-        didSet {
-            UserDefaults.standard.set(
-                openAIToolSearchEnabled,
-                forKey: OpenAIResponsesNativeToolSettings.toolSearchEnabledKey
-            )
-        }
-    }
     /// Whether memory is enabled for this chat session.
     /// Persisted to server user settings (`ui.memory`) so the web UI stays in sync.
     var memoryEnabled: Bool = false
@@ -573,10 +543,6 @@ final class ChatViewModel {
 
     private var currentProviderType: ServerConfig.ProviderType? {
         manager?.providerType
-    }
-
-    var isOpenAIResponsesNativeToolsAvailable: Bool {
-        currentProviderType == .openAICompatible
     }
 
     @MainActor
@@ -11224,103 +11190,21 @@ final class ChatViewModel {
         var tools: [[String: Any]] = []
 
         if isChatWebSearchAllowed && webSearchEnabled {
-            var webSearch: [String: Any] = ["type": "web_search"]
-            let contextSize = OpenAIResponsesNativeToolSettings.stringValue(
-                for: OpenAIResponsesNativeToolSettings.webSearchContextSizeKey,
-                default: OpenAIResponsesNativeToolSettings.defaultWebSearchContextSize
-            )
-            if ["low", "medium", "high"].contains(contextSize) {
-                webSearch["search_context_size"] = contextSize
-            }
-            if UserDefaults.standard.object(forKey: OpenAIResponsesNativeToolSettings.webSearchExternalAccessKey) != nil {
-                webSearch["external_web_access"] = OpenAIResponsesNativeToolSettings.boolValue(
-                    for: OpenAIResponsesNativeToolSettings.webSearchExternalAccessKey,
-                    default: true
-                )
-            }
-            tools.append(webSearch)
+            tools.append(["type": "web_search"])
         }
 
         if shouldEnableOpenAIResponsesImageGenerationTool(modelId: request.model) {
-            var imageTool: [String: Any] = ["type": "image_generation"]
-            let size = OpenAIResponsesNativeToolSettings.stringValue(
-                for: OpenAIResponsesNativeToolSettings.imageGenerationSizeKey,
-                default: OpenAIResponsesNativeToolSettings.defaultImageGenerationSize
-            )
-            if !size.isEmpty { imageTool["size"] = size }
-            let quality = OpenAIResponsesNativeToolSettings.stringValue(
-                for: OpenAIResponsesNativeToolSettings.imageGenerationQualityKey,
-                default: OpenAIResponsesNativeToolSettings.defaultImageGenerationQuality
-            )
-            if !quality.isEmpty { imageTool["quality"] = quality }
-            tools.append(imageTool)
+            tools.append(["type": "image_generation"])
             if Self.looksLikeImageGenerationRequest(Self.lastUserText(in: request.messages)) {
                 request.responsesToolChoice = ["type": "image_generation"]
             }
         }
 
         if codeInterpreterEnabled {
-            var container: [String: Any] = ["type": "auto"]
-            let memoryLimit = OpenAIResponsesNativeToolSettings.stringValue(
-                for: OpenAIResponsesNativeToolSettings.codeInterpreterMemoryLimitKey,
-                default: OpenAIResponsesNativeToolSettings.defaultCodeInterpreterMemoryLimit
-            )
-            if !memoryLimit.isEmpty, memoryLimit != "default" {
-                container["memory_limit"] = memoryLimit
-            }
             tools.append([
                 "type": "code_interpreter",
-                "container": container
+                "container": ["type": "auto"]
             ])
-        }
-
-        if openAIFileSearchEnabled {
-            let vectorStoreIDs = OpenAIResponsesNativeToolSettings.vectorStoreIDs()
-            if !vectorStoreIDs.isEmpty {
-                tools.append([
-                    "type": "file_search",
-                    "vector_store_ids": vectorStoreIDs
-                ])
-            }
-        }
-
-        var includedDeferredSurface = false
-        if openAIMCPEnabled,
-           let mcpURL = OpenAIResponsesNativeToolSettings.validMCPServerURL(
-            OpenAIResponsesNativeToolSettings.stringValue(
-                for: OpenAIResponsesNativeToolSettings.mcpServerURLKey
-            )
-           ) {
-            let label = OpenAIResponsesNativeToolSettings.sanitizedMCPServerLabel(
-                OpenAIResponsesNativeToolSettings.stringValue(
-                    for: OpenAIResponsesNativeToolSettings.mcpServerLabelKey,
-                    default: "mcp_server"
-                )
-            )
-            var mcpTool: [String: Any] = [
-                "type": "mcp",
-                "server_label": label,
-                "server_url": mcpURL,
-                "require_approval": OpenAIResponsesNativeToolSettings.stringValue(
-                    for: OpenAIResponsesNativeToolSettings.mcpRequireApprovalKey,
-                    default: OpenAIResponsesNativeToolSettings.defaultMCPRequireApproval
-                )
-            ]
-            let description = OpenAIResponsesNativeToolSettings.stringValue(
-                for: OpenAIResponsesNativeToolSettings.mcpServerDescriptionKey
-            )
-            if !description.isEmpty {
-                mcpTool["server_description"] = description
-            }
-            if openAIToolSearchEnabled {
-                mcpTool["defer_loading"] = true
-                includedDeferredSurface = true
-            }
-            tools.append(mcpTool)
-        }
-
-        if openAIToolSearchEnabled && includedDeferredSurface {
-            tools.append(["type": "tool_search"])
         }
 
         guard !tools.isEmpty else { return }
@@ -12939,7 +12823,7 @@ final class ChatViewModel {
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
                     action: "web_search",
-                    description: "将使用 OpenAI 原生网页搜索",
+                    description: "将使用 Responses 原生网页搜索",
                     done: true,
                     count: 0,
                     query: query,

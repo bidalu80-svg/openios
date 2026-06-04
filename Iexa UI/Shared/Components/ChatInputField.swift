@@ -81,13 +81,9 @@ struct ChatInputField: View {
     @Binding var webSearchEnabled: Bool
     @Binding var imageGenerationEnabled: Bool
     @Binding var codeInterpreterEnabled: Bool
-    @Binding var openAIFileSearchEnabled: Bool
-    @Binding var openAIMCPEnabled: Bool
-    @Binding var openAIToolSearchEnabled: Bool
     var isWebSearchAvailable: Bool = true
     var isImageGenerationAvailable: Bool = true
     var isCodeInterpreterAvailable: Bool = true
-    var isOpenAINativeToolsAvailable: Bool = false
     var tools: [ToolItem]
     @Binding var selectedToolIds: Set<String>
     var isLoadingTools: Bool = false
@@ -275,13 +271,9 @@ struct ChatInputField: View {
                 webSearchEnabled: $webSearchEnabled,
                 imageGenerationEnabled: $imageGenerationEnabled,
                 codeInterpreterEnabled: $codeInterpreterEnabled,
-                openAIFileSearchEnabled: $openAIFileSearchEnabled,
-                openAIMCPEnabled: $openAIMCPEnabled,
-                openAIToolSearchEnabled: $openAIToolSearchEnabled,
                 isWebSearchAvailable: isWebSearchAvailable,
                 isImageGenerationAvailable: isImageGenerationAvailable,
                 isCodeInterpreterAvailable: isCodeInterpreterAvailable,
-                isOpenAINativeToolsAvailable: isOpenAINativeToolsAvailable,
                 tools: tools,
                 selectedToolIds: $selectedToolIds,
                 isLoadingTools: isLoadingTools,

@@ -6,6 +6,7 @@ final class NetworkManager: NSObject, Sendable {
     let serverConfig: ServerConfig
     private let keychain: KeychainService
     private let logger = Logger(subsystem: "com.openui", category: "Network")
+    private static let defaultExternalAPIUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
 
     let session: URLSession
     private let certificateDelegate: CertificateTrustDelegate?
@@ -86,6 +87,7 @@ final class NetworkManager: NSObject, Sendable {
         }
 
         var headers = configuration.httpAdditionalHeaders ?? [:]
+        applyDefaultHTTPHeaders(to: &headers)
         for (key, value) in serverConfig.customHeaders {
             headers[key] = value
         }
@@ -144,6 +146,7 @@ final class NetworkManager: NSObject, Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = method.rawValue
         request.httpBody = body
+        applyDefaultHeaders(to: &request)
 
         if let timeout {
             request.timeoutInterval = timeout
@@ -534,6 +537,7 @@ final class NetworkManager: NSObject, Sendable {
         config.httpShouldSetCookies = true
 
         var headers = config.httpAdditionalHeaders ?? [:]
+        applyDefaultHTTPHeaders(to: &headers)
         for (key, value) in serverConfig.customHeaders {
             headers[key] = value
         }
@@ -551,6 +555,40 @@ final class NetworkManager: NSObject, Sendable {
 
     private func makeStreamingSession() -> URLSession {
         _streamingSession
+    }
+
+    private var defaultExternalUserAgent: String? {
+        if let cfUserAgent = serverConfig.cfUserAgent?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !cfUserAgent.isEmpty {
+            return cfUserAgent
+        }
+
+        switch serverConfig.providerType {
+        case .iexa:
+            return nil
+        case .openAICompatible, .gemini, .anthropic:
+            return Self.defaultExternalAPIUserAgent
+        }
+    }
+
+    private var hasCustomUserAgent: Bool {
+        serverConfig.customHeaders.keys.contains {
+            $0.caseInsensitiveCompare("User-Agent") == .orderedSame
+        }
+    }
+
+    private func applyDefaultHTTPHeaders(to headers: inout [AnyHashable: Any]) {
+        guard !hasCustomUserAgent, let userAgent = defaultExternalUserAgent else { return }
+        headers["User-Agent"] = userAgent
+    }
+
+    private func applyDefaultHeaders(to request: inout URLRequest) {
+        guard !hasCustomUserAgent,
+              request.value(forHTTPHeaderField: "User-Agent") == nil,
+              let userAgent = defaultExternalUserAgent else {
+            return
+        }
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
     }
 
     // MARK: - Multipart Form Data Upload
