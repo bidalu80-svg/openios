@@ -3798,7 +3798,12 @@ struct ChatDetailView: View {
         let icon = fileIconName(for: fileExt)
 
         return Button {
-            previewingMessageFile = MessageFilePreviewItem(file: file)
+            if let localURL = localPreviewURL(for: file),
+               Self.canQuickLookLocalFile(fileExtension: fileExt) {
+                previewFileURL = localURL
+            } else {
+                previewingMessageFile = MessageFilePreviewItem(file: file)
+            }
         } label: {
             if compact {
                 compactFileAttachmentLabel(fileName: fileName, file: file, fileExt: fileExt, icon: icon)
@@ -3807,6 +3812,23 @@ struct ChatDetailView: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    private func localPreviewURL(for file: ChatMessageFile) -> URL? {
+        for value in [file.displayURL, file.url].compactMap({ $0 }) {
+            if let url = URL(string: value), url.isFileURL {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private static func canQuickLookLocalFile(fileExtension ext: String) -> Bool {
+        [
+            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+            "numbers", "pages", "key", "rtf", "txt", "csv",
+            "png", "jpg", "jpeg", "gif", "heic", "heif", "webp"
+        ].contains(ext)
     }
 
     private func compactFileAttachmentLabel(

@@ -151,6 +151,14 @@ struct HistoryNode: Codable, Sendable {
         if !files.isEmpty {
             let filesArray: [[String: Any]] = files.compactMap { file -> [String: Any]? in
                 guard let url = file.url else { return nil }
+                let lowerURL = url.lowercased()
+                if lowerURL.hasPrefix("file://")
+                    || lowerURL.hasPrefix("data:")
+                    || lowerURL.hasPrefix("local-inline:")
+                    || lowerURL.hasPrefix("local-binary:")
+                    || lowerURL.hasPrefix("local-alpine:") {
+                    return nil
+                }
                 if (file.type == "image" || (file.contentType ?? "").hasPrefix("image/")),
                    url.hasPrefix("data:image/") {
                     return nil

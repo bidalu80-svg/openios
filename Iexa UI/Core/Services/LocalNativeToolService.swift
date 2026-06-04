@@ -5,6 +5,7 @@ import UserNotifications
 struct LocalNativeToolRunResult: Sendable {
     let didExecute: Bool
     let summary: String
+    let files: [ChatMessageFile]
 }
 
 @MainActor
@@ -16,7 +17,7 @@ final class LocalNativeToolService {
     func executeBlocks(in content: String) async -> LocalNativeToolRunResult {
         let calls = parseToolCalls(in: content)
         guard !calls.isEmpty else {
-            return LocalNativeToolRunResult(didExecute: false, summary: "")
+            return LocalNativeToolRunResult(didExecute: false, summary: "", files: [])
         }
 
         var results: [[String: Any]] = []
@@ -31,7 +32,8 @@ final class LocalNativeToolService {
         ]
         return LocalNativeToolRunResult(
             didExecute: true,
-            summary: prettyJSON(payload)
+            summary: prettyJSON(payload),
+            files: results.flatMap(Self.files(from:))
         )
     }
 
@@ -68,6 +70,10 @@ final class LocalNativeToolService {
             return executeClipboardWrite(call)
         case "system.notify", "system_notify", "notify", "show_notification":
             return await executeSystemNotify(call)
+        case "office.create_excel", "office_create_excel", "create_excel", "excel.create", "excel":
+            return await executeCreateExcel(call)
+        case "office.create_ppt", "office.create_powerpoint", "office_create_ppt", "create_ppt", "create_powerpoint", "ppt.create", "powerpoint.create", "ppt":
+            return await executeCreatePowerPoint(call)
         default:
             return [
                 "action": action.isEmpty ? "unknown" : action,
@@ -75,6 +81,61 @@ final class LocalNativeToolService {
                 "error": "Unsupported local native action"
             ]
         }
+    }
+
+    private func executeCreateExcel(_ call: [String: Any]) async -> [String: Any] {
+        do {
+            let result = try await LocalOfficeDocumentService.shared.createExcel(from: call)
+            var payload = result.payload
+            payload["action"] = "office.create_excel"
+            return payload
+        } catch {
+            return [
+                "action": "office.create_excel",
+                "ok": false,
+                "error": error.localizedDescription
+            ]
+        }
+    }
+
+    private func executeCreatePowerPoint(_ call: [String: Any]) async -> [String: Any] {
+        do {
+            let result = try await LocalOfficeDocumentService.shared.createPowerPoint(from: call)
+            var payload = result.payload
+            payload["action"] = "office.create_ppt"
+            return payload
+        } catch {
+            return [
+                "action": "office.create_ppt",
+                "ok": false,
+                "error": error.localizedDescription
+            ]
+        }
+    }
+
+    private static func files(from result: [String: Any]) -> [ChatMessageFile] {
+        guard (result["ok"] as? Bool) == true else { return [] }
+        var files: [ChatMessageFile] = []
+        if let fileURL = result["file_url"] as? String,
+           let fileName = result["file_name"] as? String {
+            files.append(ChatMessageFile(
+                type: "file",
+                url: fileURL,
+                name: fileName,
+                contentType: result["content_type"] as? String
+            ))
+        }
+        if let previews = result["preview_images"] as? [String] {
+            for (index, preview) in previews.prefix(6).enumerated() {
+                files.append(ChatMessageFile(
+                    type: "image",
+                    url: preview,
+                    name: "preview-\(index + 1).png",
+                    contentType: "image/png"
+                ))
+            }
+        }
+        return files
     }
 
     private func executeDeviceStatus() -> [String: Any] {
