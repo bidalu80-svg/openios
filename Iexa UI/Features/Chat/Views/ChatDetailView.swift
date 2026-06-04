@@ -734,10 +734,6 @@ struct ChatDetailView: View {
     @State private var viewState_contentHeight: CGFloat = 0
     /// Cached scroll container height — updated via a separate onScrollGeometryChange.
     @State private var viewState_containerHeight: CGFloat = 0
-    /// Stable viewport height used by the last-turn spacer while the keyboard animates.
-    @State private var stableLastTurnViewportHeight: CGFloat = 0
-    @State private var isKeyboardViewportFrozen = false
-    @State private var keyboardViewportFreezeGeneration = 0
     /// Last time a layout/IME correction repinned the transcript.
     @State private var lastLayoutRepinTime: Date = .distantPast
     /// Keeps a newly sent turn anchored at the top of the viewport until
@@ -2216,19 +2212,6 @@ struct ChatDetailView: View {
         .onChange(of: keyboard.height) { oldHeight, height in
             guard abs(height - oldHeight) > 1 else { return }
             let settleDelay = max(0.12, keyboard.animationDuration + 0.08)
-            if viewState_containerHeight > 1 {
-                stableLastTurnViewportHeight = max(stableLastTurnViewportHeight, viewState_containerHeight)
-            }
-            isKeyboardViewportFrozen = true
-            keyboardViewportFreezeGeneration += 1
-            let freezeGeneration = keyboardViewportFreezeGeneration
-            DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay + 0.18) {
-                guard freezeGeneration == keyboardViewportFreezeGeneration else { return }
-                isKeyboardViewportFrozen = false
-                if viewState_containerHeight > 1 {
-                    stableLastTurnViewportHeight = viewState_containerHeight
-                }
-            }
 
             guard !viewModel.messages.isEmpty else { return }
             let maxValidOffset = max(0, viewState_contentHeight - viewState_containerHeight)
@@ -2268,8 +2251,7 @@ struct ChatDetailView: View {
         .background(ScrollViewHorizontalLock())
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(editingMessageId != nil ? .never : .interactively)
-        .defaultScrollAnchor(.bottom)
-        .scrollPosition($scrollPosition, anchor: .bottom)
+        .scrollPosition($scrollPosition)
         // Detect scroll position to show/hide FAB + auto-load pagination
         .onScrollGeometryChange(for: CGPoint.self) { geo in
             geo.contentOffset
@@ -2324,10 +2306,6 @@ struct ChatDetailView: View {
             }
             if containerChanged {
                 viewState_containerHeight = newSize.height
-                if stableLastTurnViewportHeight <= 1
-                    || (!keyboard.isVisible && keyboard.height <= 1 && !isKeyboardViewportFrozen) {
-                    stableLastTurnViewportHeight = newSize.height
-                }
             }
 
             // Correct IME and layout drift whenever the viewport is known to
@@ -2430,15 +2408,7 @@ struct ChatDetailView: View {
         guard containerHeight > 1 else { return 0 }
 
         // Keep the last turn filling the currently visible ScrollView
-        // viewport. During keyboard animations, freeze this at the last
-        // stable viewport height so the last-turn spacer does not shrink or
-        // grow underneath SwiftUI's bottom scroll anchor.
-        if keyboard.isVisible || keyboard.height > 1 || isKeyboardViewportFrozen {
-            let stableHeight = stableLastTurnViewportHeight > 1
-                ? stableLastTurnViewportHeight
-                : containerHeight
-            return max(stableHeight, containerHeight)
-        }
+        // viewport.
         return containerHeight
     }
 
