@@ -236,6 +236,67 @@ struct BackendConfig: Codable, Sendable {
 
 // MARK: - Chat Completion
 
+enum OpenAIResponsesNativeToolSettings {
+    static let fileSearchEnabledKey = "openaiResponsesFileSearchEnabled"
+    static let fileSearchVectorStoreIDsKey = "openaiResponsesFileSearchVectorStoreIDs"
+    static let mcpEnabledKey = "openaiResponsesMCPEnabled"
+    static let mcpServerLabelKey = "openaiResponsesMCPServerLabel"
+    static let mcpServerURLKey = "openaiResponsesMCPServerURL"
+    static let mcpServerDescriptionKey = "openaiResponsesMCPServerDescription"
+    static let mcpRequireApprovalKey = "openaiResponsesMCPRequireApproval"
+    static let toolSearchEnabledKey = "openaiResponsesToolSearchEnabled"
+    static let webSearchContextSizeKey = "openaiResponsesWebSearchContextSize"
+    static let webSearchExternalAccessKey = "openaiResponsesWebSearchExternalAccess"
+    static let codeInterpreterMemoryLimitKey = "openaiResponsesCodeInterpreterMemoryLimit"
+    static let imageGenerationSizeKey = "openaiResponsesImageGenerationSize"
+    static let imageGenerationQualityKey = "openaiResponsesImageGenerationQuality"
+
+    static let defaultWebSearchContextSize = "medium"
+    static let defaultCodeInterpreterMemoryLimit = "default"
+    static let defaultImageGenerationSize = "auto"
+    static let defaultImageGenerationQuality = "auto"
+    static let defaultMCPRequireApproval = "never"
+
+    static func stringValue(for key: String, default defaultValue: String = "") -> String {
+        let value = UserDefaults.standard.string(forKey: key) ?? defaultValue
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func boolValue(for key: String, default defaultValue: Bool = false) -> Bool {
+        if UserDefaults.standard.object(forKey: key) == nil {
+            return defaultValue
+        }
+        return UserDefaults.standard.bool(forKey: key)
+    }
+
+    static func vectorStoreIDs(from rawValue: String? = nil) -> [String] {
+        let raw = rawValue ?? stringValue(for: fileSearchVectorStoreIDsKey)
+        return raw
+            .components(separatedBy: CharacterSet(charactersIn: ",， \n\t;；"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    static func sanitizedMCPServerLabel(_ value: String) -> String {
+        let cleaned = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"[^A-Za-z0-9_-]+"#, with: "_", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_-"))
+        return cleaned.isEmpty ? "mcp_server" : String(cleaned.prefix(64))
+    }
+
+    static func validMCPServerURL(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              url.host?.isEmpty == false else {
+            return nil
+        }
+        return trimmed
+    }
+}
+
 /// Request body for `/api/chat/completions`.
 struct ChatCompletionRequest: Sendable {
     var model: String
@@ -271,6 +332,16 @@ struct ChatCompletionRequest: Sendable {
     var tools: [[String: Any]]?
     /// OpenAI-compatible native tool choice (`"auto"` or `"none"`).
     var toolChoice: String?
+    /// OpenAI Responses hosted tools such as web_search, file_search,
+    /// code_interpreter, image_generation, mcp, and tool_search.
+    ///
+    /// Keep this separate from `tools`: Chat Completions function tools and
+    /// Responses hosted tools are not interchangeable, and many compatible
+    /// gateways reject hosted tool types on `/chat/completions`.
+    var responsesTools: [[String: Any]]?
+    /// Responses tool choice. Can be a string (`"auto"`/`"none"`) or a hosted
+    /// tool object such as `["type": "image_generation"]`.
+    var responsesToolChoice: Any?
     /// Iexa native server server-side parameters sent alongside the request.
     /// The server's `apply_params_to_form_data()` consumes these before forwarding
     /// to the LLM. Key use: `function_calling` — controls native vs default tool mode.
@@ -486,6 +557,12 @@ struct ChatCompletionRequest: Sendable {
             "model": model,
             "input": Self.responsesInputItems(from: serializedMessages)
         ]
+        if let responsesTools, !responsesTools.isEmpty {
+            data["tools"] = responsesTools
+        }
+        if let responsesToolChoice {
+            data["tool_choice"] = responsesToolChoice
+        }
 
         if let params, !params.isEmpty {
             let passthroughKeys: Set<String> = [

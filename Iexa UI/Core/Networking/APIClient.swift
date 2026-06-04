@@ -2308,6 +2308,7 @@ final class APIClient: @unchecked Sendable {
         if request.files?.isEmpty == false { return false }
         if request.isPipeModel { return false }
         if providerType != .openAICompatible { return false }
+        if request.responsesTools?.isEmpty == false { return true }
         if request.tools?.isEmpty == false { return false }
         if let toolChoice = request.toolChoice {
             if !toolChoice.isEmpty, toolChoice.lowercased() != "none" {

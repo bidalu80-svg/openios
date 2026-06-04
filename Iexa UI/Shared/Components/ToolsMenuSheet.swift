@@ -29,9 +29,13 @@ struct ToolsMenuSheet: View {
     @Binding var webSearchEnabled: Bool
     @Binding var imageGenerationEnabled: Bool
     @Binding var codeInterpreterEnabled: Bool
+    @Binding var openAIFileSearchEnabled: Bool
+    @Binding var openAIMCPEnabled: Bool
+    @Binding var openAIToolSearchEnabled: Bool
     var isWebSearchAvailable: Bool = true
     var isImageGenerationAvailable: Bool = true
     var isCodeInterpreterAvailable: Bool = true
+    var isOpenAINativeToolsAvailable: Bool = false
     var tools: [ToolItem]
     @Binding var selectedToolIds: Set<String>
     var isLoadingTools: Bool = false
@@ -46,6 +50,7 @@ struct ToolsMenuSheet: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     @State private var toolsExpanded = true
+    @State private var showOpenAINativeToolSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -73,6 +78,11 @@ struct ToolsMenuSheet: View {
                             .padding(.horizontal, Spacing.md)
                     }
 
+                    if isOpenAINativeToolsAvailable {
+                        openAINativeToolsSection
+                            .padding(.horizontal, Spacing.md)
+                    }
+
                     // 工具区
                     toolsSection
                         .padding(.horizontal, Spacing.md)
@@ -84,6 +94,9 @@ struct ToolsMenuSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.hidden)
         .presentationCornerRadius(CornerRadius.modal)
+        .sheet(isPresented: $showOpenAINativeToolSettings) {
+            OpenAINativeToolsSettingsSheet()
+        }
     }
 
     // MARK: - Sheet Handle
@@ -341,6 +354,84 @@ struct ToolsMenuSheet: View {
                 codeInterpreterToggle
             }
         }
+    }
+
+    // MARK: - OpenAI Native Tools Section
+
+    private var openAINativeToolsSection: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            Text("OpenAI 原生")
+                .scaledFont(size: 11, weight: .semibold)
+                .textCase(.uppercase)
+                .foregroundStyle(theme.textTertiary)
+                .padding(.bottom, 2)
+
+            featureToggleTile(
+                icon: "doc.text.magnifyingglass",
+                title: "文件搜索",
+                subtitle: openAIFileSearchConfigured
+                    ? "使用 OpenAI vector store 检索文件"
+                    : "先填写 vector store id",
+                isOn: $openAIFileSearchEnabled
+            )
+
+            featureToggleTile(
+                icon: "point.3.connected.trianglepath.dotted",
+                title: "Remote MCP",
+                subtitle: openAIMCPConfigured
+                    ? "连接一个 OpenAI 可访问的 MCP Server"
+                    : "先填写公开 MCP 地址",
+                isOn: $openAIMCPEnabled
+            )
+
+            featureToggleTile(
+                icon: "text.magnifyingglass",
+                title: "工具搜索",
+                subtitle: "按需加载 MCP 工具定义",
+                isOn: $openAIToolSearchEnabled
+            )
+
+            Button {
+                showOpenAINativeToolSettings = true
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    toolGlyph(systemImage: "slider.horizontal.3", isSelected: false)
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        Text("原生工具配置")
+                            .scaledFont(size: 14, weight: .medium)
+                            .foregroundStyle(theme.textPrimary)
+                        Text("搜索、文件、代码和 MCP 参数")
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .scaledFont(size: 12, weight: .semibold)
+                        .foregroundStyle(theme.textTertiary)
+                }
+                .padding(Spacing.sm)
+                .background(theme.surfaceContainer.opacity(theme.isDark ? 0.32 : 0.12))
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.input, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: CornerRadius.input, style: .continuous)
+                        .strokeBorder(theme.cardBorder.opacity(0.55), lineWidth: 0.5)
+                )
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var openAIFileSearchConfigured: Bool {
+        !OpenAIResponsesNativeToolSettings.vectorStoreIDs().isEmpty
+    }
+
+    private var openAIMCPConfigured: Bool {
+        OpenAIResponsesNativeToolSettings.validMCPServerURL(
+            OpenAIResponsesNativeToolSettings.stringValue(
+                for: OpenAIResponsesNativeToolSettings.mcpServerURLKey
+            )
+        ) != nil
     }
 
     // MARK: - Tools Section
@@ -613,6 +704,105 @@ struct ToolsMenuSheet: View {
     }
 }
 
+private struct OpenAINativeToolsSettingsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    @AppStorage(OpenAIResponsesNativeToolSettings.fileSearchVectorStoreIDsKey)
+    private var vectorStoreIDs = ""
+    @AppStorage(OpenAIResponsesNativeToolSettings.webSearchContextSizeKey)
+    private var webSearchContextSize = OpenAIResponsesNativeToolSettings.defaultWebSearchContextSize
+    @AppStorage(OpenAIResponsesNativeToolSettings.webSearchExternalAccessKey)
+    private var webSearchExternalAccess = true
+    @AppStorage(OpenAIResponsesNativeToolSettings.codeInterpreterMemoryLimitKey)
+    private var codeInterpreterMemoryLimit = OpenAIResponsesNativeToolSettings.defaultCodeInterpreterMemoryLimit
+    @AppStorage(OpenAIResponsesNativeToolSettings.imageGenerationSizeKey)
+    private var imageGenerationSize = OpenAIResponsesNativeToolSettings.defaultImageGenerationSize
+    @AppStorage(OpenAIResponsesNativeToolSettings.imageGenerationQualityKey)
+    private var imageGenerationQuality = OpenAIResponsesNativeToolSettings.defaultImageGenerationQuality
+    @AppStorage(OpenAIResponsesNativeToolSettings.mcpServerLabelKey)
+    private var mcpServerLabel = "mcp_server"
+    @AppStorage(OpenAIResponsesNativeToolSettings.mcpServerURLKey)
+    private var mcpServerURL = ""
+    @AppStorage(OpenAIResponsesNativeToolSettings.mcpServerDescriptionKey)
+    private var mcpServerDescription = ""
+    @AppStorage(OpenAIResponsesNativeToolSettings.mcpRequireApprovalKey)
+    private var mcpRequireApproval = OpenAIResponsesNativeToolSettings.defaultMCPRequireApproval
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("网页搜索") {
+                    Picker("上下文", selection: $webSearchContextSize) {
+                        Text("低").tag("low")
+                        Text("中").tag("medium")
+                        Text("高").tag("high")
+                    }
+                    Toggle("允许实时网页访问", isOn: $webSearchExternalAccess)
+                }
+
+                Section("文件搜索") {
+                    TextField("vs_xxx, vs_yyy", text: $vectorStoreIDs, axis: .vertical)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .lineLimit(2...4)
+                    Text("填写 OpenAI vector store id，多个可用逗号或空格分隔。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("代码解释器") {
+                    Picker("内存", selection: $codeInterpreterMemoryLimit) {
+                        Text("默认").tag("default")
+                        Text("1 GB").tag("1g")
+                        Text("4 GB").tag("4g")
+                    }
+                }
+
+                Section("图像生成") {
+                    Picker("尺寸", selection: $imageGenerationSize) {
+                        Text("自动").tag("auto")
+                        Text("1024x1024").tag("1024x1024")
+                        Text("1024x1536").tag("1024x1536")
+                        Text("1536x1024").tag("1536x1024")
+                    }
+                    Picker("质量", selection: $imageGenerationQuality) {
+                        Text("自动").tag("auto")
+                        Text("低").tag("low")
+                        Text("中").tag("medium")
+                        Text("高").tag("high")
+                    }
+                }
+
+                Section("Remote MCP") {
+                    TextField("server_label", text: $mcpServerLabel)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("https://example.com/sse", text: $mcpServerURL)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                    TextField("描述", text: $mcpServerDescription, axis: .vertical)
+                        .lineLimit(2...3)
+                    Picker("审批", selection: $mcpRequireApproval) {
+                        Text("不要求").tag("never")
+                        Text("始终要求").tag("always")
+                    }
+                    Text("这里填写的是 OpenAI 服务器可访问的远程 MCP 地址；本机 localhost 或局域网地址通常不能被 OpenAI 访问。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("OpenAI 原生工具")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Preview
 
 #Preview("Tools Menu Sheet") {
@@ -622,6 +812,10 @@ struct ToolsMenuSheet: View {
                 webSearchEnabled: .constant(false),
                 imageGenerationEnabled: .constant(false),
                 codeInterpreterEnabled: .constant(false),
+                openAIFileSearchEnabled: .constant(false),
+                openAIMCPEnabled: .constant(false),
+                openAIToolSearchEnabled: .constant(false),
+                isOpenAINativeToolsAvailable: true,
                 tools: [
                     ToolItem(
                         name: "Web Search",
