@@ -14670,9 +14670,57 @@ final class ChatViewModel {
     }
 
     private func executeLocalNativeTool(messageId: String, content: String) async {
+        let officeKind = LocalNativeToolService.officeActionKind(in: content)
+        if let officeKind {
+            markLocalOfficeGenerationStarted(messageId: messageId, kind: officeKind)
+        }
         let result = await LocalNativeToolService.shared.executeBlocks(in: content)
-        guard result.didExecute else { return }
+        guard result.didExecute else {
+            if let officeKind {
+                await finishLocalOfficeGeneration(
+                    messageId: messageId,
+                    document: LocalNativeOfficeDocument(
+                        kind: officeKind,
+                        ok: false,
+                        title: officeKind.displayName,
+                        fileName: "",
+                        summary: "",
+                        previewText: "",
+                        previewCount: 0,
+                        error: "模型返回的 Office 生成指令无法解析。"
+                    ),
+                    files: []
+                )
+            }
+            return
+        }
         guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
+
+        if let officeDocument = result.officeDocument {
+            await finishLocalOfficeGeneration(
+                messageId: messageId,
+                document: officeDocument,
+                files: result.files
+            )
+            return
+        }
+        if let officeKind {
+            await finishLocalOfficeGeneration(
+                messageId: messageId,
+                document: LocalNativeOfficeDocument(
+                    kind: officeKind,
+                    ok: false,
+                    title: officeKind.displayName,
+                    fileName: "",
+                    summary: "",
+                    previewText: "",
+                    previewCount: 0,
+                    error: "本地 Office 工具没有返回文件结果。"
+                ),
+                files: []
+            )
+            return
+        }
 
         let resultMessage = ChatMessage(
             role: .system,
@@ -14705,6 +14753,148 @@ final class ChatViewModel {
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
         await startLocalNativeContinuation(parentId: resultMessage.id)
+    }
+
+    private func markLocalOfficeGenerationStarted(messageId: String, kind: LocalNativeOfficeKind) {
+        isStreaming = true
+        hasFinishedStreaming = false
+        selfInitiatedStream = true
+        activeTaskId = nil
+        let statuses = localOfficeStatusHistory(kind: kind, phase: .running)
+        updateLocalOfficeGenerationMessage(
+            messageId: messageId,
+            content: kind.creatingTitle,
+            isStreaming: true,
+            statusHistory: statuses,
+            files: []
+        )
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func finishLocalOfficeGeneration(
+        messageId: String,
+        document: LocalNativeOfficeDocument,
+        files: [ChatMessageFile]
+    ) async {
+        let content = localOfficeFinalContent(for: document, fileCount: files.count)
+        updateLocalOfficeGenerationMessage(
+            messageId: messageId,
+            content: content,
+            isStreaming: false,
+            statusHistory: localOfficeStatusHistory(
+                kind: document.kind,
+                phase: document.ok ? .finished : .failed
+            ),
+            files: files
+        )
+        hasFinishedStreaming = true
+        isStreaming = false
+        isExternallyStreaming = false
+        selfInitiatedStream = false
+        activeTaskId = nil
+        await persistLocalConversationIfNeeded()
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        await sendCompletionNotificationIfNeeded(content: content)
+    }
+
+    private enum LocalOfficeGenerationPhase: Equatable {
+        case running
+        case finished
+        case failed
+    }
+
+    private func localOfficeStatusHistory(
+        kind: LocalNativeOfficeKind,
+        phase: LocalOfficeGenerationPhase
+    ) -> [ChatStatusUpdate] {
+        let isDone = phase != .running
+        let failed = phase == .failed
+        return [
+            ChatStatusUpdate(
+                action: "local_office_agent",
+                description: "解析生成需求",
+                done: true,
+                occurredAt: .now
+            ),
+            ChatStatusUpdate(
+                action: "local_office_agent",
+                description: "生成\(kind.displayName)文件",
+                done: isDone,
+                occurredAt: .now
+            ),
+            ChatStatusUpdate(
+                action: "local_office_agent",
+                description: failed ? "生成失败" : "生成预览图",
+                done: isDone,
+                occurredAt: .now
+            ),
+            ChatStatusUpdate(
+                action: "local_office_agent",
+                description: failed ? "请调整需求后重试" : "附加到聊天",
+                done: isDone,
+                occurredAt: .now
+            )
+        ]
+    }
+
+    private func localOfficeFinalContent(
+        for document: LocalNativeOfficeDocument,
+        fileCount: Int
+    ) -> String {
+        guard document.ok else {
+            let detail = document.error?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let reason: String
+            if let detail, !detail.isEmpty {
+                reason = "：\(detail)"
+            } else {
+                reason = "。"
+            }
+            return "本地\(document.kind.displayName)生成失败\(reason)"
+        }
+
+        let fileName = document.fileName.isEmpty
+            ? "\(document.title).\(document.kind == .powerPoint ? "pptx" : "xlsx")"
+            : document.fileName
+        let previewLine = document.previewCount > 0
+            ? "已生成 \(document.previewCount) 张预览图。"
+            : "已生成文件，可直接打开查看。"
+        let summary = document.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let titleLine = "已生成本地\(document.kind.displayName)：\(fileName)"
+        let attachmentLine = fileCount > 0 ? "文件和预览已附在这条消息下方。" : "文件已保存到本地工作区。"
+        return [titleLine, summary, previewLine, attachmentLine]
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n\n")
+    }
+
+    private func updateLocalOfficeGenerationMessage(
+        messageId: String,
+        content: String,
+        isStreaming: Bool,
+        statusHistory: [ChatStatusUpdate],
+        files: [ChatMessageFile]
+    ) {
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        var metadata = conversation?.messages[index].metadata ?? [:]
+        metadata["iexa_local_office_document"] = "true"
+        metadata["iexa_local_native_tool_parent"] = "true"
+
+        conversation?.messages[index].content = content
+        conversation?.messages[index].isStreaming = isStreaming
+        conversation?.messages[index].statusHistory = statusHistory
+        conversation?.messages[index].metadata = metadata
+        if !files.isEmpty {
+            conversation?.messages[index].files = files
+        }
+        conversation?.history.updateNode(id: messageId) { node in
+            node.content = content
+            node.done = !isStreaming
+            node.statusHistory = statusHistory
+            node.metadata = metadata
+            if !files.isEmpty {
+                node.files = files
+            }
+        }
+        conversation?.history.currentId = messageId
     }
 
     private func startLocalNativeContinuation(parentId: String) async {

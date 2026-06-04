@@ -6,6 +6,41 @@ struct LocalNativeToolRunResult: Sendable {
     let didExecute: Bool
     let summary: String
     let files: [ChatMessageFile]
+    let officeDocument: LocalNativeOfficeDocument?
+}
+
+enum LocalNativeOfficeKind: String, Sendable, Equatable {
+    case excel
+    case powerPoint
+
+    var displayName: String {
+        switch self {
+        case .excel:
+            return "Excel"
+        case .powerPoint:
+            return "PPT"
+        }
+    }
+
+    var creatingTitle: String {
+        switch self {
+        case .excel:
+            return "正在生成本地 Excel..."
+        case .powerPoint:
+            return "正在生成本地 PPT..."
+        }
+    }
+}
+
+struct LocalNativeOfficeDocument: Sendable {
+    let kind: LocalNativeOfficeKind
+    let ok: Bool
+    let title: String
+    let fileName: String
+    let summary: String
+    let previewText: String
+    let previewCount: Int
+    let error: String?
 }
 
 @MainActor
@@ -17,7 +52,12 @@ final class LocalNativeToolService {
     func executeBlocks(in content: String) async -> LocalNativeToolRunResult {
         let calls = parseToolCalls(in: content)
         guard !calls.isEmpty else {
-            return LocalNativeToolRunResult(didExecute: false, summary: "", files: [])
+            return LocalNativeToolRunResult(
+                didExecute: false,
+                summary: "",
+                files: [],
+                officeDocument: nil
+            )
         }
 
         var results: [[String: Any]] = []
@@ -33,7 +73,8 @@ final class LocalNativeToolService {
         return LocalNativeToolRunResult(
             didExecute: true,
             summary: prettyJSON(payload),
-            files: results.flatMap(Self.files(from:))
+            files: results.flatMap(Self.files(from:)),
+            officeDocument: Self.officeDocument(from: results)
         )
     }
 
@@ -44,6 +85,30 @@ final class LocalNativeToolService {
 
     static func containsNativeToolBlock(_ content: String) -> Bool {
         content.range(of: #"```iexa_native\s*[\s\S]*?```"#, options: .regularExpression) != nil
+    }
+
+    static func officeActionKind(in content: String) -> LocalNativeOfficeKind? {
+        let lower = content.lowercased()
+        if lower.contains("office.create_ppt")
+            || lower.contains("office.create_powerpoint")
+            || lower.contains("office_create_ppt")
+            || lower.contains("create_ppt")
+            || lower.contains("create_powerpoint")
+            || lower.contains("ppt.create")
+            || lower.contains("powerpoint.create")
+            || lower.range(of: #""action"\s*:\s*"ppt""#, options: .regularExpression) != nil
+            || lower.range(of: #""name"\s*:\s*"ppt""#, options: .regularExpression) != nil {
+            return .powerPoint
+        }
+        if lower.contains("office.create_excel")
+            || lower.contains("office_create_excel")
+            || lower.contains("create_excel")
+            || lower.contains("excel.create")
+            || lower.range(of: #""action"\s*:\s*"excel""#, options: .regularExpression) != nil
+            || lower.range(of: #""name"\s*:\s*"excel""#, options: .regularExpression) != nil {
+            return .excel
+        }
+        return nil
     }
 
     private func execute(_ call: [String: Any]) async -> [String: Any] {
@@ -136,6 +201,40 @@ final class LocalNativeToolService {
             }
         }
         return files
+    }
+
+    private static func officeDocument(from results: [[String: Any]]) -> LocalNativeOfficeDocument? {
+        for result in results {
+            let action = (result["action"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let documentType = (result["document_type"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let kind: LocalNativeOfficeKind?
+            if action.contains("ppt") || action.contains("powerpoint") || documentType == "ppt" {
+                kind = .powerPoint
+            } else if action.contains("excel") || documentType == "excel" {
+                kind = .excel
+            } else {
+                kind = nil
+            }
+            guard let kind else { continue }
+
+            let ok = result["ok"] as? Bool ?? false
+            let previews = result["preview_images"] as? [String] ?? []
+            return LocalNativeOfficeDocument(
+                kind: kind,
+                ok: ok,
+                title: result["title"] as? String ?? kind.displayName,
+                fileName: result["file_name"] as? String ?? "",
+                summary: result["summary"] as? String ?? "",
+                previewText: result["preview_text"] as? String ?? "",
+                previewCount: previews.count,
+                error: result["error"] as? String
+            )
+        }
+        return nil
     }
 
     private func executeDeviceStatus() -> [String: Any] {

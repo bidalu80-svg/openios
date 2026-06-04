@@ -337,7 +337,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     || action.contains("code_interpreter")
                     || action.contains("get_readable")
                     || action.contains("readable")
-                    || action.contains("local_native_tool") else {
+                    || action.contains("local_native_tool")
+                    || action.contains("local_office_agent") else {
                 return nil
             }
 
@@ -400,6 +401,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
             if description.contains("准备执行") { return "准备执行本地命令" }
             let cleaned = description.trimmingCharacters(in: CharacterSet(charactersIn: ".。… "))
             return cleaned.isEmpty ? "运行本地工具" : cleaned
+        }
+        if action.contains("local_office_agent") {
+            let cleaned = description.trimmingCharacters(in: CharacterSet(charactersIn: ".。… "))
+            return cleaned.isEmpty ? "生成 Office 文件" : cleaned
         }
         if action.contains("web_search") || action.contains("browser_web_search") {
             if description.contains("读取") || description.lowercased().contains("read") {
@@ -572,6 +577,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 || action.contains("code_interpreter")
                 || action.contains("get_readable")
                 || action.contains("readable")
+                || action.contains("local_native_tool")
+                || action.contains("local_office_agent")
         }
     }
 
@@ -1062,6 +1069,7 @@ struct ChatDetailView: View {
                 || action == "local_alpine_agent"
                 || action == "local_alpine_tool"
                 || action == "local_native_tool"
+                || action == "local_office_agent"
         }
     }
 
