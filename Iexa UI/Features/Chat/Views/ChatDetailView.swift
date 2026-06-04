@@ -714,14 +714,6 @@ struct ChatDetailView: View {
     // MARK: Model selector sheet
     @State private var isShowingModelSelectorSheet = false
     @State private var isShowingChatParams = false
-    @AppStorage("tokenUsageInputTotal") private var tokenUsageInputTotal: Int = 0
-    @AppStorage("tokenUsageOutputTotal") private var tokenUsageOutputTotal: Int = 0
-    @AppStorage("tokenUsageCachedTotal") private var tokenUsageCachedTotal: Int = 0
-    @AppStorage("tokenUsageImageTotal") private var tokenUsageImageTotal: Int = 0
-    @AppStorage("tokenUsageImageCountTotal") private var tokenUsageImageCountTotal: Int = 0
-    @AppStorage("tokenUsageVideoCountTotal") private var tokenUsageVideoCountTotal: Int = 0
-    @AppStorage("tokenUsageExactMessagesTotal") private var tokenUsageExactMessagesTotal: Int = 0
-    @AppStorage("tokenUsageEstimatedMessagesTotal") private var tokenUsageEstimatedMessagesTotal: Int = 0
     @AppStorage("chatWebSearchEnabled") private var chatWebSearchEnabled = false
     @State private var editingModelDetail: ModelDetail? = nil
     @State private var isLoadingModelDetail = false
@@ -742,6 +734,9 @@ struct ChatDetailView: View {
     @State private var viewState_contentHeight: CGFloat = 0
     /// Cached scroll container height — updated via a separate onScrollGeometryChange.
     @State private var viewState_containerHeight: CGFloat = 0
+    /// Stable viewport height used by the last-turn spacer while the keyboard animates.
+    @State private var stableLastTurnViewportHeight: CGFloat = 0
+    @State private var keyboardViewportFreezeUntil: Date = .distantPast
     /// Last time a layout/IME correction repinned the transcript.
     @State private var lastLayoutRepinTime: Date = .distantPast
     /// Keeps a newly sent turn anchored at the top of the viewport until
@@ -787,19 +782,6 @@ struct ChatDetailView: View {
     @State private var agentFloatingFilePreview: LocalAlpineWrittenFilePreviewItem?
     @State private var agentFloatingStepPreview: AgentFloatingStepPreviewItem?
     @State private var agentFloatingLoadingPath: String?
-
-    private var tokenUsageTotalsSnapshot: ChatTokenUsageSnapshot {
-        ChatTokenUsageSnapshot(
-            inputTokens: tokenUsageInputTotal,
-            outputTokens: tokenUsageOutputTotal,
-            cachedTokens: tokenUsageCachedTotal,
-            imageTokens: tokenUsageImageTotal,
-            imageCount: tokenUsageImageCountTotal,
-            videoCount: tokenUsageVideoCountTotal,
-            exactUsageMessages: tokenUsageExactMessagesTotal,
-            estimatedMessages: tokenUsageEstimatedMessagesTotal
-        )
-    }
 
     private var toolbarControlsMinWidth: CGFloat {
         var buttonCount = 1
@@ -1109,18 +1091,6 @@ struct ChatDetailView: View {
         ) != nil
     }
 
-    private func resetTokenUsageTotals() {
-        tokenUsageInputTotal = 0
-        tokenUsageOutputTotal = 0
-        tokenUsageCachedTotal = 0
-        tokenUsageImageTotal = 0
-        tokenUsageImageCountTotal = 0
-        tokenUsageVideoCountTotal = 0
-        tokenUsageExactMessagesTotal = 0
-        tokenUsageEstimatedMessagesTotal = 0
-        Haptics.play(.medium)
-    }
-
     // MARK: Model mention (@ trigger)
     @State private var isShowingModelPicker = false
     @State private var modelPickerQuery = ""
@@ -1356,16 +1326,6 @@ struct ChatDetailView: View {
             guard phase != .active else { return }
             collapseTransientAgentViewsForBackground()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .chatTokenUsageDidAccumulate)) { notification in
-            tokenUsageInputTotal += notification.userInfo?["input"] as? Int ?? 0
-            tokenUsageOutputTotal += notification.userInfo?["output"] as? Int ?? 0
-            tokenUsageCachedTotal += notification.userInfo?["cached"] as? Int ?? 0
-            tokenUsageImageTotal += notification.userInfo?["image"] as? Int ?? 0
-            tokenUsageImageCountTotal += notification.userInfo?["imageCount"] as? Int ?? 0
-            tokenUsageVideoCountTotal += notification.userInfo?["videoCount"] as? Int ?? 0
-            tokenUsageExactMessagesTotal += notification.userInfo?["exact"] as? Int ?? 0
-            tokenUsageEstimatedMessagesTotal += notification.userInfo?["estimated"] as? Int ?? 0
-        }
 
         let presentationView = lifecycleView
         // Toasts & banners
@@ -1580,9 +1540,7 @@ struct ChatDetailView: View {
                             viewModel.pendingChatParams = newParams
                         }
                     }
-                ),
-                tokenUsage: tokenUsageTotalsSnapshot,
-                onResetTokenUsage: resetTokenUsageTotals
+                )
             )
             .themed()
         }
@@ -2255,7 +2213,14 @@ struct ChatDetailView: View {
             }
         }
         .onChange(of: keyboard.height) { oldHeight, height in
-            guard abs(height - oldHeight) > 1, !viewModel.messages.isEmpty else { return }
+            guard abs(height - oldHeight) > 1 else { return }
+            let settleDelay = max(0.12, keyboard.animationDuration + 0.08)
+            if viewState_containerHeight > 1 {
+                stableLastTurnViewportHeight = max(stableLastTurnViewportHeight, viewState_containerHeight)
+            }
+            keyboardViewportFreezeUntil = Date().addingTimeInterval(settleDelay + 0.18)
+
+            guard !viewModel.messages.isEmpty else { return }
             let maxValidOffset = max(0, viewState_contentHeight - viewState_containerHeight)
             let offsetIsPastContent = lastScrollOffset > maxValidOffset + 24
             let wasFollowingBottom = !isScrolledUp || distanceFromBottom <= 140 || offsetIsPastContent
@@ -2267,7 +2232,6 @@ struct ChatDetailView: View {
             // space into the viewport, making the conversation look empty
             // until the user drags. Repin to the last real message instead
             // of the ScrollView's edge while the keyboard is visible.
-            let settleDelay = max(0.12, keyboard.animationDuration + 0.08)
             if offsetIsPastContent {
                 forceRepinToPinnedTranscriptTarget(after: 0.01)
                 forceRepinToPinnedTranscriptTarget(after: settleDelay)
@@ -2350,6 +2314,11 @@ struct ChatDetailView: View {
             }
             if containerChanged {
                 viewState_containerHeight = newSize.height
+                let now = Date()
+                if stableLastTurnViewportHeight <= 1
+                    || (!keyboard.isVisible && keyboard.height <= 1 && now >= keyboardViewportFreezeUntil) {
+                    stableLastTurnViewportHeight = newSize.height
+                }
             }
 
             // Correct IME and layout drift whenever the viewport is known to
@@ -2452,9 +2421,15 @@ struct ChatDetailView: View {
         guard containerHeight > 1 else { return 0 }
 
         // Keep the last turn filling the currently visible ScrollView
-        // viewport. Collapsing this while the keyboard is visible makes the
-        // transcript jump because SwiftUI keeps the old scroll offset while
-        // the content height changes.
+        // viewport. During keyboard animations, freeze this at the last
+        // stable viewport height so the last-turn spacer does not shrink or
+        // grow underneath SwiftUI's bottom scroll anchor.
+        if keyboard.isVisible || keyboard.height > 1 || Date() < keyboardViewportFreezeUntil {
+            let stableHeight = stableLastTurnViewportHeight > 1
+                ? stableLastTurnViewportHeight
+                : containerHeight
+            return max(stableHeight, containerHeight)
+        }
         return containerHeight
     }
 

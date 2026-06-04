@@ -1,26 +1,5 @@
 import SwiftUI
 
-struct ChatTokenUsageSnapshot: Sendable, Equatable {
-    var inputTokens: Int = 0
-    var outputTokens: Int = 0
-    var cachedTokens: Int = 0
-    var imageTokens: Int = 0
-    var imageCount: Int = 0
-    var videoCount: Int = 0
-    var exactUsageMessages: Int = 0
-    var estimatedMessages: Int = 0
-
-    static let empty = ChatTokenUsageSnapshot()
-
-    var totalTokens: Int {
-        max(0, inputTokens + outputTokens + imageTokens)
-    }
-
-    var hasAnyUsage: Bool {
-        totalTokens > 0 || cachedTokens > 0 || imageCount > 0 || videoCount > 0
-    }
-}
-
 /// A sheet that lets the user set per-chat advanced params and system prompt override.
 /// Changes are applied immediately to the bound `ChatAdvancedParams` and saved
 /// to the conversation by the caller.
@@ -29,20 +8,14 @@ struct ChatAdvancedParamsSheet: View {
     @Environment(\.theme) private var theme
 
     @Binding var params: ChatAdvancedParams
-    let tokenUsage: ChatTokenUsageSnapshot
-    var onResetTokenUsage: (() -> Void)?
 
     // Local working copy — committed on Save
     @State private var draft: ChatAdvancedParams
 
     init(
-        params: Binding<ChatAdvancedParams>,
-        tokenUsage: ChatTokenUsageSnapshot = .empty,
-        onResetTokenUsage: (() -> Void)? = nil
+        params: Binding<ChatAdvancedParams>
     ) {
         self._params = params
-        self.tokenUsage = tokenUsage
-        self.onResetTokenUsage = onResetTokenUsage
         self._draft = State(initialValue: params.wrappedValue)
     }
 
@@ -51,7 +24,6 @@ struct ChatAdvancedParamsSheet: View {
             List {
                 systemPromptSection
                 basicSection
-                tokenUsageSection
                 samplingSection
                 mirostatSection
                 repeatSection
@@ -119,36 +91,6 @@ struct ChatAdvancedParamsSheet: View {
                         range: -1...131072, step: 1, defaultHint: "-1")
             paramOptionalIntRow(label: "随机种子", value: $draft.seed,
                                 range: 0...9_999_999, step: 1, defaultHint: "随机")
-        }
-    }
-
-    private var tokenUsageSection: some View {
-        Section {
-            usageMetricRow("总量", value: tokenUsage.totalTokens, isPrimary: true)
-            usageMetricRow("输入累计", value: tokenUsage.inputTokens)
-            usageMetricRow("输出累计", value: tokenUsage.outputTokens)
-            usageMetricRow("缓存命中", value: tokenUsage.cachedTokens)
-            usageMetricRow("媒体估算", value: tokenUsage.imageTokens)
-            if tokenUsage.imageCount > 0 {
-                usageMetricRow("图像数量", value: tokenUsage.imageCount, suffix: " 张")
-            }
-            if tokenUsage.videoCount > 0 {
-                usageMetricRow("视频数量", value: tokenUsage.videoCount, suffix: " 个")
-            }
-            if tokenUsage.exactUsageMessages > 0 || tokenUsage.estimatedMessages > 0 {
-                usageMetricRow("精确统计回复", value: tokenUsage.exactUsageMessages, suffix: " 条")
-                usageMetricRow("估算统计回复", value: tokenUsage.estimatedMessages, suffix: " 条")
-            }
-            Button(role: .destructive) {
-                onResetTokenUsage?()
-            } label: {
-                Label("清空统计", systemImage: "trash")
-            }
-            .disabled(!tokenUsage.hasAnyUsage)
-        } header: {
-            Text("Token 消耗")
-        } footer: {
-            Text("跨对话累计统计。优先使用 API 返回的 usage；缺失时按文本、附件、生图和生视频结果本地估算。只有点击“清空统计”才会归零。")
         }
     }
 
@@ -401,24 +343,6 @@ struct ChatAdvancedParamsSheet: View {
     }
 
     // MARK: - Generic param rows
-
-    @ViewBuilder
-    private func usageMetricRow(_ title: String, value: Int, suffix: String = "", isPrimary: Bool = false) -> some View {
-        HStack {
-            Text(title)
-                .font(isPrimary ? .body.weight(.semibold) : .body)
-            Spacer()
-            Text("\(Self.formatCount(value))\(suffix)")
-                .font(isPrimary ? .body.weight(.bold).monospacedDigit() : .caption.monospacedDigit())
-                .foregroundStyle(isPrimary ? Color.accentColor : .secondary)
-        }
-    }
-
-    private static func formatCount(_ value: Int) -> String {
-        let number = NumberFormatter()
-        number.numberStyle = .decimal
-        return number.string(from: NSNumber(value: value)) ?? "\(value)"
-    }
 
     @ViewBuilder
     private func paramDoubleRow(label: String, value: Binding<Double?>,

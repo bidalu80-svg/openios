@@ -18,9 +18,6 @@ extension Notification.Name {
     /// Posted when function config changes (toggle active/global in Admin, or model editor save).
     /// ChatViewModel observes this to re-resolve actions/filters for the current model immediately.
     static let functionsConfigChanged = Notification.Name("functionsConfigChanged")
-    /// Posted after a response completes so app-wide token counters can accumulate
-    /// across chats without resetting on new conversations.
-    static let chatTokenUsageDidAccumulate = Notification.Name("chatTokenUsageDidAccumulate")
     /// Posted by Agent step previews when the user wants to jump into the terminal/file panel.
     static let openIexaTerminalBrowser = Notification.Name("openIexaTerminalBrowser")
 }
@@ -12038,21 +12035,6 @@ final class ChatViewModel {
         let usageIsExact = exactInput != nil || exactOutput != nil
         let providerName = currentProviderType?.rawValue ?? "unknown"
         let usageModelName = selectedModel?.shortName ?? selectedModel?.name ?? selectedModelId ?? conversation?.model ?? "unknown"
-
-        NotificationCenter.default.post(
-            name: .chatTokenUsageDidAccumulate,
-            object: nil,
-            userInfo: [
-                "input": resolvedInputTokens,
-                "output": resolvedOutputTokens,
-                "cached": resolvedCachedTokens,
-                "image": mediaTokens,
-                "imageCount": mediaKind == .image ? mediaCount : 0,
-                "videoCount": mediaKind == .video ? mediaCount : 0,
-                "exact": usageIsExact ? 1 : 0,
-                "estimated": usageIsExact ? 0 : 1
-            ]
-        )
 
         TokenUsageHistoryStore.shared.record(
             provider: providerName,
