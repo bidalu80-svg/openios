@@ -279,7 +279,7 @@ final class BrowserWebSearchService: NSObject {
 
     private func executeNativeText(_ call: [String: Any]) async -> [String: Any] {
         if let url = Self.urlValue(in: call),
-           !await load(url: url, timeout: 12) {
+           !(await load(url: url, timeout: 12)) {
             return [
                 "action": "browser.text",
                 "ok": false,
@@ -335,7 +335,7 @@ final class BrowserWebSearchService: NSObject {
 
     private func executeNativePageInfo(_ call: [String: Any]) async -> [String: Any] {
         if let url = Self.urlValue(in: call),
-           !await load(url: url, timeout: 12) {
+           !(await load(url: url, timeout: 12)) {
             return [
                 "action": "browser.info",
                 "ok": false,
@@ -391,7 +391,7 @@ final class BrowserWebSearchService: NSObject {
 
     private func executeNativeScreenshot(_ call: [String: Any]) async -> [String: Any] {
         if let url = Self.urlValue(in: call),
-           !await load(url: url, timeout: 14) {
+           !(await load(url: url, timeout: 14)) {
             return [
                 "action": "browser.screenshot",
                 "ok": false,
@@ -647,7 +647,7 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private static func dispositionFileName(_ disposition: String) -> String? {
-        let pattern = #"filename\*?=(?:UTF-8''|")?([^";]+)"?#
+        let pattern = ##"filename\*?=(?:UTF-8''|")?([^";]+)"?"##
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
               let match = regex.firstMatch(in: disposition, range: NSRange(disposition.startIndex..<disposition.endIndex, in: disposition)),
               match.numberOfRanges > 1,
