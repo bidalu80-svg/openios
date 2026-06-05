@@ -298,7 +298,7 @@ struct StreamingStatusView: View {
     private func webSearchSourceIcons(items: [ChatStatusItem], fallbackURLs: [String]) -> some View {
         let urls = sourceIconURLs(items: items, fallbackURLs: fallbackURLs)
 
-        ZStack(alignment: .leading) {
+        return ZStack(alignment: .leading) {
             ForEach(0..<3, id: \.self) { index in
                 sourceIcon(urlString: urls.indices.contains(index) ? urls[index] : nil, index: index)
                     .offset(x: CGFloat(index * 13))
