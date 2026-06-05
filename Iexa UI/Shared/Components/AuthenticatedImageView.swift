@@ -693,9 +693,7 @@ private struct FullScreenImageGalleryPage: View {
                 Color.clear
 
                 if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
+                    ZoomableImageView(image: image)
                         .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
                 } else if didFail {
                     Image(systemName: "photo")
