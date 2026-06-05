@@ -694,6 +694,11 @@ private struct FullScreenImageGalleryPage: View {
 
     @State private var image: UIImage?
     @State private var didFail = false
+    @State private var appearResetGeneration = 0
+
+    private var effectiveResetToken: String {
+        "\(resetToken)-appear-\(appearResetGeneration)"
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -701,7 +706,8 @@ private struct FullScreenImageGalleryPage: View {
                 Color.clear
 
                 if let image {
-                    ZoomableImageView(image: image, resetToken: resetToken)
+                    ZoomableImageView(image: image, resetToken: effectiveResetToken)
+                        .id(effectiveResetToken)
                         .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
                 } else if didFail {
                     Image(systemName: "photo")
@@ -717,6 +723,9 @@ private struct FullScreenImageGalleryPage: View {
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
             .clipped()
+        }
+        .onAppear {
+            appearResetGeneration += 1
         }
         .task(id: item.fileId) {
             guard image == nil else { return }
@@ -821,7 +830,7 @@ struct ZoomableImageView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UIScrollView {
-        let scrollView = UIScrollView()
+        let scrollView = ZoomLayoutScrollView()
         scrollView.delegate = context.coordinator
         scrollView.minimumZoomScale = 1.0
         scrollView.maximumZoomScale = 5.0
@@ -846,6 +855,10 @@ struct ZoomableImageView: UIViewRepresentable {
 
         context.coordinator.scrollView = scrollView
         context.coordinator.imageView = imageView
+        let coordinator = context.coordinator
+        scrollView.onLayout = { [weak coordinator] in
+            coordinator?.layoutDidChange()
+        }
 
         return scrollView
     }
@@ -859,13 +872,10 @@ struct ZoomableImageView: UIViewRepresentable {
         }
         let shouldReset = imageChanged || context.coordinator.consumeResetToken(resetToken)
 
-        // Recalculate zoom scales when the view size changes
-        DispatchQueue.main.async {
-            if shouldReset {
-                context.coordinator.resetZoom(animated: false)
-            } else {
-                context.coordinator.updateZoomScale()
-            }
+        if shouldReset {
+            context.coordinator.resetZoom(animated: false)
+        } else {
+            context.coordinator.updateZoomScale()
         }
     }
 
@@ -879,6 +889,8 @@ struct ZoomableImageView: UIViewRepresentable {
         weak var imageView: UIImageView?
         private var hasSetInitialZoom = false
         private var lastResetToken: String?
+        private var lastBoundsSize: CGSize = .zero
+        private var needsResetAfterLayout = true
 
         init(image: UIImage) {
             self.image = image
@@ -894,6 +906,7 @@ struct ZoomableImageView: UIViewRepresentable {
 
         func invalidateInitialZoom() {
             hasSetInitialZoom = false
+            needsResetAfterLayout = true
         }
 
         func consumeResetToken(_ token: String?) -> Bool {
@@ -904,37 +917,64 @@ struct ZoomableImageView: UIViewRepresentable {
         }
 
         func resetZoom(animated: Bool) {
+            needsResetAfterLayout = true
             updateZoomScale(forceReset: true, animated: animated)
+        }
+
+        func layoutDidChange() {
+            guard let scrollView else { return }
+            let boundsSize = scrollView.bounds.size
+            guard boundsSize.width > 0 && boundsSize.height > 0 else { return }
+            let boundsChanged = abs(boundsSize.width - lastBoundsSize.width) > 0.5
+                || abs(boundsSize.height - lastBoundsSize.height) > 0.5
+            if needsResetAfterLayout {
+                updateZoomScale(forceReset: true, animated: false)
+            } else if boundsChanged {
+                updateZoomScale()
+            }
         }
 
         func updateZoomScale(forceReset: Bool = false, animated: Bool = false) {
             guard let scrollView, let imageView else { return }
+            let shouldForceReset = forceReset || needsResetAfterLayout
             let boundsSize = scrollView.bounds.size
-            guard boundsSize.width > 0 && boundsSize.height > 0 else { return }
+            guard boundsSize.width > 0 && boundsSize.height > 0 else {
+                if shouldForceReset {
+                    needsResetAfterLayout = true
+                }
+                return
+            }
 
             let imageSize = image.size
             guard imageSize.width > 0 && imageSize.height > 0 else { return }
 
-            // Calculate the scale that fits the image within the scroll view
+            // Treat the fitted image size as the 1x baseline. This avoids
+            // carrying a UIScrollView zoomScale from one paged image to another.
             let xScale = boundsSize.width / imageSize.width
             let yScale = boundsSize.height / imageSize.height
-            let minScale = min(xScale, yScale)
+            let fitScale = min(xScale, yScale)
+            let fittedSize = CGSize(
+                width: imageSize.width * fitScale,
+                height: imageSize.height * fitScale
+            )
 
-            scrollView.minimumZoomScale = minScale
-            scrollView.maximumZoomScale = max(minScale * 5, 5.0)
+            scrollView.minimumZoomScale = 1.0
+            let nativeScale = max(imageSize.width / max(fittedSize.width, 1), imageSize.height / max(fittedSize.height, 1))
+            scrollView.maximumZoomScale = max(5.0, min(nativeScale * 1.5, 12.0))
 
-            // Set the image view frame to the actual image size
             imageView.frame = CGRect(
                 origin: .zero,
-                size: imageSize
+                size: fittedSize
             )
-            scrollView.contentSize = imageSize
+            scrollView.contentSize = fittedSize
 
-            if forceReset || !hasSetInitialZoom || scrollView.zoomScale < minScale {
+            if shouldForceReset || !hasSetInitialZoom || scrollView.zoomScale < scrollView.minimumZoomScale {
                 hasSetInitialZoom = true
-                scrollView.setZoomScale(minScale, animated: animated)
+                needsResetAfterLayout = false
+                scrollView.setZoomScale(scrollView.minimumZoomScale, animated: animated)
                 scrollView.contentOffset = .zero
             }
+            lastBoundsSize = boundsSize
 
             centerImageInScrollView()
         }
@@ -966,7 +1006,7 @@ struct ZoomableImageView: UIViewRepresentable {
             guard let scrollView else { return }
             let minScale = scrollView.minimumZoomScale
 
-            if scrollView.zoomScale > minScale {
+            if scrollView.zoomScale > minScale + 0.01 {
                 // Zoom out to fit
                 scrollView.setZoomScale(minScale, animated: true)
             } else {
@@ -993,5 +1033,14 @@ struct ZoomableImageView: UIViewRepresentable {
             )
             return CGRect(origin: origin, size: size)
         }
+    }
+}
+
+private final class ZoomLayoutScrollView: UIScrollView {
+    var onLayout: (() -> Void)?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onLayout?()
     }
 }

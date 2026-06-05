@@ -185,6 +185,13 @@ private struct AgentActivityItem: Identifiable, Hashable {
         currentStep?.file
     }
 
+    var firstPreviewThumbnailReference: String? {
+        steps.compactMap { step in
+            let reference = step.previewThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return reference?.isEmpty == false ? reference : nil
+        }.last
+    }
+
     var currentPreviewTitle: String {
         if let file = currentPreviewFile {
             return file.fileName
@@ -7108,7 +7115,11 @@ private struct AgentStepFloatingBar: View {
     }
 
     private var previewThumbnailReference: String? {
-        selectedStep?.previewThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selected = selectedStep?.previewThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if selected?.isEmpty == false {
+            return selected
+        }
+        return item.firstPreviewThumbnailReference
     }
 
     private var selectedTitle: String {
