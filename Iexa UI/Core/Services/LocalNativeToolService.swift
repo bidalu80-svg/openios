@@ -53,6 +53,14 @@ struct LocalNativeOfficeDocument: Sendable {
     let error: String?
 }
 
+enum LocalOfficeProgressPhase: Sendable {
+    case parsedDemand
+    case generatedFile
+    case generatedPreview
+}
+
+typealias LocalOfficeProgressHandler = @MainActor (LocalOfficeProgressPhase) async -> Void
+
 @MainActor
 final class LocalNativeToolService {
     static let shared = LocalNativeToolService()
@@ -62,7 +70,10 @@ final class LocalNativeToolService {
 
     private init() {}
 
-    func executeBlocks(in content: String) async -> LocalNativeToolRunResult {
+    func executeBlocks(
+        in content: String,
+        officeProgress: LocalOfficeProgressHandler? = nil
+    ) async -> LocalNativeToolRunResult {
         let calls = parseToolCalls(in: content)
         guard !calls.isEmpty else {
             return LocalNativeToolRunResult(
@@ -75,7 +86,7 @@ final class LocalNativeToolService {
 
         var results: [[String: Any]] = []
         for call in calls {
-            let result = await execute(call)
+            let result = await execute(call, officeProgress: officeProgress)
             results.append(result)
         }
 
@@ -143,7 +154,10 @@ final class LocalNativeToolService {
         return nil
     }
 
-    private func execute(_ call: [String: Any]) async -> [String: Any] {
+    private func execute(
+        _ call: [String: Any],
+        officeProgress: LocalOfficeProgressHandler?
+    ) async -> [String: Any] {
         let action = (call["action"] as? String ?? call["name"] as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         switch action {
@@ -168,13 +182,13 @@ final class LocalNativeToolService {
         case "system.notify", "system_notify", "notify", "show_notification":
             return await executeSystemNotify(call)
         case "office.create_excel", "office_create_excel", "create_excel", "excel.create", "excel":
-            return await executeCreateExcel(call)
+            return await executeCreateExcel(call, progress: officeProgress)
         case "office.create_ppt", "office.create_powerpoint", "office_create_ppt", "create_ppt", "create_powerpoint", "ppt.create", "powerpoint.create", "ppt":
-            return await executeCreatePowerPoint(call)
+            return await executeCreatePowerPoint(call, progress: officeProgress)
         case "office.create_word", "office.create_docx", "office_create_word", "create_word", "create_docx", "word.create", "docx.create", "word", "docx":
-            return await executeCreateWord(call)
+            return await executeCreateWord(call, progress: officeProgress)
         case "office.create_pdf", "office_create_pdf", "create_pdf", "pdf.create", "pdf":
-            return await executeCreatePDF(call)
+            return await executeCreatePDF(call, progress: officeProgress)
         default:
             return [
                 "action": action.isEmpty ? "unknown" : action,
@@ -184,9 +198,12 @@ final class LocalNativeToolService {
         }
     }
 
-    private func executeCreateExcel(_ call: [String: Any]) async -> [String: Any] {
+    private func executeCreateExcel(
+        _ call: [String: Any],
+        progress: LocalOfficeProgressHandler?
+    ) async -> [String: Any] {
         do {
-            let result = try await LocalOfficeDocumentService.shared.createExcel(from: call)
+            let result = try await LocalOfficeDocumentService.shared.createExcel(from: call, progress: progress)
             var payload = result.payload
             payload["action"] = "office.create_excel"
             rememberConvertibleOfficeResult(payload)
@@ -200,9 +217,12 @@ final class LocalNativeToolService {
         }
     }
 
-    private func executeCreatePowerPoint(_ call: [String: Any]) async -> [String: Any] {
+    private func executeCreatePowerPoint(
+        _ call: [String: Any],
+        progress: LocalOfficeProgressHandler?
+    ) async -> [String: Any] {
         do {
-            let result = try await LocalOfficeDocumentService.shared.createPowerPoint(from: call)
+            let result = try await LocalOfficeDocumentService.shared.createPowerPoint(from: call, progress: progress)
             var payload = result.payload
             payload["action"] = "office.create_ppt"
             rememberConvertibleOfficeResult(payload)
@@ -216,9 +236,12 @@ final class LocalNativeToolService {
         }
     }
 
-    private func executeCreateWord(_ call: [String: Any]) async -> [String: Any] {
+    private func executeCreateWord(
+        _ call: [String: Any],
+        progress: LocalOfficeProgressHandler?
+    ) async -> [String: Any] {
         do {
-            let result = try await LocalOfficeDocumentService.shared.createWord(from: call)
+            let result = try await LocalOfficeDocumentService.shared.createWord(from: call, progress: progress)
             var payload = result.payload
             payload["action"] = "office.create_word"
             rememberConvertibleOfficeResult(payload)
@@ -232,9 +255,15 @@ final class LocalNativeToolService {
         }
     }
 
-    private func executeCreatePDF(_ call: [String: Any]) async -> [String: Any] {
+    private func executeCreatePDF(
+        _ call: [String: Any],
+        progress: LocalOfficeProgressHandler?
+    ) async -> [String: Any] {
         do {
-            let result = try await LocalOfficeDocumentService.shared.createPDF(from: callWithLatestOfficeSourceIfNeeded(call))
+            let result = try await LocalOfficeDocumentService.shared.createPDF(
+                from: callWithLatestOfficeSourceIfNeeded(call),
+                progress: progress
+            )
             var payload = result.payload
             payload["action"] = "office.create_pdf"
             return payload

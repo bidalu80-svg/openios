@@ -14907,7 +14907,17 @@ final class ChatViewModel {
         if let officeKind {
             markLocalOfficeGenerationStarted(messageId: messageId, kind: officeKind)
         }
-        let result = await LocalNativeToolService.shared.executeBlocks(in: content)
+        let result = await LocalNativeToolService.shared.executeBlocks(
+            in: content,
+            officeProgress: { [weak self] phase in
+                guard let self = self, let officeKind = officeKind else { return }
+                await self.updateLocalOfficeGenerationProgress(
+                    messageId: messageId,
+                    kind: officeKind,
+                    phase: phase
+                )
+            }
+        )
         guard result.didExecute else {
             if let officeKind {
                 await finishLocalOfficeGeneration(
@@ -14993,12 +15003,49 @@ final class ChatViewModel {
         hasFinishedStreaming = false
         selfInitiatedStream = true
         activeTaskId = nil
-        let statuses = localOfficeStatusHistory(kind: kind, phase: .running)
+        let statuses = localOfficeStatusHistory(
+            kind: kind,
+            visibleThrough: .parseDemand,
+            completedThrough: nil
+        )
         updateLocalOfficeGenerationMessage(
             messageId: messageId,
             content: kind.creatingTitle,
             isStreaming: true,
             statusHistory: statuses,
+            files: []
+        )
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func updateLocalOfficeGenerationProgress(
+        messageId: String,
+        kind: LocalNativeOfficeKind,
+        phase: LocalOfficeProgressPhase
+    ) async {
+        guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
+        let visibleThrough: LocalOfficeGenerationStep
+        let completedThrough: LocalOfficeGenerationStep
+        switch phase {
+        case .parsedDemand:
+            visibleThrough = .generateFile
+            completedThrough = .parseDemand
+        case .generatedFile:
+            visibleThrough = .generatePreview
+            completedThrough = .generateFile
+        case .generatedPreview:
+            visibleThrough = .attachToChat
+            completedThrough = .generatePreview
+        }
+        updateLocalOfficeGenerationMessage(
+            messageId: messageId,
+            content: kind.creatingTitle,
+            isStreaming: true,
+            statusHistory: localOfficeStatusHistory(
+                kind: kind,
+                visibleThrough: visibleThrough,
+                completedThrough: completedThrough
+            ),
             files: []
         )
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
@@ -15016,7 +15063,9 @@ final class ChatViewModel {
             isStreaming: false,
             statusHistory: localOfficeStatusHistory(
                 kind: document.kind,
-                phase: document.ok ? .finished : .failed
+                visibleThrough: .attachToChat,
+                completedThrough: document.ok ? .attachToChat : nil,
+                failed: !document.ok
             ),
             files: files
         )
@@ -15030,44 +15079,42 @@ final class ChatViewModel {
         await sendCompletionNotificationIfNeeded(content: content)
     }
 
-    private enum LocalOfficeGenerationPhase: Equatable {
-        case running
-        case finished
-        case failed
+    private enum LocalOfficeGenerationStep: Int, CaseIterable {
+        case parseDemand
+        case generateFile
+        case generatePreview
+        case attachToChat
+
+        func description(kind: LocalNativeOfficeKind, failed: Bool) -> String {
+            switch self {
+            case .parseDemand:
+                return "解析生成需求"
+            case .generateFile:
+                return "生成\(kind.displayName)文件"
+            case .generatePreview:
+                return failed ? "生成失败" : "生成预览图"
+            case .attachToChat:
+                return failed ? "请调整需求后重试" : "附加到聊天"
+            }
+        }
     }
 
     private func localOfficeStatusHistory(
         kind: LocalNativeOfficeKind,
-        phase: LocalOfficeGenerationPhase
+        visibleThrough: LocalOfficeGenerationStep,
+        completedThrough: LocalOfficeGenerationStep?,
+        failed: Bool = false
     ) -> [ChatStatusUpdate] {
-        let isDone = phase != .running
-        let failed = phase == .failed
-        return [
-            ChatStatusUpdate(
-                action: "local_office_agent",
-                description: "解析生成需求",
-                done: true,
-                occurredAt: .now
-            ),
-            ChatStatusUpdate(
-                action: "local_office_agent",
-                description: "生成\(kind.displayName)文件",
-                done: isDone,
-                occurredAt: .now
-            ),
-            ChatStatusUpdate(
-                action: "local_office_agent",
-                description: failed ? "生成失败" : "生成预览图",
-                done: isDone,
-                occurredAt: .now
-            ),
-            ChatStatusUpdate(
-                action: "local_office_agent",
-                description: failed ? "请调整需求后重试" : "附加到聊天",
-                done: isDone,
-                occurredAt: .now
-            )
-        ]
+        return LocalOfficeGenerationStep.allCases
+            .filter { $0.rawValue <= visibleThrough.rawValue }
+            .map { step in
+                ChatStatusUpdate(
+                    action: "local_office_agent",
+                    description: step.description(kind: kind, failed: failed),
+                    done: completedThrough.map { step.rawValue <= $0.rawValue } ?? false,
+                    occurredAt: .now
+                )
+            }
     }
 
     private func localOfficeFinalContent(
@@ -15088,13 +15135,9 @@ final class ChatViewModel {
         let fileName = document.fileName.isEmpty
             ? "\(document.title).\(localOfficeFileExtension(for: document.kind))"
             : document.fileName
-        let previewLine = document.previewCount > 0
-            ? "已生成 \(document.previewCount) 张预览图。"
-            : "已生成文件，可直接打开查看。"
-        let summary = document.summary.trimmingCharacters(in: .whitespacesAndNewlines)
         let titleLine = "已生成本地\(document.kind.displayName)：\(fileName)"
-        let attachmentLine = fileCount > 0 ? "文件和预览已附在这条消息下方。" : "文件已保存到本地工作区。"
-        return [titleLine, summary, previewLine, attachmentLine]
+        let attachmentLine = fileCount > 0 ? "文件卡片已附在下方，可直接打开或预览。" : "文件已保存到本地工作区。"
+        return [titleLine, attachmentLine]
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n\n")
     }

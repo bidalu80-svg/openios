@@ -55,8 +55,12 @@ final class LocalOfficeDocumentService {
 
     private init() {}
 
-    func createExcel(from call: [String: Any]) async throws -> LocalOfficeDocumentResult {
+    func createExcel(
+        from call: [String: Any],
+        progress: LocalOfficeProgressHandler? = nil
+    ) async throws -> LocalOfficeDocumentResult {
         let spec = ExcelSpec(call: call)
+        await reportProgress(.parsedDemand, to: progress)
         let folder = try makeOutputFolder(prefix: "excel")
         let fileName = safeFileName(spec.fileName, fallback: "\(spec.title).xlsx", fileExtension: "xlsx")
         let documentURL = folder.appendingPathComponent(fileName)
@@ -65,8 +69,10 @@ final class LocalOfficeDocumentService {
 
         let xlsx = try ExcelOpenXMLBuilder(spec: spec).build()
         try OfficeZipWriter(entries: xlsx).write(to: documentURL)
-        try writeJSON(call, to: draftURL)
+        try writeJSON(spec.normalizedDraft(original: call), to: draftURL)
+        await reportProgress(.generatedFile, to: progress)
         try await renderExcelPreview(spec: spec, to: previewURL)
+        await reportProgress(.generatedPreview, to: progress)
 
         return LocalOfficeDocumentResult(
             documentURL: documentURL,
@@ -80,8 +86,12 @@ final class LocalOfficeDocumentService {
         )
     }
 
-    func createPowerPoint(from call: [String: Any]) async throws -> LocalOfficeDocumentResult {
+    func createPowerPoint(
+        from call: [String: Any],
+        progress: LocalOfficeProgressHandler? = nil
+    ) async throws -> LocalOfficeDocumentResult {
         let spec = PresentationSpec(call: call)
+        await reportProgress(.parsedDemand, to: progress)
         let folder = try makeOutputFolder(prefix: "ppt")
         let fileName = safeFileName(spec.fileName, fallback: "\(spec.title).pptx", fileExtension: "pptx")
         let documentURL = folder.appendingPathComponent(fileName)
@@ -98,6 +108,8 @@ final class LocalOfficeDocumentService {
         let pptx = try PowerPointOpenXMLBuilder(spec: spec, renderedSlides: renderedSlides).build()
         try OfficeZipWriter(entries: pptx).write(to: documentURL)
         try writeJSON(call, to: draftURL)
+        await reportProgress(.generatedFile, to: progress)
+        await reportProgress(.generatedPreview, to: progress)
 
         return LocalOfficeDocumentResult(
             documentURL: documentURL,
@@ -111,8 +123,12 @@ final class LocalOfficeDocumentService {
         )
     }
 
-    func createWord(from call: [String: Any]) async throws -> LocalOfficeDocumentResult {
+    func createWord(
+        from call: [String: Any],
+        progress: LocalOfficeProgressHandler? = nil
+    ) async throws -> LocalOfficeDocumentResult {
         let spec = WordSpec(call: call)
+        await reportProgress(.parsedDemand, to: progress)
         let folder = try makeOutputFolder(prefix: "word")
         let fileName = safeFileName(spec.fileName, fallback: "\(spec.title).docx", fileExtension: "docx")
         let documentURL = folder.appendingPathComponent(fileName)
@@ -130,6 +146,8 @@ final class LocalOfficeDocumentService {
         let docx = try WordOpenXMLBuilder(spec: spec, visualPageURLs: visualPageURLs).build()
         try OfficeZipWriter(entries: docx).write(to: documentURL)
         try writeJSON(call, to: draftURL)
+        await reportProgress(.generatedFile, to: progress)
+        await reportProgress(.generatedPreview, to: progress)
 
         let modeText = spec.shouldEmbedPreviewPagesInWord ? "视觉页模式，" : ""
         return LocalOfficeDocumentResult(
@@ -144,8 +162,12 @@ final class LocalOfficeDocumentService {
         )
     }
 
-    func createPDF(from call: [String: Any]) async throws -> LocalOfficeDocumentResult {
+    func createPDF(
+        from call: [String: Any],
+        progress: LocalOfficeProgressHandler? = nil
+    ) async throws -> LocalOfficeDocumentResult {
         let title = JSONValue.string(call["title"], fallback: "PDF 文档")
+        await reportProgress(.parsedDemand, to: progress)
         let folder = try makeOutputFolder(prefix: "pdf")
         let fileName = safeFileName(JSONValue.string(call["file_name"]).nilIfEmpty, fallback: "\(title).pdf", fileExtension: "pdf")
         let documentURL = folder.appendingPathComponent(fileName)
@@ -158,6 +180,7 @@ final class LocalOfficeDocumentService {
         }
         try PDFDocumentRenderer.write(images: pages, title: render.title, to: documentURL)
         try writeJSON(call, to: draftURL)
+        await reportProgress(.generatedFile, to: progress)
 
         var previewURLs: [URL] = []
         for (index, image) in pages.enumerated() {
@@ -165,6 +188,7 @@ final class LocalOfficeDocumentService {
             try writePNG(image, to: previewURL)
             previewURLs.append(previewURL)
         }
+        await reportProgress(.generatedPreview, to: progress)
 
         return LocalOfficeDocumentResult(
             documentURL: documentURL,
@@ -226,6 +250,15 @@ final class LocalOfficeDocumentService {
     private func renderExcelPreview(spec: ExcelSpec, to url: URL) async throws {
         let image = ExcelPreviewRenderer.render(spec: spec)
         try writePNG(image, to: url)
+    }
+
+    private func reportProgress(
+        _ phase: LocalOfficeProgressPhase,
+        to progress: LocalOfficeProgressHandler?
+    ) async {
+        guard let progress else { return }
+        await progress(phase)
+        try? await Task.sleep(nanoseconds: 80_000_000)
     }
 
     private func renderSlidePreview(slide: SlideSpec, index: Int, theme: PresentationTheme) -> UIImage {
@@ -372,11 +405,13 @@ private enum JSONValue {
 private struct ExcelSpec: Sendable {
     let title: String
     let fileName: String?
+    let theme: PresentationTheme
     let sheets: [ExcelSheetSpec]
 
     init(call: [String: Any]) {
         title = JSONValue.string(call["title"], fallback: "Excel 报表")
         fileName = JSONValue.string(call["file_name"]).nilIfEmpty
+        theme = PresentationTheme(raw: call["theme"] as? [String: Any], hint: Self.themeHint(from: call))
         let rawSheets = JSONValue.array(call["sheets"])
         if rawSheets.isEmpty {
             sheets = [
@@ -405,6 +440,49 @@ private struct ExcelSpec: Sendable {
             let body = sheet.rows.prefix(8).map { row in row.joined(separator: " | ") }.joined(separator: "\n")
             return [header, body].filter { !$0.isEmpty }.joined(separator: "\n")
         }.joined(separator: "\n\n")
+    }
+
+    func normalizedDraft(original: [String: Any]) -> [String: Any] {
+        var draft = original
+        draft["action"] = "office.create_excel"
+        draft["title"] = title
+        if let fileName {
+            draft["file_name"] = fileName
+        }
+        draft["theme"] = theme.normalizedDraft
+        draft["sheets"] = sheets.map { sheet in
+            [
+                "name": sheet.name,
+                "headers": sheet.headers,
+                "rows": sheet.rows,
+                "notes": sheet.notes
+            ] as [String: Any]
+        }
+        return draft
+    }
+
+    private static func themeHint(from call: [String: Any]) -> String {
+        let sheetHints = JSONValue.array(call["sheets"]).prefix(3).flatMap { sheet in
+            [
+                JSONValue.string(sheet["name"]),
+                JSONValue.string(sheet["title"]),
+                JSONValue.string(sheet["style"]),
+                JSONValue.string(sheet["note"]),
+                JSONValue.string(sheet["notes"])
+            ] + Array(JSONValue.stringArray(sheet["headers"]).prefix(6))
+        }
+        return ([
+            JSONValue.string(call["style"]),
+            JSONValue.string(call["design"]),
+            JSONValue.string(call["background_style"]),
+            JSONValue.string(call["theme"]),
+            JSONValue.string(call["title"]),
+            JSONValue.string(call["file_name"]),
+            JSONValue.string(call["subtitle"]),
+            JSONValue.string(call["notes"])
+        ] + sheetHints)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 }
 
@@ -613,6 +691,10 @@ private struct PresentationTheme: Sendable {
             return "7C3AED"
         case "cream", "beige":
             return "FFF7ED"
+        case "gold":
+            return "D6A84F"
+        case "slate":
+            return "334155"
         default:
             return nil
         }
@@ -625,6 +707,7 @@ private struct PresentationTheme: Sendable {
         if lower.contains("黑金") || lower.contains("金色") || lower.contains("高级") || lower.contains("奢华") || lower.contains("luxury") || lower.contains("premium") || lower.contains("gold") { return .luxury }
         if lower.contains("暗") || lower.contains("黑") || lower.contains("dark") { return .dark }
         if lower.contains("暖") || lower.contains("橙") || lower.contains("红") || lower.contains("warm") || lower.contains("orange") { return .warm }
+        if lower.contains("清爽") || lower.contains("清新") || lower.contains("爽") || lower.contains("fresh") || lower.contains("refreshing") { return .green }
         if lower.contains("绿色") || lower.contains("环保") || lower.contains("生态") || lower.contains("green") { return .green }
         if lower.contains("紫") || lower.contains("violet") || lower.contains("purple") { return .violet }
         if lower.contains("杂志") || lower.contains("editorial") || lower.contains("magazine") || lower.contains("publication") { return .editorial }
@@ -703,6 +786,21 @@ private struct PresentationTheme: Sendable {
     var surfaceColor: UIColor { UIColor(hex: surfaceHex) }
     var isDark: Bool {
         style == .deepBlue || style == .tech || style == .dark || style == .luxury
+    }
+
+    var normalizedDraft: [String: Any] {
+        [
+            "style": style.rawValue,
+            "layout": layout.rawValue,
+            "decoration": decoration.rawValue,
+            "background": backgroundHex,
+            "background_2": background2Hex,
+            "primary": primaryHex,
+            "accent": accentHex,
+            "text": textHex,
+            "subtle": subtleHex,
+            "surface": surfaceHex
+        ]
     }
 }
 
@@ -869,12 +967,12 @@ private struct ExcelPreviewRenderer {
         let size = CGSize(width: 1200, height: 675)
         let renderer = UIGraphicsImageRenderer(size: size)
         return renderer.image { context in
-            UIColor(hex: "F7F8FA").setFill()
-            context.cgContext.fill(CGRect(origin: .zero, size: size))
+            let theme = spec.theme
+            drawBackground(context.cgContext, size: size, theme: theme)
 
             let titleAttrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.systemFont(ofSize: 46, weight: .bold),
-                .foregroundColor: UIColor(hex: "111827")
+                .foregroundColor: theme.textColor
             ]
             spec.title.draw(in: CGRect(x: 56, y: 38, width: 900, height: 60), withAttributes: titleAttrs)
 
@@ -884,26 +982,46 @@ private struct ExcelPreviewRenderer {
                 : sheet.headers
             let rows = Array(sheet.rows.prefix(8))
             let tableRect = CGRect(x: 56, y: 130, width: 1088, height: 440)
-            UIColor.white.setFill()
-            UIBezierPath(roundedRect: tableRect, cornerRadius: 18).fill()
-            UIColor(hex: "D1D5DB").setStroke()
-            UIBezierPath(roundedRect: tableRect, cornerRadius: 18).stroke()
+            let tablePath = UIBezierPath(roundedRect: tableRect, cornerRadius: 18)
+            context.cgContext.saveGState()
+            context.cgContext.setShadow(
+                offset: CGSize(width: 0, height: 18),
+                blur: 34,
+                color: UIColor.black.withAlphaComponent(theme.isDark ? 0.34 : 0.10).cgColor
+            )
+            theme.surfaceColor.withAlphaComponent(theme.isDark ? 0.95 : 0.96).setFill()
+            tablePath.fill()
+            context.cgContext.restoreGState()
+            theme.accentColor.withAlphaComponent(theme.isDark ? 0.46 : 0.24).setStroke()
+            tablePath.lineWidth = theme.style == .luxury ? 2 : 1
+            tablePath.stroke()
 
             let columnCount = max(1, min(headers.count, 6))
             let colWidth = tableRect.width / CGFloat(columnCount)
             let rowHeight: CGFloat = 48
             for rowIndex in 0...(rows.count) {
                 let y = tableRect.minY + CGFloat(rowIndex) * rowHeight
-                let fill = rowIndex == 0 ? UIColor(hex: "EEF2FF") : (rowIndex % 2 == 0 ? UIColor(hex: "F9FAFB") : UIColor.white)
+                let fill: UIColor
+                if rowIndex == 0 {
+                    fill = theme.accentColor.withAlphaComponent(theme.isDark ? 0.36 : 0.18)
+                } else if rowIndex % 2 == 0 {
+                    fill = theme.background2Color.withAlphaComponent(theme.isDark ? 0.20 : 0.30)
+                } else {
+                    fill = theme.surfaceColor.withAlphaComponent(theme.isDark ? 0.72 : 0.94)
+                }
                 fill.setFill()
                 UIBezierPath(rect: CGRect(x: tableRect.minX, y: y, width: tableRect.width, height: rowHeight)).fill()
+                theme.accentColor.withAlphaComponent(theme.isDark ? 0.20 : 0.10).setStroke()
+                UIBezierPath(rect: CGRect(x: tableRect.minX, y: y, width: tableRect.width, height: 1)).stroke()
                 for colIndex in 0..<columnCount {
                     let text = rowIndex == 0
                         ? headers[safe: colIndex] ?? ""
                         : rows[safe: rowIndex - 1]?[safe: colIndex] ?? ""
                     let attrs: [NSAttributedString.Key: Any] = [
                         .font: UIFont.systemFont(ofSize: rowIndex == 0 ? 22 : 20, weight: rowIndex == 0 ? .semibold : .regular),
-                        .foregroundColor: UIColor(hex: rowIndex == 0 ? "1D4ED8" : "111827")
+                        .foregroundColor: rowIndex == 0
+                            ? (theme.isDark ? theme.primaryColor : theme.accentColor)
+                            : theme.textColor
                     ]
                     text.draw(
                         in: CGRect(x: tableRect.minX + CGFloat(colIndex) * colWidth + 14, y: y + 12, width: colWidth - 22, height: rowHeight - 12),
@@ -914,13 +1032,75 @@ private struct ExcelPreviewRenderer {
 
             let footerAttrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.systemFont(ofSize: 20, weight: .medium),
-                .foregroundColor: UIColor(hex: "6B7280")
+                .foregroundColor: theme.subtleColor
             ]
             "本地 Office Agent · \(spec.sheets.count) 个工作表 · \(sheet.rows.count) 行".draw(
                 in: CGRect(x: 56, y: 600, width: 1000, height: 32),
                 withAttributes: footerAttrs
             )
         }
+    }
+
+    private static func drawBackground(_ context: CGContext, size: CGSize, theme: PresentationTheme) {
+        let bounds = CGRect(origin: .zero, size: size)
+        if let gradient = CGGradient(
+            colorsSpace: CGColorSpaceCreateDeviceRGB(),
+            colors: [theme.backgroundColor.cgColor, theme.background2Color.cgColor] as CFArray,
+            locations: [0, 1]
+        ) {
+            context.drawLinearGradient(
+                gradient,
+                start: CGPoint(x: 0, y: 0),
+                end: CGPoint(x: size.width, y: size.height),
+                options: []
+            )
+        } else {
+            theme.backgroundColor.setFill()
+            context.fill(bounds)
+        }
+
+        switch theme.style {
+        case .luxury:
+            theme.accentColor.withAlphaComponent(0.80).setFill()
+            UIBezierPath(roundedRect: CGRect(x: 56, y: 101, width: 176, height: 6), cornerRadius: 3).fill()
+            theme.accentColor.withAlphaComponent(0.18).setStroke()
+            let frame = UIBezierPath(roundedRect: bounds.insetBy(dx: 34, dy: 28), cornerRadius: 26)
+            frame.lineWidth = 1
+            frame.stroke()
+        case .tech:
+            drawGrid(context, size: size, color: theme.accentColor.withAlphaComponent(0.14), step: 44)
+        case .green, .playful:
+            theme.accentColor.withAlphaComponent(0.13).setFill()
+            UIBezierPath(ovalIn: CGRect(x: 930, y: -90, width: 280, height: 280)).fill()
+            theme.primaryColor.withAlphaComponent(0.08).setFill()
+            UIBezierPath(ovalIn: CGRect(x: 980, y: 480, width: 160, height: 160)).fill()
+        case .editorial:
+            theme.accentColor.withAlphaComponent(0.20).setFill()
+            UIBezierPath(rect: CGRect(x: 56, y: 118, width: 8, height: 470)).fill()
+        default:
+            theme.accentColor.withAlphaComponent(theme.isDark ? 0.12 : 0.08).setFill()
+            UIBezierPath(ovalIn: CGRect(x: 960, y: -120, width: 320, height: 320)).fill()
+        }
+    }
+
+    private static func drawGrid(_ context: CGContext, size: CGSize, color: UIColor, step: CGFloat) {
+        context.saveGState()
+        context.setStrokeColor(color.cgColor)
+        context.setLineWidth(1)
+        var x: CGFloat = 0
+        while x <= size.width {
+            context.move(to: CGPoint(x: x, y: 0))
+            context.addLine(to: CGPoint(x: x, y: size.height))
+            x += step
+        }
+        var y: CGFloat = 0
+        while y <= size.height {
+            context.move(to: CGPoint(x: 0, y: y))
+            context.addLine(to: CGPoint(x: size.width, y: y))
+            y += step
+        }
+        context.strokePath()
+        context.restoreGState()
     }
 }
 
@@ -1846,15 +2026,39 @@ private struct ExcelOpenXMLBuilder {
     }
 
     private var stylesXML: String {
-        """
+        let theme = spec.theme
+        let headerTextHex = theme.style == .luxury || theme.style == .tech ? theme.backgroundHex : "FFFFFF"
+        let bodyFillHex = theme.isDark ? theme.surfaceHex : theme.surfaceHex
+        let alternateFillHex = theme.isDark ? theme.background2Hex : theme.background2Hex
+        let borderHex = theme.isDark ? theme.accentHex : theme.background2Hex
+        return """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-        <fonts count="2"><font><sz val="11"/><name val="Arial"/></font><font><b/><sz val="11"/><color rgb="FF2563EB"/><name val="Arial"/></font></fonts>
-        <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEFF6FF"/></patternFill></fill></fills>
-        <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+        <fonts count="3">
+        <font><sz val="11"/><color rgb="FF\(theme.textHex)"/><name val="Arial"/><family val="2"/></font>
+        <font><b/><sz val="11"/><color rgb="FF\(headerTextHex)"/><name val="Arial"/><family val="2"/></font>
+        <font><b/><sz val="11"/><color rgb="FF\(theme.accentHex)"/><name val="Arial"/><family val="2"/></font>
+        </fonts>
+        <fills count="5">
+        <fill><patternFill patternType="none"/></fill>
+        <fill><patternFill patternType="gray125"/></fill>
+        <fill><patternFill patternType="solid"><fgColor rgb="FF\(theme.accentHex)"/><bgColor indexed="64"/></patternFill></fill>
+        <fill><patternFill patternType="solid"><fgColor rgb="FF\(bodyFillHex)"/><bgColor indexed="64"/></patternFill></fill>
+        <fill><patternFill patternType="solid"><fgColor rgb="FF\(alternateFillHex)"/><bgColor indexed="64"/></patternFill></fill>
+        </fills>
+        <borders count="2">
+        <border><left/><right/><top/><bottom/><diagonal/></border>
+        <border><left style="thin"><color rgb="FF\(borderHex)"/></left><right style="thin"><color rgb="FF\(borderHex)"/></right><top style="thin"><color rgb="FF\(borderHex)"/></top><bottom style="thin"><color rgb="FF\(borderHex)"/></bottom><diagonal/></border>
+        </borders>
         <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-        <cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs>
+        <cellXfs count="4">
+        <xf numFmtId="0" fontId="0" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+        <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+        <xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+        <xf numFmtId="0" fontId="2" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>
+        </cellXfs>
         <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+        <tableStyles count="0" defaultTableStyle="TableStyleMedium2" defaultPivotStyle="PivotStyleLight16"/>
         </styleSheet>
         """
     }
@@ -1867,21 +2071,44 @@ private struct ExcelOpenXMLBuilder {
         if rows.isEmpty {
             rows = [[sheet.name]]
         }
-        let rowXML = rows.enumerated().map { rowIndex, row in
+        let rowColumnCount = rows.map(\.count).max() ?? 0
+        let columnCount = max(1, max(headers.count, rowColumnCount))
+        let effectiveRowCount = max(rows.count, headers.isEmpty ? 1 : 12)
+        let lastCellRef = "\(columnName(columnCount - 1))\(effectiveRowCount)"
+        let columnsXML = (0..<columnCount).map { index in
+            let width = index == 0 ? 16 : 18
+            return #"<col min="\#(index + 1)" max="\#(index + 1)" width="\#(width)" customWidth="1"/>"#
+        }.joined(separator: "\n")
+        let freezeHeaderXML = headers.isEmpty ? "" : #"<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>"#
+        let autoFilterXML = headers.isEmpty ? "" : #"<autoFilter ref="A1:\#(columnName(columnCount - 1))\#(effectiveRowCount)"/>"#
+        let rowXML = (0..<effectiveRowCount).map { rowIndex in
+            let row = rows[safe: rowIndex] ?? []
             let number = rowIndex + 1
-            let cells = row.enumerated().map { columnIndex, value in
+            let rowStyle = rowIndex == 0 && !headers.isEmpty ? 1 : (rowIndex % 2 == 0 ? 2 : 0)
+            let rowHeight = rowIndex == 0 && !headers.isEmpty ? 26 : 24
+            let cells = (0..<columnCount).map { columnIndex in
+                let value = row[safe: columnIndex] ?? ""
                 let ref = "\(columnName(columnIndex))\(number)"
-                let style = rowIndex == 0 && !headers.isEmpty ? #" s="1""# : ""
+                let style = #" s="\#(rowStyle)""#
                 return "<c r=\"\(ref)\"\(style) t=\"inlineStr\"><is><t>\(xmlEscape(value))</t></is></c>"
             }.joined()
-            return "<row r=\"\(number)\">\(cells)</row>"
+            return #"<row r="\#(number)" ht="\#(rowHeight)" customHeight="1">\#(cells)</row>"#
         }.joined(separator: "\n")
         return """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <dimension ref="A1:\(lastCellRef)"/>
+        <sheetPr><tabColor rgb="FF\(spec.theme.accentHex)"/></sheetPr>
+        \(freezeHeaderXML)
+        <sheetFormatPr defaultRowHeight="24"/>
+        <cols>
+        \(columnsXML)
+        </cols>
         <sheetData>
         \(rowXML)
         </sheetData>
+        \(autoFilterXML)
+        <pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>
         </worksheet>
         """
     }

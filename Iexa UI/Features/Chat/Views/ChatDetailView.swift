@@ -3806,12 +3806,7 @@ struct ChatDetailView: View {
         let icon = fileIconName(for: fileExt)
 
         return Button {
-            if let localURL = localPreviewURL(for: file),
-               Self.canQuickLookLocalFile(fileExtension: fileExt) {
-                previewFileURL = localURL
-            } else {
-                previewingMessageFile = MessageFilePreviewItem(file: file)
-            }
+            openMessageFile(file)
         } label: {
             if compact {
                 compactFileAttachmentLabel(fileName: fileName, file: file, fileExt: fileExt, icon: icon)
@@ -3820,6 +3815,17 @@ struct ChatDetailView: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    private func openMessageFile(_ file: ChatMessageFile) {
+        let fileName = file.name ?? file.url ?? "File"
+        let fileExt = (fileName as NSString).pathExtension.lowercased()
+        if let localURL = localPreviewURL(for: file),
+           Self.canQuickLookLocalFile(fileExtension: fileExt) {
+            previewFileURL = localURL
+        } else {
+            previewingMessageFile = MessageFilePreviewItem(file: file)
+        }
     }
 
     private func localPreviewURL(for file: ChatMessageFile) -> URL? {
@@ -3986,11 +3992,23 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func messageFilesView(files: [ChatMessageFile]) -> some View {
-        let imageFiles = Array(files.filter { isImageFile($0) }.prefix(9))
+        let officeFiles = files.filter { isOfficeDocumentFile($0) }
+        let officePreviewFiles = officeFiles.isEmpty ? [] : files.filter { isOfficePreviewImageFile($0) }
+        let imageFiles = Array(files.filter { file in
+            isImageFile(file) && !officePreviewFiles.contains(file)
+        }.prefix(9))
         let nonImageFiles = files.filter {
             !isImageFile($0)
                 && $0.type != "collection"
                 && $0.type != "folder"
+                && !isOfficeDocumentFile($0)
+        }
+        if !officeFiles.isEmpty {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                ForEach(Array(officeFiles.enumerated()), id: \.offset) { _, file in
+                    officeDocumentAttachmentCard(file: file, previewFiles: officePreviewFiles)
+                }
+            }
         }
         if !imageFiles.isEmpty {
             let columnCount = imageFiles.count >= 5 ? 3 : 2
@@ -4025,6 +4043,125 @@ struct ChatDetailView: View {
                 }
             }
         }
+    }
+
+    private func isOfficeDocumentFile(_ file: ChatMessageFile) -> Bool {
+        let name = (file.name ?? file.url ?? "").lowercased()
+        let contentType = (file.contentType ?? "").lowercased()
+        let ext = (name as NSString).pathExtension.lowercased()
+        if ["xlsx", "xls", "pptx", "ppt", "docx", "doc", "pdf"].contains(ext) {
+            return true
+        }
+        return contentType.contains("spreadsheetml")
+            || contentType.contains("presentationml")
+            || contentType.contains("wordprocessingml")
+            || contentType == "application/pdf"
+            || contentType.contains("officedocument")
+    }
+
+    private func isOfficePreviewImageFile(_ file: ChatMessageFile) -> Bool {
+        guard isImageFile(file) else { return false }
+        let name = (file.name ?? file.url ?? "").lowercased()
+        return name.contains("preview-")
+            || name.contains("slide-")
+            || name.contains("/office agent/")
+            || name.contains("office%20agent")
+    }
+
+    private func officeDocumentAttachmentCard(
+        file: ChatMessageFile,
+        previewFiles: [ChatMessageFile]
+    ) -> some View {
+        let fileName = file.name ?? file.url ?? "Office 文件"
+        let fileExt = (fileName as NSString).pathExtension.lowercased()
+        let icon = fileIconName(for: fileExt)
+        let kind = officeDocumentKindName(for: file, fallbackExtension: fileExt)
+        let previewReference = previewFiles.first.flatMap { imageReference(for: $0) }
+        let previewCount = previewFiles.count
+
+        return Button {
+            openMessageFile(file)
+        } label: {
+            HStack(spacing: 12) {
+                OfficeAttachmentThumbnail(
+                    reference: previewReference,
+                    fallbackIcon: icon,
+                    pageCount: previewCount
+                )
+                .frame(width: 116, height: 74)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Image(systemName: icon)
+                            .scaledFont(size: 12, weight: .semibold)
+                            .foregroundStyle(theme.brandPrimary)
+                        Text(kind)
+                            .scaledFont(size: 12, weight: .semibold)
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+                    }
+
+                    Text(fileName)
+                        .scaledFont(size: 15, weight: .semibold)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Text(officeAttachmentSubtitle(for: file, previewCount: previewCount, fallbackExtension: fileExt))
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 6)
+
+                Image(systemName: "chevron.right")
+                    .scaledFont(size: 13, weight: .semibold)
+                    .foregroundStyle(theme.textTertiary)
+            }
+            .padding(10)
+            .frame(maxWidth: 390, alignment: .leading)
+            .background(theme.surfaceContainer.opacity(0.82))
+            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(0.42), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                openMessageFile(file)
+            } label: {
+                Label("打开文件", systemImage: "doc.viewfinder")
+            }
+            if let preview = previewFiles.first {
+                Button {
+                    openMessageFile(preview)
+                } label: {
+                    Label("查看缩略图", systemImage: "photo")
+                }
+            }
+        }
+    }
+
+    private func officeDocumentKindName(for file: ChatMessageFile, fallbackExtension ext: String) -> String {
+        let contentType = (file.contentType ?? "").lowercased()
+        if ["xlsx", "xls"].contains(ext) || contentType.contains("spreadsheetml") { return "Excel 表格" }
+        if ["pptx", "ppt"].contains(ext) || contentType.contains("presentationml") { return "PPT 演示稿" }
+        if ["docx", "doc"].contains(ext) || contentType.contains("wordprocessingml") { return "Word 文档" }
+        if ext == "pdf" || contentType == "application/pdf" { return "PDF 文档" }
+        return ext.isEmpty ? "Office 文件" : ext.uppercased()
+    }
+
+    private func officeAttachmentSubtitle(
+        for file: ChatMessageFile,
+        previewCount: Int,
+        fallbackExtension ext: String
+    ) -> String {
+        let previewText = previewCount > 0 ? "\(previewCount) 张缩略预览" : "可直接打开预览"
+        let kind = officeDocumentKindName(for: file, fallbackExtension: ext)
+        return "\(kind) · \(previewText)"
     }
 
     // MARK: - Sources Bar
@@ -7819,6 +7956,112 @@ struct UserMessageContentView: View {
 private struct MessageFilePreviewItem: Identifiable {
     let id = UUID()
     let file: ChatMessageFile
+}
+
+private struct OfficeAttachmentThumbnail: View {
+    let reference: String?
+    let fallbackIcon: String
+    let pageCount: Int
+
+    @Environment(\.theme) private var theme
+    @State private var image: UIImage?
+    @State private var didAttemptLoad = false
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Group {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    theme.surfaceContainerHighest.opacity(0.92),
+                                    theme.surfaceContainer.opacity(0.70)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .overlay {
+                            Image(systemName: fallbackIcon)
+                                .scaledFont(size: 24, weight: .semibold)
+                                .foregroundStyle(theme.textTertiary.opacity(0.72))
+                        }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+
+            if pageCount > 1 {
+                Text("\(pageCount)")
+                    .scaledFont(size: 11, weight: .bold)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(.black.opacity(0.62), in: Capsule())
+                    .padding(6)
+            }
+        }
+        .background(theme.surfaceContainerHighest.opacity(0.7))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(0.36), lineWidth: 0.5)
+        )
+        .task(id: reference ?? "") {
+            guard !didAttemptLoad || image == nil else { return }
+            didAttemptLoad = true
+            image = await Self.loadImage(from: reference)
+        }
+    }
+
+    private struct LoadedImage: @unchecked Sendable {
+        let image: UIImage
+    }
+
+    private static func loadImage(from reference: String?) async -> UIImage? {
+        guard let reference = reference?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !reference.isEmpty else {
+            return nil
+        }
+
+        if reference.hasPrefix("data:image/"),
+           let comma = reference.firstIndex(of: ",") {
+            let encoded = String(reference[reference.index(after: comma)...])
+            let loaded = await Task.detached(priority: .utility) {
+                Data(base64Encoded: encoded, options: .ignoreUnknownCharacters)
+                    .flatMap(UIImage.init(data:))
+                    .map { LoadedImage(image: $0) }
+            }.value
+            return loaded?.image
+        }
+
+        if let url = URL(string: reference), url.isFileURL {
+            let loaded = await Task.detached(priority: .utility) {
+                UIImage(contentsOfFile: url.path).map { LoadedImage(image: $0) }
+            }.value
+            return loaded?.image
+        }
+
+        if let url = URL(string: reference),
+           ["http", "https"].contains(url.scheme?.lowercased()) {
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                let loaded = await Task.detached(priority: .utility) {
+                    UIImage(data: data).map { LoadedImage(image: $0) }
+                }.value
+                return loaded?.image
+            } catch {
+                return nil
+            }
+        }
+
+        return nil
+    }
 }
 
 private struct MessageFilePreviewSheet: View {
