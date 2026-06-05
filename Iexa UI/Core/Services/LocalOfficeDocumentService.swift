@@ -149,7 +149,7 @@ final class LocalOfficeDocumentService {
         let documentURL = folder.appendingPathComponent(fileName)
         let draftURL = folder.appendingPathComponent("draft.json")
 
-        let render = PDFRenderPlan(call: call)
+        let render = existingOfficePDFRenderPlan(from: call) ?? PDFRenderPlan(call: call)
         let pages = render.pages
         guard !pages.isEmpty else {
             throw OfficeDocumentError.renderFailed
@@ -228,6 +228,64 @@ final class LocalOfficeDocumentService {
 
     private func renderSlidePreview(slide: SlideSpec, index: Int, theme: PresentationTheme) -> UIImage {
         SlidePreviewRenderer.render(slide: slide, index: index, theme: theme)
+    }
+
+    private func existingOfficePDFRenderPlan(from call: [String: Any]) -> PDFRenderPlan? {
+        let candidates = [
+            JSONValue.string(call["source_file"]),
+            JSONValue.string(call["source_url"]),
+            JSONValue.string(call["input_file"]),
+            JSONValue.string(call["input_url"]),
+            JSONValue.string(call["file_url"]),
+            JSONValue.string(call["from"])
+        ].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+        for raw in candidates {
+            guard let url = localFileURL(from: raw) else { continue }
+            let folder = url.hasDirectoryPath ? url : url.deletingLastPathComponent()
+            let imageURLs = previewImageURLs(in: folder)
+            let images = imageURLs.compactMap { UIImage(contentsOfFile: $0.path) }
+            guard !images.isEmpty else { continue }
+            let title = JSONValue.string(call["title"], fallback: url.deletingPathExtension().lastPathComponent)
+            return PDFRenderPlan(
+                title: title,
+                previewText: "由本地文件预览转换：\(url.lastPathComponent)",
+                pages: images
+            )
+        }
+        return nil
+    }
+
+    private func localFileURL(from raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let url = URL(string: trimmed), url.isFileURL {
+            return url
+        }
+        if trimmed.hasPrefix("/") || trimmed.contains(":\\") {
+            return URL(fileURLWithPath: trimmed)
+        }
+        return nil
+    }
+
+    private func previewImageURLs(in folder: URL) -> [URL] {
+        guard let urls = try? fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else {
+            return []
+        }
+        return urls
+            .filter { url in
+                let name = url.lastPathComponent.lowercased()
+                let ext = url.pathExtension.lowercased()
+                return (name.hasPrefix("preview-") || name.hasPrefix("slide-")) && ext == "png"
+            }
+            .sorted { lhs, rhs in
+                naturalIndex(lhs.lastPathComponent) < naturalIndex(rhs.lastPathComponent)
+            }
+    }
+
+    private func naturalIndex(_ name: String) -> Int {
+        let digits = name.compactMap { $0.isNumber ? $0 : nil }
+        return Int(String(digits)) ?? Int.max
     }
 }
 
@@ -419,14 +477,24 @@ private struct PresentationSpec: Sendable {
     }
 
     private static func themeHint(from call: [String: Any]) -> String {
-        [
+        let slideHints = JSONValue.array(call["slides"]).prefix(4).flatMap { slide in
+            [
+                JSONValue.string(slide["layout"]),
+                JSONValue.string(slide["title"]),
+                JSONValue.string(slide["subtitle"]),
+                JSONValue.string(slide["note"])
+            ] + Array(JSONValue.stringArray(slide["bullets"] ?? slide["points"] ?? slide["body"]).prefix(3))
+        }
+        return ([
             JSONValue.string(call["style"]),
             JSONValue.string(call["design"]),
             JSONValue.string(call["background_style"]),
             JSONValue.string(call["theme"]),
             JSONValue.string(call["title"]),
             JSONValue.string(call["subtitle"])
-        ].filter { !$0.isEmpty }.joined(separator: " ")
+        ] + slideHints)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 }
 
@@ -440,14 +508,42 @@ private struct PresentationTheme: Sendable {
         case warm
         case green
         case violet
+        case editorial
+        case luxury
+        case playful
+    }
+
+    enum Layout: String, Sendable {
+        case standard
+        case split
+        case centered
+        case card
+        case dashboard
+        case poster
+        case sidebar
+    }
+
+    enum Decoration: String, Sendable {
+        case automatic
+        case none
+        case diagonal
+        case circle
+        case grid
+        case dots
+        case frame
+        case wave
     }
 
     let style: Style
+    let layout: Layout
+    let decoration: Decoration
     let backgroundHex: String
+    let background2Hex: String
     let primaryHex: String
     let accentHex: String
     let textHex: String
     let subtleHex: String
+    let surfaceHex: String
 
     init(raw: [String: Any]?, hint: String = "") {
         let styleHint = [
@@ -458,61 +554,154 @@ private struct PresentationTheme: Sendable {
             hint
         ].filter { !$0.isEmpty }.joined(separator: " ")
         style = Self.style(from: styleHint)
+        layout = Self.layout(from: [
+            JSONValue.string(raw?["layout"]),
+            JSONValue.string(raw?["composition"]),
+            JSONValue.string(raw?["template"]),
+            styleHint
+        ].filter { !$0.isEmpty }.joined(separator: " "))
+        decoration = Self.decoration(from: [
+            JSONValue.string(raw?["decoration"]),
+            JSONValue.string(raw?["ornament"]),
+            JSONValue.string(raw?["background_pattern"]),
+            styleHint
+        ].filter { !$0.isEmpty }.joined(separator: " "), style: style)
         let palette = Self.palette(for: style)
         backgroundHex = Self.hex(raw?["background"], fallback: palette.background)
+        background2Hex = Self.hex(raw?["background_2"] ?? raw?["gradient_to"] ?? raw?["secondary_background"], fallback: palette.background2)
         primaryHex = Self.hex(raw?["primary"], fallback: palette.primary)
         accentHex = Self.hex(raw?["accent"], fallback: palette.accent)
         textHex = Self.hex(raw?["text"], fallback: palette.text)
         subtleHex = Self.hex(raw?["subtle"], fallback: palette.subtle)
+        surfaceHex = Self.hex(raw?["surface"] ?? raw?["card"] ?? raw?["panel"], fallback: palette.surface)
     }
 
     private static func hex(_ value: Any?, fallback: String) -> String {
         let raw = JSONValue.string(value, fallback: fallback)
             .replacingOccurrences(of: "#", with: "")
+            .replacingOccurrences(of: "0x", with: "", options: .caseInsensitive)
             .uppercased()
+        if let named = namedColor(raw) {
+            return named
+        }
         let hexCharacters = CharacterSet(charactersIn: "0123456789ABCDEF")
         guard raw.count == 6, raw.unicodeScalars.allSatisfy({ hexCharacters.contains($0) }) else { return fallback }
         return raw
+    }
+
+    private static func namedColor(_ raw: String) -> String? {
+        switch raw.lowercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "_", with: "") {
+        case "black", "dark":
+            return "111827"
+        case "white":
+            return "FFFFFF"
+        case "navy", "deepblue", "darkblue":
+            return "071326"
+        case "blue":
+            return "2563EB"
+        case "cyan", "teal":
+            return "22D3EE"
+        case "green":
+            return "16A34A"
+        case "orange":
+            return "EA580C"
+        case "red":
+            return "EF4444"
+        case "purple", "violet":
+            return "7C3AED"
+        case "cream", "beige":
+            return "FFF7ED"
+        default:
+            return nil
+        }
     }
 
     private static func style(from text: String) -> Style {
         let lower = text.lowercased()
         if lower.contains("深蓝") || lower.contains("navy") || lower.contains("deep blue") || lower.contains("deep_blue") { return .deepBlue }
         if lower.contains("科技") || lower.contains("tech") || lower.contains("ai") || lower.contains("cyber") { return .tech }
+        if lower.contains("黑金") || lower.contains("金色") || lower.contains("高级") || lower.contains("奢华") || lower.contains("luxury") || lower.contains("premium") || lower.contains("gold") { return .luxury }
         if lower.contains("暗") || lower.contains("黑") || lower.contains("dark") { return .dark }
         if lower.contains("暖") || lower.contains("橙") || lower.contains("红") || lower.contains("warm") || lower.contains("orange") { return .warm }
         if lower.contains("绿色") || lower.contains("环保") || lower.contains("生态") || lower.contains("green") { return .green }
         if lower.contains("紫") || lower.contains("violet") || lower.contains("purple") { return .violet }
+        if lower.contains("杂志") || lower.contains("editorial") || lower.contains("magazine") || lower.contains("publication") { return .editorial }
+        if lower.contains("活泼") || lower.contains("可爱") || lower.contains("playful") || lower.contains("colorful") { return .playful }
         if lower.contains("极简") || lower.contains("简洁") || lower.contains("minimal") || lower.contains("clean") { return .minimal }
         return .modern
     }
 
-    private static func palette(for style: Style) -> (background: String, primary: String, accent: String, text: String, subtle: String) {
+    private static func layout(from text: String) -> Layout {
+        let lower = text.lowercased()
+        if lower.contains("split") || lower.contains("分栏") || lower.contains("左右") || lower.contains("双栏") { return .split }
+        if lower.contains("center") || lower.contains("居中") || lower.contains("居中封面") { return .centered }
+        if lower.contains("card") || lower.contains("卡片") || lower.contains("玻璃") || lower.contains("面板") { return .card }
+        if lower.contains("dashboard") || lower.contains("仪表盘") || lower.contains("数据看板") || lower.contains("网格卡片") { return .dashboard }
+        if lower.contains("poster") || lower.contains("海报") || lower.contains("大标题") || lower.contains("封面感") { return .poster }
+        if lower.contains("sidebar") || lower.contains("侧栏") || lower.contains("竖栏") { return .sidebar }
+        return .standard
+    }
+
+    private static func decoration(from text: String, style: Style) -> Decoration {
+        let lower = text.lowercased()
+        if lower.contains("none") || lower.contains("无装饰") || lower.contains("纯色") { return .none }
+        if lower.contains("grid") || lower.contains("网格") || lower.contains("科技线") { return .grid }
+        if lower.contains("dot") || lower.contains("点阵") || lower.contains("圆点") { return .dots }
+        if lower.contains("circle") || lower.contains("圆形") || lower.contains("圆弧") || lower.contains("泡泡") { return .circle }
+        if lower.contains("frame") || lower.contains("边框") || lower.contains("描边") { return .frame }
+        if lower.contains("wave") || lower.contains("波浪") || lower.contains("曲线") { return .wave }
+        if lower.contains("diagonal") || lower.contains("斜切") || lower.contains("斜线") { return .diagonal }
+        switch style {
+        case .tech:
+            return .grid
+        case .minimal:
+            return .none
+        case .editorial, .luxury:
+            return .frame
+        case .playful:
+            return .circle
+        default:
+            return .automatic
+        }
+    }
+
+    private static func palette(for style: Style) -> (background: String, background2: String, primary: String, accent: String, text: String, subtle: String, surface: String) {
         switch style {
         case .modern:
-            return ("F7F8FA", "111827", "2563EB", "111827", "6B7280")
+            return ("F7F8FA", "EAF2FF", "111827", "2563EB", "111827", "6B7280", "FFFFFF")
         case .minimal:
-            return ("FFFFFF", "111827", "111827", "111827", "6B7280")
+            return ("FFFFFF", "FFFFFF", "111827", "111827", "111827", "6B7280", "FFFFFF")
         case .deepBlue:
-            return ("071326", "EAF2FF", "3B82F6", "F8FAFC", "B6C6E3")
+            return ("071326", "102A6B", "EAF2FF", "3B82F6", "F8FAFC", "B6C6E3", "12213D")
         case .tech:
-            return ("08111F", "ECFEFF", "22D3EE", "F8FAFC", "A7F3D0")
+            return ("08111F", "0F172A", "ECFEFF", "22D3EE", "F8FAFC", "A7F3D0", "101C2D")
         case .dark:
-            return ("111827", "F9FAFB", "60A5FA", "F9FAFB", "D1D5DB")
+            return ("111827", "030712", "F9FAFB", "60A5FA", "F9FAFB", "D1D5DB", "1F2937")
         case .warm:
-            return ("FFF7ED", "2F241D", "EA580C", "1F2937", "78716C")
+            return ("FFF7ED", "FED7AA", "2F241D", "EA580C", "1F2937", "78716C", "FFFFFF")
         case .green:
-            return ("F0FDF4", "113124", "16A34A", "102A1D", "4B6357")
+            return ("F0FDF4", "DCFCE7", "113124", "16A34A", "102A1D", "4B6357", "FFFFFF")
         case .violet:
-            return ("F5F3FF", "2E1065", "7C3AED", "1F163D", "6D5D8A")
+            return ("F5F3FF", "DDD6FE", "2E1065", "7C3AED", "1F163D", "6D5D8A", "FFFFFF")
+        case .editorial:
+            return ("FAFAF9", "E7E5E4", "1C1917", "A16207", "1C1917", "78716C", "FFFFFF")
+        case .luxury:
+            return ("0B0B0D", "1F1B16", "F8F5EC", "D6A84F", "F8F5EC", "D6C6A8", "171717")
+        case .playful:
+            return ("FFF7FB", "E0F2FE", "1F2937", "EC4899", "1F2937", "6B7280", "FFFFFF")
         }
     }
 
     var backgroundColor: UIColor { UIColor(hex: backgroundHex) }
+    var background2Color: UIColor { UIColor(hex: background2Hex) }
     var primaryColor: UIColor { UIColor(hex: primaryHex) }
     var accentColor: UIColor { UIColor(hex: accentHex) }
     var textColor: UIColor { UIColor(hex: textHex) }
     var subtleColor: UIColor { UIColor(hex: subtleHex) }
+    var surfaceColor: UIColor { UIColor(hex: surfaceHex) }
+    var isDark: Bool {
+        style == .deepBlue || style == .tech || style == .dark || style == .luxury
+    }
 }
 
 private struct SlideSpec: Sendable {
@@ -569,14 +758,22 @@ private struct WordSpec: Sendable {
     }
 
     private static func themeHint(from call: [String: Any]) -> String {
-        [
+        let sectionHints = JSONValue.array(call["sections"]).prefix(4).flatMap { section in
+            [
+                JSONValue.string(section["heading"] ?? section["title"])
+            ] + Array(JSONValue.stringArray(section["paragraphs"] ?? section["content"] ?? section["body"]).prefix(2))
+                + Array(JSONValue.stringArray(section["bullets"] ?? section["points"]).prefix(3))
+        }
+        return ([
             JSONValue.string(call["style"]),
             JSONValue.string(call["design"]),
             JSONValue.string(call["background_style"]),
             JSONValue.string(call["theme"]),
             JSONValue.string(call["title"]),
             JSONValue.string(call["subtitle"])
-        ].filter { !$0.isEmpty }.joined(separator: " ")
+        ] + sectionHints)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 }
 
@@ -587,6 +784,12 @@ private struct WordSectionSpec: Sendable {
 }
 
 private struct DocumentTheme: Sendable {
+    let style: PresentationTheme.Style
+    let layout: PresentationTheme.Layout
+    let decoration: PresentationTheme.Decoration
+    let backgroundHex: String
+    let background2Hex: String
+    let surfaceHex: String
     let accentHex: String
     let titleHex: String
     let textHex: String
@@ -594,18 +797,34 @@ private struct DocumentTheme: Sendable {
 
     init(raw: [String: Any]?, hint: String = "") {
         let presentationTheme = PresentationTheme(raw: raw, hint: hint)
+        style = presentationTheme.style
+        layout = presentationTheme.layout
+        decoration = presentationTheme.decoration
+        backgroundHex = presentationTheme.backgroundHex
+        background2Hex = presentationTheme.background2Hex
+        surfaceHex = presentationTheme.surfaceHex
         accentHex = presentationTheme.accentHex
-        titleHex = presentationTheme.style == .dark || presentationTheme.style == .deepBlue || presentationTheme.style == .tech
-            ? "111827"
-            : presentationTheme.primaryHex
-        textHex = "111827"
-        subtleHex = "6B7280"
+        if presentationTheme.isDark {
+            titleHex = presentationTheme.primaryHex
+            textHex = presentationTheme.textHex
+            subtleHex = presentationTheme.subtleHex
+        } else {
+            titleHex = presentationTheme.primaryHex
+            textHex = presentationTheme.textHex
+            subtleHex = presentationTheme.subtleHex
+        }
     }
 
+    var backgroundColor: UIColor { UIColor(hex: backgroundHex) }
+    var background2Color: UIColor { UIColor(hex: background2Hex) }
+    var surfaceColor: UIColor { UIColor(hex: surfaceHex) }
     var accentColor: UIColor { UIColor(hex: accentHex) }
     var titleColor: UIColor { UIColor(hex: titleHex) }
     var textColor: UIColor { UIColor(hex: textHex) }
     var subtleColor: UIColor { UIColor(hex: subtleHex) }
+    var isDark: Bool {
+        style == .deepBlue || style == .tech || style == .dark || style == .luxury
+    }
 }
 
 private struct RenderedSlide: Sendable {
@@ -698,38 +917,237 @@ private struct SlidePreviewRenderer {
         let renderer = UIGraphicsImageRenderer(size: size)
         return renderer.image { context in
             let isCover = slide.layout.lowercased().contains("cover") || index == 0
+            let layout = resolvedLayout(for: slide, theme: theme, isCover: isCover)
             drawBackground(context.cgContext, size: size, theme: theme, index: index, isCover: isCover)
+            drawLayoutSurface(context.cgContext, size: size, theme: theme, layout: layout, isCover: isCover)
 
-            let isDark = theme.style == .deepBlue || theme.style == .tech || theme.style == .dark
-            let titleSize: CGFloat = isCover ? (isDark ? 68 : 64) : 46
-            let titleX: CGFloat = isDark ? 110 : (theme.style == .minimal ? 82 : 96)
-            let titleY: CGFloat = isCover ? (isDark ? 178 : 190) : 78
-            let titleRect = CGRect(x: titleX, y: titleY, width: isDark ? 980 : 940, height: isCover ? 166 : 80)
+            if layout == .centered {
+                drawCenteredSlide(slide, index: index, theme: theme, isCover: isCover)
+                return
+            }
+            if layout == .poster, isCover {
+                drawPosterCover(slide, theme: theme)
+                drawPageNumber(index, theme: theme)
+                return
+            }
+
+            let titleRect = titleFrame(for: layout, isCover: isCover, theme: theme)
+            let titleSize = titleFontSize(for: layout, isCover: isCover, theme: theme)
             drawText(slide.title, in: titleRect, font: .systemFont(ofSize: titleSize, weight: .bold), color: theme.textColor)
 
             if !slide.subtitle.isEmpty {
                 drawText(
                     slide.subtitle,
-                    in: CGRect(x: titleX + 4, y: isCover ? (isDark ? 350 : 348) : 138, width: isDark ? 900 : 860, height: 70),
+                    in: subtitleFrame(for: layout, titleFrame: titleRect, isCover: isCover),
                     font: .systemFont(ofSize: isCover ? 30 : 22, weight: .medium),
                     color: theme.subtleColor
                 )
             }
 
             if !isCover {
+                let body = bodyFrame(for: layout)
                 if !slide.table.isEmpty {
-                    drawTable(slide.table, origin: CGPoint(x: 100, y: 220), width: 980, theme: theme)
+                    drawTable(slide.table, origin: body.origin, width: body.width, theme: theme)
+                } else if layout == .dashboard {
+                    drawBulletCards(slide.bullets, in: body, theme: theme)
+                } else if layout == .poster {
+                    drawPosterBullets(slide.bullets, in: body, theme: theme)
                 } else {
-                    drawBullets(slide.bullets, origin: CGPoint(x: 120, y: 220), width: 920, theme: theme)
+                    drawBullets(slide.bullets, origin: body.origin, width: body.width, theme: theme)
                 }
             }
 
-            let pageAttrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.monospacedDigitSystemFont(ofSize: 20, weight: .semibold),
-                .foregroundColor: theme.subtleColor
-            ]
-            "\(index + 1)".draw(in: CGRect(x: 1120, y: 640, width: 80, height: 30), withAttributes: pageAttrs)
+            drawPageNumber(index, theme: theme)
         }
+    }
+
+    private static func resolvedLayout(for slide: SlideSpec, theme: PresentationTheme, isCover: Bool) -> PresentationTheme.Layout {
+        let lower = slide.layout.lowercased()
+        if lower.contains("split") || lower.contains("分栏") { return .split }
+        if lower.contains("center") || lower.contains("居中") { return .centered }
+        if lower.contains("card") || lower.contains("卡片") { return .card }
+        if lower.contains("dashboard") || lower.contains("仪表盘") || lower.contains("grid") { return .dashboard }
+        if lower.contains("poster") || lower.contains("海报") { return .poster }
+        if lower.contains("sidebar") || lower.contains("侧栏") { return .sidebar }
+        if theme.layout != .standard { return theme.layout }
+        if isCover && (theme.style == .editorial || theme.style == .luxury) { return .poster }
+        return .standard
+    }
+
+    private static func titleFrame(
+        for layout: PresentationTheme.Layout,
+        isCover: Bool,
+        theme: PresentationTheme
+    ) -> CGRect {
+        switch layout {
+        case .split:
+            return isCover
+                ? CGRect(x: 86, y: 166, width: 530, height: 190)
+                : CGRect(x: 548, y: 78, width: 560, height: 94)
+        case .card:
+            return isCover
+                ? CGRect(x: 150, y: 170, width: 860, height: 172)
+                : CGRect(x: 150, y: 108, width: 870, height: 78)
+        case .dashboard:
+            return CGRect(x: 82, y: isCover ? 168 : 68, width: 1020, height: isCover ? 168 : 76)
+        case .poster:
+            return CGRect(x: 92, y: isCover ? 165 : 76, width: 1060, height: isCover ? 220 : 96)
+        case .sidebar:
+            return CGRect(x: 178, y: isCover ? 180 : 82, width: 900, height: isCover ? 170 : 80)
+        case .centered:
+            return CGRect(x: 150, y: isCover ? 210 : 88, width: 980, height: isCover ? 160 : 88)
+        case .standard:
+            let titleX: CGFloat = theme.isDark ? 110 : (theme.style == .minimal ? 82 : 96)
+            let titleY: CGFloat = isCover ? (theme.isDark ? 178 : 190) : 78
+            return CGRect(x: titleX, y: titleY, width: theme.isDark ? 980 : 940, height: isCover ? 166 : 80)
+        }
+    }
+
+    private static func subtitleFrame(
+        for layout: PresentationTheme.Layout,
+        titleFrame: CGRect,
+        isCover: Bool
+    ) -> CGRect {
+        switch layout {
+        case .split:
+            return isCover
+                ? CGRect(x: titleFrame.minX + 4, y: 372, width: titleFrame.width, height: 82)
+                : CGRect(x: titleFrame.minX, y: 148, width: titleFrame.width, height: 48)
+        case .card:
+            return CGRect(x: titleFrame.minX + 2, y: isCover ? 350 : 172, width: titleFrame.width, height: 70)
+        case .poster:
+            return CGRect(x: titleFrame.minX + 4, y: isCover ? 400 : 150, width: titleFrame.width, height: 72)
+        case .sidebar:
+            return CGRect(x: titleFrame.minX + 2, y: isCover ? 350 : 146, width: titleFrame.width, height: 64)
+        default:
+            return CGRect(x: titleFrame.minX + 4, y: isCover ? 348 : 138, width: min(titleFrame.width, 900), height: 70)
+        }
+    }
+
+    private static func titleFontSize(
+        for layout: PresentationTheme.Layout,
+        isCover: Bool,
+        theme: PresentationTheme
+    ) -> CGFloat {
+        switch layout {
+        case .poster:
+            return isCover ? 82 : 50
+        case .dashboard:
+            return isCover ? 62 : 42
+        case .split:
+            return isCover ? 58 : 44
+        default:
+            return isCover ? (theme.isDark ? 68 : 64) : 46
+        }
+    }
+
+    private static func bodyFrame(for layout: PresentationTheme.Layout) -> CGRect {
+        switch layout {
+        case .split:
+            return CGRect(x: 548, y: 220, width: 560, height: 420)
+        case .card:
+            return CGRect(x: 150, y: 224, width: 900, height: 400)
+        case .dashboard:
+            return CGRect(x: 76, y: 172, width: 1090, height: 470)
+        case .poster:
+            return CGRect(x: 95, y: 238, width: 1040, height: 430)
+        case .sidebar:
+            return CGRect(x: 180, y: 222, width: 920, height: 410)
+        default:
+            return CGRect(x: 120, y: 220, width: 920, height: 420)
+        }
+    }
+
+    private static func drawLayoutSurface(
+        _ context: CGContext,
+        size: CGSize,
+        theme: PresentationTheme,
+        layout: PresentationTheme.Layout,
+        isCover: Bool
+    ) {
+        switch layout {
+        case .split:
+            let panel = CGRect(x: 0, y: 0, width: 465, height: size.height)
+            context.saveGState()
+            context.setFillColor(theme.surfaceColor.withAlphaComponent(theme.isDark ? 0.10 : 0.74).cgColor)
+            context.fill(panel)
+            context.restoreGState()
+            drawRule(x: 465, y: 0, width: 2, height: size.height, color: theme.accentColor.withAlphaComponent(0.55))
+            if !isCover {
+                drawRule(x: 548, y: 184, width: 96, height: 5, color: theme.accentColor)
+            }
+        case .card:
+            let rect = CGRect(x: 104, y: 82, width: 1072, height: 555)
+            context.saveGState()
+            context.setShadow(offset: CGSize(width: 0, height: 16), blur: 34, color: UIColor.black.withAlphaComponent(theme.isDark ? 0.32 : 0.12).cgColor)
+            context.setFillColor(theme.surfaceColor.withAlphaComponent(theme.isDark ? 0.20 : 0.90).cgColor)
+            UIBezierPath(roundedRect: rect, cornerRadius: 28).fill()
+            context.restoreGState()
+            theme.accentColor.withAlphaComponent(0.18).setStroke()
+            UIBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), cornerRadius: 28).stroke()
+        case .dashboard:
+            drawRule(x: 76, y: 134, width: 178, height: 5, color: theme.accentColor)
+        case .sidebar:
+            let rect = CGRect(x: 0, y: 0, width: 130, height: size.height)
+            theme.accentColor.withAlphaComponent(theme.isDark ? 0.24 : 0.12).setFill()
+            UIBezierPath(rect: rect).fill()
+            drawRule(x: 76, y: 82, width: 8, height: 520, color: theme.accentColor)
+        case .poster, .centered, .standard:
+            break
+        }
+    }
+
+    private static func drawCenteredSlide(
+        _ slide: SlideSpec,
+        index: Int,
+        theme: PresentationTheme,
+        isCover: Bool
+    ) {
+        let titleRect = CGRect(x: 170, y: isCover ? 220 : 82, width: 940, height: isCover ? 160 : 90)
+        drawCenteredText(
+            slide.title,
+            in: titleRect,
+            font: .systemFont(ofSize: isCover ? 66 : 48, weight: .bold),
+            color: theme.textColor
+        )
+        if !slide.subtitle.isEmpty {
+            drawCenteredText(
+                slide.subtitle,
+                in: CGRect(x: 230, y: isCover ? 360 : 150, width: 820, height: 58),
+                font: .systemFont(ofSize: isCover ? 28 : 22, weight: .medium),
+                color: theme.subtleColor
+            )
+        }
+        if !isCover {
+            if !slide.table.isEmpty {
+                drawTable(slide.table, origin: CGPoint(x: 180, y: 244), width: 920, theme: theme)
+            } else {
+                drawBullets(slide.bullets, origin: CGPoint(x: 230, y: 240), width: 820, theme: theme)
+            }
+        }
+        drawPageNumber(index, theme: theme)
+    }
+
+    private static func drawPosterCover(_ slide: SlideSpec, theme: PresentationTheme) {
+        let titleRect = CGRect(x: 92, y: 150, width: 1080, height: 255)
+        drawText(slide.title, in: titleRect, font: .systemFont(ofSize: 82, weight: .heavy), color: theme.textColor)
+        if !slide.subtitle.isEmpty {
+            drawText(
+                slide.subtitle,
+                in: CGRect(x: 98, y: 430, width: 850, height: 72),
+                font: .systemFont(ofSize: 30, weight: .semibold),
+                color: theme.subtleColor
+            )
+        }
+        drawRule(x: 98, y: 525, width: 220, height: 7, color: theme.accentColor)
+    }
+
+    private static func drawPageNumber(_ index: Int, theme: PresentationTheme) {
+        let pageAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.monospacedDigitSystemFont(ofSize: 20, weight: .semibold),
+            .foregroundColor: theme.subtleColor
+        ]
+        "\(index + 1)".draw(in: CGRect(x: 1120, y: 640, width: 80, height: 30), withAttributes: pageAttrs)
     }
 
     private static func drawBackground(
@@ -741,67 +1159,119 @@ private struct SlidePreviewRenderer {
     ) {
         let bounds = CGRect(origin: .zero, size: size)
         switch theme.style {
-        case .deepBlue:
-            drawGradient(context, bounds: bounds, startHex: "061020", endHex: "102A6B")
+        case .deepBlue, .tech, .dark, .luxury:
+            drawGradient(context, bounds: bounds, startHex: theme.backgroundHex, endHex: theme.background2Hex)
+            drawResolvedDecoration(context, size: size, theme: theme)
+            if theme.style == .tech {
+                drawTopKicker(context, size: size, theme: theme, text: "AI WORKFLOW")
+            } else if theme.style == .deepBlue {
+                drawTopKicker(context, size: size, theme: theme, text: isCover ? "IEXA DECK" : "SECTION \(index + 1)")
+            }
+            if theme.style == .luxury {
+                drawRule(x: 92, y: 92, width: 150, height: 2, color: theme.accentColor)
+                drawRule(x: 92, y: 612, width: 150, height: 2, color: theme.accentColor)
+            } else {
+                drawRule(x: theme.style == .tech ? 74 : 64, y: theme.style == .tech ? 84 : 72, width: theme.style == .tech ? 118 : 8, height: theme.style == .tech ? 6 : 540, color: theme.accentColor)
+            }
+        case .minimal:
+            UIColor(hex: theme.backgroundHex).setFill()
+            context.fill(bounds)
+            drawResolvedDecoration(context, size: size, theme: theme)
+            drawRule(x: 76, y: 76, width: 1120, height: 2, color: UIColor(hex: theme.textHex).withAlphaComponent(0.16))
+            drawRule(x: 76, y: 616, width: 180, height: 4, color: theme.accentColor)
+        case .warm, .green, .violet, .editorial, .playful, .modern:
+            drawGradient(context, bounds: bounds, startHex: theme.backgroundHex, endHex: theme.background2Hex)
+            drawResolvedDecoration(context, size: size, theme: theme)
+            let leftRule = theme.style == .editorial ? CGFloat(72) : CGFloat(56)
+            drawRule(x: leftRule, y: 52, width: theme.style == .modern ? 9 : 7, height: 560, color: theme.accentColor.withAlphaComponent(theme.style == .editorial ? 0.70 : 1))
+        }
+    }
+
+    private static func drawResolvedDecoration(_ context: CGContext, size: CGSize, theme: PresentationTheme) {
+        let decoration = theme.decoration == .automatic ? automaticDecoration(for: theme.style) : theme.decoration
+        switch decoration {
+        case .none:
+            return
+        case .diagonal, .automatic:
             drawDiagonalBand(context, points: [
-                CGPoint(x: 820, y: 0), CGPoint(x: size.width, y: 0),
-                CGPoint(x: size.width, y: size.height), CGPoint(x: 1040, y: size.height)
-            ], color: theme.accentColor.withAlphaComponent(0.22))
-            drawRule(x: 64, y: 72, width: 8, height: 540, color: theme.accentColor)
-            drawTopKicker(context, size: size, theme: theme, text: isCover ? "IEXA DECK" : "SECTION \(index + 1)")
-        case .tech:
-            drawGradient(context, bounds: bounds, startHex: "06111F", endHex: "0F172A")
+                CGPoint(x: 900, y: 0), CGPoint(x: size.width, y: 0),
+                CGPoint(x: size.width, y: size.height), CGPoint(x: 1010, y: size.height)
+            ], color: theme.accentColor.withAlphaComponent(theme.isDark ? 0.22 : 0.14))
+        case .grid:
             drawGrid(context, size: size, color: theme.accentColor.withAlphaComponent(0.16), step: 44)
             drawDiagonalBand(context, points: [
                 CGPoint(x: 860, y: 0), CGPoint(x: size.width, y: 0),
                 CGPoint(x: size.width, y: 250), CGPoint(x: 980, y: 350)
             ], color: theme.accentColor.withAlphaComponent(0.24))
-            drawRule(x: 74, y: 84, width: 118, height: 6, color: theme.accentColor)
-            drawTopKicker(context, size: size, theme: theme, text: "AI WORKFLOW")
-        case .dark:
-            UIColor(hex: theme.backgroundHex).setFill()
-            context.fill(bounds)
-            drawDiagonalBand(context, points: [
-                CGPoint(x: 0, y: 530), CGPoint(x: size.width, y: 430),
-                CGPoint(x: size.width, y: size.height), CGPoint(x: 0, y: size.height)
-            ], color: UIColor.white.withAlphaComponent(0.06))
-            drawRule(x: 70, y: 70, width: 150, height: 7, color: theme.accentColor)
+        case .circle:
+            drawCircle(CGRect(x: 965, y: -72, width: 260, height: 260), color: theme.accentColor.withAlphaComponent(theme.isDark ? 0.20 : 0.16))
+            drawCircle(CGRect(x: 1016, y: 482, width: 180, height: 180), color: theme.primaryColor.withAlphaComponent(theme.isDark ? 0.12 : 0.10))
+            drawCircle(CGRect(x: 52, y: 548, width: 96, height: 96), color: theme.accentColor.withAlphaComponent(0.12))
+        case .dots:
+            drawDots(context, size: size, color: theme.accentColor.withAlphaComponent(0.20), step: 36)
+        case .frame:
+            let frame = CGRect(x: 48, y: 48, width: size.width - 96, height: size.height - 96)
+            context.saveGState()
+            context.setStrokeColor(theme.accentColor.withAlphaComponent(theme.isDark ? 0.45 : 0.34).cgColor)
+            context.setLineWidth(2)
+            context.stroke(frame)
+            context.restoreGState()
+        case .wave:
+            drawWave(context, size: size, color: theme.accentColor.withAlphaComponent(theme.isDark ? 0.18 : 0.14))
+        }
+    }
+
+    private static func automaticDecoration(for style: PresentationTheme.Style) -> PresentationTheme.Decoration {
+        switch style {
+        case .tech:
+            return .grid
         case .minimal:
-            UIColor.white.setFill()
-            context.fill(bounds)
-            drawRule(x: 76, y: 76, width: 1120, height: 2, color: UIColor(hex: "111827").withAlphaComponent(0.16))
-            drawRule(x: 76, y: 616, width: 180, height: 4, color: theme.accentColor)
-        case .warm:
-            UIColor(hex: theme.backgroundHex).setFill()
-            context.fill(bounds)
-            drawDiagonalBand(context, points: [
-                CGPoint(x: 0, y: 0), CGPoint(x: 330, y: 0),
-                CGPoint(x: 220, y: size.height), CGPoint(x: 0, y: size.height)
-            ], color: UIColor(hex: "FED7AA").withAlphaComponent(0.72))
-            drawRule(x: 82, y: 72, width: 8, height: 530, color: theme.accentColor)
-            drawRule(x: 1018, y: 92, width: 142, height: 142, color: UIColor(hex: "FDBA74").withAlphaComponent(0.35))
-        case .green:
-            UIColor(hex: theme.backgroundHex).setFill()
-            context.fill(bounds)
-            drawDiagonalBand(context, points: [
-                CGPoint(x: 920, y: 0), CGPoint(x: size.width, y: 0),
-                CGPoint(x: size.width, y: size.height), CGPoint(x: 780, y: size.height)
-            ], color: UIColor(hex: "BBF7D0").withAlphaComponent(0.58))
-            drawRule(x: 70, y: 72, width: 8, height: 540, color: theme.accentColor)
-            drawRule(x: 96, y: 612, width: 280, height: 5, color: theme.accentColor.withAlphaComponent(0.55))
-        case .violet:
-            UIColor(hex: theme.backgroundHex).setFill()
-            context.fill(bounds)
-            drawDiagonalBand(context, points: [
-                CGPoint(x: 0, y: 0), CGPoint(x: size.width, y: 0),
-                CGPoint(x: size.width, y: 150), CGPoint(x: 0, y: 250)
-            ], color: UIColor(hex: "DDD6FE").withAlphaComponent(0.72))
-            drawRule(x: 74, y: 86, width: 132, height: 8, color: theme.accentColor)
-            drawRule(x: 74, y: 106, width: 68, height: 8, color: theme.accentColor.withAlphaComponent(0.5))
-        case .modern:
-            UIColor(hex: theme.backgroundHex).setFill()
-            context.fill(bounds)
-            drawRule(x: 56, y: 52, width: 9, height: 560, color: theme.accentColor)
+            return .none
+        case .editorial, .luxury:
+            return .frame
+        case .playful:
+            return .circle
+        case .warm, .green, .violet, .modern, .deepBlue, .dark:
+            return .diagonal
+        }
+    }
+
+    private static func drawCircle(_ rect: CGRect, color: UIColor) {
+        color.setFill()
+        UIBezierPath(ovalIn: rect).fill()
+    }
+
+    private static func drawDots(_ context: CGContext, size: CGSize, color: UIColor, step: CGFloat) {
+        context.saveGState()
+        context.setFillColor(color.cgColor)
+        var y: CGFloat = 96
+        while y <= size.height - 90 {
+            var x: CGFloat = 820
+            while x <= size.width - 70 {
+                context.fillEllipse(in: CGRect(x: x, y: y, width: 4, height: 4))
+                x += step
+            }
+            y += step
+        }
+        context.restoreGState()
+    }
+
+    private static func drawWave(_ context: CGContext, size: CGSize, color: UIColor) {
+        context.saveGState()
+        context.beginPath()
+        context.move(to: CGPoint(x: 0, y: size.height * 0.76))
+        context.addCurve(
+            to: CGPoint(x: size.width, y: size.height * 0.66),
+            control1: CGPoint(x: size.width * 0.32, y: size.height * 0.56),
+            control2: CGPoint(x: size.width * 0.62, y: size.height * 0.88)
+        )
+        context.addLine(to: CGPoint(x: size.width, y: size.height))
+        context.addLine(to: CGPoint(x: 0, y: size.height))
+        context.closePath()
+        context.setFillColor(color.cgColor)
+        context.fillPath()
+        context.restoreGState()
+    }
             drawDiagonalBand(context, points: [
                 CGPoint(x: 1000, y: 0), CGPoint(x: size.width, y: 0),
                 CGPoint(x: size.width, y: 255), CGPoint(x: 1088, y: 300)
@@ -886,12 +1356,65 @@ private struct SlidePreviewRenderer {
         }
     }
 
+    private static func drawBulletCards(_ bullets: [String], in rect: CGRect, theme: PresentationTheme) {
+        let items = Array((bullets.isEmpty ? ["核心要点", "执行路径", "预期结果", "下一步"] : bullets).prefix(6))
+        let columns = items.count <= 3 ? 3 : 2
+        let rows = Int(ceil(Double(items.count) / Double(columns)))
+        let gap: CGFloat = 22
+        let cardWidth = (rect.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
+        let cardHeight = min(CGFloat(132), (rect.height - gap * CGFloat(max(0, rows - 1))) / CGFloat(max(1, rows)))
+
+        for (index, item) in items.enumerated() {
+            let col = index % columns
+            let row = index / columns
+            let card = CGRect(
+                x: rect.minX + CGFloat(col) * (cardWidth + gap),
+                y: rect.minY + CGFloat(row) * (cardHeight + gap),
+                width: cardWidth,
+                height: cardHeight
+            )
+            let fill = theme.surfaceColor.withAlphaComponent(theme.isDark ? 0.16 : 0.82)
+            fill.setFill()
+            UIBezierPath(roundedRect: card, cornerRadius: 18).fill()
+            theme.accentColor.withAlphaComponent(theme.isDark ? 0.34 : 0.22).setStroke()
+            UIBezierPath(roundedRect: card.insetBy(dx: 1, dy: 1), cornerRadius: 18).stroke()
+            drawRule(x: card.minX + 24, y: card.minY + 22, width: 34, height: 6, color: theme.accentColor)
+            drawText(
+                item,
+                in: CGRect(x: card.minX + 24, y: card.minY + 44, width: card.width - 48, height: card.height - 54),
+                font: .systemFont(ofSize: 25, weight: .semibold),
+                color: theme.textColor
+            )
+        }
+    }
+
+    private static func drawPosterBullets(_ bullets: [String], in rect: CGRect, theme: PresentationTheme) {
+        let items = Array(bullets.prefix(5))
+        for (index, item) in items.enumerated() {
+            let y = rect.minY + CGFloat(index) * 78
+            let number = String(format: "%02d", index + 1)
+            drawText(
+                number,
+                in: CGRect(x: rect.minX, y: y - 4, width: 74, height: 42),
+                font: .monospacedDigitSystemFont(ofSize: 25, weight: .bold),
+                color: theme.accentColor
+            )
+            drawText(
+                item,
+                in: CGRect(x: rect.minX + 88, y: y, width: rect.width - 120, height: 58),
+                font: .systemFont(ofSize: 31, weight: .semibold),
+                color: theme.textColor
+            )
+            drawRule(x: rect.minX + 88, y: y + 60, width: min(760, rect.width - 120), height: 1, color: theme.subtleColor.withAlphaComponent(0.25))
+        }
+    }
+
     private static func drawTable(_ table: [[String]], origin: CGPoint, width: CGFloat, theme: PresentationTheme) {
         let rows = Array(table.prefix(6))
         let columns = max(1, min(rows.map(\.count).max() ?? 1, 5))
         let colWidth = width / CGFloat(columns)
         let rowHeight: CGFloat = 58
-        let dark = theme.style == .deepBlue || theme.style == .tech || theme.style == .dark
+        let dark = theme.isDark
         for rowIndex in 0..<rows.count {
             let y = origin.y + CGFloat(rowIndex) * rowHeight
             let fill = rowIndex == 0
@@ -911,9 +1434,24 @@ private struct SlidePreviewRenderer {
         }
     }
 
+    private static func drawCenteredText(_ text: String, in rect: CGRect, font: UIFont, color: UIColor) {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.lineBreakMode = .byWordWrapping
+        style.lineSpacing = 5
+        (text as NSString).draw(
+            in: rect,
+            withAttributes: [
+                .font: font,
+                .foregroundColor: color,
+                .paragraphStyle: style
+            ]
+        )
+    }
+
     private static func drawText(_ text: String, in rect: CGRect, font: UIFont, color: UIColor) {
         let style = NSMutableParagraphStyle()
-        style.lineBreakMode = .byTruncatingTail
+        style.lineBreakMode = .byWordWrapping
         style.lineSpacing = 4
         (text as NSString).draw(
             in: rect,
@@ -1009,8 +1547,7 @@ private struct WordPreviewRenderer {
     ) -> UIImage {
         let renderer = UIGraphicsImageRenderer(size: pageSize)
         return renderer.image { context in
-            UIColor.white.setFill()
-            context.cgContext.fill(CGRect(origin: .zero, size: pageSize))
+            drawDocumentBackground(context.cgContext, theme: spec.theme)
 
             let contentRect = CGRect(
                 x: pageInsets.left,
@@ -1049,6 +1586,36 @@ private struct WordPreviewRenderer {
                     .foregroundColor: spec.theme.subtleColor
                 ]
             )
+        }
+    }
+
+    private static func drawDocumentBackground(_ context: CGContext, theme: DocumentTheme) {
+        let bounds = CGRect(origin: .zero, size: pageSize)
+        if theme.isDark {
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let colors = [theme.backgroundColor.cgColor, theme.background2Color.cgColor] as CFArray
+            if let gradient = CGGradient(colorsSpace: colorSpace, colors: colors, locations: [0, 1]) {
+                context.drawLinearGradient(
+                    gradient,
+                    start: CGPoint(x: bounds.minX, y: bounds.minY),
+                    end: CGPoint(x: bounds.maxX, y: bounds.maxY),
+                    options: []
+                )
+            } else {
+                theme.backgroundColor.setFill()
+                context.fill(bounds)
+            }
+            theme.accentColor.withAlphaComponent(0.78).setFill()
+            UIBezierPath(roundedRect: CGRect(x: pageInsets.left, y: pageInsets.top - 36, width: 132, height: 7), cornerRadius: 3.5).fill()
+            theme.accentColor.withAlphaComponent(0.34).setStroke()
+            UIBezierPath(rect: bounds.insetBy(dx: 54, dy: 54)).stroke()
+        } else {
+            UIColor.white.setFill()
+            context.fill(bounds)
+            if theme.style != .minimal {
+                theme.accentColor.withAlphaComponent(0.08).setFill()
+                UIBezierPath(roundedRect: CGRect(x: 0, y: pageSize.height - 250, width: pageSize.width, height: 250), cornerRadius: 0).fill()
+            }
         }
     }
 
@@ -1138,6 +1705,12 @@ private struct PDFRenderPlan {
     let title: String
     let previewText: String
     let pages: [UIImage]
+
+    init(title: String, previewText: String, pages: [UIImage]) {
+        self.title = title
+        self.previewText = previewText
+        self.pages = pages
+    }
 
     init(call: [String: Any]) {
         let mode = [
@@ -1381,12 +1954,18 @@ private struct WordOpenXMLBuilder {
         return """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        \(documentBackgroundXML)
         <w:body>
         \(paragraphs)
         <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/><w:cols w:space="708"/><w:docGrid w:linePitch="360"/></w:sectPr>
         </w:body>
         </w:document>
         """
+    }
+
+    private var documentBackgroundXML: String {
+        guard spec.theme.isDark else { return "" }
+        return #"<w:background w:color="\#(spec.theme.backgroundHex)"/>"#
     }
 
     private var documentParagraphs: [String] {
@@ -1412,15 +1991,20 @@ private struct WordOpenXMLBuilder {
 
     private func paragraph(_ text: String, style: String) -> String {
         """
-        <w:p><w:pPr><w:pStyle w:val="\(style)"/></w:pPr><w:r><w:t>\(xmlEscape(text))</w:t></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="\(style)"/>\(paragraphShadingXML)</w:pPr><w:r><w:t>\(xmlEscape(text))</w:t></w:r></w:p>
         """
+    }
+
+    private var paragraphShadingXML: String {
+        guard spec.theme.isDark else { return "" }
+        return #"<w:shd w:val="clear" w:color="auto" w:fill="\#(spec.theme.backgroundHex)"/>"#
     }
 
     private var stylesXML: String {
         """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-        <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Aptos" w:eastAsia="PingFang SC" w:hAnsi="Aptos"/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="\(spec.theme.textHex)"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
+        <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Aptos" w:eastAsia="PingFang SC" w:hAnsi="Aptos"/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="\(spec.theme.textHex)"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/>\(paragraphShadingXML)</w:pPr></w:pPrDefault></w:docDefaults>
         <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>
         <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:qFormat/><w:pPr><w:spacing w:after="280"/></w:pPr><w:rPr><w:b/><w:sz w:val="52"/><w:szCs w:val="52"/><w:color w:val="\(spec.theme.titleHex)"/></w:rPr></w:style>
         <w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Normal"/><w:qFormat/><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/><w:color w:val="\(spec.theme.subtleHex)"/></w:rPr></w:style>

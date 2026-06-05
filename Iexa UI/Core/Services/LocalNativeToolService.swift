@@ -57,6 +57,9 @@ struct LocalNativeOfficeDocument: Sendable {
 final class LocalNativeToolService {
     static let shared = LocalNativeToolService()
 
+    private var latestConvertibleOfficeFileURL: String?
+    private var latestConvertibleOfficeFileName: String?
+
     private init() {}
 
     func executeBlocks(in content: String) async -> LocalNativeToolRunResult {
@@ -186,6 +189,7 @@ final class LocalNativeToolService {
             let result = try await LocalOfficeDocumentService.shared.createExcel(from: call)
             var payload = result.payload
             payload["action"] = "office.create_excel"
+            rememberConvertibleOfficeResult(payload)
             return payload
         } catch {
             return [
@@ -201,6 +205,7 @@ final class LocalNativeToolService {
             let result = try await LocalOfficeDocumentService.shared.createPowerPoint(from: call)
             var payload = result.payload
             payload["action"] = "office.create_ppt"
+            rememberConvertibleOfficeResult(payload)
             return payload
         } catch {
             return [
@@ -216,6 +221,7 @@ final class LocalNativeToolService {
             let result = try await LocalOfficeDocumentService.shared.createWord(from: call)
             var payload = result.payload
             payload["action"] = "office.create_word"
+            rememberConvertibleOfficeResult(payload)
             return payload
         } catch {
             return [
@@ -228,7 +234,7 @@ final class LocalNativeToolService {
 
     private func executeCreatePDF(_ call: [String: Any]) async -> [String: Any] {
         do {
-            let result = try await LocalOfficeDocumentService.shared.createPDF(from: call)
+            let result = try await LocalOfficeDocumentService.shared.createPDF(from: callWithLatestOfficeSourceIfNeeded(call))
             var payload = result.payload
             payload["action"] = "office.create_pdf"
             return payload
@@ -238,6 +244,46 @@ final class LocalNativeToolService {
                 "ok": false,
                 "error": error.localizedDescription
             ]
+        }
+    }
+
+    private func rememberConvertibleOfficeResult(_ payload: [String: Any]) {
+        guard (payload["ok"] as? Bool) == true,
+              let url = payload["file_url"] as? String,
+              !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        latestConvertibleOfficeFileURL = url
+        latestConvertibleOfficeFileName = payload["file_name"] as? String
+    }
+
+    private func callWithLatestOfficeSourceIfNeeded(_ call: [String: Any]) -> [String: Any] {
+        guard !hasPDFSource(in: call),
+              let latestConvertibleOfficeFileURL,
+              !latestConvertibleOfficeFileURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return call
+        }
+        var enriched = call
+        enriched["source_url"] = latestConvertibleOfficeFileURL
+        if enriched["title"] == nil,
+           let latestConvertibleOfficeFileName,
+           !latestConvertibleOfficeFileName.isEmpty {
+            enriched["title"] = (latestConvertibleOfficeFileName as NSString).deletingPathExtension
+        }
+        return enriched
+    }
+
+    private func hasPDFSource(in call: [String: Any]) -> Bool {
+        [
+            "source_file",
+            "source_url",
+            "input_file",
+            "input_url",
+            "file_url",
+            "from"
+        ].contains { key in
+            guard let value = call[key] else { return false }
+            return !String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
 
