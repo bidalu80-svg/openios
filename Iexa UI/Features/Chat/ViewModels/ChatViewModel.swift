@@ -12684,6 +12684,8 @@ final class ChatViewModel {
 
         For Office/PDF actions, build a concise structured draft from the user's natural language and attachments. Always translate visual requests into a concrete `theme`: `style`, `layout`, `decoration`, `background`, `background_2`, `surface`, `accent`, `text`, and `subtle`. Supported style/layout/decoration hints include `deep_blue_tech`, `minimal`, `dark`, `warm_business`, `green`, `violet`, `editorial`, `luxury`, `playful`, `split`, `centered`, `card`, `dashboard`, `poster`, `sidebar`, `diagonal`, `circle`, `grid`, `dots`, `frame`, and `wave`. For "黑金", "金色商务", "高级商务", "奢华", or "premium/luxury", use `style:"luxury"` with a near-black `background`, a second dark `background_2`, gold `accent`, light `text`, and `decoration:"frame"` or `layout:"poster"`/`card`; never output a white minimal Word/PPT/PDF for those requests. If the user attaches a screenshot/template image, inspect it and approximate its visual fingerprint: dominant colors, dark/light mood, title placement, card/sidebar/split/dashboard/poster composition, border/shape/grid/dot/circle/wave decoration, and typography density. Put that fingerprint into `theme` and per-slide `layout`; do not reuse the default blue template when a different visual style was requested. If exact screenshot replication is impossible, still generate the closest local approximation instead of saying the tool cannot do it.
 
+        If a `[Latest local Office document for revision]` context is present and the user asks to modify, regenerate, restyle, improve, rewrite, or "改方案/换方案/按这个改", you must emit a fresh Office/PDF `iexa_native` block using the previous structured draft as the base. Preserve useful existing content, apply the requested changes, and generate a new file. Do not answer with only a plan, explanation, or promise.
+
         For PDF, use `office.create_pdf`; use `format:"slides"` with `slides` for deck-like PDFs, `format:"document"` with `sections` for report-like PDFs, or sheets/rows for table PDFs. If the user asks to convert the latest generated Office file to PDF, emit `office.create_pdf`; include the latest file URL as `source_url` when it is visible in context, otherwise the app will use the most recent local Office result automatically. If a key requirement is missing, choose a safe default instead of asking many setup questions. After Iexa appends the native tool result, continue from that real result and answer normally. If permissions are denied, location is not ready, notification permission is disabled, WeatherKit entitlement is unavailable, or Office/PDF generation fails, explain the exact local permission/state issue.
         """
     }
@@ -13517,6 +13519,220 @@ final class ChatViewModel {
         return content + "\n\n" + extraContexts.joined(separator: "\n\n")
     }
 
+    private struct LocalOfficeRevisionSnapshot {
+        let kind: LocalNativeOfficeKind
+        let fileName: String
+        let summary: String
+        let draftJSON: String?
+    }
+
+    private func localOfficeRevisionSystemContext(for userText: String) -> String? {
+        guard Self.looksLikeLocalOfficeRevisionRequest(userText),
+              let snapshot = latestLocalOfficeRevisionSnapshot() else {
+            return nil
+        }
+
+        let actionName: String = {
+            switch snapshot.kind {
+            case .excel:
+                return "office.create_excel"
+            case .powerPoint:
+                return "office.create_ppt"
+            case .word:
+                return "office.create_word"
+            case .pdf:
+                return "office.create_pdf"
+            }
+        }()
+        let draft = snapshot.draftJSON
+            .map { Self.contextTextForModel(Self.redactedLocalOfficeDraft($0), label: "latest-office-draft-json", maxInlineCharacters: 10_000) }
+            ?? "（未找到 draft.json；请根据上一版摘要和当前用户修改要求重新生成同类型文件。）"
+
+        return """
+        [Latest local Office document for revision]
+        The user appears to be asking to revise/regenerate the most recent local Office/PDF artifact. Treat this as a file regeneration task, not as ordinary advice.
+        Previous document type: \(snapshot.kind.displayName)
+        Previous file name: \(snapshot.fileName)
+        Previous result summary:
+        \(Self.indentForSystemContext(Self.clippedForSystemContext(snapshot.summary, maxCharacters: 2_000)))
+
+        Previous structured draft:
+        \(draft)
+
+        If the current user asks to 修改/改/重做/换风格/优化/完善/按截图模板改/重新生成/换成另一版, emit exactly one `iexa_native` JSON block. Use action `\(actionName)` unless the user explicitly asks to convert to another format. Start from the previous structured draft, apply the user's requested changes, keep useful existing content, and update `title`, `file_name`, `theme`, `slides`, `sections`, `sheets`, or PDF `format` as needed.
+        Do not merely describe a plan or say what you would change. Regenerate the file.
+        [/Latest local Office document for revision]
+        """
+    }
+
+    private func latestLocalOfficeRevisionSnapshot() -> LocalOfficeRevisionSnapshot? {
+        guard let messages = conversation?.messages else { return nil }
+        for message in messages.reversed() {
+            if let file = message.files.first(where: Self.isLocalOfficeDocumentFile),
+               let kind = Self.localOfficeKind(for: file) {
+                let draftJSON = Self.localOfficeDraftJSON(for: file)
+                return LocalOfficeRevisionSnapshot(
+                    kind: kind,
+                    fileName: file.name ?? Self.localOfficeFallbackFileName(for: kind),
+                    summary: message.content,
+                    draftJSON: draftJSON
+                )
+            }
+
+            if Self.isLocalNativeToolResult(message),
+               message.content.range(of: #""document_type"\s*:"#, options: .regularExpression) != nil,
+               let payload = Self.firstJSONObjectString(in: message.content),
+               let kind = Self.localOfficeKind(fromPayloadJSON: payload) {
+                return LocalOfficeRevisionSnapshot(
+                    kind: kind,
+                    fileName: Self.localOfficeFileName(fromPayloadJSON: payload) ?? Self.localOfficeFallbackFileName(for: kind),
+                    summary: message.content,
+                    draftJSON: Self.localOfficeDraftJSON(fromPayloadJSON: payload) ?? payload
+                )
+            }
+        }
+        return nil
+    }
+
+    private static func looksLikeLocalOfficeRevisionRequest(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let revisionMarkers = [
+            "改", "修改", "调整", "优化", "完善", "重做", "重新做", "重新生成", "再生成",
+            "再做", "换成", "改成", "换风格", "换个", "换一个", "套用", "参考", "照着",
+            "按这个", "按截图", "模板", "不对", "不是这样", "不满意", "继续完善",
+            "revise", "revision", "modify", "change", "update", "regenerate", "redo",
+            "recreate", "restyle", "use this template", "make it like"
+        ]
+        guard revisionMarkers.contains(where: { lower.contains($0) }) else { return false }
+        return true
+    }
+
+    private static func isLocalOfficeDocumentFile(_ file: ChatMessageFile) -> Bool {
+        if localOfficeKind(for: file) != nil { return true }
+        return false
+    }
+
+    private static func localOfficeKind(for file: ChatMessageFile) -> LocalNativeOfficeKind? {
+        let name = (file.name ?? file.url ?? "").lowercased()
+        let contentType = (file.contentType ?? "").lowercased()
+        if name.hasSuffix(".pptx") || name.hasSuffix(".ppt") || contentType.contains("presentationml") {
+            return .powerPoint
+        }
+        if name.hasSuffix(".xlsx") || name.hasSuffix(".xls") || contentType.contains("spreadsheetml") {
+            return .excel
+        }
+        if name.hasSuffix(".docx") || name.hasSuffix(".doc") || contentType.contains("wordprocessingml") {
+            return .word
+        }
+        if name.hasSuffix(".pdf") || contentType == "application/pdf" {
+            return .pdf
+        }
+        return nil
+    }
+
+    private static func localOfficeFallbackFileName(for kind: LocalNativeOfficeKind) -> String {
+        switch kind {
+        case .excel:
+            return "工作表.xlsx"
+        case .powerPoint:
+            return "演示文稿.pptx"
+        case .word:
+            return "文档.docx"
+        case .pdf:
+            return "文档.pdf"
+        }
+    }
+
+    private static func localOfficeDraftJSON(for file: ChatMessageFile) -> String? {
+        guard let url = localFileURL(from: file.url) else { return nil }
+        let draftURL = url.deletingLastPathComponent().appendingPathComponent("draft.json")
+        guard FileManager.default.fileExists(atPath: draftURL.path) else { return nil }
+        return try? String(contentsOf: draftURL, encoding: .utf8)
+    }
+
+    private static func localFileURL(from reference: String?) -> URL? {
+        guard let reference = reference?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !reference.isEmpty else { return nil }
+        if let url = URL(string: reference), url.isFileURL {
+            return url
+        }
+        if reference.hasPrefix("/") || reference.contains(":\\") {
+            return URL(fileURLWithPath: reference)
+        }
+        return nil
+    }
+
+    private static func firstJSONObjectString(in text: String) -> String? {
+        guard let start = text.firstIndex(of: "{"),
+              let end = text.lastIndex(of: "}"),
+              start <= end else { return nil }
+        return String(text[start...end])
+    }
+
+    private static func localOfficeKind(fromPayloadJSON json: String) -> LocalNativeOfficeKind? {
+        let documentType = valueFromJSONObjectString(json, key: "document_type")?.lowercased() ?? ""
+        let action = valueFromJSONObjectString(json, key: "action")?.lowercased() ?? ""
+        if documentType == "ppt" || documentType == "powerpoint" || action.contains("ppt") || action.contains("powerpoint") {
+            return .powerPoint
+        }
+        if documentType == "excel" || action.contains("excel") {
+            return .excel
+        }
+        if documentType == "word" || documentType == "docx" || action.contains("word") || action.contains("docx") {
+            return .word
+        }
+        if documentType == "pdf" || action.contains("pdf") {
+            return .pdf
+        }
+        return nil
+    }
+
+    private static func localOfficeFileName(fromPayloadJSON json: String) -> String? {
+        valueFromJSONObjectString(json, key: "file_name")
+    }
+
+    private static func localOfficeDraftJSON(fromPayloadJSON json: String) -> String? {
+        guard let draft = valueFromJSONObjectString(json, key: "draft_url"),
+              let url = localFileURL(from: draft),
+              FileManager.default.fileExists(atPath: url.path) else {
+            return nil
+        }
+        return try? String(contentsOf: url, encoding: .utf8)
+    }
+
+    private static func valueFromJSONObjectString(_ json: String, key: String) -> String? {
+        guard let data = json.data(using: .utf8),
+              let rawObject = try? JSONSerialization.jsonObject(with: data),
+              let object = rawObject as? [String: Any] else {
+            return nil
+        }
+        if let value = object[key] as? String, !value.isEmpty {
+            return value
+        }
+        if let results = object["results"] as? [[String: Any]] {
+            for result in results {
+                if let value = result[key] as? String, !value.isEmpty {
+                    return value
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func redactedLocalOfficeDraft(_ text: String) -> String {
+        text
+            .replacingOccurrences(
+                of: #"file://[^"\s,}]+"#,
+                with: "local-file",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"([A-Za-z]:\\)[^"\n,}]+"#,
+                with: "local-file",
+                options: .regularExpression
+            )
+    }
+
     private static func localAlpineObservationContent(for message: ChatMessage) -> String {
         let metadata = message.metadata ?? [:]
         let command = metadata["iexa_local_alpine_display_command"]
@@ -13814,8 +14030,17 @@ final class ChatViewModel {
         let webSearchToolContext: String? = nil
         let localSoulContext = LocalSoulService.shared.contextPrompt()
         let localSkillsContext = LocalSkillsService.shared.contextPrompt()
-        let localNativeToolContext = latestUserTextForLocalAlpine.map(Self.shouldExposeLocalNativeTools)
-            == true ? Self.localNativeToolSystemContext() : nil
+        let localNativeToolContext: String? = {
+            guard let latestUserTextForLocalAlpine else { return nil }
+            let officeRevisionContext = localOfficeRevisionSystemContext(for: latestUserTextForLocalAlpine)
+            let shouldExpose = Self.shouldExposeLocalNativeTools(latestUserTextForLocalAlpine)
+                || officeRevisionContext != nil
+            guard shouldExpose else { return nil }
+            return [Self.localNativeToolSystemContext(), officeRevisionContext]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+        }()
         let modelCapabilityContext = Self.modelCapabilitySystemContext(
             model: selectedModel,
             modelId: selectedModelId ?? conversation.model
@@ -15302,6 +15527,8 @@ final class ChatViewModel {
             "ppt", "pptx", "powerpoint", "slides", "幻灯片", "演示文稿", "汇报文件", "课件",
             "pdf", "pdf文件", "pdf文档", "生成pdf", "做成pdf", "转成pdf",
             "word", "docx", "文档", "word文档", "写文档", "生成文档", "产品方案",
+            "方案文件", "做方案", "生成方案", "改方案", "重做方案", "换方案",
+            "修改方案", "优化方案", "完善方案", "重新生成方案",
             "device status", "device info", "battery", "clipboard", "pasteboard",
             "copy to clipboard", "read clipboard", "notification", "notify me",
             "calendar", "event", "schedule", "reminder", "location", "where am i",
