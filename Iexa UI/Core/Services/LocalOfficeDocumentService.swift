@@ -968,6 +968,11 @@ private struct ExcelPreviewRenderer {
         let renderer = UIGraphicsImageRenderer(size: size)
         return renderer.image { context in
             let theme = spec.theme
+            let sheetSurfaceColor = theme.isDark ? UIColor(hex: "FFFFFF") : theme.surfaceColor
+            let alternateSurfaceColor = theme.isDark ? UIColor(hex: "F8FAFC") : theme.background2Color
+            let bodyTextColor = theme.isDark ? UIColor(hex: "111827") : theme.textColor
+            let headerTextColor = theme.isDark ? UIColor(hex: "111827") : theme.accentColor
+            let footerTextColor = theme.isDark ? UIColor(hex: "6B7280") : theme.subtleColor
             drawBackground(context.cgContext, size: size, theme: theme)
 
             let titleAttrs: [NSAttributedString.Key: Any] = [
@@ -989,7 +994,7 @@ private struct ExcelPreviewRenderer {
                 blur: 34,
                 color: UIColor.black.withAlphaComponent(theme.isDark ? 0.34 : 0.10).cgColor
             )
-            theme.surfaceColor.withAlphaComponent(theme.isDark ? 0.95 : 0.96).setFill()
+            sheetSurfaceColor.withAlphaComponent(0.98).setFill()
             tablePath.fill()
             context.cgContext.restoreGState()
             theme.accentColor.withAlphaComponent(theme.isDark ? 0.46 : 0.24).setStroke()
@@ -1003,11 +1008,11 @@ private struct ExcelPreviewRenderer {
                 let y = tableRect.minY + CGFloat(rowIndex) * rowHeight
                 let fill: UIColor
                 if rowIndex == 0 {
-                    fill = theme.accentColor.withAlphaComponent(theme.isDark ? 0.36 : 0.18)
+                    fill = theme.accentColor.withAlphaComponent(theme.isDark ? 0.30 : 0.18)
                 } else if rowIndex % 2 == 0 {
-                    fill = theme.background2Color.withAlphaComponent(theme.isDark ? 0.20 : 0.30)
+                    fill = alternateSurfaceColor.withAlphaComponent(0.92)
                 } else {
-                    fill = theme.surfaceColor.withAlphaComponent(theme.isDark ? 0.72 : 0.94)
+                    fill = sheetSurfaceColor.withAlphaComponent(0.96)
                 }
                 fill.setFill()
                 UIBezierPath(rect: CGRect(x: tableRect.minX, y: y, width: tableRect.width, height: rowHeight)).fill()
@@ -1020,8 +1025,8 @@ private struct ExcelPreviewRenderer {
                     let attrs: [NSAttributedString.Key: Any] = [
                         .font: UIFont.systemFont(ofSize: rowIndex == 0 ? 22 : 20, weight: rowIndex == 0 ? .semibold : .regular),
                         .foregroundColor: rowIndex == 0
-                            ? (theme.isDark ? theme.primaryColor : theme.accentColor)
-                            : theme.textColor
+                            ? headerTextColor
+                            : bodyTextColor
                     ]
                     text.draw(
                         in: CGRect(x: tableRect.minX + CGFloat(colIndex) * colWidth + 14, y: y + 12, width: colWidth - 22, height: rowHeight - 12),
@@ -1032,7 +1037,7 @@ private struct ExcelPreviewRenderer {
 
             let footerAttrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.systemFont(ofSize: 20, weight: .medium),
-                .foregroundColor: theme.subtleColor
+                .foregroundColor: footerTextColor
             ]
             "本地 Office Agent · \(spec.sheets.count) 个工作表 · \(sheet.rows.count) 行".draw(
                 in: CGRect(x: 56, y: 600, width: 1000, height: 32),
@@ -2027,15 +2032,16 @@ private struct ExcelOpenXMLBuilder {
 
     private var stylesXML: String {
         let theme = spec.theme
-        let headerTextHex = theme.style == .luxury || theme.style == .tech ? theme.backgroundHex : "FFFFFF"
-        let bodyFillHex = theme.isDark ? theme.surfaceHex : theme.surfaceHex
-        let alternateFillHex = theme.isDark ? theme.background2Hex : theme.background2Hex
-        let borderHex = theme.isDark ? theme.accentHex : theme.background2Hex
+        let bodyTextHex = theme.isDark ? "111827" : theme.textHex
+        let headerTextHex = Self.readableTextHex(on: theme.accentHex)
+        let bodyFillHex = theme.isDark ? "FFFFFF" : theme.surfaceHex
+        let alternateFillHex = theme.isDark ? "F8FAFC" : theme.background2Hex
+        let borderHex = theme.isDark ? "CBD5E1" : theme.background2Hex
         return """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
         <fonts count="3">
-        <font><sz val="11"/><color rgb="FF\(theme.textHex)"/><name val="Arial"/><family val="2"/></font>
+        <font><sz val="11"/><color rgb="FF\(bodyTextHex)"/><name val="Arial"/><family val="2"/></font>
         <font><b/><sz val="11"/><color rgb="FF\(headerTextHex)"/><name val="Arial"/><family val="2"/></font>
         <font><b/><sz val="11"/><color rgb="FF\(theme.accentHex)"/><name val="Arial"/><family val="2"/></font>
         </fonts>
@@ -2061,6 +2067,19 @@ private struct ExcelOpenXMLBuilder {
         <tableStyles count="0" defaultTableStyle="TableStyleMedium2" defaultPivotStyle="PivotStyleLight16"/>
         </styleSheet>
         """
+    }
+
+    private static func readableTextHex(on backgroundHex: String) -> String {
+        let cleaned = backgroundHex.replacingOccurrences(of: "#", with: "")
+        guard cleaned.count == 6,
+              let value = Int(cleaned, radix: 16) else {
+            return "111827"
+        }
+        let red = Double((value >> 16) & 0xFF) / 255
+        let green = Double((value >> 8) & 0xFF) / 255
+        let blue = Double(value & 0xFF) / 255
+        let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+        return luminance > 0.55 ? "111827" : "FFFFFF"
     }
 
     private func worksheetXML(sheet: ExcelSheetSpec) -> String {

@@ -5587,7 +5587,10 @@ final class APIClient: @unchecked Sendable {
                     for rawItem in rawItems {
                         statusItems.append(ChatStatusItem(
                             title: rawItem["title"] as? String,
-                            link: rawItem["link"] as? String
+                            link: rawItem["link"] as? String,
+                            snippet: rawItem["snippet"] as? String,
+                            thumbnailURL: rawItem["thumbnailURL"] as? String
+                                ?? rawItem["thumbnail_url"] as? String
                         ))
                     }
                 }
@@ -5815,7 +5818,10 @@ final class APIClient: @unchecked Sendable {
                     for rawItem in rawItems {
                         statusItems.append(ChatStatusItem(
                             title: rawItem["title"] as? String,
-                            link: rawItem["link"] as? String
+                            link: rawItem["link"] as? String,
+                            snippet: rawItem["snippet"] as? String,
+                            thumbnailURL: rawItem["thumbnailURL"] as? String
+                                ?? rawItem["thumbnail_url"] as? String
                         ))
                     }
                 }

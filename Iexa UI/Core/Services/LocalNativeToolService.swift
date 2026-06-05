@@ -7,6 +7,7 @@ struct LocalNativeToolRunResult: Sendable {
     let summary: String
     let files: [ChatMessageFile]
     let officeDocument: LocalNativeOfficeDocument?
+    let browserDocument: LocalNativeBrowserDocument?
 }
 
 enum LocalNativeOfficeKind: String, Sendable, Equatable {
@@ -53,6 +54,17 @@ struct LocalNativeOfficeDocument: Sendable {
     let error: String?
 }
 
+struct LocalNativeBrowserDocument: Sendable {
+    let ok: Bool
+    let action: String
+    let title: String
+    let url: String?
+    let query: String?
+    let summary: String
+    let items: [ChatStatusItem]
+    let error: String?
+}
+
 enum LocalOfficeProgressPhase: Sendable {
     case parsedDemand
     case generatedFile
@@ -80,7 +92,8 @@ final class LocalNativeToolService {
                 didExecute: false,
                 summary: "",
                 files: [],
-                officeDocument: nil
+                officeDocument: nil,
+                browserDocument: nil
             )
         }
 
@@ -98,7 +111,8 @@ final class LocalNativeToolService {
             didExecute: true,
             summary: prettyJSON(payload),
             files: results.flatMap(Self.files(from:)),
-            officeDocument: Self.officeDocument(from: results)
+            officeDocument: Self.officeDocument(from: results),
+            browserDocument: Self.browserDocument(from: results)
         )
     }
 
@@ -154,6 +168,23 @@ final class LocalNativeToolService {
         return nil
     }
 
+    static func browserActionName(in content: String) -> String? {
+        let lower = content.lowercased()
+        let actions = [
+            "web.search", "web_search", "search_web", "browser.search", "browser_search",
+            "browser.open", "browser_open", "browser.navigate", "navigate",
+            "browser.readable", "browser_readable", "browser.get_readable", "get_readable",
+            "browser.text", "browser_text", "browser.get_text", "get_text",
+            "browser.info", "browser_info", "browser.get_page_info", "get_page_info",
+            "browser.screenshot", "browser_screenshot",
+            "browser.fetch", "browser_fetch"
+        ]
+        return actions.first { action in
+            lower.contains(action)
+                || lower.contains(action.replacingOccurrences(of: ".", with: "\\."))
+        }
+    }
+
     private func execute(
         _ call: [String: Any],
         officeProgress: LocalOfficeProgressHandler?
@@ -181,6 +212,14 @@ final class LocalNativeToolService {
             return executeClipboardWrite(call)
         case "system.notify", "system_notify", "notify", "show_notification":
             return await executeSystemNotify(call)
+        case "web.search", "web_search", "search_web", "browser.search", "browser_search",
+             "browser.open", "browser_open", "browser.navigate", "browser.navigate_url", "navigate",
+             "browser.readable", "browser_readable", "browser.get_readable", "get_readable", "read_webpage",
+             "browser.text", "browser_text", "browser.get_text", "get_text",
+             "browser.info", "browser_info", "browser.get_page_info", "get_page_info",
+             "browser.screenshot", "browser_screenshot", "screenshot",
+             "browser.fetch", "browser_fetch", "fetch":
+            return await executeBrowserTool(action: action, call)
         case "office.create_excel", "office_create_excel", "create_excel", "excel.create", "excel":
             return await executeCreateExcel(call, progress: officeProgress)
         case "office.create_ppt", "office.create_powerpoint", "office_create_ppt", "create_ppt", "create_powerpoint", "ppt.create", "powerpoint.create", "ppt":
@@ -196,6 +235,14 @@ final class LocalNativeToolService {
                 "error": "Unsupported local native action"
             ]
         }
+    }
+
+    private func executeBrowserTool(action: String, _ call: [String: Any]) async -> [String: Any] {
+        var payload = await BrowserWebSearchService.shared.executeNativeBrowserTool(action: action, call: call)
+        if payload["action"] == nil {
+            payload["action"] = action
+        }
+        return payload
     }
 
     private func executeCreateExcel(
@@ -339,6 +386,84 @@ final class LocalNativeToolService {
             }
         }
         return files
+    }
+
+    private static func browserDocument(from results: [[String: Any]]) -> LocalNativeBrowserDocument? {
+        for result in results {
+            let action = (result["action"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard action.contains("browser")
+                    || action.contains("web.search")
+                    || action.contains("web_search")
+                    || action.contains("search_web")
+                    || action.contains("get_readable")
+                    || action == "navigate"
+                    || action == "fetch"
+                    || action == "screenshot" else {
+                continue
+            }
+
+            let ok = result["ok"] as? Bool ?? false
+            let title = (result["title"] as? String)
+                ?? (result["query"] as? String)
+                ?? "网页工具"
+            let url = (result["url"] as? String)
+                ?? (result["link"] as? String)
+            let query = result["query"] as? String
+            let summary = (result["summary"] as? String)
+                ?? (ok ? "本地浏览器工具已完成。" : "本地浏览器工具失败。")
+            let previewImages = result["preview_images"] as? [String] ?? []
+            var items = browserItems(from: result["items"])
+            if items.isEmpty, let url {
+                items = [
+                    ChatStatusItem(
+                        title: title,
+                        link: url,
+                        snippet: result["description"] as? String ?? result["text"] as? String,
+                        thumbnailURL: previewImages.first
+                    )
+                ]
+            }
+
+            return LocalNativeBrowserDocument(
+                ok: ok,
+                action: action,
+                title: title,
+                url: url,
+                query: query,
+                summary: summary,
+                items: items,
+                error: result["error"] as? String
+            )
+        }
+        return nil
+    }
+
+    private static func browserItems(from value: Any?) -> [ChatStatusItem] {
+        guard let rawItems = value as? [[String: Any]] else { return [] }
+        return rawItems.compactMap { raw in
+            let title = (raw["title"] as? String)
+                ?? (raw["name"] as? String)
+            let link = (raw["link"] as? String)
+                ?? (raw["url"] as? String)
+                ?? (raw["source"] as? String)
+            let snippet = (raw["snippet"] as? String)
+                ?? (raw["description"] as? String)
+                ?? (raw["text"] as? String)
+            let thumbnail = (raw["thumbnail_url"] as? String)
+                ?? (raw["thumbnailURL"] as? String)
+                ?? (raw["image"] as? String)
+            guard title?.isEmpty == false || link?.isEmpty == false || snippet?.isEmpty == false else {
+                return nil
+            }
+            return ChatStatusItem(
+                title: title,
+                link: link,
+                snippet: snippet.map { String($0.prefix(320)) },
+                thumbnailURL: thumbnail
+            )
+        }
     }
 
     private static func officeDocument(from results: [[String: Any]]) -> LocalNativeOfficeDocument? {

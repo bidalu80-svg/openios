@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import MarkdownView
 
 // MARK: - Streaming Status View
@@ -226,6 +227,16 @@ struct StreamingStatusView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.82 : 0.94))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.5 : 0.75), lineWidth: 0.7)
+        )
+        .shadow(color: .black.opacity(theme.isDark ? 0.2 : 0.06), radius: 12, x: 0, y: 6)
         .padding(.horizontal, Spacing.screenPadding)
         .padding(.vertical, Spacing.xs)
         .animation(MicroAnimation.snappy, value: isExpanded)
@@ -362,30 +373,62 @@ struct StreamingStatusView: View {
                         userInfo: ["url": url]
                     )
                 } label: {
-                    webSearchSourceRowContent(index: index, title: label, url: urlString, hasLink: true)
+                    webSearchSourceRowContent(
+                        index: index,
+                        title: label,
+                        url: urlString,
+                        snippet: item.snippet,
+                        thumbnailURL: item.thumbnailURL,
+                        hasLink: true
+                    )
                 }
                 .buttonStyle(.plain)
             } else {
-                webSearchSourceRowContent(index: index, title: label, url: urlString, hasLink: false)
+                webSearchSourceRowContent(
+                    index: index,
+                    title: label,
+                    url: urlString,
+                    snippet: item.snippet,
+                    thumbnailURL: item.thumbnailURL,
+                    hasLink: false
+                )
             }
         }
     }
 
-    private func webSearchSourceRowContent(index: Int, title: String, url: String?, hasLink: Bool) -> some View {
-        HStack(alignment: .top, spacing: 8) {
+    private func webSearchSourceRowContent(
+        index: Int,
+        title: String,
+        url: String?,
+        snippet: String?,
+        thumbnailURL: String?,
+        hasLink: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: 9) {
             Text("\(index)")
                 .scaledFont(size: 10, weight: .bold)
                 .foregroundStyle(theme.textTertiary)
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.55 : 0.8)))
 
-            webSearchFavicon(for: url, title: title, size: 18)
+            if let thumbnailURL, !thumbnailURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                webSearchThumbnail(thumbnailURL, fallbackURL: url, title: title)
+            } else {
+                webSearchFavicon(for: url, title: title, size: 20)
+                    .padding(.top, 1)
+            }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .scaledFont(size: 12, weight: .semibold)
                     .foregroundStyle(theme.textSecondary)
                     .lineLimit(2)
+                if let snippet = snippet?.trimmingCharacters(in: .whitespacesAndNewlines), !snippet.isEmpty {
+                    Text(snippet)
+                        .scaledFont(size: 11, weight: .regular)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(2)
+                }
                 if let url, let host = hostLabel(from: url) {
                     Text(host)
                         .scaledFont(size: 11, weight: .regular)
@@ -407,6 +450,67 @@ struct StreamingStatusView: View {
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.45 : 0.72))
+        )
+    }
+
+    @ViewBuilder
+    private func webSearchThumbnail(_ reference: String, fallbackURL: String?, title: String) -> some View {
+        let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let image = webSearchLocalImage(from: trimmed) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 72, height: 46)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.5)
+                )
+        } else if let url = URL(string: trimmed), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            FallbackCachedAsyncImage(urls: [url], targetPixelSize: 180) { image in
+                image
+                    .resizable()
+                    .scaledToFill()
+            } placeholder: {
+                thumbnailPlaceholder(fallbackURL: fallbackURL, title: title)
+            }
+            .frame(width: 72, height: 46)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.5)
+            )
+        } else {
+            thumbnailPlaceholder(fallbackURL: fallbackURL, title: title)
+        }
+    }
+
+    private func webSearchLocalImage(from reference: String) -> UIImage? {
+        if reference.hasPrefix("file://"),
+           let url = URL(string: reference),
+           url.isFileURL {
+            return UIImage(contentsOfFile: url.path)
+        }
+        if reference.hasPrefix("data:image/"),
+           let comma = reference.firstIndex(of: ",") {
+            let encoded = String(reference[reference.index(after: comma)...])
+            if let data = Data(base64Encoded: encoded) {
+                return UIImage(data: data)
+            }
+        }
+        return nil
+    }
+
+    private func thumbnailPlaceholder(fallbackURL: String?, title: String) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.55 : 0.82))
+            webSearchFavicon(for: fallbackURL, title: title, size: 24)
+        }
+        .frame(width: 72, height: 46)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(0.45), lineWidth: 0.5)
         )
     }
 

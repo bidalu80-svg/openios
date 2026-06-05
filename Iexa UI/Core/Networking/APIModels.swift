@@ -2425,6 +2425,7 @@ struct WebSearchResultItem: Sendable, Hashable {
     var title: String?
     var link: String?
     var snippet: String?
+    var thumbnailURL: String?
 
     init?(json: [String: Any]) {
         title = json["title"] as? String
@@ -2435,6 +2436,9 @@ struct WebSearchResultItem: Sendable, Hashable {
         snippet = json["snippet"] as? String
             ?? json["content"] as? String
             ?? json["description"] as? String
+        thumbnailURL = json["thumbnail_url"] as? String
+            ?? json["thumbnailURL"] as? String
+            ?? json["image"] as? String
 
         if (title?.isEmpty ?? true), (link?.isEmpty ?? true), (snippet?.isEmpty ?? true) {
             return nil

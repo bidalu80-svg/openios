@@ -236,6 +236,8 @@ struct HistoryNode: Codable, Sendable {
                         var itemDict: [String: Any] = [:]
                         if let title = item.title { itemDict["title"] = title }
                         if let link = item.link { itemDict["link"] = link }
+                        if let snippet = item.snippet { itemDict["snippet"] = snippet }
+                        if let thumbnailURL = item.thumbnailURL { itemDict["thumbnailURL"] = thumbnailURL }
                         return itemDict
                     }
                 }
@@ -593,7 +595,10 @@ struct MessageHistory: Codable, Sendable {
                     for rawItem in rawItems {
                         statusItems.append(ChatStatusItem(
                             title: rawItem["title"] as? String,
-                            link: rawItem["link"] as? String
+                            link: rawItem["link"] as? String,
+                            snippet: rawItem["snippet"] as? String,
+                            thumbnailURL: rawItem["thumbnailURL"] as? String
+                                ?? rawItem["thumbnail_url"] as? String
                         ))
                     }
                 }

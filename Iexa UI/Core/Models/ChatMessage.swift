@@ -82,6 +82,8 @@ struct ChatSourceReference: Codable, Identifiable, Hashable, Sendable {
 struct ChatStatusItem: Codable, Sendable {
     var title: String?
     var link: String?
+    var snippet: String? = nil
+    var thumbnailURL: String? = nil
 }
 
 /// A status update during message streaming (e.g., tool calls, web searches).

@@ -65,18 +65,626 @@ final class BrowserWebSearchService: NSObject {
             }
         }
 
-        let docs = await fetchDocuments(for: Array(items.prefix(4)))
+        var docs = await fetchDocuments(for: Array(items.prefix(4)))
+        var finalItems = Array(items.prefix(8))
+        if let firstLink = finalItems.compactMap(\.link).first,
+           let url = URL(string: firstLink),
+           ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+           await load(url: url, timeout: 8) {
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            let snapshot = await evaluatePageSnapshot()
+            let thumbnail = await capturePageThumbnail(prefix: "search")
+            if let index = finalItems.firstIndex(where: { $0.link == firstLink }) {
+                if let snapshot, finalItems[index].snippet?.isEmpty != false {
+                    finalItems[index].snippet = String(snapshot.text.prefix(260))
+                }
+                if let thumbnail {
+                    finalItems[index].thumbnailURL = thumbnail.absoluteString
+                }
+            }
+            if let snapshot,
+               !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !docs.contains(where: { ($0.metadata["source"] ?? $0.metadata["link"]) == firstLink }) {
+                docs.insert(WebSearchDocument(
+                    content: [
+                        "Title: \(snapshot.title.isEmpty ? firstLink : snapshot.title)",
+                        "URL: \(snapshot.url.isEmpty ? firstLink : snapshot.url)",
+                        snapshot.description.isEmpty ? nil : "Description: \(snapshot.description)",
+                        "Content excerpt:\n\(String(snapshot.text.prefix(4_000)))"
+                    ]
+                    .compactMap { $0 }
+                    .joined(separator: "\n"),
+                    metadata: [
+                        "title": snapshot.title.isEmpty ? firstLink : snapshot.title,
+                        "source": snapshot.url.isEmpty ? firstLink : snapshot.url,
+                        "link": snapshot.url.isEmpty ? firstLink : snapshot.url,
+                        "provider": "wkwebview_browser_thumbnail"
+                    ]
+                ), at: 0)
+            }
+        }
 
         guard !items.isEmpty || !docs.isEmpty else { return WebSearchResponse() }
-        let filenames = items.compactMap(\.link)
+        let filenames = finalItems.compactMap(\.link)
         return WebSearchResponse(
             status: true,
             collectionNames: ["browser_web_search"],
             filenames: filenames,
-            items: Array(items.prefix(8)),
+            items: finalItems,
             docs: docs,
             loadedCount: docs.count
         )
+    }
+
+    func executeNativeBrowserTool(action rawAction: String, call: [String: Any]) async -> [String: Any] {
+        let action = rawAction
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch action {
+        case "web.search", "web_search", "search_web", "browser.search", "browser_search":
+            return await executeNativeSearch(call)
+        case "browser.open", "browser.navigate", "browser_open", "browser.navigate_url", "navigate":
+            return await executeNativeOpen(call, readable: true)
+        case "browser.readable", "browser.get_readable", "browser_readable", "get_readable", "read_webpage":
+            return await executeNativeOpen(call, readable: true)
+        case "browser.text", "browser.get_text", "browser_text", "get_text":
+            return await executeNativeText(call)
+        case "browser.info", "browser.get_page_info", "browser_info", "get_page_info":
+            return await executeNativePageInfo(call)
+        case "browser.screenshot", "browser_screenshot", "screenshot":
+            return await executeNativeScreenshot(call)
+        case "browser.fetch", "browser_fetch", "fetch":
+            return await executeNativeFetch(call)
+        default:
+            return [
+                "action": rawAction,
+                "ok": false,
+                "error": "Unsupported browser action"
+            ]
+        }
+    }
+
+    private func executeNativeSearch(_ call: [String: Any]) async -> [String: Any] {
+        let query = Self.firstString(in: call, keys: ["query", "q", "text", "keyword", "keywords"])
+        guard let query, !query.isEmpty else {
+            return [
+                "action": "web.search",
+                "ok": false,
+                "error": "Missing required field: query"
+            ]
+        }
+
+        let extraQueries = Self.stringArray(in: call, keys: ["queries", "search_queries"])
+        let limit = min(max(Self.intValue(call["limit"] ?? call["count"] ?? call["max_results"]) ?? 6, 1), 8)
+        let includeScreenshot = Self.boolValue(call["screenshot"] ?? call["with_screenshot"] ?? call["thumbnail"]) ?? true
+        let queries = Self.unique(([query] + extraQueries).map(Self.normalizedQuery))
+        let response = await search(queries: Array(queries.prefix(4)), originalQuery: query)
+
+        var itemsPayload = response.items.prefix(limit).map(Self.itemPayload(from:))
+        var docsPayload = response.docs.prefix(4).map(Self.documentPayload(from:))
+        var previewImages: [String] = []
+
+        if includeScreenshot,
+           let existingThumbnail = itemsPayload.compactMap({ $0["thumbnail_url"] as? String }).first {
+            previewImages.append(existingThumbnail)
+        } else if includeScreenshot,
+           let firstLink = response.items.compactMap(\.link).first,
+           let url = URL(string: firstLink),
+           ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+           await load(url: url, timeout: 10) {
+            try? await Task.sleep(nanoseconds: 550_000_000)
+            let snapshot = await evaluatePageSnapshot()
+            let thumbnail = await capturePageThumbnail(prefix: "search")
+            if let thumbnail {
+                previewImages.append(thumbnail.absoluteString)
+            }
+            if !itemsPayload.isEmpty {
+                let currentSnippet = itemsPayload[0]["snippet"] as? String
+                if let snapshot, currentSnippet?.isEmpty != false {
+                    itemsPayload[0]["snippet"] = String(snapshot.text.prefix(260))
+                }
+                if let thumbnail {
+                    itemsPayload[0]["thumbnail_url"] = thumbnail.absoluteString
+                }
+            }
+            if let snapshot, !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let doc = WebSearchDocument(
+                    content: [
+                        "Title: \(snapshot.title.isEmpty ? firstLink : snapshot.title)",
+                        "URL: \(snapshot.url.isEmpty ? firstLink : snapshot.url)",
+                        snapshot.description.isEmpty ? nil : "Description: \(snapshot.description)",
+                        "Content excerpt:\n\(String(snapshot.text.prefix(4_000)))"
+                    ]
+                    .compactMap { $0 }
+                    .joined(separator: "\n"),
+                    metadata: [
+                        "title": snapshot.title.isEmpty ? firstLink : snapshot.title,
+                        "source": snapshot.url.isEmpty ? firstLink : snapshot.url,
+                        "link": snapshot.url.isEmpty ? firstLink : snapshot.url,
+                        "provider": "wkwebview_browser_tool"
+                    ]
+                )
+                docsPayload.insert(Self.documentPayload(from: doc), at: 0)
+            }
+        }
+
+        return [
+            "action": "web.search",
+            "ok": !response.items.isEmpty || !response.docs.isEmpty,
+            "query": query,
+            "queries": queries,
+            "count": itemsPayload.count,
+            "items": itemsPayload,
+            "docs": Array(docsPayload.prefix(4)),
+            "preview_images": previewImages,
+            "summary": itemsPayload.isEmpty ? "未找到可用搜索结果。" : "已搜索 \(itemsPayload.count) 个网页来源。"
+        ]
+    }
+
+    private func executeNativeOpen(_ call: [String: Any], readable: Bool) async -> [String: Any] {
+        guard let url = Self.urlValue(in: call) else {
+            return [
+                "action": readable ? "browser.readable" : "browser.open",
+                "ok": false,
+                "error": "Missing required field: url"
+            ]
+        }
+
+        let timeout = TimeInterval(Self.intValue(call["timeout"] ?? call["timeout_seconds"]) ?? 14)
+        guard await load(url: url, timeout: min(max(timeout, 3), 30)) else {
+            return [
+                "action": readable ? "browser.readable" : "browser.open",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 650_000_000)
+
+        let maxLength = min(max(Self.intValue(call["max_length"] ?? call["limit"]) ?? 8_000, 800), 18_000)
+        let includeScreenshot = Self.boolValue(call["screenshot"] ?? call["with_screenshot"] ?? call["thumbnail"]) ?? true
+        let snapshot = await evaluatePageSnapshot()
+        let thumbnail = includeScreenshot ? await capturePageThumbnail(prefix: "browser") : nil
+        let title = snapshot?.title.isEmpty == false ? snapshot!.title : (url.host ?? url.absoluteString)
+        let finalURL = snapshot?.url.isEmpty == false ? snapshot!.url : url.absoluteString
+        let text = snapshot?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        var payload: [String: Any] = [
+            "action": readable ? "browser.readable" : "browser.open",
+            "ok": true,
+            "title": title,
+            "url": finalURL,
+            "description": snapshot?.description ?? "",
+            "text": String(text.prefix(maxLength)),
+            "text_truncated": text.count > maxLength,
+            "summary": text.isEmpty ? "已打开网页：\(title)" : "已打开并读取网页：\(title)"
+        ]
+        if let thumbnail {
+            payload["preview_images"] = [thumbnail.absoluteString]
+            payload["items"] = [[
+                "title": title,
+                "link": finalURL,
+                "snippet": String(text.prefix(260)),
+                "thumbnail_url": thumbnail.absoluteString
+            ]]
+        } else {
+            payload["items"] = [[
+                "title": title,
+                "link": finalURL,
+                "snippet": String(text.prefix(260))
+            ]]
+        }
+        return payload
+    }
+
+    private func executeNativeText(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !await load(url: url, timeout: 12) {
+            return [
+                "action": "browser.text",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 350_000_000)
+
+        let selector = Self.firstString(in: call, keys: ["selector", "css"])
+        let maxLength = min(max(Self.intValue(call["max_length"] ?? call["limit"]) ?? 8_000, 500), 18_000)
+        let script: String
+        if let selector, !selector.isEmpty {
+            script = """
+            (() => {
+              const node = document.querySelector(\(Self.javascriptString(selector)));
+              return JSON.stringify({
+                title: document.title || '',
+                url: location.href,
+                text: ((node && (node.innerText || node.textContent)) || '').slice(0, \(maxLength))
+              });
+            })();
+            """
+        } else {
+            script = """
+            (() => JSON.stringify({
+              title: document.title || '',
+              url: location.href,
+              text: ((document.body && document.body.innerText) || '').slice(0, \(maxLength))
+            }))();
+            """
+        }
+
+        guard let json = await evaluateString(script),
+              let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [
+                "action": "browser.text",
+                "ok": false,
+                "error": "Unable to read page text"
+            ]
+        }
+        return [
+            "action": "browser.text",
+            "ok": true,
+            "title": object["title"] as? String ?? "",
+            "url": object["url"] as? String ?? "",
+            "selector": selector ?? "",
+            "text": object["text"] as? String ?? "",
+            "summary": "已读取网页文本。"
+        ]
+    }
+
+    private func executeNativePageInfo(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !await load(url: url, timeout: 12) {
+            return [
+                "action": "browser.info",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 350_000_000)
+
+        let script = """
+        (() => {
+          const text = n => ((n && (n.innerText || n.textContent)) || '').replace(/\\s+/g, ' ').trim();
+          const links = Array.from(document.querySelectorAll('a[href]')).slice(0, 30).map(a => ({
+            text: text(a).slice(0, 120),
+            href: new URL(a.getAttribute('href'), location.href).href
+          }));
+          const forms = Array.from(document.forms).slice(0, 10).map(f => ({
+            action: f.action || '',
+            method: f.method || 'get',
+            inputs: Array.from(f.querySelectorAll('input, textarea, select')).slice(0, 20).map(i => ({
+              name: i.name || '',
+              type: i.type || i.tagName.toLowerCase(),
+              placeholder: i.placeholder || ''
+            }))
+          }));
+          return JSON.stringify({
+            title: document.title || '',
+            url: location.href,
+            readyState: document.readyState,
+            scrollY: Math.round(scrollY),
+            viewport: { width: innerWidth, height: innerHeight },
+            page: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
+            links,
+            forms
+          });
+        })();
+        """
+        guard let json = await evaluateString(script),
+              let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [
+                "action": "browser.info",
+                "ok": false,
+                "error": "Unable to inspect page"
+            ]
+        }
+        var payload = object
+        payload["action"] = "browser.info"
+        payload["ok"] = true
+        payload["summary"] = "已读取网页结构。"
+        return payload
+    }
+
+    private func executeNativeScreenshot(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !await load(url: url, timeout: 14) {
+            return [
+                "action": "browser.screenshot",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 650_000_000)
+
+        guard let screenshot = await capturePageThumbnail(prefix: "browser") else {
+            return [
+                "action": "browser.screenshot",
+                "ok": false,
+                "error": "Failed to capture webpage screenshot"
+            ]
+        }
+        let snapshot = await evaluatePageSnapshot()
+        let title = snapshot?.title.isEmpty == false ? snapshot!.title : "网页截图"
+        let url = snapshot?.url ?? webView?.url?.absoluteString ?? ""
+        return [
+            "action": "browser.screenshot",
+            "ok": true,
+            "title": title,
+            "url": url,
+            "preview_images": [screenshot.absoluteString],
+            "items": [[
+                "title": title,
+                "link": url,
+                "snippet": snapshot.map { String($0.text.prefix(260)) } ?? "",
+                "thumbnail_url": screenshot.absoluteString
+            ]],
+            "summary": "已生成网页截图。"
+        ]
+    }
+
+    private func executeNativeFetch(_ call: [String: Any]) async -> [String: Any] {
+        guard let url = Self.urlValue(in: call) else {
+            return [
+                "action": "browser.fetch",
+                "ok": false,
+                "error": "Missing required field: url"
+            ]
+        }
+        var request = URLRequest(url: url, timeoutInterval: 20)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("zh-CN,zh;q=0.9,en;q=0.8,*;q=0.6", forHTTPHeaderField: "Accept-Language")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else {
+                return [
+                    "action": "browser.fetch",
+                    "ok": false,
+                    "url": url.absoluteString,
+                    "error": "Fetch failed"
+                ]
+            }
+            let contentType = http.value(forHTTPHeaderField: "Content-Type")?.components(separatedBy: ";").first ?? "application/octet-stream"
+            let fileName = Self.fetchFileName(for: url, contentType: contentType, headers: http.allHeaderFields)
+            let folder = try browserOutputDirectory()
+            let fileURL = folder.appendingPathComponent(fileName)
+            try data.write(to: fileURL, options: [.atomic])
+            return [
+                "action": "browser.fetch",
+                "ok": true,
+                "url": url.absoluteString,
+                "file_url": fileURL.absoluteString,
+                "file_name": fileName,
+                "content_type": contentType,
+                "bytes": data.count,
+                "summary": "已下载网页资源：\(fileName)"
+            ]
+        } catch {
+            return [
+                "action": "browser.fetch",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": error.localizedDescription
+            ]
+        }
+    }
+
+    private func capturePageThumbnail(prefix: String) async -> URL? {
+        let wv = webViewReady()
+        let width: CGFloat = 390
+        let height: CGFloat = 720
+        wv.isHidden = false
+        wv.alpha = 1
+        wv.frame = CGRect(x: -10_000, y: -10_000, width: width, height: height)
+        wv.scrollView.setContentOffset(.zero, animated: false)
+        wv.setNeedsLayout()
+        wv.layoutIfNeeded()
+
+        let config = WKSnapshotConfiguration()
+        let contentHeight = max(height, min(wv.scrollView.contentSize.height, 1_200))
+        config.rect = CGRect(x: 0, y: 0, width: width, height: min(contentHeight, 1_200))
+        config.snapshotWidth = NSNumber(value: Double(width))
+
+        return await withCheckedContinuation { continuation in
+            wv.takeSnapshot(with: config) { image, error in
+                if let error {
+                    self.logger.debug("Browser snapshot failed: \(error.localizedDescription, privacy: .public)")
+                    continuation.resume(returning: nil)
+                    return
+                }
+                guard let image, let data = image.pngData() else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                do {
+                    let folder = try self.browserOutputDirectory()
+                    let fileURL = folder.appendingPathComponent("\(prefix)_\(Int(Date().timeIntervalSince1970 * 1000)).png")
+                    try data.write(to: fileURL, options: [.atomic])
+                    continuation.resume(returning: fileURL)
+                } catch {
+                    self.logger.debug("Browser snapshot write failed: \(error.localizedDescription, privacy: .public)")
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
+
+    private nonisolated func browserOutputDirectory() throws -> URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let folder = base
+            .appendingPathComponent("iexa-browser-tool", isDirectory: true)
+            .appendingPathComponent(Self.dateFolderName(), isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
+    private static func itemPayload(from item: WebSearchResultItem) -> [String: Any] {
+        var payload: [String: Any] = [
+            "title": item.title ?? "",
+            "link": item.link ?? "",
+            "snippet": item.snippet ?? ""
+        ]
+        if let thumbnailURL = item.thumbnailURL, !thumbnailURL.isEmpty {
+            payload["thumbnail_url"] = thumbnailURL
+        }
+        return payload
+    }
+
+    private static func documentPayload(from document: WebSearchDocument) -> [String: Any] {
+        [
+            "content": document.content,
+            "metadata": document.metadata
+        ]
+    }
+
+    private static func urlValue(in call: [String: Any]) -> URL? {
+        guard let raw = firstString(in: call, keys: ["url", "link", "href", "page_url", "source", "input_url"]),
+              let url = URL(string: raw),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            return nil
+        }
+        return url
+    }
+
+    private static func firstString(in call: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            guard let raw = call[key] else { continue }
+            if let string = raw as? String {
+                let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { return trimmed }
+            } else if let number = raw as? NSNumber {
+                return number.stringValue
+            }
+        }
+        return nil
+    }
+
+    private static func stringArray(in call: [String: Any], keys: [String]) -> [String] {
+        for key in keys {
+            if let values = call[key] as? [String] {
+                return values
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            }
+            if let values = call[key] as? [Any] {
+                return values.compactMap { value in
+                    if let string = value as? String {
+                        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+                        return trimmed.isEmpty ? nil : trimmed
+                    }
+                    return nil
+                }
+            }
+        }
+        return []
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? Double { return Int(value) }
+        if let value = value as? NSNumber { return value.intValue }
+        if let value = value as? String {
+            return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool? {
+        if let value = value as? Bool { return value }
+        if let value = value as? NSNumber { return value.boolValue }
+        if let value = value as? String {
+            switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "1", "true", "yes", "y", "on":
+                return true
+            case "0", "false", "no", "n", "off":
+                return false
+            default:
+                return nil
+            }
+        }
+        return nil
+    }
+
+    private static func unique(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for value in values where !value.isEmpty {
+            let key = value.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            result.append(value)
+        }
+        return result
+    }
+
+    private static func javascriptString(_ value: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [value]),
+              let json = String(data: data, encoding: .utf8) else {
+            return "\"\""
+        }
+        return String(json.dropFirst().dropLast())
+    }
+
+    private static func fetchFileName(for url: URL, contentType: String, headers: [AnyHashable: Any]) -> String {
+        if let disposition = headers.first(where: { "\($0.key)".lowercased() == "content-disposition" })?.value as? String,
+           let fileName = dispositionFileName(disposition) {
+            return safeDownloadFileName(fileName, fallbackExtension: fileExtension(for: contentType))
+        }
+        let last = url.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !last.isEmpty, last != "/" {
+            return safeDownloadFileName(last, fallbackExtension: fileExtension(for: contentType))
+        }
+        return "download_\(Int(Date().timeIntervalSince1970)).\(fileExtension(for: contentType))"
+    }
+
+    private static func dispositionFileName(_ disposition: String) -> String? {
+        let pattern = #"filename\*?=(?:UTF-8''|")?([^";]+)"?#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: disposition, range: NSRange(disposition.startIndex..<disposition.endIndex, in: disposition)),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: disposition) else {
+            return nil
+        }
+        return String(disposition[range]).removingPercentEncoding
+            ?? String(disposition[range])
+    }
+
+    private static func safeDownloadFileName(_ raw: String, fallbackExtension: String) -> String {
+        let cleaned = raw
+            .components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>"))
+            .joined(separator: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = cleaned.isEmpty ? "download" : cleaned
+        let ext = (name as NSString).pathExtension
+        return ext.isEmpty ? "\(name).\(fallbackExtension)" : name
+    }
+
+    private static func fileExtension(for contentType: String) -> String {
+        let type = contentType.lowercased()
+        if type.contains("html") { return "html" }
+        if type.contains("json") { return "json" }
+        if type.contains("pdf") { return "pdf" }
+        if type.contains("png") { return "png" }
+        if type.contains("jpeg") || type.contains("jpg") { return "jpg" }
+        if type.contains("webp") { return "webp" }
+        if type.contains("text") { return "txt" }
+        return "bin"
+    }
+
+    private nonisolated static func dateFolderName() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd"
+        return formatter.string(from: Date())
     }
 
     private func searchItems(for query: String) async -> [WebSearchResultItem] {
@@ -441,9 +1049,10 @@ final class BrowserWebSearchService: NSObject {
         prefs.allowsContentJavaScript = true
         config.defaultWebpagePreferences = prefs
 
-        let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1), configuration: config)
+        let wv = WKWebView(frame: CGRect(x: -10_000, y: -10_000, width: 390, height: 720), configuration: config)
         wv.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
-        wv.isHidden = true
+        wv.isHidden = false
+        wv.alpha = 1
         wv.navigationDelegate = self
         webView = wv
         attachToWindow(wv)

@@ -16,6 +16,12 @@ private struct MessageShareItem: Identifiable {
     let text: String
 }
 
+private struct LocalQuickLookPreviewItem: Identifiable {
+    let id = UUID()
+    let url: URL
+    let title: String
+}
+
 private func localAlpineContentType(for file: LocalAlpineWrittenFile) -> String {
     switch (file.fileName as NSString).pathExtension.lowercased() {
     case "py":
@@ -1142,6 +1148,9 @@ struct ChatDetailView: View {
     @State private var downloadErrorMessage = ""
     /// URL for QuickLook in-app file preview (PDF, images, docs, etc.)
     @State private var previewFileURL: URL?
+    /// Office previews use a UIKit QuickLook wrapper so the navigation bar
+    /// keeps readable contrast in both app appearances.
+    @State private var localQuickLookPreview: LocalQuickLookPreviewItem?
     /// Fullscreen image browser for images visible in the current chat window.
     @State private var imageGalleryPresentation: AuthenticatedImageGalleryPresentation?
     /// Message-level file preview sheet. Keeps sent files out of message text.
@@ -1531,6 +1540,10 @@ struct ChatDetailView: View {
         }
         // In-app file preview using QuickLook (PDFs, images, docs, etc.)
         .quickLookPreview($previewFileURL)
+        .fullScreenCover(item: $localQuickLookPreview) { item in
+            LocalQuickLookPreviewController(url: item.url, title: item.title)
+                .ignoresSafeArea()
+        }
         // Chat advanced parameters sheet (slider icon in toolbar)
         .sheet(isPresented: $isShowingChatParams) {
             ChatAdvancedParamsSheet(
@@ -3822,10 +3835,40 @@ struct ChatDetailView: View {
         let fileExt = (fileName as NSString).pathExtension.lowercased()
         if let localURL = localPreviewURL(for: file),
            Self.canQuickLookLocalFile(fileExtension: fileExt) {
-            previewFileURL = localURL
+            if isOfficeDocumentFile(file) {
+                localQuickLookPreview = LocalQuickLookPreviewItem(
+                    url: localURL,
+                    title: Self.previewTitle(for: fileName)
+                )
+            } else {
+                previewFileURL = localURL
+            }
         } else {
             previewingMessageFile = MessageFilePreviewItem(file: file)
         }
+    }
+
+    private func shareMessageFileForEditing(_ file: ChatMessageFile) {
+        if let localURL = localPreviewURL(for: file) {
+            downloadedFileURL = localURL
+            Haptics.play(.light)
+            return
+        }
+
+        let fileName = file.name ?? file.url ?? "File"
+        let candidates = [file.displayURL, file.url]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if let fileId = candidates.compactMap(Self.serverFileId(from:)).first {
+            Task { await downloadAndShareFile(fileId: fileId) }
+            return
+        }
+        if let remote = candidates.compactMap(URL.init(string:)).first(where: { ["http", "https"].contains($0.scheme?.lowercased()) }) {
+            Task { await downloadAndShareRemoteFile(url: remote, suggestedName: fileName) }
+            return
+        }
+
+        openMessageFile(file)
     }
 
     private func localPreviewURL(for file: ChatMessageFile) -> URL? {
@@ -3835,6 +3878,27 @@ struct ChatDetailView: View {
             }
         }
         return nil
+    }
+
+    private static func previewTitle(for fileName: String) -> String {
+        let name = (fileName as NSString).lastPathComponent
+        let baseName = (name as NSString).deletingPathExtension
+        return baseName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? name : baseName
+    }
+
+    private static func serverFileId(from ref: String) -> String? {
+        if ref.hasPrefix("data:") || ref.hasPrefix("file://") {
+            return nil
+        }
+        let parts = ref.split(separator: "/", omittingEmptySubsequences: true)
+        if let filesIndex = parts.firstIndex(of: "files"),
+           filesIndex + 1 < parts.endIndex {
+            return String(parts[filesIndex + 1])
+        }
+        if ref.contains("/") || ref.contains(":") {
+            return nil
+        }
+        return ref
     }
 
     private static func canQuickLookLocalFile(fileExtension ext: String) -> Bool {
@@ -4079,61 +4143,86 @@ struct ChatDetailView: View {
         let previewReference = previewFiles.first.flatMap { imageReference(for: $0) }
         let previewCount = previewFiles.count
 
-        return Button {
-            openMessageFile(file)
-        } label: {
-            HStack(spacing: 12) {
-                OfficeAttachmentThumbnail(
-                    reference: previewReference,
-                    fallbackIcon: icon,
-                    pageCount: previewCount
-                )
-                .frame(width: 116, height: 74)
+        return HStack(spacing: 8) {
+            Button {
+                openMessageFile(file)
+            } label: {
+                HStack(spacing: 12) {
+                    OfficeAttachmentThumbnail(
+                        reference: previewReference,
+                        fallbackIcon: icon,
+                        pageCount: previewCount
+                    )
+                    .frame(width: 116, height: 74)
 
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 6) {
-                        Image(systemName: icon)
-                            .scaledFont(size: 12, weight: .semibold)
-                            .foregroundStyle(theme.brandPrimary)
-                        Text(kind)
-                            .scaledFont(size: 12, weight: .semibold)
-                            .foregroundStyle(theme.textSecondary)
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 6) {
+                            Image(systemName: icon)
+                                .scaledFont(size: 12, weight: .semibold)
+                                .foregroundStyle(theme.brandPrimary)
+                            Text(kind)
+                                .scaledFont(size: 12, weight: .semibold)
+                                .foregroundStyle(theme.textSecondary)
+                                .lineLimit(1)
+                        }
+
+                        Text(fileName)
+                            .scaledFont(size: 15, weight: .semibold)
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Text(officeAttachmentSubtitle(for: file, previewCount: previewCount, fallbackExtension: fileExt))
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
                             .lineLimit(1)
                     }
 
-                    Text(fileName)
-                        .scaledFont(size: 15, weight: .semibold)
-                        .foregroundStyle(theme.textPrimary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    Spacer(minLength: 6)
 
-                    Text(officeAttachmentSubtitle(for: file, previewCount: previewCount, fallbackExtension: fileExt))
-                        .scaledFont(size: 12, weight: .medium)
+                    Image(systemName: "chevron.right")
+                        .scaledFont(size: 13, weight: .semibold)
                         .foregroundStyle(theme.textTertiary)
-                        .lineLimit(1)
                 }
-
-                Spacer(minLength: 6)
-
-                Image(systemName: "chevron.right")
-                    .scaledFont(size: 13, weight: .semibold)
-                    .foregroundStyle(theme.textTertiary)
+                .contentShape(Rectangle())
             }
-            .padding(10)
-            .frame(maxWidth: 390, alignment: .leading)
-            .background(theme.surfaceContainer.opacity(0.82))
-            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
-                    .strokeBorder(theme.cardBorder.opacity(0.42), lineWidth: 0.5)
-            )
+            .buttonStyle(.plain)
+
+            Button {
+                shareMessageFileForEditing(file)
+            } label: {
+                VStack(spacing: 3) {
+                    Image(systemName: "square.and.arrow.up")
+                        .scaledFont(size: 15, weight: .semibold)
+                    Text("编辑")
+                        .scaledFont(size: 10, weight: .semibold)
+                }
+                .foregroundStyle(theme.textSecondary)
+                .frame(width: 46, height: 54)
+                .background(theme.surfaceContainerHighest.opacity(0.82))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
         }
+        .padding(10)
+        .frame(maxWidth: 390, alignment: .leading)
+        .background(theme.surfaceContainer.opacity(0.82))
+        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(0.42), lineWidth: 0.5)
+        )
         .buttonStyle(.plain)
         .contextMenu {
             Button {
                 openMessageFile(file)
             } label: {
                 Label("打开文件", systemImage: "doc.viewfinder")
+            }
+            Button {
+                shareMessageFileForEditing(file)
+            } label: {
+                Label("编辑或导出", systemImage: "square.and.arrow.up")
             }
             if let preview = previewFiles.first {
                 Button {
@@ -8645,6 +8734,124 @@ struct ShareSheetView: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+// MARK: - Local QuickLook Preview
+
+private struct LocalQuickLookPreviewController: UIViewControllerRepresentable {
+    let url: URL
+    let title: String
+
+    @Environment(\.dismiss) private var dismiss
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(url: url, title: title) {
+            dismiss()
+        }
+    }
+
+    func makeUIViewController(context: Context) -> UINavigationController {
+        let previewController = QLPreviewController()
+        previewController.dataSource = context.coordinator
+        previewController.delegate = context.coordinator
+        previewController.navigationItem.title = title
+        previewController.navigationItem.leftBarButtonItem = UIBarButtonItem(
+            image: UIImage(systemName: "square.and.arrow.up"),
+            style: .plain,
+            target: context.coordinator,
+            action: #selector(Coordinator.share)
+        )
+        previewController.navigationItem.rightBarButtonItem = UIBarButtonItem(
+            title: "完成",
+            style: .done,
+            target: context.coordinator,
+            action: #selector(Coordinator.close)
+        )
+        context.coordinator.previewController = previewController
+
+        let navigationController = UINavigationController(rootViewController: previewController)
+        navigationController.modalPresentationStyle = .fullScreen
+        navigationController.overrideUserInterfaceStyle = .light
+        previewController.overrideUserInterfaceStyle = .light
+        Self.configureAppearance(for: navigationController.navigationBar)
+        return navigationController
+    }
+
+    func updateUIViewController(_ uiViewController: UINavigationController, context: Context) {
+        context.coordinator.update(url: url, title: title)
+        Self.configureAppearance(for: uiViewController.navigationBar)
+        if let previewController = uiViewController.viewControllers.first as? QLPreviewController {
+            previewController.navigationItem.title = title
+            previewController.reloadData()
+        }
+    }
+
+    private static func configureAppearance(for navigationBar: UINavigationBar) {
+        let appearance = UINavigationBarAppearance()
+        appearance.configureWithOpaqueBackground()
+        appearance.backgroundColor = .white
+        appearance.shadowColor = UIColor.black.withAlphaComponent(0.12)
+        appearance.titleTextAttributes = [
+            .foregroundColor: UIColor.black,
+            .font: UIFont.systemFont(ofSize: 17, weight: .semibold)
+        ]
+        appearance.buttonAppearance.normal.titleTextAttributes = [.foregroundColor: UIColor.black]
+        appearance.buttonAppearance.highlighted.titleTextAttributes = [.foregroundColor: UIColor.darkGray]
+        appearance.doneButtonAppearance.normal.titleTextAttributes = [.foregroundColor: UIColor.black]
+        appearance.doneButtonAppearance.highlighted.titleTextAttributes = [.foregroundColor: UIColor.darkGray]
+
+        navigationBar.standardAppearance = appearance
+        navigationBar.scrollEdgeAppearance = appearance
+        navigationBar.compactAppearance = appearance
+        navigationBar.tintColor = .black
+        navigationBar.isTranslucent = false
+    }
+
+    final class Coordinator: NSObject, QLPreviewControllerDataSource, QLPreviewControllerDelegate {
+        private var item: PreviewItem
+        private let onDismiss: () -> Void
+        weak var previewController: QLPreviewController?
+
+        init(url: URL, title: String, onDismiss: @escaping () -> Void) {
+            self.item = PreviewItem(url: url, title: title)
+            self.onDismiss = onDismiss
+        }
+
+        func update(url: URL, title: String) {
+            item = PreviewItem(url: url, title: title)
+        }
+
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
+            1
+        }
+
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
+            item
+        }
+
+        @objc func close() {
+            onDismiss()
+        }
+
+        @objc func share() {
+            guard let previewController else { return }
+            let activityController = UIActivityViewController(activityItems: [item.url], applicationActivities: nil)
+            previewController.present(activityController, animated: true)
+        }
+    }
+
+    private final class PreviewItem: NSObject, QLPreviewItem {
+        let url: URL
+        let title: String
+
+        init(url: URL, title: String) {
+            self.url = url
+            self.title = title
+        }
+
+        var previewItemURL: URL? { url }
+        var previewItemTitle: String? { title }
+    }
 }
 
 // MARK: - ScrollView Horizontal Lock

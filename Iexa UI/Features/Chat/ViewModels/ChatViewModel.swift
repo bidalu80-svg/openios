@@ -11191,9 +11191,8 @@ final class ChatViewModel {
 
         var tools: [[String: Any]] = []
 
-        if isChatWebSearchAllowed && webSearchEnabled {
-            tools.append(["type": "web_search"])
-        }
+        // Web search is handled by the local WKWebView browser pipeline so the
+        // app can show clickable source cards and thumbnails consistently.
 
         if shouldEnableOpenAIResponsesImageGenerationTool(modelId: request.model) {
             tools.append(["type": "image_generation"])
@@ -12630,11 +12629,11 @@ final class ChatViewModel {
         let exampleEndText = formatter.string(from: exampleEventEnd)
         let timezoneName = TimeZone.current.identifier
         return """
-        Iexa has on-device native iOS tools for device info, clipboard, local notifications, location, weather, calendar, and local Office/PDF document generation. These run locally on the user's device and do not require the remote server.
+        Iexa has on-device native iOS tools for device info, clipboard, local notifications, location, weather, calendar, local browser/web reading, and local Office/PDF document generation. These run locally on the user's device and do not require the remote server.
 
         Current device time: \(nowText), timezone: \(timezoneName). For relative requests such as "今天", "现在", "明天", or "查看日历", calculate the date range from this current device time. Do not reuse stale sample dates.
 
-        Use them only when the user asks to read device status/info, read/write clipboard text, show a local notification, get/use their current location, query current local weather, query local calendar events, create/delete a calendar event, or directly create an Excel/PPT/Word/PDF file. Do not emit this tool for ordinary conversation.
+        Use them only when the user asks to read device status/info, read/write clipboard text, show a local notification, get/use their current location, query current local weather, query local calendar events, create/delete a calendar event, search/open/read/screenshot/download webpages, or directly create an Excel/PPT/Word/PDF file. Do not emit this tool for ordinary conversation.
         For code execution, Python scripts, package installs, project edits, or "write/run Python to generate a file", use Local Alpine when available instead of the Office actions. The Office actions are for productized file creation from a document draft, not for replacing the Python/terminal agent.
         To call a local native tool, output exactly one fenced `iexa_native` JSON block and no fake tool-call syntax.
 
@@ -12670,6 +12669,18 @@ final class ChatViewModel {
         {"action":"delete_calendar_event","id":"event-id-from-list"}
         ```
         ```iexa_native
+        {"action":"web.search","query":"OpenAI 最新 Responses API 工具","limit":6,"screenshot":true}
+        ```
+        ```iexa_native
+        {"action":"browser.readable","url":"https://example.com/article","screenshot":true,"max_length":8000}
+        ```
+        ```iexa_native
+        {"action":"browser.screenshot","url":"https://example.com"}
+        ```
+        ```iexa_native
+        {"action":"browser.fetch","url":"https://example.com/file.pdf"}
+        ```
+        ```iexa_native
         {"action":"office.create_excel","title":"销售周报","file_name":"销售周报.xlsx","sheets":[{"name":"汇总","headers":["指标","数值","备注"],"rows":[["销售额","128000","环比增长"],["订单数","342","本周新增"]]}]}
         ```
         ```iexa_native
@@ -12681,6 +12692,8 @@ final class ChatViewModel {
         ```iexa_native
         {"action":"office.create_pdf","title":"项目汇报","file_name":"项目汇报.pdf","format":"slides","theme":{"style":"warm_business","layout":"split","decoration":"diagonal","background":"FFF7ED","background_2":"FED7AA","accent":"EA580C","text":"1F2937","subtle":"78716C"},"slides":[{"layout":"cover","title":"项目汇报","subtitle":"本地生成 PDF"},{"layout":"split","title":"关键进展","bullets":["目标清晰","风险可控","下一步明确"]}]}
         ```
+
+        For browser/web actions, use `web.search` when the user asks to search/find/current/latest information and there is no exact URL. Use `browser.readable` when a URL is known or after search results need verification. Set `screenshot:true` when the user may benefit from seeing the page; Iexa will show a clickable webpage source card with thumbnail in the chat. Use `browser.screenshot` for visual page checks and `browser.fetch` for downloadable files. After Iexa appends the real browser result, answer from that result; cite page titles/URLs plainly and do not claim you cannot browse.
 
         For Office/PDF actions, build a concise structured draft from the user's natural language and attachments. Always translate visual requests into a concrete `theme`: `style`, `layout`, `decoration`, `background`, `background_2`, `surface`, `accent`, `text`, and `subtle`. Supported style/layout/decoration hints include `deep_blue_tech`, `minimal`, `dark`, `warm_business`, `green`, `violet`, `editorial`, `luxury`, `playful`, `split`, `centered`, `card`, `dashboard`, `poster`, `sidebar`, `diagonal`, `circle`, `grid`, `dots`, `frame`, and `wave`. For "黑金", "金色商务", "高级商务", "奢华", or "premium/luxury", use `style:"luxury"` with a near-black `background`, a second dark `background_2`, gold `accent`, light `text`, and `decoration:"frame"` or `layout:"poster"`/`card`; never output a white minimal Word/PPT/PDF for those requests. If the user attaches a screenshot/template image, inspect it and approximate its visual fingerprint: dominant colors, dark/light mood, title placement, card/sidebar/split/dashboard/poster composition, border/shape/grid/dot/circle/wave decoration, and typography density. Put that fingerprint into `theme` and per-slide `layout`; do not reuse the default blue template when a different visual style was requested. If exact screenshot replication is impossible, still generate the closest local approximation instead of saying the tool cannot do it.
 
@@ -12964,7 +12977,12 @@ final class ChatViewModel {
                     done: true,
                     urls: Array(urls),
                     items: result.items.prefix(6).map {
-                        ChatStatusItem(title: $0.title, link: $0.link)
+                        ChatStatusItem(
+                            title: $0.title,
+                            link: $0.link,
+                            snippet: $0.snippet,
+                            thumbnailURL: $0.thumbnailURL
+                        )
                     },
                     count: max(result.loadedCount, sources.count),
                     query: query,
@@ -13258,13 +13276,7 @@ final class ChatViewModel {
     }
 
     private func shouldUseOpenAIResponsesWebSearchTool(modelId: String) -> Bool {
-        isOpenAICompatibleProvider
-            && currentProviderType == .openAICompatible
-            && isChatWebSearchAllowed
-            && webSearchEnabled
-            && !shouldUseDirectImageGeneration(modelId: modelId)
-            && !shouldPreferChatNativeImageGeneration(modelId: modelId)
-            && !shouldUseDirectVideoGeneration(modelId: modelId)
+        false
     }
 
     private func modelCurrentTimeContextPrompt(for text: String) -> String? {
@@ -13334,7 +13346,7 @@ final class ChatViewModel {
         """
 
         [客户端联网搜索能力]
-        Iexa 客户端已接入内置 WKWebView 浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明搜索由 iOS 内置浏览器工具执行。只有当用户原话明确包含“搜”或“查”时，客户端才会先用 WKWebView 打开搜索页并读取网页内容，再把结果附加到本轮消息里给你使用；“最新、今天、实时、新闻”等词本身不会自动触发联网。联网搜索会优先找较新的结果，但不会只限制到当天，除非用户明确要求今天或 24 小时内。不要声称你无法联网或无法实时搜索。
+        Iexa 客户端已接入内置 WKWebView 浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明搜索由 iOS 内置浏览器工具执行。用户明确要求搜索时，客户端会先用 WKWebView 打开搜索页并读取网页内容；当本轮系统提示里提供 `iexa_native` 浏览器工具时，你也可以主动调用 `web.search` 或 `browser.readable`。联网搜索会优先找较新的结果，但不会只限制到当天，除非用户明确要求今天或 24 小时内。不要声称你无法联网或无法实时搜索。
         [/客户端联网搜索能力]
         """
     }
@@ -14033,7 +14045,11 @@ final class ChatViewModel {
         let localNativeToolContext: String? = {
             guard let latestUserTextForLocalAlpine else { return nil }
             let officeRevisionContext = localOfficeRevisionSystemContext(for: latestUserTextForLocalAlpine)
+            let shouldExposeBrowserTools = isChatWebSearchAllowed
+                && webSearchEnabled
+                && Self.shouldExposeLocalBrowserTools(latestUserTextForLocalAlpine)
             let shouldExpose = Self.shouldExposeLocalNativeTools(latestUserTextForLocalAlpine)
+                || shouldExposeBrowserTools
                 || officeRevisionContext != nil
             guard shouldExpose else { return nil }
             return [Self.localNativeToolSystemContext(), officeRevisionContext]
@@ -14201,8 +14217,18 @@ final class ChatViewModel {
                 let link = item["link"] as? String
                     ?? item["url"] as? String
                     ?? item["source"] as? String
+                let snippet = item["snippet"] as? String
+                    ?? item["description"] as? String
+                let thumbnail = item["thumbnailURL"] as? String
+                    ?? item["thumbnail_url"] as? String
+                    ?? item["image"] as? String
                 guard title != nil || link != nil else { return nil }
-                return ChatStatusItem(title: title, link: link)
+                return ChatStatusItem(
+                    title: title,
+                    link: link,
+                    snippet: snippet,
+                    thumbnailURL: thumbnail
+                )
             }
         }
 
@@ -14904,8 +14930,11 @@ final class ChatViewModel {
 
     private func executeLocalNativeTool(messageId: String, content: String) async {
         let officeKind = LocalNativeToolService.officeActionKind(in: content)
+        let browserAction = LocalNativeToolService.browserActionName(in: content)
         if let officeKind {
             markLocalOfficeGenerationStarted(messageId: messageId, kind: officeKind)
+        } else if let browserAction {
+            markLocalBrowserToolStarted(messageId: messageId, actionName: browserAction)
         }
         let result = await LocalNativeToolService.shared.executeBlocks(
             in: content,
@@ -14933,6 +14962,20 @@ final class ChatViewModel {
                         error: "模型返回的 Office 生成指令无法解析。"
                     ),
                     files: []
+                )
+            } else if let browserAction {
+                finishLocalBrowserTool(
+                    messageId: messageId,
+                    document: LocalNativeBrowserDocument(
+                        ok: false,
+                        action: browserAction,
+                        title: "本地浏览器",
+                        url: nil,
+                        query: nil,
+                        summary: "模型返回的浏览器工具指令无法解析。",
+                        items: [],
+                        error: "模型返回的浏览器工具指令无法解析。"
+                    )
                 )
             }
             return
@@ -14963,6 +15006,26 @@ final class ChatViewModel {
                 files: []
             )
             return
+        }
+        if let browserDocument = result.browserDocument {
+            finishLocalBrowserTool(
+                messageId: messageId,
+                document: browserDocument
+            )
+        } else if browserAction != nil {
+            finishLocalBrowserTool(
+                messageId: messageId,
+                document: LocalNativeBrowserDocument(
+                    ok: false,
+                    action: browserAction ?? "browser",
+                    title: "本地浏览器",
+                    url: nil,
+                    query: nil,
+                    summary: "本地浏览器工具没有返回可用结果。",
+                    items: [],
+                    error: "本地浏览器工具没有返回可用结果。"
+                )
+            )
         }
 
         let resultMessage = ChatMessage(
@@ -14996,6 +15059,91 @@ final class ChatViewModel {
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
         await startLocalNativeContinuation(parentId: resultMessage.id)
+    }
+
+    private func markLocalBrowserToolStarted(messageId: String, actionName: String) {
+        isStreaming = true
+        hasFinishedStreaming = false
+        selfInitiatedStream = true
+        activeTaskId = nil
+        let title = localBrowserToolRunningTitle(for: actionName)
+        updateLocalBrowserToolMessage(
+            messageId: messageId,
+            content: title,
+            isStreaming: true,
+            status: ChatStatusUpdate(
+                action: "browser_web_search",
+                description: title,
+                done: false,
+                occurredAt: .now
+            )
+        )
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private func finishLocalBrowserTool(
+        messageId: String,
+        document: LocalNativeBrowserDocument
+    ) {
+        var urls = document.items.compactMap(\.link)
+        if let url = document.url, !urls.contains(url) {
+            urls.insert(url, at: 0)
+        }
+        let status = ChatStatusUpdate(
+            action: "browser_web_search",
+            description: document.ok ? document.summary : (document.error ?? document.summary),
+            done: true,
+            urls: urls,
+            occurredAt: .now,
+            items: document.items,
+            count: max(document.items.count, urls.count),
+            query: document.query,
+            queries: document.query.map { [$0] } ?? []
+        )
+        updateLocalBrowserToolMessage(
+            messageId: messageId,
+            content: document.ok ? "本地浏览器已完成：\(document.title)" : "本地浏览器失败：\(document.error ?? document.summary)",
+            isStreaming: false,
+            status: status
+        )
+    }
+
+    private func updateLocalBrowserToolMessage(
+        messageId: String,
+        content: String,
+        isStreaming: Bool,
+        status: ChatStatusUpdate
+    ) {
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        var metadata = conversation?.messages[index].metadata ?? [:]
+        metadata["iexa_local_browser_tool"] = "true"
+        metadata["iexa_local_native_tool_parent"] = "true"
+
+        conversation?.messages[index].content = content
+        conversation?.messages[index].isStreaming = isStreaming
+        conversation?.messages[index].statusHistory = [status]
+        conversation?.messages[index].metadata = metadata
+        conversation?.history.updateNode(id: messageId) { node in
+            node.content = content
+            node.done = !isStreaming
+            node.statusHistory = [status]
+            node.metadata = metadata
+        }
+        conversation?.history.currentId = messageId
+    }
+
+    private func localBrowserToolRunningTitle(for actionName: String) -> String {
+        let action = actionName.lowercased()
+        if action.contains("search") || action.contains("搜索") || action.contains("web.search") {
+            return "本地浏览器正在搜索网页..."
+        }
+        if action.contains("screenshot") {
+            return "本地浏览器正在生成网页缩略图..."
+        }
+        if action.contains("fetch") {
+            return "本地浏览器正在下载网页资源..."
+        }
+        return "本地浏览器正在读取网页..."
     }
 
     private func markLocalOfficeGenerationStarted(messageId: String, kind: LocalNativeOfficeKind) {
@@ -15550,8 +15698,8 @@ final class ChatViewModel {
     private static func appendLocalNativeResultInstruction(to messages: inout [[String: Any]]) {
         let instruction = """
         [Local native tool result]
-        The latest Local Native message above is a real on-device iOS tool result for device info, clipboard, local notification, location, weather, calendar, or local Office document generation. Do not emit another `iexa_native` block in this turn.
-        Reply to the user in normal language only. If the local tool succeeded, summarize the concrete result. If an Office document was generated, tell the user the file and previews are attached in the chat. If it failed, explain the permission/state problem and the next user action.
+        The latest Local Native message above is a real on-device iOS tool result for device info, clipboard, local notification, location, weather, calendar, local browser/web reading, or local Office document generation. Do not emit another `iexa_native` block in this turn.
+        Reply to the user in normal language only. If the local browser tool succeeded, answer from the returned page/search content and cite page titles/URLs plainly. If an Office document was generated, tell the user the file and previews are attached in the chat. If it failed, explain the permission/state problem and the next user action.
         [/Local native tool result]
         """
         appendSystemInstruction(instruction, marker: "[Local native tool result]", to: &messages)
@@ -15579,6 +15727,19 @@ final class ChatViewModel {
             "spreadsheet", "presentation", "slide deck", "make a deck", "word document", "docx", "document", "pdf"
         ]
         return markers.contains { lower.contains($0) }
+    }
+
+    private static func shouldExposeLocalBrowserTools(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let compact = lower.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+        let markers = [
+            "联网", "搜索", "搜一下", "查一下", "查询", "网页", "网站", "链接",
+            "网址", "打开网页", "阅读网页", "读取网页", "浏览器", "来源",
+            "最新", "今天", "今日", "现在", "实时", "新闻", "资料",
+            "web", "search", "browse", "browser", "website", "webpage", "url",
+            "link", "latest", "current", "today", "news", "source"
+        ]
+        return markers.contains { lower.contains($0) || compact.contains($0) }
     }
 
     private func localAlpineStepsSinceLastUser() -> Int {
