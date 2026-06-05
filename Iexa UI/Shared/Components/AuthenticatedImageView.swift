@@ -558,7 +558,8 @@ struct FullScreenImageGalleryView: View {
     let apiClient: APIClient?
 
     @Environment(\.dismiss) private var dismiss
-    @State private var currentItemId: String
+    @State private var currentItemId: String?
+    @State private var zoomResetGeneration = 0
     @State private var loadedImages: [String: UIImage] = [:]
 
     init(
@@ -584,26 +585,31 @@ struct FullScreenImageGalleryView: View {
                                 FullScreenImageGalleryPage(
                                     item: item,
                                     apiClient: apiClient,
+                                    resetToken: "\(item.id)-\(currentItemId == item.id ? zoomResetGeneration : 0)",
                                     onLoaded: { image in
                                         loadedImages[item.id] = image
                                     }
                                 )
                                 .containerRelativeFrame([.horizontal, .vertical], alignment: .center)
                                 .id(item.id)
-                                .onAppear {
-                                    currentItemId = item.id
-                                }
                             }
                         }
                         .scrollTargetLayout()
                     }
                     .scrollIndicators(.hidden)
                     .scrollTargetBehavior(.paging)
+                    .scrollPosition(id: $currentItemId)
                     .ignoresSafeArea()
                     .onAppear {
                         currentItemId = initialItemId
+                        zoomResetGeneration += 1
                         DispatchQueue.main.async {
                             proxy.scrollTo(initialItemId, anchor: .center)
+                        }
+                    }
+                    .onChange(of: currentItemId) { _, newValue in
+                        if newValue != nil {
+                            zoomResetGeneration += 1
                         }
                     }
                 }
@@ -647,7 +653,8 @@ struct FullScreenImageGalleryView: View {
 
     @MainActor
     private func shareCurrentImage() async {
-        guard let item = items.first(where: { $0.id == currentItemId }) ?? items.first else { return }
+        let selectedId = currentItemId ?? initialItemId
+        guard let item = items.first(where: { $0.id == selectedId }) ?? items.first else { return }
         let image: UIImage?
         if let cached = loadedImages[item.id] {
             image = cached
@@ -682,6 +689,7 @@ struct FullScreenImageGalleryView: View {
 private struct FullScreenImageGalleryPage: View {
     let item: AuthenticatedImageGalleryItem
     let apiClient: APIClient?
+    let resetToken: String
     let onLoaded: (UIImage) -> Void
 
     @State private var image: UIImage?
@@ -693,7 +701,7 @@ private struct FullScreenImageGalleryPage: View {
                 Color.clear
 
                 if let image {
-                    ZoomableImageView(image: image)
+                    ZoomableImageView(image: image, resetToken: resetToken)
                         .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
                 } else if didFail {
                     Image(systemName: "photo")
@@ -805,6 +813,12 @@ struct FullScreenImageView: View {
 /// - Image is centered when zoomed out below the viewport size
 struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
+    let resetToken: String?
+
+    init(image: UIImage, resetToken: String? = nil) {
+        self.image = image
+        self.resetToken = resetToken
+    }
 
     func makeUIView(context: Context) -> UIScrollView {
         let scrollView = UIScrollView()
@@ -837,9 +851,21 @@ struct ZoomableImageView: UIViewRepresentable {
     }
 
     func updateUIView(_ scrollView: UIScrollView, context: Context) {
+        let imageChanged = context.coordinator.image !== image
+        if imageChanged {
+            context.coordinator.image = image
+            context.coordinator.imageView?.image = image
+            context.coordinator.invalidateInitialZoom()
+        }
+        let shouldReset = imageChanged || context.coordinator.consumeResetToken(resetToken)
+
         // Recalculate zoom scales when the view size changes
         DispatchQueue.main.async {
-            context.coordinator.updateZoomScale()
+            if shouldReset {
+                context.coordinator.resetZoom(animated: false)
+            } else {
+                context.coordinator.updateZoomScale()
+            }
         }
     }
 
@@ -848,10 +874,11 @@ struct ZoomableImageView: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate {
-        let image: UIImage
+        var image: UIImage
         weak var scrollView: UIScrollView?
         weak var imageView: UIImageView?
         private var hasSetInitialZoom = false
+        private var lastResetToken: String?
 
         init(image: UIImage) {
             self.image = image
@@ -865,7 +892,22 @@ struct ZoomableImageView: UIViewRepresentable {
             centerImageInScrollView()
         }
 
-        func updateZoomScale() {
+        func invalidateInitialZoom() {
+            hasSetInitialZoom = false
+        }
+
+        func consumeResetToken(_ token: String?) -> Bool {
+            guard let token else { return false }
+            guard lastResetToken != token else { return false }
+            lastResetToken = token
+            return true
+        }
+
+        func resetZoom(animated: Bool) {
+            updateZoomScale(forceReset: true, animated: animated)
+        }
+
+        func updateZoomScale(forceReset: Bool = false, animated: Bool = false) {
             guard let scrollView, let imageView else { return }
             let boundsSize = scrollView.bounds.size
             guard boundsSize.width > 0 && boundsSize.height > 0 else { return }
@@ -888,9 +930,10 @@ struct ZoomableImageView: UIViewRepresentable {
             )
             scrollView.contentSize = imageSize
 
-            if !hasSetInitialZoom {
+            if forceReset || !hasSetInitialZoom || scrollView.zoomScale < minScale {
                 hasSetInitialZoom = true
-                scrollView.zoomScale = minScale
+                scrollView.setZoomScale(minScale, animated: animated)
+                scrollView.contentOffset = .zero
             }
 
             centerImageInScrollView()
