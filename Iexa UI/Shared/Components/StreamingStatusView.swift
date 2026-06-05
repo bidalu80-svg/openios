@@ -151,6 +151,7 @@ struct StreamingStatusView: View {
         let subtitle = webSearchSubtitle(for: latest)
         let queries = webSearchQueries(for: latest)
         let items = webSearchItems(for: latest)
+        let previewItem = webSearchCollapsedPreviewItem(items)
         let visibleSourceCount = max(max(items.count, latest?.urls.count ?? 0), latest?.count ?? 0)
 
         return VStack(alignment: .leading, spacing: 10) {
@@ -202,6 +203,11 @@ struct StreamingStatusView: View {
                 }
             }
             .buttonStyle(.plain)
+
+            if !isExpanded, let previewItem {
+                webSearchCompactSourcePreview(item: previewItem)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 7) {
@@ -309,6 +315,13 @@ struct StreamingStatusView: View {
         }
     }
 
+    private func webSearchCollapsedPreviewItem(_ items: [ChatStatusItem]) -> ChatStatusItem? {
+        items.first(where: { item in
+            guard let thumbnail = item.thumbnailURL?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
+            return !thumbnail.isEmpty
+        }) ?? items.first
+    }
+
     private func sourceLabel(count: Int, fallback: String) -> String {
         guard count > 0 else { return fallback }
         return "\(count) 个来源"
@@ -356,6 +369,93 @@ struct StreamingStatusView: View {
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.62 : 0.86))
+        )
+    }
+
+    private func webSearchCompactSourcePreview(item: ChatStatusItem) -> some View {
+        let title = item.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let urlString = item.link?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = title?.isEmpty == false ? title! : (urlString.flatMap(hostLabel(from:)) ?? "网页来源")
+
+        return Group {
+            if let urlString, let url = URL(string: urlString) {
+                Button {
+                    NotificationCenter.default.post(
+                        name: .markdownLinkTapped,
+                        object: nil,
+                        userInfo: ["url": url]
+                    )
+                } label: {
+                    webSearchCompactSourcePreviewContent(
+                        title: label,
+                        url: urlString,
+                        snippet: item.snippet,
+                        thumbnailURL: item.thumbnailURL,
+                        hasLink: true
+                    )
+                }
+                .buttonStyle(.plain)
+            } else {
+                webSearchCompactSourcePreviewContent(
+                    title: label,
+                    url: urlString,
+                    snippet: item.snippet,
+                    thumbnailURL: item.thumbnailURL,
+                    hasLink: false
+                )
+            }
+        }
+    }
+
+    private func webSearchCompactSourcePreviewContent(
+        title: String,
+        url: String?,
+        snippet: String?,
+        thumbnailURL: String?,
+        hasLink: Bool
+    ) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            if let thumbnailURL, !thumbnailURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                webSearchThumbnail(thumbnailURL, fallbackURL: url, title: title)
+            } else {
+                thumbnailPlaceholder(fallbackURL: url, title: title)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .scaledFont(size: 12, weight: .semibold)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(2)
+
+                if let snippet = snippet?.trimmingCharacters(in: .whitespacesAndNewlines), !snippet.isEmpty {
+                    Text(snippet)
+                        .scaledFont(size: 11)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(2)
+                } else if let url, let host = hostLabel(from: url) {
+                    Text(host)
+                        .scaledFont(size: 11)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            if hasLink {
+                Image(systemName: "arrow.up.right")
+                    .scaledFont(size: 10, weight: .semibold)
+                    .foregroundStyle(theme.textTertiary)
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.52 : 0.78))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.42 : 0.58), lineWidth: 0.6)
         )
     }
 
