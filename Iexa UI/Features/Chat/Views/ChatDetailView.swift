@@ -66,6 +66,8 @@ private struct AgentActivityStep: Identifiable, Hashable {
     let command: String?
     let cwd: String?
     let previewThumbnailReference: String?
+    let previewOpenURL: String?
+    let previewFile: ChatMessageFile?
 
     var hasInspectablePayload: Bool {
         file != nil
@@ -192,6 +194,17 @@ private struct AgentActivityItem: Identifiable, Hashable {
         }.last
     }
 
+    var firstPreviewOpenURL: String? {
+        steps.compactMap { step in
+            let value = step.previewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value?.isEmpty == false ? value : nil
+        }.last
+    }
+
+    var firstPreviewFile: ChatMessageFile? {
+        steps.compactMap(\.previewFile).last
+    }
+
     var currentPreviewTitle: String {
         if let file = currentPreviewFile {
             return file.fileName
@@ -261,11 +274,13 @@ private struct AgentActivityItem: Identifiable, Hashable {
         writtenFiles: [LocalAlpineWrittenFile],
         commandResults: [LocalAlpineAgentCommandResult],
         statusHistory: [ChatStatusUpdate],
-        officePreviewReferences: [String]
+        officePreviewReferences: [String],
+        officeDocumentFiles: [ChatMessageFile]
     ) -> [AgentActivityStep] {
         var steps: [AgentActivityStep] = statusSteps(
             from: statusHistory,
-            officePreviewReferences: officePreviewReferences
+            officePreviewReferences: officePreviewReferences,
+            officeDocumentFiles: officeDocumentFiles
         )
         let localStatusPlaceholders = localStatusSteps(from: statusHistory)
 
@@ -285,7 +300,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 file: matchedFile,
                 command: call.command,
                 cwd: call.cwd,
-                previewThumbnailReference: nil
+                previewThumbnailReference: nil,
+                previewOpenURL: nil,
+                previewFile: nil
             )
         })
 
@@ -303,7 +320,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     file: file,
                     command: nil,
                     cwd: nil,
-                    previewThumbnailReference: nil
+                    previewThumbnailReference: nil,
+                    previewOpenURL: nil,
+                    previewFile: nil
                 )
             )
         }
@@ -328,7 +347,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     file: nil,
                     command: command,
                     cwd: result.cwd,
-                    previewThumbnailReference: nil
+                    previewThumbnailReference: nil,
+                    previewOpenURL: nil,
+                    previewFile: nil
                 )
             )
         }
@@ -348,7 +369,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
 
     private static func statusSteps(
         from statusHistory: [ChatStatusUpdate],
-        officePreviewReferences: [String]
+        officePreviewReferences: [String],
+        officeDocumentFiles: [ChatMessageFile]
     ) -> [AgentActivityStep] {
         statusHistory.enumerated().compactMap { index, status in
             guard status.hidden != true else { return nil }
@@ -376,6 +398,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 action: action,
                 officePreviewReferences: officePreviewReferences
             )
+            let previewURL = statusOpenURL(for: status, action: action)
+            let previewFile = action.contains("local_office_agent") ? officeDocumentFiles.first : nil
             return AgentActivityStep(
                 id: "status-\(index)-\(action)-\(detail.hashValue)",
                 kind: .status,
@@ -387,7 +411,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 file: nil,
                 command: nil,
                 cwd: nil,
-                previewThumbnailReference: previewThumbnail
+                previewThumbnailReference: previewThumbnail,
+                previewOpenURL: previewURL,
+                previewFile: previewFile
             )
         }
     }
@@ -417,7 +443,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 file: nil,
                 command: nil,
                 cwd: nil,
-                previewThumbnailReference: nil
+                previewThumbnailReference: nil,
+                previewOpenURL: nil,
+                previewFile: nil
             )
         }
     }
@@ -486,6 +514,27 @@ private struct AgentActivityItem: Identifiable, Hashable {
             }.first
         }
         return nil
+    }
+
+    private static func statusOpenURL(for status: ChatStatusUpdate, action: String) -> String? {
+        guard action.contains("web_search")
+                || action.contains("browser_web_search")
+                || action.contains("get_readable")
+                || action.contains("readable") else {
+            return nil
+        }
+        let candidates = status.items.compactMap(\.link) + status.urls
+        return candidates
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { isHTTPURLString($0) }
+    }
+
+    private static func isHTTPURLString(_ value: String) -> Bool {
+        guard let url = URL(string: value),
+              let scheme = url.scheme?.lowercased() else {
+            return false
+        }
+        return scheme == "http" || scheme == "https"
     }
 
     private static func officePreviewReferences(from files: [ChatMessageFile]) -> [String] {
@@ -705,6 +754,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
         let toolCalls = Self.mergedToolCalls(persisted: persistedToolCalls, live: liveToolCalls)
         let statusHistory = liveStatus.map { message.statusHistory + [$0] } ?? message.statusHistory
         let officePreviewReferences = Self.officePreviewReferences(from: message.files)
+        let officeDocumentFiles = message.files.filter(Self.isOfficeDocumentFile)
         let parsed = ParsedLocalAlpineResult(content: message.content, metadata: metadata)
         let visibleCommands = commandResults.filter {
             $0.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "write_files"
@@ -738,7 +788,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
             writtenFiles: writtenFiles,
             commandResults: visibleCommands,
             statusHistory: statusHistory,
-            officePreviewReferences: officePreviewReferences
+            officePreviewReferences: officePreviewReferences,
+            officeDocumentFiles: officeDocumentFiles
         )
     }
 
@@ -1089,11 +1140,56 @@ struct ChatDetailView: View {
             openAgentTaskPanel()
             return
         }
+        let clampedIndex = min(max(initialIndex, 0), max(item.steps.count - 1, 0))
+        let step = item.steps.indices.contains(clampedIndex) ? item.steps[clampedIndex] : item.currentStep
+        if openAgentPreviewResult(step: step, item: item) {
+            Haptics.play(.light)
+            return
+        }
         Haptics.play(.light)
         agentFloatingStepPreview = AgentFloatingStepPreviewItem(
             activity: item,
             initialIndex: initialIndex
         )
+    }
+
+    @MainActor
+    private func openAgentPreviewResult(step: AgentActivityStep?, item: AgentActivityItem) -> Bool {
+        if let file = step?.previewFile {
+            openMessageFile(file)
+            return true
+        }
+
+        if let urlString = step?.previewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           openPreviewURLString(urlString) {
+            return true
+        }
+
+        if let file = item.firstPreviewFile {
+            openMessageFile(file)
+            return true
+        }
+
+        if let urlString = item.firstPreviewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           openPreviewURLString(urlString) {
+            return true
+        }
+
+        return false
+    }
+
+    @MainActor
+    private func openPreviewURLString(_ urlString: String) -> Bool {
+        guard !urlString.isEmpty,
+              let url = URL(string: urlString) else {
+            return false
+        }
+        if Self.canPreviewInApp(url) {
+            previewWebURL = WebPreviewURL(url: url)
+        } else {
+            UIApplication.shared.open(url)
+        }
+        return true
     }
 
     private func shouldHideFromTranscript(_ message: ChatMessage) -> Bool {
@@ -7209,6 +7305,9 @@ private struct AgentStepFloatingBar: View {
                     previewText: previewText,
                     thumbnailReference: previewThumbnailReference
                 )
+                .frame(width: 96, height: 54, alignment: .topLeading)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
             .buttonStyle(.plain)
             .padding(.leading, 8)
@@ -7244,6 +7343,7 @@ private struct AgentToolPreviewPop: View {
                !thumbnailReference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 AgentToolPreviewThumbnail(reference: thumbnailReference)
                     .frame(width: previewSize.width, height: previewSize.height)
+                    .mask(Rectangle().frame(width: previewSize.width, height: previewSize.height))
                     .clipped()
                     .overlay(
                         LinearGradient(
@@ -7294,27 +7394,38 @@ private struct AgentToolPreviewThumbnail: View {
     let reference: String
 
     var body: some View {
-        Group {
-            if let image = Self.localImage(from: reference) {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            } else if let url = URL(string: reference),
-                      ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
-                FallbackCachedAsyncImage(urls: [url], targetPixelSize: 220) { image in
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    fallback
-                }
-            } else {
-                fallback
-            }
+        GeometryReader { proxy in
+            let size = proxy.size
+            thumbnailContent(size: size)
+                .frame(width: size.width, height: size.height)
+                .clipped()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .clipped()
+    }
+
+    @ViewBuilder
+    private func thumbnailContent(size: CGSize) -> some View {
+        if let image = Self.localImage(from: reference) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: size.width, height: size.height)
+        } else if let url = URL(string: reference),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            FallbackCachedAsyncImage(urls: [url], targetPixelSize: 220) { image in
+                image
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: size.width, height: size.height)
+            } placeholder: {
+                fallback
+                    .frame(width: size.width, height: size.height)
+            }
+        } else {
+            fallback
+                .frame(width: size.width, height: size.height)
+        }
     }
 
     private var fallback: some View {
