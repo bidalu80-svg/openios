@@ -118,10 +118,6 @@ final class LocalOfficeDocumentService {
         let documentURL = folder.appendingPathComponent(fileName)
         let draftURL = folder.appendingPathComponent("draft.json")
 
-        let docx = try WordOpenXMLBuilder(spec: spec).build()
-        try OfficeZipWriter(entries: docx).write(to: documentURL)
-        try writeJSON(call, to: draftURL)
-
         var previewURLs: [URL] = []
         let previewImages = WordPreviewRenderer.renderPages(spec: spec)
         for (index, image) in previewImages.enumerated() {
@@ -130,6 +126,12 @@ final class LocalOfficeDocumentService {
             previewURLs.append(previewURL)
         }
 
+        let visualPageURLs = spec.shouldEmbedPreviewPagesInWord ? previewURLs : []
+        let docx = try WordOpenXMLBuilder(spec: spec, visualPageURLs: visualPageURLs).build()
+        try OfficeZipWriter(entries: docx).write(to: documentURL)
+        try writeJSON(call, to: draftURL)
+
+        let modeText = spec.shouldEmbedPreviewPagesInWord ? "视觉页模式，" : ""
         return LocalOfficeDocumentResult(
             documentURL: documentURL,
             previewURLs: previewURLs,
@@ -137,7 +139,7 @@ final class LocalOfficeDocumentService {
             contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             documentType: "word",
             title: spec.title,
-            summary: "已生成 Word：\(fileName)，共 \(spec.sections.count) 个章节、\(previewURLs.count) 页预览。",
+            summary: "已生成 Word：\(fileName)，\(modeText)共 \(spec.sections.count) 个章节、\(previewURLs.count) 页预览。",
             previewText: spec.previewText
         )
     }
@@ -755,6 +757,17 @@ private struct WordSpec: Sendable {
                 .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
                 .joined(separator: "：")
         }.joined(separator: "\n")
+    }
+
+    var shouldEmbedPreviewPagesInWord: Bool {
+        if theme.isDark { return true }
+        if theme.layout != .standard { return true }
+        switch theme.style {
+        case .editorial, .luxury, .playful, .deepBlue, .tech, .dark:
+            return true
+        case .modern, .minimal, .warm, .green, .violet:
+            return false
+        }
     }
 
     private static func themeHint(from call: [String: Any]) -> String {
@@ -1889,9 +1902,10 @@ private struct ExcelOpenXMLBuilder {
 
 private struct WordOpenXMLBuilder {
     let spec: WordSpec
+    let visualPageURLs: [URL]
 
     func build() throws -> [OfficeZipEntry] {
-        [
+        var entries: [OfficeZipEntry] = [
             .text("[Content_Types].xml", contentTypes),
             .text("_rels/.rels", packageRelationships),
             .text("docProps/core.xml", corePropertiesXML),
@@ -1902,6 +1916,11 @@ private struct WordOpenXMLBuilder {
             .text("word/settings.xml", settingsXML),
             .text("word/fontTable.xml", fontTableXML)
         ]
+        for (index, url) in visualPageURLs.enumerated() {
+            let data = try Data(contentsOf: url)
+            entries.append(OfficeZipEntry(path: "word/media/page\(index + 1).png", data: data))
+        }
+        return entries
     }
 
     private var contentTypes: String {
@@ -1910,6 +1929,7 @@ private struct WordOpenXMLBuilder {
         <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
         <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
         <Default Extension="xml" ContentType="application/xml"/>
+        \(visualPageURLs.isEmpty ? "" : #"<Default Extension="png" ContentType="image/png"/>"#)
         <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
         <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
         <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
@@ -1938,11 +1958,15 @@ private struct WordOpenXMLBuilder {
         <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
         <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>
         <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>
+        \(visualPageURLs.indices.map { "<Relationship Id=\"rId\($0 + 4)\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"media/page\($0 + 1).png\"/>" }.joined(separator: "\n"))
         </Relationships>
         """
     }
 
     private var documentXML: String {
+        if !visualPageURLs.isEmpty {
+            return visualDocumentXML
+        }
         let paragraphs = documentParagraphs.joined(separator: "\n")
         return """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1953,6 +1977,51 @@ private struct WordOpenXMLBuilder {
         <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/><w:cols w:space="708"/><w:docGrid w:linePitch="360"/></w:sectPr>
         </w:body>
         </w:document>
+        """
+    }
+
+    private var visualDocumentXML: String {
+        let pages = visualPageURLs.indices.map { index in
+            visualPageParagraph(index: index)
+        }.joined(separator: "\n")
+        return """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <w:body>
+        \(pages)
+        <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0" w:header="0" w:footer="0" w:gutter="0"/><w:cols w:space="0"/><w:docGrid w:linePitch="360"/></w:sectPr>
+        </w:body>
+        </w:document>
+        """
+    }
+
+    private func visualPageParagraph(index: Int) -> String {
+        let relationshipId = "rId\(index + 4)"
+        let pageBreak = index < visualPageURLs.count - 1 ? #"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"# : ""
+        return """
+        <w:p>
+        <w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>
+        <w:r>
+        <w:drawing>
+        <wp:inline distT="0" distB="0" distL="0" distR="0">
+        <wp:extent cx="7560000" cy="10689840"/>
+        <wp:effectExtent l="0" t="0" r="0" b="0"/>
+        <wp:docPr id="\(index + 1)" name="Word visual page \(index + 1)" descr="\(xmlEscape(spec.title)) page \(index + 1)"/>
+        <wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>
+        <a:graphic>
+        <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:pic>
+        <pic:nvPicPr><pic:cNvPr id="\(index + 1)" name="page-\(index + 1).png"/><pic:cNvPicPr/></pic:nvPicPr>
+        <pic:blipFill><a:blip r:embed="\(relationshipId)"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>
+        <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="7560000" cy="10689840"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>
+        </pic:pic>
+        </a:graphicData>
+        </a:graphic>
+        </wp:inline>
+        </w:drawing>
+        </w:r>
+        </w:p>
+        \(pageBreak)
         """
     }
 
