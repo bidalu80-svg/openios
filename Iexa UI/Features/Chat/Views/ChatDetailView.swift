@@ -65,6 +65,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
     let file: LocalAlpineWrittenFile?
     let command: String?
     let cwd: String?
+    let previewThumbnailReference: String?
 
     var hasInspectablePayload: Bool {
         file != nil
@@ -252,9 +253,13 @@ private struct AgentActivityItem: Identifiable, Hashable {
         toolCalls: [LocalAlpineToolCall],
         writtenFiles: [LocalAlpineWrittenFile],
         commandResults: [LocalAlpineAgentCommandResult],
-        statusHistory: [ChatStatusUpdate]
+        statusHistory: [ChatStatusUpdate],
+        officePreviewReferences: [String]
     ) -> [AgentActivityStep] {
-        var steps: [AgentActivityStep] = statusSteps(from: statusHistory)
+        var steps: [AgentActivityStep] = statusSteps(
+            from: statusHistory,
+            officePreviewReferences: officePreviewReferences
+        )
         let localStatusPlaceholders = localStatusSteps(from: statusHistory)
 
         steps.append(contentsOf: toolCalls.map { call in
@@ -272,7 +277,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 outputPreview: output,
                 file: matchedFile,
                 command: call.command,
-                cwd: call.cwd
+                cwd: call.cwd,
+                previewThumbnailReference: nil
             )
         })
 
@@ -289,7 +295,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     outputPreview: file.previewLines(limit: 10).joined(separator: "\n"),
                     file: file,
                     command: nil,
-                    cwd: nil
+                    cwd: nil,
+                    previewThumbnailReference: nil
                 )
             )
         }
@@ -313,7 +320,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     outputPreview: result.outputPreview,
                     file: nil,
                     command: command,
-                    cwd: result.cwd
+                    cwd: result.cwd,
+                    previewThumbnailReference: nil
                 )
             )
         }
@@ -331,7 +339,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
         return concreteSteps.isEmpty ? localStatusPlaceholders : concreteSteps
     }
 
-    private static func statusSteps(from statusHistory: [ChatStatusUpdate]) -> [AgentActivityStep] {
+    private static func statusSteps(
+        from statusHistory: [ChatStatusUpdate],
+        officePreviewReferences: [String]
+    ) -> [AgentActivityStep] {
         statusHistory.enumerated().compactMap { index, status in
             guard status.hidden != true else { return nil }
             let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
@@ -353,6 +364,11 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 ? status.query!
                 : (status.description ?? status.status ?? title)
             let output = statusPreview(status)
+            let previewThumbnail = statusThumbnailReference(
+                for: status,
+                action: action,
+                officePreviewReferences: officePreviewReferences
+            )
             return AgentActivityStep(
                 id: "status-\(index)-\(action)-\(detail.hashValue)",
                 kind: .status,
@@ -363,7 +379,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 outputPreview: output.isEmpty ? detail : output,
                 file: nil,
                 command: nil,
-                cwd: nil
+                cwd: nil,
+                previewThumbnailReference: previewThumbnail
             )
         }
     }
@@ -392,7 +409,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 outputPreview: detail,
                 file: nil,
                 command: nil,
-                cwd: nil
+                cwd: nil,
+                previewThumbnailReference: nil
             )
         }
     }
@@ -440,6 +458,73 @@ private struct AgentActivityItem: Identifiable, Hashable {
             lines.append(description)
         }
         return lines.joined(separator: "\n")
+    }
+
+    private static func statusThumbnailReference(
+        for status: ChatStatusUpdate,
+        action: String,
+        officePreviewReferences: [String]
+    ) -> String? {
+        if action.contains("local_office_agent"),
+           let reference = officePreviewReferences.first {
+            return reference
+        }
+        if action.contains("web_search")
+            || action.contains("browser_web_search")
+            || action.contains("get_readable")
+            || action.contains("readable") {
+            return status.items.compactMap { item in
+                let value = item.thumbnailURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return value?.isEmpty == false ? value : nil
+            }.first
+        }
+        return nil
+    }
+
+    private static func officePreviewReferences(from files: [ChatMessageFile]) -> [String] {
+        let hasOfficeDocument = files.contains(where: Self.isOfficeDocumentFile)
+        guard hasOfficeDocument else { return [] }
+        return files
+            .filter(Self.isOfficePreviewImageFile)
+            .compactMap(Self.imageReference)
+    }
+
+    private static func isOfficeDocumentFile(_ file: ChatMessageFile) -> Bool {
+        let name = (file.name ?? file.url ?? "").lowercased()
+        let contentType = (file.contentType ?? "").lowercased()
+        let ext = (name as NSString).pathExtension.lowercased()
+        if ["xlsx", "xls", "pptx", "ppt", "docx", "doc", "pdf"].contains(ext) {
+            return true
+        }
+        return contentType.contains("spreadsheetml")
+            || contentType.contains("presentationml")
+            || contentType.contains("wordprocessingml")
+            || contentType == "application/pdf"
+            || contentType.contains("officedocument")
+    }
+
+    private static func isOfficePreviewImageFile(_ file: ChatMessageFile) -> Bool {
+        guard isImageFile(file) else { return false }
+        let name = (file.name ?? file.url ?? "").lowercased()
+        return name.contains("preview-")
+            || name.contains("slide-")
+            || name.contains("/office agent/")
+            || name.contains("office%20agent")
+    }
+
+    private static func isImageFile(_ file: ChatMessageFile) -> Bool {
+        if file.contentType?.lowercased().hasPrefix("image/") == true {
+            return true
+        }
+        let name = (file.name ?? file.url ?? "").lowercased()
+        let ext = (name as NSString).pathExtension.lowercased()
+        return ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif"].contains(ext)
+    }
+
+    private static func imageReference(for file: ChatMessageFile) -> String? {
+        [file.displayURL, file.url]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
     }
 
     static func previewSnippet(_ text: String, limit: Int = 220) -> String {
@@ -612,6 +697,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
         let persistedToolCalls = LocalAlpineToolCall.decodeMetadata(metadata?["iexa_local_alpine_tool_calls"])
         let toolCalls = Self.mergedToolCalls(persisted: persistedToolCalls, live: liveToolCalls)
         let statusHistory = liveStatus.map { message.statusHistory + [$0] } ?? message.statusHistory
+        let officePreviewReferences = Self.officePreviewReferences(from: message.files)
         let parsed = ParsedLocalAlpineResult(content: message.content, metadata: metadata)
         let visibleCommands = commandResults.filter {
             $0.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "write_files"
@@ -644,7 +730,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
             toolCalls: toolCalls,
             writtenFiles: writtenFiles,
             commandResults: visibleCommands,
-            statusHistory: statusHistory
+            statusHistory: statusHistory,
+            officePreviewReferences: officePreviewReferences
         )
     }
 
@@ -1012,6 +1099,9 @@ struct ChatDetailView: View {
         }
 
         let metadata = message.metadata ?? [:]
+        if metadata["iexa_local_native_hidden_tool_parent"] == "true" {
+            return true
+        }
         if isLocalAlpineResultMessage(message) {
             if hasVisibleLocalAlpineFinalSummary(after: message) {
                 return true
@@ -7017,6 +7107,10 @@ private struct AgentStepFloatingBar: View {
         return AgentActivityItem.multilinePreview(selectedStep.detail, maxLines: 4, maxLineLength: 88)
     }
 
+    private var previewThumbnailReference: String? {
+        selectedStep?.previewThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private var selectedTitle: String {
         selectedStep?.title ?? item.currentStepTitle
     }
@@ -7101,7 +7195,8 @@ private struct AgentStepFloatingBar: View {
                 AgentToolPreviewPop(
                     previewTitle: previewTitle,
                     previewSubtitle: previewSubtitle,
-                    previewText: previewText
+                    previewText: previewText,
+                    thumbnailReference: previewThumbnailReference
                 )
                 .frame(width: 96, height: 54)
             }
@@ -7128,33 +7223,113 @@ private struct AgentToolPreviewPop: View {
     let previewTitle: String
     let previewSubtitle: String
     let previewText: String
+    let thumbnailReference: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(previewTitle)
-                .font(.system(size: 8.2, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.82))
-                .lineLimit(1)
+        ZStack(alignment: .topLeading) {
+            if let thumbnailReference,
+               !thumbnailReference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                AgentToolPreviewThumbnail(reference: thumbnailReference)
+                    .overlay(
+                        LinearGradient(
+                            colors: [
+                                Color.black.opacity(0.72),
+                                Color.black.opacity(0.40),
+                                Color.black.opacity(0.12)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            } else {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.black.opacity(0.88))
+            }
 
-            Text(previewSubtitle)
-                .font(.system(size: 6.8, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.58))
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(previewTitle)
+                    .font(.system(size: 8.2, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .lineLimit(1)
 
-            Text(previewText)
-                .font(.system(size: 7.0, weight: .semibold, design: .monospaced))
-                .foregroundStyle(Color(red: 0.30, green: 0.63, blue: 1.0))
-                .lineLimit(3)
-                .truncationMode(.tail)
+                Text(previewSubtitle)
+                    .font(.system(size: 6.8, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.66))
+                    .lineLimit(1)
+
+                if thumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                    Text(previewText)
+                        .font(.system(size: 7.0, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color(red: 0.30, green: 0.63, blue: 1.0))
+                        .lineLimit(3)
+                        .truncationMode(.tail)
+                }
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 5)
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.black.opacity(0.88))
-        )
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .shadow(color: .black.opacity(0.20), radius: 6, x: 0, y: 3)
+    }
+}
+
+private struct AgentToolPreviewThumbnail: View {
+    let reference: String
+
+    var body: some View {
+        Group {
+            if let image = Self.localImage(from: reference) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if let url = URL(string: reference),
+                      ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                FallbackCachedAsyncImage(urls: [url], targetPixelSize: 220) { image in
+                    image
+                        .resizable()
+                        .scaledToFill()
+                } placeholder: {
+                    fallback
+                }
+            } else {
+                fallback
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+    }
+
+    private var fallback: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.05, green: 0.06, blue: 0.08),
+                    Color(red: 0.10, green: 0.12, blue: 0.16)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            Image(systemName: "photo")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.42))
+        }
+    }
+
+    private static func localImage(from reference: String) -> UIImage? {
+        let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("data:image/"),
+           let comma = trimmed.firstIndex(of: ",") {
+            let encoded = String(trimmed[trimmed.index(after: comma)...])
+            return Data(base64Encoded: encoded, options: .ignoreUnknownCharacters).flatMap(UIImage.init(data:))
+        }
+        if let url = URL(string: trimmed), url.isFileURL {
+            return UIImage(contentsOfFile: url.path)
+        }
+        if FileManager.default.fileExists(atPath: trimmed) {
+            return UIImage(contentsOfFile: trimmed)
+        }
+        return nil
     }
 }
 

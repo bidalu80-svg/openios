@@ -151,7 +151,6 @@ struct StreamingStatusView: View {
         let subtitle = webSearchSubtitle(for: latest)
         let queries = webSearchQueries(for: latest)
         let items = webSearchItems(for: latest)
-        let previewItem = webSearchCollapsedPreviewItem(items)
         let visibleSourceCount = max(max(items.count, latest?.urls.count ?? 0), latest?.count ?? 0)
 
         return VStack(alignment: .leading, spacing: 10) {
@@ -160,54 +159,13 @@ struct StreamingStatusView: View {
                     isExpanded.toggle()
                 }
             } label: {
-                HStack(alignment: .center, spacing: 10) {
-                    ZStack {
-                        Circle()
-                            .fill((isDone ? theme.success : theme.brandPrimary).opacity(theme.isDark ? 0.16 : 0.10))
-                            .frame(width: 30, height: 30)
-
-                        if isDone {
-                            Image(systemName: "checkmark")
-                                .scaledFont(size: 13, weight: .bold)
-                                .foregroundStyle(theme.success)
-                        } else {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .tint(theme.brandPrimary)
-                        }
-                    }
-
-                    HStack(spacing: 9) {
-                        webSearchSourceCluster(items)
-
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(sourceLabel(count: visibleSourceCount, fallback: title))
-                                .scaledFont(size: 14, weight: .semibold)
-                                .foregroundStyle(theme.textSecondary)
-                                .lineLimit(1)
-
-                            if !isDone {
-                                Text(subtitle)
-                                    .scaledFont(size: 12, weight: .medium)
-                                    .foregroundStyle(theme.textTertiary)
-                                    .lineLimit(1)
-                            }
-                        }
-                    }
-
-                    Spacer(minLength: 0)
-
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .scaledFont(size: 11, weight: .semibold)
-                        .foregroundStyle(theme.textTertiary)
-                }
+                webSearchDefaultHeader(
+                    title: sourceLabel(count: visibleSourceCount, fallback: title),
+                    subtitle: subtitle,
+                    isDone: isDone
+                )
             }
             .buttonStyle(.plain)
-
-            if !isExpanded, let previewItem {
-                webSearchCompactSourcePreview(item: previewItem)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            }
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 7) {
@@ -233,16 +191,17 @@ struct StreamingStatusView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .padding(12)
+        .padding(10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.82 : 0.94))
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.20 : 0.34))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.5 : 0.75), lineWidth: 0.7)
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.34 : 0.42), lineWidth: 0.6)
         )
-        .shadow(color: .black.opacity(theme.isDark ? 0.2 : 0.06), radius: 12, x: 0, y: 6)
+        .shadow(color: .black.opacity(theme.isDark ? 0.12 : 0.025), radius: 8, x: 0, y: 4)
         .padding(.horizontal, Spacing.screenPadding)
         .padding(.vertical, Spacing.xs)
         .animation(MicroAnimation.snappy, value: isExpanded)
@@ -325,6 +284,128 @@ struct StreamingStatusView: View {
     private func sourceLabel(count: Int, fallback: String) -> String {
         guard count > 0 else { return fallback }
         return "\(count) 个来源"
+    }
+
+    private func webSearchDefaultHeader(
+        title: String,
+        subtitle: String,
+        isDone: Bool
+    ) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            webSearchStateBadge(isDone: isDone)
+
+            Image(systemName: "globe")
+                .scaledFont(size: 14, weight: .semibold)
+                .foregroundStyle(theme.textSecondary)
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.62)))
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .scaledFont(size: 14, weight: .semibold)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+
+                if !isDone {
+                    Text(subtitle)
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                .scaledFont(size: 11, weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
+        }
+    }
+
+    private func webSearchCollapsedHeader(
+        item: ChatStatusItem,
+        sourceCount: Int,
+        fallbackTitle: String,
+        subtitle: String,
+        isDone: Bool
+    ) -> some View {
+        let title = item.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = item.link?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = title?.isEmpty == false ? title! : (url.flatMap(hostLabel(from:)) ?? fallbackTitle)
+        let host = url.flatMap(hostLabel(from:))
+
+        return HStack(alignment: .center, spacing: 10) {
+            webSearchStateBadge(isDone: isDone)
+
+            if let thumbnailURL = item.thumbnailURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !thumbnailURL.isEmpty {
+                webSearchThumbnail(thumbnailURL, fallbackURL: url, title: label, width: 58, height: 38)
+            } else {
+                thumbnailPlaceholder(fallbackURL: url, title: label, width: 58, height: 38)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    Text(sourceLabel(count: sourceCount, fallback: fallbackTitle))
+                        .scaledFont(size: 14, weight: .semibold)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+
+                    if let host {
+                        Text(host)
+                            .scaledFont(size: 11, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Text(label)
+                    .scaledFont(size: 12, weight: .medium)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+
+                if !isDone {
+                    Text(subtitle)
+                        .scaledFont(size: 11, weight: .regular)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            Image(systemName: "chevron.right")
+                .scaledFont(size: 12, weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.18 : 0.24))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.28 : 0.34), lineWidth: 0.55)
+        )
+    }
+
+    private func webSearchStateBadge(isDone: Bool) -> some View {
+        ZStack {
+            Circle()
+                .fill((isDone ? theme.success : theme.brandPrimary).opacity(theme.isDark ? 0.15 : 0.09))
+                .frame(width: 28, height: 28)
+
+            if isDone {
+                Image(systemName: "checkmark")
+                    .scaledFont(size: 12, weight: .bold)
+                    .foregroundStyle(theme.success)
+            } else {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(theme.brandPrimary)
+            }
+        }
     }
 
     private func webSearchSourceCluster(_ items: [ChatStatusItem]) -> some View {
@@ -554,13 +635,19 @@ struct StreamingStatusView: View {
     }
 
     @ViewBuilder
-    private func webSearchThumbnail(_ reference: String, fallbackURL: String?, title: String) -> some View {
+    private func webSearchThumbnail(
+        _ reference: String,
+        fallbackURL: String?,
+        title: String,
+        width: CGFloat = 72,
+        height: CGFloat = 46
+    ) -> some View {
         let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
         if let image = webSearchLocalImage(from: trimmed) {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()
-                .frame(width: 72, height: 46)
+                .frame(width: width, height: height)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -572,16 +659,16 @@ struct StreamingStatusView: View {
                     .resizable()
                     .scaledToFill()
             } placeholder: {
-                thumbnailPlaceholder(fallbackURL: fallbackURL, title: title)
+                thumbnailPlaceholder(fallbackURL: fallbackURL, title: title, width: width, height: height)
             }
-            .frame(width: 72, height: 46)
+            .frame(width: width, height: height)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.5)
             )
         } else {
-            thumbnailPlaceholder(fallbackURL: fallbackURL, title: title)
+            thumbnailPlaceholder(fallbackURL: fallbackURL, title: title, width: width, height: height)
         }
     }
 
@@ -601,13 +688,18 @@ struct StreamingStatusView: View {
         return nil
     }
 
-    private func thumbnailPlaceholder(fallbackURL: String?, title: String) -> some View {
+    private func thumbnailPlaceholder(
+        fallbackURL: String?,
+        title: String,
+        width: CGFloat = 72,
+        height: CGFloat = 46
+    ) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.55 : 0.82))
             webSearchFavicon(for: fallbackURL, title: title, size: 24)
         }
-        .frame(width: 72, height: 46)
+        .frame(width: width, height: height)
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(0.45), lineWidth: 0.5)
