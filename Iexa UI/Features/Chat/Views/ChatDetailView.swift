@@ -7209,7 +7209,6 @@ private struct AgentStepFloatingBar: View {
                     previewText: previewText,
                     thumbnailReference: previewThumbnailReference
                 )
-                .frame(width: 96, height: 54)
             }
             .buttonStyle(.plain)
             .padding(.leading, 8)
@@ -7236,11 +7235,16 @@ private struct AgentToolPreviewPop: View {
     let previewText: String
     let thumbnailReference: String?
 
+    private let previewSize = CGSize(width: 96, height: 54)
+    private let cornerRadius: CGFloat = 6
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             if let thumbnailReference,
                !thumbnailReference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 AgentToolPreviewThumbnail(reference: thumbnailReference)
+                    .frame(width: previewSize.width, height: previewSize.height)
+                    .clipped()
                     .overlay(
                         LinearGradient(
                             colors: [
@@ -7253,7 +7257,7 @@ private struct AgentToolPreviewPop: View {
                         )
                     )
             } else {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(Color.black.opacity(0.88))
             }
 
@@ -7279,8 +7283,9 @@ private struct AgentToolPreviewPop: View {
             .padding(.horizontal, 7)
             .padding(.vertical, 5)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .frame(width: previewSize.width, height: previewSize.height, alignment: .topLeading)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .compositingGroup()
         .shadow(color: .black.opacity(0.20), radius: 6, x: 0, y: 3)
     }
 }
@@ -7293,13 +7298,13 @@ private struct AgentToolPreviewThumbnail: View {
             if let image = Self.localImage(from: reference) {
                 Image(uiImage: image)
                     .resizable()
-                    .scaledToFill()
+                    .aspectRatio(contentMode: .fill)
             } else if let url = URL(string: reference),
                       ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
                 FallbackCachedAsyncImage(urls: [url], targetPixelSize: 220) { image in
                     image
                         .resizable()
-                        .scaledToFill()
+                        .aspectRatio(contentMode: .fill)
                 } placeholder: {
                     fallback
                 }
@@ -7308,6 +7313,7 @@ private struct AgentToolPreviewThumbnail: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
         .clipped()
     }
 
