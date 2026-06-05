@@ -336,7 +336,6 @@ struct StreamingStatusView: View {
             sourceIconFallback(index: index)
         }
         .frame(width: size, height: size)
-        .background(sourceIconFallback(index: index))
         .clipShape(Circle())
         .overlay(Circle().strokeBorder(theme.background.opacity(0.88), lineWidth: 1))
     }

@@ -519,6 +519,7 @@ final class ChatViewModel {
     private var localAlpineMissingToolCorrectionParentIds: Set<String> = []
     private var localAlpineContinuationWatchdogTask: Task<Void, Never>?
     private var localAlpineNativeToolsUnsupportedModels: Set<String> = []
+    private var localNativeFunctionToolsUnsupportedModels: Set<String> = []
     private var localAlpineActiveRunIdsByMessageId: [String: String] = [:]
     private var localAlpineLiveToolCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
     private var localAlpineLastLiveToolStatusByMessageId: [String: ChatStatusUpdate] = [:]
@@ -2033,6 +2034,163 @@ final class ChatViewModel {
         - If native tools are rejected by the provider, fallback is one fenced `iexa_alpine` block using the same structured JSON shape.
         [/Local Alpine native tools]
         """
+    }
+
+    private static func localNativeFunctionToolSchemas(includeBrowserTools: Bool) -> [[String: Any]] {
+        var tools: [[String: Any]] = []
+
+        if includeBrowserTools {
+            tools.append([
+                "type": "function",
+                "function": [
+                    "name": "web_search",
+                    "description": "Search the live web with the iOS built-in browser when the answer may require current, recent, external, source-backed, or uncertain information. Infer the search query from the user's natural language; the user does not need to say search/browse explicitly.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "query": ["type": "string", "description": "A concise search query extracted from the user's request."],
+                            "queries": [
+                                "type": "array",
+                                "items": ["type": "string"],
+                                "description": "Optional alternate search queries for better recall."
+                            ],
+                            "limit": ["type": "integer", "description": "Number of sources to return, 1-8."],
+                            "screenshot": ["type": "boolean", "description": "Whether to capture a page thumbnail for the source card."]
+                        ],
+                        "required": ["query"]
+                    ]
+                ]
+            ])
+            tools.append([
+                "type": "function",
+                "function": [
+                    "name": "browser_readable",
+                    "description": "Open and read a known URL with the iOS built-in browser. Use after web_search when a result needs verification, or when the user provides a URL.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "url": ["type": "string", "description": "HTTP or HTTPS URL to open and read."],
+                            "screenshot": ["type": "boolean", "description": "Whether to capture a page thumbnail."],
+                            "max_length": ["type": "integer", "description": "Maximum readable text length."]
+                        ],
+                        "required": ["url"]
+                    ]
+                ]
+            ])
+        }
+
+        tools.append(contentsOf: [
+            [
+                "type": "function",
+                "function": [
+                    "name": "office_create_excel",
+                    "description": "Create or restyle a local Excel/XLSX spreadsheet from the user's natural language. Use for tables, reports, ledgers, records, budgets, resumes in spreadsheet form, calculations, and follow-up requests to change the previous Excel style/content.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "title": ["type": "string"],
+                            "file_name": ["type": "string"],
+                            "theme": ["type": "object", "description": "Visual style such as luxury/dark/minimal/green, colors, layout, decoration, accent, text."],
+                            "sheets": [
+                                "type": "array",
+                                "items": [
+                                    "type": "object",
+                                    "properties": [
+                                        "name": ["type": "string"],
+                                        "headers": ["type": "array", "items": ["type": "string"]],
+                                        "rows": ["type": "array", "items": ["type": "array", "items": ["type": "string"]]],
+                                        "notes": ["type": "array", "items": ["type": "string"]]
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "required": ["title", "sheets"]
+                    ]
+                ]
+            ],
+            [
+                "type": "function",
+                "function": [
+                    "name": "office_create_ppt",
+                    "description": "Create or regenerate a local PowerPoint/PPTX deck. Use for presentations, decks, slides, reports, product introductions, lessonware, and follow-up requests to modify方案, style, background, page count, or match a screenshot/template.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "title": ["type": "string"],
+                            "file_name": ["type": "string"],
+                            "subtitle": ["type": "string"],
+                            "theme": ["type": "object", "description": "Concrete visual fingerprint: style, layout, decoration, background, background_2, surface, accent, text, subtle."],
+                            "slides": [
+                                "type": "array",
+                                "items": [
+                                    "type": "object",
+                                    "properties": [
+                                        "layout": ["type": "string"],
+                                        "title": ["type": "string"],
+                                        "subtitle": ["type": "string"],
+                                        "bullets": ["type": "array", "items": ["type": "string"]],
+                                        "table": ["type": "array", "items": ["type": "array", "items": ["type": "string"]]],
+                                        "note": ["type": "string"]
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "required": ["title", "slides"]
+                    ]
+                ]
+            ],
+            [
+                "type": "function",
+                "function": [
+                    "name": "office_create_word",
+                    "description": "Create or regenerate a local Word/DOCX document. Use for proposals, plans, contracts, resumes, reports, introductions, and follow-up requests to revise content or visual style.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "title": ["type": "string"],
+                            "file_name": ["type": "string"],
+                            "subtitle": ["type": "string"],
+                            "theme": ["type": "object", "description": "Concrete document style and colors. Use dark/luxury values for black-gold or premium business requests."],
+                            "sections": [
+                                "type": "array",
+                                "items": [
+                                    "type": "object",
+                                    "properties": [
+                                        "heading": ["type": "string"],
+                                        "paragraphs": ["type": "array", "items": ["type": "string"]],
+                                        "bullets": ["type": "array", "items": ["type": "string"]]
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "required": ["title", "sections"]
+                    ]
+                ]
+            ],
+            [
+                "type": "function",
+                "function": [
+                    "name": "office_create_pdf",
+                    "description": "Create a local PDF or convert the latest generated Office document to PDF. Use for PDF reports, PDF slides, PDF tables, and follow-up requests to export/convert to PDF.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "title": ["type": "string"],
+                            "file_name": ["type": "string"],
+                            "format": ["type": "string", "enum": ["slides", "document", "table"]],
+                            "source_url": ["type": "string", "description": "Optional local file URL from a previous Office result."],
+                            "theme": ["type": "object"],
+                            "slides": ["type": "array", "items": ["type": "object"]],
+                            "sections": ["type": "array", "items": ["type": "object"]],
+                            "sheets": ["type": "array", "items": ["type": "object"]]
+                        ],
+                        "required": ["title"]
+                    ]
+                ]
+            ]
+        ])
+
+        return tools
     }
 
     private static var localAlpineToolManifest: String {
@@ -5664,6 +5822,35 @@ final class ChatViewModel {
                                 imageCanvasInstructionMessageId: imageCanvasInstructionMessageId,
                                 preferLocalAlpineNativeTools: false
                             )
+                            fallbackRequest.tools = nil
+                            fallbackRequest.toolChoice = nil
+                            let sseStream = try await manager.sendPreferredOpenAIStreaming(request: fallbackRequest)
+                            for try await event in sseStream {
+                                if Task.isCancelled { break }
+                                if let usage = event.usage, !usage.isEmpty {
+                                    exactUsage = usage
+                                }
+                                self.applyStreamingEventDelta(
+                                    event,
+                                    to: acc,
+                                    assistantMessageId: assistantMessageId
+                                )
+                                if event.isFinished { break }
+                            }
+                        }
+                    } else if Self.requestUsesLocalNativeFunctionTools(request) {
+                        do {
+                            exactUsage = try await self.streamOpenAICompatibleLocalNativeFunctionLoop(
+                                manager: manager,
+                                initialRequest: request,
+                                assistantMessageId: assistantMessageId,
+                                acc: acc
+                            )
+                        } catch {
+                            guard Self.errorLooksLikeUnsupportedNativeTools(error) else { throw error }
+                            self.localNativeFunctionToolsUnsupportedModels.insert(modelId)
+                            self.logger.warning("Provider rejected local native function tools; falling back to Markdown bridge: \(error.localizedDescription)")
+                            var fallbackRequest = request
                             fallbackRequest.tools = nil
                             fallbackRequest.toolChoice = nil
                             let sseStream = try await manager.sendPreferredOpenAIStreaming(request: fallbackRequest)
@@ -9334,6 +9521,237 @@ final class ChatViewModel {
         )
     }
 
+    private struct LocalNativeFunctionToolExecution {
+        let toolContent: String
+        let completedAssistantTurn: Bool
+        let visibleContent: String?
+    }
+
+    private func streamOpenAICompatibleLocalNativeFunctionLoop(
+        manager: ConversationManager,
+        initialRequest: ChatCompletionRequest,
+        assistantMessageId: String,
+        acc: ContentAccumulator
+    ) async throws -> [String: Any]? {
+        var request = initialRequest
+        var apiMessages = initialRequest.messages
+        var exactUsage: [String: Any]?
+
+        for _ in 0..<4 {
+            request.messages = apiMessages
+            let toolAccumulator = LocalAlpineNativeToolCallAccumulator()
+            let sseStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+
+            for try await event in sseStream {
+                if Task.isCancelled { break }
+                if let usage = event.usage, !usage.isEmpty {
+                    exactUsage = usage
+                }
+                toolAccumulator.absorb(event)
+                applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
+                if event.isFinished { break }
+            }
+            if Task.isCancelled { return exactUsage }
+
+            let calls = toolAccumulator.completedCalls()
+                .filter(Self.isLocalNativeFunctionToolCall)
+            guard !calls.isEmpty else { return exactUsage }
+
+            if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                acc.replace("")
+                updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
+            }
+
+            apiMessages.append(Self.openAIToolCallAssistantMessage(for: calls))
+            for call in calls {
+                let execution = await executeLocalNativeFunctionToolCall(
+                    call,
+                    assistantMessageId: assistantMessageId
+                )
+                if let visibleContent = execution.visibleContent {
+                    acc.replace(visibleContent)
+                }
+                if execution.completedAssistantTurn {
+                    return exactUsage
+                }
+                apiMessages.append([
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": execution.toolContent
+                ])
+            }
+        }
+
+        throw APIError.unknown(
+            underlying: NSError(
+                domain: "ChatViewModel",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "本地原生工具已达到最大步骤数，已停止以避免重复执行。"]
+            )
+        )
+    }
+
+    private func executeLocalNativeFunctionToolCall(
+        _ call: LocalAlpineNativeToolCall,
+        assistantMessageId: String
+    ) async -> LocalNativeFunctionToolExecution {
+        localNativeToolExecutedMessageIds.insert(assistantMessageId)
+        let content = Self.localNativeFunctionToolEnvelopeContent(for: call)
+        let officeKind = LocalNativeToolService.officeActionKind(in: content)
+        let browserAction = LocalNativeToolService.browserActionName(in: content)
+
+        if let officeKind {
+            markLocalOfficeGenerationStarted(messageId: assistantMessageId, kind: officeKind)
+        } else if let browserAction {
+            markLocalBrowserToolStarted(messageId: assistantMessageId, actionName: browserAction)
+        }
+
+        let result = await LocalNativeToolService.shared.executeBlocks(
+            in: content,
+            officeProgress: { [weak self] phase in
+                guard let self, let officeKind else { return }
+                await self.updateLocalOfficeGenerationProgress(
+                    messageId: assistantMessageId,
+                    kind: officeKind,
+                    phase: phase
+                )
+            }
+        )
+
+        guard result.didExecute else {
+            let toolContent = "Local native tool did not execute. The tool call could not be parsed."
+            if let officeKind {
+                let document = LocalNativeOfficeDocument(
+                    kind: officeKind,
+                    ok: false,
+                    title: officeKind.displayName,
+                    fileName: "",
+                    summary: "",
+                    previewText: "",
+                    previewCount: 0,
+                    error: "模型返回的 Office 工具调用无法解析。"
+                )
+                let visible = completeLocalOfficeFunctionGeneration(
+                    messageId: assistantMessageId,
+                    document: document,
+                    files: []
+                )
+                return LocalNativeFunctionToolExecution(
+                    toolContent: toolContent,
+                    completedAssistantTurn: true,
+                    visibleContent: visible
+                )
+            }
+            if let browserAction {
+                finishLocalBrowserTool(
+                    messageId: assistantMessageId,
+                    document: LocalNativeBrowserDocument(
+                        ok: false,
+                        action: browserAction,
+                        title: "本地浏览器",
+                        url: nil,
+                        query: nil,
+                        summary: "模型返回的浏览器工具调用无法解析。",
+                        items: [],
+                        error: "模型返回的浏览器工具调用无法解析。"
+                    ),
+                    keepStreaming: true
+                )
+            }
+            return LocalNativeFunctionToolExecution(
+                toolContent: toolContent,
+                completedAssistantTurn: false,
+                visibleContent: nil
+            )
+        }
+
+        if let officeDocument = result.officeDocument {
+            let visible = completeLocalOfficeFunctionGeneration(
+                messageId: assistantMessageId,
+                document: officeDocument,
+                files: result.files
+            )
+            return LocalNativeFunctionToolExecution(
+                toolContent: Self.localNativeFunctionToolResultContent(result.summary),
+                completedAssistantTurn: true,
+                visibleContent: visible
+            )
+        }
+
+        if let officeKind {
+            let document = LocalNativeOfficeDocument(
+                kind: officeKind,
+                ok: false,
+                title: officeKind.displayName,
+                fileName: "",
+                summary: "",
+                previewText: "",
+                previewCount: 0,
+                error: "本地 Office 工具没有返回文件结果。"
+            )
+            let visible = completeLocalOfficeFunctionGeneration(
+                messageId: assistantMessageId,
+                document: document,
+                files: []
+            )
+            return LocalNativeFunctionToolExecution(
+                toolContent: Self.localNativeFunctionToolResultContent(result.summary),
+                completedAssistantTurn: true,
+                visibleContent: visible
+            )
+        }
+
+        if let browserDocument = result.browserDocument {
+            finishLocalBrowserTool(
+                messageId: assistantMessageId,
+                document: browserDocument,
+                keepStreaming: true
+            )
+        } else if let browserAction {
+            finishLocalBrowserTool(
+                messageId: assistantMessageId,
+                document: LocalNativeBrowserDocument(
+                    ok: false,
+                    action: browserAction,
+                    title: "本地浏览器",
+                    url: nil,
+                    query: nil,
+                    summary: "本地浏览器工具没有返回可用结果。",
+                    items: [],
+                    error: "本地浏览器工具没有返回可用结果。"
+                ),
+                keepStreaming: true
+            )
+        }
+
+        return LocalNativeFunctionToolExecution(
+            toolContent: Self.localNativeFunctionToolResultContent(result.summary),
+            completedAssistantTurn: false,
+            visibleContent: nil
+        )
+    }
+
+    private func completeLocalOfficeFunctionGeneration(
+        messageId: String,
+        document: LocalNativeOfficeDocument,
+        files: [ChatMessageFile]
+    ) -> String {
+        let content = localOfficeFinalContent(for: document, fileCount: files.count)
+        updateLocalOfficeGenerationMessage(
+            messageId: messageId,
+            content: content,
+            isStreaming: true,
+            statusHistory: localOfficeStatusHistory(
+                kind: document.kind,
+                visibleThrough: .attachToChat,
+                completedThrough: document.ok ? .attachToChat : nil,
+                failed: !document.ok
+            ),
+            files: files
+        )
+        return content
+    }
+
     private func executeLocalAlpineNativeToolCall(
         _ call: LocalAlpineNativeToolCall,
         assistantMessageId: String
@@ -9445,12 +9863,91 @@ final class ChatViewModel {
         return String((body.isEmpty ? fallback : body).prefix(16_000))
     }
 
+    private static let localNativeFunctionToolNames: Set<String> = [
+        "web_search",
+        "browser_readable",
+        "office_create_excel",
+        "office_create_ppt",
+        "office_create_word",
+        "office_create_pdf"
+    ]
+
+    private static func requestUsesLocalNativeFunctionTools(_ request: ChatCompletionRequest) -> Bool {
+        request.tools?.contains { tool in
+            guard let function = tool["function"] as? [String: Any],
+                  let name = function["name"] as? String else {
+                return false
+            }
+            return localNativeFunctionToolNames.contains(name)
+        } == true
+    }
+
+    private static func isLocalNativeFunctionToolCall(_ call: LocalAlpineNativeToolCall) -> Bool {
+        localNativeFunctionToolNames.contains(
+            call.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private static func localNativeFunctionToolEnvelopeContent(for call: LocalAlpineNativeToolCall) -> String {
+        var argumentsObject: [String: Any] = [:]
+        if let data = call.arguments.data(using: .utf8),
+           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            argumentsObject = dict
+        } else if !call.arguments.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            argumentsObject["query"] = call.arguments
+        }
+        if argumentsObject["action"] == nil {
+            argumentsObject["action"] = localNativeActionName(forFunctionName: call.name)
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: argumentsObject, options: [.prettyPrinted, .sortedKeys]))
+            ?? Data()
+        let json = String(data: data, encoding: .utf8) ?? #"{"action":"\#(localNativeActionName(forFunctionName: call.name))"}"#
+        return """
+        ```iexa_native
+        \(json)
+        ```
+        """
+    }
+
+    private static func localNativeActionName(forFunctionName name: String) -> String {
+        switch name.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "web_search":
+            return "web.search"
+        case "browser_readable":
+            return "browser.readable"
+        case "office_create_excel":
+            return "office.create_excel"
+        case "office_create_ppt":
+            return "office.create_ppt"
+        case "office_create_word":
+            return "office.create_word"
+        case "office_create_pdf":
+            return "office.create_pdf"
+        default:
+            return name
+        }
+    }
+
+    private static func localNativeFunctionToolResultContent(_ summary: String) -> String {
+        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String((trimmed.isEmpty ? "Local native tool completed." : trimmed).prefix(16_000))
+    }
+
     private func shouldUseLocalAlpineNativeTools(for modelId: String?) -> Bool {
         guard isOpenAICompatibleProvider else { return false }
         let key = (modelId ?? selectedModelId ?? conversation?.model ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return true }
         return !localAlpineNativeToolsUnsupportedModels.contains(key)
+    }
+
+    private func shouldUseLocalNativeFunctionTools(for modelId: String?) -> Bool {
+        guard isOpenAICompatibleProvider else { return false }
+        guard !(terminalEnabled && selectedTerminalIsLocalAlpine) else { return false }
+        let key = (modelId ?? selectedModelId ?? conversation?.model ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return true }
+        return !localNativeFunctionToolsUnsupportedModels.contains(key)
     }
 
     private static func errorLooksLikeUnsupportedNativeTools(_ error: Error) -> Bool {
@@ -11057,6 +11554,19 @@ final class ChatViewModel {
 
         applyOpenAIResponsesNativeTools(to: &request)
 
+        let nativeToolsDisabled = request.toolChoice?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() == "none"
+        if shouldUseLocalNativeFunctionTools(for: request.model),
+           request.tools == nil,
+           request.responsesTools?.isEmpty != false,
+           !nativeToolsDisabled {
+            request.tools = Self.localNativeFunctionToolSchemas(
+                includeBrowserTools: isChatWebSearchAllowed && webSearchEnabled
+            )
+            request.toolChoice = "auto"
+        }
+
         if let fc = selectedModel?.functionCallingMode, fc == "native", !localAlpineClientSideTask {
             params["function_calling"] = "native"
         }
@@ -12638,7 +13148,8 @@ final class ChatViewModel {
 
         Use them only when the user asks to read device status/info, read/write clipboard text, show a local notification, get/use their current location, query current local weather, query local calendar events, create/delete a calendar event, search/open/read/screenshot/download webpages, or directly create an Excel/PPT/Word/PDF file. Do not emit this tool for ordinary conversation.
         For code execution, Python scripts, package installs, project edits, or "write/run Python to generate a file", use Local Alpine when available instead of the Office actions. The Office actions are for productized file creation from a document draft, not for replacing the Python/terminal agent.
-        To call a local native tool, output exactly one fenced `iexa_native` JSON block and no fake tool-call syntax.
+        If OpenAI-style function tools named `web_search`, `browser_readable`, or `office_create_*` are available in this request, call those real tools first. The iOS host will execute them and return the real result as a tool message in the same turn.
+        If real function tools are not available, use the Markdown fallback by outputting exactly one fenced `iexa_native` JSON block and no fake tool-call syntax.
 
         Supported actions:
         ```iexa_native
@@ -12696,12 +13207,12 @@ final class ChatViewModel {
         {"action":"office.create_pdf","title":"项目汇报","file_name":"项目汇报.pdf","format":"slides","theme":{"style":"warm_business","layout":"split","decoration":"diagonal","background":"FFF7ED","background_2":"FED7AA","accent":"EA580C","text":"1F2937","subtle":"78716C"},"slides":[{"layout":"cover","title":"项目汇报","subtitle":"本地生成 PDF"},{"layout":"split","title":"关键进展","bullets":["目标清晰","风险可控","下一步明确"]}]}
         ```
 
-        For browser/web actions, when these tools are present, you may proactively use them. Use `web.search` before answering whenever the answer depends on information that may have changed after training or that you are not confident is still true: current/latest/recent facts, software/app/game versions, patch notes, releases, prices, stocks, laws/policies, schedules, sports, weather, news, rankings, product availability, official announcements, live website content, or "what is it now / has it changed / which version" style questions. If you are unsure whether your knowledge is stale, search first; do not wait for the user to literally say 搜、查、搜索, or 联网. Do not use the browser for stable writing, translation, math, coding, or brainstorming unless the user asks for current/source-backed information.
-        Use `web.search` when there is no exact URL. Use `browser.readable` when a URL is known or after search results need verification. Set `screenshot:true` when the user may benefit from seeing the page; Iexa will show a clickable webpage source card with thumbnail in the chat. Use `browser.screenshot` for visual page checks and `browser.fetch` for downloadable files. After Iexa appends the real browser result, answer from that result; cite page titles/URLs plainly and do not claim you cannot browse.
+        For browser/web actions, when real function tools are present, call `web_search` or `browser_readable`; when using the Markdown fallback, emit `web.search` or `browser.readable` in the `iexa_native` JSON. Search before answering whenever the answer depends on information that may have changed after training or that you are not confident is still true: current/latest/recent facts, software/app/game versions, patch notes, releases, prices, stocks, laws/policies, schedules, sports, weather, news, rankings, product availability, official announcements, live website content, or "what is it now / has it changed / which version" style questions. If you are unsure whether your knowledge is stale, search first; do not wait for the user to literally say 搜、查、搜索, or 联网. Do not use the browser for stable writing, translation, math, coding, or brainstorming unless the user asks for current/source-backed information.
+        Use `web_search` / `web.search` when there is no exact URL. Use `browser_readable` / `browser.readable` when a URL is known or after search results need verification. Set `screenshot:true` when the user may benefit from seeing the page; Iexa will show a clickable webpage source card with thumbnail in the chat. Use `browser.screenshot` for visual page checks and `browser.fetch` for downloadable files. After Iexa appends the real browser result, answer from that result; cite page titles/URLs plainly and do not claim you cannot browse.
 
-        For Office/PDF actions, build a concise structured draft from the user's natural language and attachments. Always translate visual requests into a concrete `theme`: `style`, `layout`, `decoration`, `background`, `background_2`, `surface`, `accent`, `text`, and `subtle`. Supported style/layout/decoration hints include `deep_blue_tech`, `minimal`, `dark`, `warm_business`, `green`, `violet`, `editorial`, `luxury`, `playful`, `split`, `centered`, `card`, `dashboard`, `poster`, `sidebar`, `diagonal`, `circle`, `grid`, `dots`, `frame`, and `wave`. For "黑金", "金色商务", "高级商务", "奢华", or "premium/luxury", use `style:"luxury"` with a near-black `background`, a second dark `background_2`, gold `accent`, light `text`, and `decoration:"frame"` or `layout:"poster"`/`card`; never output a white minimal Word/PPT/PDF for those requests. If the user attaches a screenshot/template image, inspect it and approximate its visual fingerprint: dominant colors, dark/light mood, title placement, card/sidebar/split/dashboard/poster composition, border/shape/grid/dot/circle/wave decoration, and typography density. Put that fingerprint into `theme` and per-slide `layout`; do not reuse the default blue template when a different visual style was requested. If exact screenshot replication is impossible, still generate the closest local approximation instead of saying the tool cannot do it.
+        For Office/PDF actions, when real function tools are present, call `office_create_excel`, `office_create_ppt`, `office_create_word`, or `office_create_pdf`; when using the Markdown fallback, emit `office.create_excel`, `office.create_ppt`, `office.create_word`, or `office.create_pdf` in the `iexa_native` JSON. Build a concise structured draft from the user's natural language and attachments. Always translate visual requests into a concrete `theme`: `style`, `layout`, `decoration`, `background`, `background_2`, `surface`, `accent`, `text`, and `subtle`. Supported style/layout/decoration hints include `deep_blue_tech`, `minimal`, `dark`, `warm_business`, `green`, `violet`, `editorial`, `luxury`, `playful`, `split`, `centered`, `card`, `dashboard`, `poster`, `sidebar`, `diagonal`, `circle`, `grid`, `dots`, `frame`, and `wave`. For "黑金", "金色商务", "高级商务", "奢华", or "premium/luxury", use `style:"luxury"` with a near-black `background`, a second dark `background_2`, gold `accent`, light `text`, and `decoration:"frame"` or `layout:"poster"`/`card`; never output a white minimal Word/PPT/PDF for those requests. If the user attaches a screenshot/template image, inspect it and approximate its visual fingerprint: dominant colors, dark/light mood, title placement, card/sidebar/split/dashboard/poster composition, border/shape/grid/dot/circle/wave decoration, and typography density. Put that fingerprint into `theme` and per-slide `layout`; do not reuse the default blue template when a different visual style was requested. If exact screenshot replication is impossible, still generate the closest local approximation instead of saying the tool cannot do it.
 
-        If a `[Latest local Office document for revision]` context is present and the user asks to modify, regenerate, restyle, improve, rewrite, or "改方案/换方案/按这个改", you must emit a fresh Office/PDF `iexa_native` block using the previous structured draft as the base. Preserve useful existing content, apply the requested changes, and generate a new file. Do not answer with only a plan, explanation, or promise.
+        If a `[Latest local Office document for revision]` context is present and the user asks to modify, regenerate, restyle, improve, rewrite, or "改方案/换方案/按这个改", you must call a fresh Office/PDF function tool or emit a fresh Office/PDF `iexa_native` block using the previous structured draft as the base. Preserve useful existing content, apply the requested changes, and generate a new file. Do not answer with only a plan, explanation, or promise.
 
         For PDF, use `office.create_pdf`; use `format:"slides"` with `slides` for deck-like PDFs, `format:"document"` with `sections` for report-like PDFs, or sheets/rows for table PDFs. If the user asks to convert the latest generated Office file to PDF, emit `office.create_pdf`; include the latest file URL as `source_url` when it is visible in context, otherwise the app will use the most recent local Office result automatically. If a key requirement is missing, choose a safe default instead of asking many setup questions. After Iexa appends the native tool result, continue from that real result and answer normally. If permissions are denied, location is not ready, notification permission is disabled, WeatherKit entitlement is unavailable, or Office/PDF generation fails, explain the exact local permission/state issue.
         """
@@ -12849,163 +13360,14 @@ final class ChatViewModel {
               !shouldUseDirectVideoGeneration(modelId: modelId) else {
             return
         }
-        guard shouldResolveWebSearchContext(for: text) else { return }
-
-        let query = webSearchQuery(from: text)
-        guard !query.isEmpty else { return }
-
-        if shouldUseOpenAIResponsesWebSearchTool(modelId: modelId) {
-            appendStatusUpdate(
-                id: assistantMessageId,
-                status: ChatStatusUpdate(
-                    action: "web_search",
-                    description: "将使用 Responses 原生网页搜索",
-                    done: true,
-                    count: 0,
-                    query: query,
-                    queries: [query]
-                )
-            )
-            return
-        }
 
         if let currentTimeContext = modelCurrentTimeContextPrompt(for: text) {
             webSearchContextsByMessageId[userMessageId] = currentTimeContext
-            appendStatusUpdate(
-                id: assistantMessageId,
-                status: ChatStatusUpdate(
-                    action: "browser_web_search",
-                    description: "已获取当前时间",
-                    done: true,
-                    count: 0,
-                    query: query,
-                    queries: [query]
-                )
-            )
             return
         }
 
         if isWebSearchCapabilityQuestion(text) {
             webSearchContextsByMessageId[userMessageId] = modelWebSearchAvailabilityPrompt()
-            appendStatusUpdate(
-                id: assistantMessageId,
-                status: ChatStatusUpdate(
-                    action: "browser_web_search",
-                    description: "内置浏览器搜索已可用",
-                    done: true,
-                    count: 0,
-                    query: query,
-                    queries: [query]
-                )
-            )
-            return
-        }
-
-        appendStatusUpdate(
-                id: assistantMessageId,
-                status: ChatStatusUpdate(
-                    action: "browser_web_search",
-                    description: "正在用内置浏览器搜索...",
-                    done: false,
-                    query: query,
-                    queries: [query]
-                )
-        )
-
-        do {
-            let queries: [String]
-            if let apiClient = manager?.apiClient {
-                queries = await webSearchQueries(for: query, userText: text, apiClient: apiClient, modelId: modelId)
-            } else {
-                queries = Self.freshnessAwareWebSearchQueries(
-                    userText: text,
-                    originalQuery: query,
-                    generated: Self.fallbackWebSearchQueries(for: text, originalQuery: query),
-                    limit: 4
-                )
-            }
-            appendStatusUpdate(
-                id: assistantMessageId,
-                status: ChatStatusUpdate(
-                    action: "browser_web_search",
-                    description: "正在用内置浏览器搜索...",
-                    done: false,
-                    query: query,
-                    queries: queries
-                )
-            )
-
-            let searchOutput = try await runAgenticWebSearch(
-                query: query,
-                queries: queries,
-                assistantMessageId: assistantMessageId
-            )
-            let result = searchOutput.result
-            let usedQueries = searchOutput.queries
-            Self.prefetchFavicons(for: result)
-            guard result.loadedCount > 0 || !result.items.isEmpty || !result.docs.isEmpty else {
-                appendStatusUpdate(
-                    id: assistantMessageId,
-                    status: ChatStatusUpdate(
-                        action: "browser_web_search",
-                        description: "联网搜索没有返回结果，已按原问题发送",
-                        done: true,
-                        count: 0,
-                        query: query,
-                        queries: usedQueries
-                    )
-                )
-                return
-            }
-            let context = modelWebSearchContextPrompt(result: result, query: query, queries: usedQueries)
-            let sources = webSearchSources(from: result)
-
-            if !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                webSearchContextsByMessageId[userMessageId] = context
-            }
-            if !sources.isEmpty {
-                appendSources(id: assistantMessageId, sources: sources)
-                if streamingStore.streamingMessageId == assistantMessageId && streamingStore.isActive {
-                    streamingStore.appendSources(sources)
-                }
-            }
-
-            let urls = Array(Set(result.filenames + result.items.compactMap(\.link))).prefix(8)
-            appendStatusUpdate(
-                id: assistantMessageId,
-                status: ChatStatusUpdate(
-                    action: "browser_web_search",
-                    description: result.loadedCount > 0
-                        ? "内置浏览器已读取 \(result.loadedCount) 个网页"
-                        : "内置浏览器已搜索 \(max(sources.count, result.items.count)) 个来源",
-                    done: true,
-                    urls: Array(urls),
-                    items: result.items.prefix(6).map {
-                        ChatStatusItem(
-                            title: $0.title,
-                            link: $0.link,
-                            snippet: $0.snippet,
-                            thumbnailURL: $0.thumbnailURL
-                        )
-                    },
-                    count: max(result.loadedCount, sources.count),
-                    query: query,
-                    queries: usedQueries
-                )
-            )
-        } catch {
-            logger.warning("Web search failed: \(error.localizedDescription)")
-            appendStatusUpdate(
-                id: assistantMessageId,
-                status: ChatStatusUpdate(
-                    action: "browser_web_search",
-                    description: "内置浏览器搜索失败，已按原问题发送",
-                    done: true,
-                    count: 0,
-                    query: query,
-                    queries: [query]
-                )
-            )
         }
     }
 
@@ -13397,7 +13759,7 @@ final class ChatViewModel {
         """
 
         [客户端联网搜索能力]
-        Iexa 客户端已接入内置 WKWebView 浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明搜索由 iOS 内置浏览器工具执行。用户明确要求搜索时，客户端会先用 WKWebView 打开搜索页并读取网页内容；当本轮系统提示里提供 `iexa_native` 浏览器工具时，你也可以主动调用 `web.search` 或 `browser.readable`。联网搜索会优先找较新的结果，但不会只限制到当天，除非用户明确要求今天或 24 小时内。不要声称你无法联网或无法实时搜索。
+        Iexa 客户端已接入内置 WKWebView 浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明你可以调用 iOS 内置浏览器搜索工具。若本轮请求提供了 `web_search` / `browser_readable` 函数工具，请直接调用真实函数工具；若没有函数工具但系统提示提供 `iexa_native` 浏览器工具，请主动输出 `web.search` 或 `browser.readable` 工具块。联网搜索会优先找较新的结果，但不会只限制到当天，除非用户明确要求今天或 24 小时内。不要声称你无法联网、无法实时搜索、无法访问最新信息。
         [/客户端联网搜索能力]
         """
     }
@@ -14098,7 +14460,9 @@ final class ChatViewModel {
             let officeRevisionContext = localOfficeRevisionSystemContext(for: latestUserTextForLocalAlpine)
             let shouldExposeBrowserTools = isChatWebSearchAllowed
                 && webSearchEnabled
-            let shouldExpose = Self.shouldExposeLocalNativeTools(latestUserTextForLocalAlpine)
+            let shouldExposeFunctionTools = shouldUseLocalNativeFunctionTools(for: localAlpineModelId)
+            let shouldExpose = shouldExposeFunctionTools
+                || Self.shouldExposeLocalNativeTools(latestUserTextForLocalAlpine)
                 || shouldExposeBrowserTools
                 || officeRevisionContext != nil
             guard shouldExpose else { return nil }
@@ -15142,7 +15506,8 @@ final class ChatViewModel {
 
     private func finishLocalBrowserTool(
         messageId: String,
-        document: LocalNativeBrowserDocument
+        document: LocalNativeBrowserDocument,
+        keepStreaming: Bool = false
     ) {
         var urls = document.items.compactMap(\.link)
         if let url = document.url, !urls.contains(url) {
@@ -15162,7 +15527,7 @@ final class ChatViewModel {
         updateLocalBrowserToolMessage(
             messageId: messageId,
             content: document.ok ? "本地浏览器已完成：\(document.title)" : "本地浏览器失败：\(document.error ?? document.summary)",
-            isStreaming: false,
+            isStreaming: keepStreaming,
             status: status
         )
     }
@@ -15187,6 +15552,10 @@ final class ChatViewModel {
             node.done = !isStreaming
             node.statusHistory = [status]
             node.metadata = metadata
+        }
+        if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
+            streamingStore.updateContent(content, displayContent: content)
+            streamingStore.setStatusHistory([status])
         }
         conversation?.history.currentId = messageId
     }
@@ -15423,6 +15792,10 @@ final class ChatViewModel {
             if !files.isEmpty {
                 node.files = files
             }
+        }
+        if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
+            streamingStore.updateContent(content, displayContent: content)
+            streamingStore.setStatusHistory(statusHistory)
         }
         conversation?.history.currentId = messageId
     }
@@ -16804,7 +17177,7 @@ final class ChatViewModel {
                     messageId: assistantMessageId,
                     parentId: parentId
                 )
-                if finalSummaryOnly {
+                if finalSummaryOnly || !useLocalAlpineNativeToolsForContinuation {
                     request.toolChoice = "none"
                 }
                 await self.populateCommonRequestFields(&request)

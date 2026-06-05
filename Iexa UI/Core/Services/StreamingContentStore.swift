@@ -225,6 +225,12 @@ final class StreamingContentStore {
         }
     }
 
+    /// Replaces the full live status list for tools that expose a multi-step
+    /// timeline with repeated action names.
+    func setStatusHistory(_ statuses: [ChatStatusUpdate]) {
+        streamingStatusHistory = statuses
+    }
+
     /// Appends source references.
     func appendSources(_ sources: [ChatSourceReference]) {
         for source in sources {
