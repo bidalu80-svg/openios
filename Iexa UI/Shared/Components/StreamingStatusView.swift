@@ -153,70 +153,34 @@ struct StreamingStatusView: View {
         let items = webSearchItems(for: latest)
         let visibleSourceCount = max(max(items.count, latest?.urls.count ?? 0), latest?.count ?? 0)
 
-        return VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: 8) {
             Button {
-                withAnimation(MicroAnimation.snappy) {
+                withAnimation(.easeOut(duration: 0.12)) {
                     isExpanded.toggle()
                 }
             } label: {
                 webSearchDefaultHeader(
                     title: sourceLabel(count: visibleSourceCount, fallback: title),
                     subtitle: subtitle,
-                    isDone: isDone
+                    isDone: isDone,
+                    items: items,
+                    fallbackURLs: latest?.urls ?? []
                 )
             }
             .buttonStyle(.plain)
 
             if isExpanded {
-                VStack(alignment: .leading, spacing: 7) {
-                    if !queries.isEmpty {
-                        VStack(alignment: .leading, spacing: 5) {
-                            ForEach(Array(queries.enumerated()), id: \.offset) { _, query in
-                                webSearchQueryChip(query)
-                            }
-                        }
-                    }
-
-                    if !items.isEmpty {
-                        ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                            webSearchSourceRow(index: index + 1, item: item)
-                        }
-                    } else if let latest, !latest.urls.isEmpty {
-                        ForEach(Array(latest.urls.enumerated()), id: \.offset) { index, url in
-                            webSearchSourceRow(index: index + 1, item: ChatStatusItem(title: hostLabel(from: url) ?? url, link: url))
-                        }
-                    }
-                }
-                .padding(.leading, 40)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                webSearchLightweightDetails(
+                    queries: queries,
+                    items: items,
+                    fallbackURLs: latest?.urls ?? []
+                )
+                .transition(.opacity)
             }
         }
-        .padding(10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .background(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.20 : 0.34))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.34 : 0.42), lineWidth: 0.6)
-        )
-        .shadow(color: .black.opacity(theme.isDark ? 0.12 : 0.025), radius: 8, x: 0, y: 4)
         .padding(.horizontal, Spacing.screenPadding)
-        .padding(.vertical, Spacing.xs)
-        .animation(MicroAnimation.snappy, value: isExpanded)
-        .onAppear {
-            if !isDone && isStreaming {
-                isExpanded = true
-            }
-        }
-        .onChange(of: latestStatus?.done == true) { _, done in
-            if done {
-                withAnimation(MicroAnimation.snappy) {
-                    isExpanded = false
-                }
-            }
-        }
+        .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func webSearchTitle(for status: ChatStatusUpdate?) -> String {
@@ -282,16 +246,14 @@ struct StreamingStatusView: View {
     private func webSearchDefaultHeader(
         title: String,
         subtitle: String,
-        isDone: Bool
+        isDone: Bool,
+        items: [ChatStatusItem],
+        fallbackURLs: [String]
     ) -> some View {
         HStack(alignment: .center, spacing: 10) {
             webSearchStateBadge(isDone: isDone)
 
-            Image(systemName: "globe")
-                .scaledFont(size: 14, weight: .semibold)
-                .foregroundStyle(theme.textSecondary)
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.62)))
+            webSearchSourceIcons(items: items, fallbackURLs: fallbackURLs)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
@@ -333,26 +295,107 @@ struct StreamingStatusView: View {
         }
     }
 
-    private func webSearchQueryChip(_ query: String) -> some View {
+    private func webSearchSourceIcons(items: [ChatStatusItem], fallbackURLs: [String]) -> some View {
+        let urls = sourceIconURLs(items: items, fallbackURLs: fallbackURLs)
+
+        ZStack(alignment: .leading) {
+            ForEach(0..<3, id: \.self) { index in
+                sourceIcon(urlString: urls.indices.contains(index) ? urls[index] : nil, index: index)
+                    .offset(x: CGFloat(index * 13))
+            }
+        }
+        .frame(width: 48, height: 22, alignment: .leading)
+    }
+
+    private func sourceIconURLs(items: [ChatStatusItem], fallbackURLs: [String]) -> [String] {
+        var result: [String] = []
+        for item in items {
+            if let link = item.link?.trimmingCharacters(in: .whitespacesAndNewlines), !link.isEmpty {
+                result.append(link)
+            }
+        }
+        if result.isEmpty {
+            result.append(contentsOf: fallbackURLs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+        }
+        return Array(result.prefix(3))
+    }
+
+    @ViewBuilder
+    private func sourceIcon(urlString: String?, index: Int) -> some View {
+        let size: CGFloat = 22
+        let targetPixelSize = Int(size * UIScreen.main.scale)
+        let faviconURLs = urlString
+            .map { WebsiteFaviconResolver.candidateURLs(for: $0, size: max(64, targetPixelSize)) }
+            ?? []
+
+        FallbackCachedAsyncImage(urls: faviconURLs, targetPixelSize: targetPixelSize) { image in
+            image
+                .resizable()
+                .scaledToFill()
+        } placeholder: {
+            sourceIconFallback(index: index)
+        }
+        .frame(width: size, height: size)
+        .background(sourceIconFallback(index: index))
+        .clipShape(Circle())
+        .overlay(Circle().strokeBorder(theme.background.opacity(0.88), lineWidth: 1))
+    }
+
+    private func sourceIconFallback(index: Int) -> some View {
+        let colors: [Color] = [
+            Color(red: 0.30, green: 0.38, blue: 1.0),
+            Color(red: 0.06, green: 0.74, blue: 0.62),
+            Color(red: 0.98, green: 0.52, blue: 0.16)
+        ]
+        return Circle()
+            .fill(colors[min(index, colors.count - 1)])
+            .overlay(
+                Image(systemName: "globe")
+                    .scaledFont(size: 10, weight: .bold)
+                    .foregroundStyle(.white.opacity(0.82))
+            )
+    }
+
+    private func webSearchLightweightDetails(
+        queries: [String],
+        items: [ChatStatusItem],
+        fallbackURLs: [String]
+    ) -> some View {
+        let sourceItems = !items.isEmpty
+            ? items
+            : fallbackURLs.prefix(6).map { ChatStatusItem(title: hostLabel(from: $0) ?? $0, link: $0) }
+
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(queries.enumerated()), id: \.offset) { _, query in
+                webSearchQueryLine(query)
+            }
+
+            ForEach(Array(sourceItems.enumerated()), id: \.offset) { index, item in
+                webSearchSourceLine(index: index + 1, item: item)
+            }
+        }
+        .padding(.top, 2)
+        .padding(.leading, 40)
+    }
+
+    private func webSearchQueryLine(_ query: String) -> some View {
         HStack(spacing: 7) {
             Image(systemName: "magnifyingglass")
-                .scaledFont(size: 11, weight: .semibold)
+                .scaledFont(size: 10, weight: .semibold)
                 .foregroundStyle(theme.textTertiary)
+                .frame(width: 16)
+
             Text(query)
-                .scaledFont(size: 12, weight: .semibold)
+                .scaledFont(size: 12, weight: .medium)
                 .foregroundStyle(theme.textSecondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.62 : 0.86))
-        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
     }
 
-    private func webSearchSourceRow(index: Int, item: ChatStatusItem) -> some View {
+    private func webSearchSourceLine(index: Int, item: ChatStatusItem) -> some View {
         let title = item.title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let urlString = item.link?.trimmingCharacters(in: .whitespacesAndNewlines)
         let label = title?.isEmpty == false ? title! : (urlString.flatMap(hostLabel(from:)) ?? "来源 \(index)")
@@ -366,58 +409,32 @@ struct StreamingStatusView: View {
                         userInfo: ["url": url]
                     )
                 } label: {
-                    webSearchSourceRowContent(
-                        index: index,
-                        title: label,
-                        url: urlString,
-                        snippet: item.snippet,
-                        hasLink: true
-                    )
+                    webSearchSourceLineContent(index: index, title: label, url: urlString)
                 }
                 .buttonStyle(.plain)
             } else {
-                webSearchSourceRowContent(
-                    index: index,
-                    title: label,
-                    url: urlString,
-                    snippet: item.snippet,
-                    hasLink: false
-                )
+                webSearchSourceLineContent(index: index, title: label, url: urlString)
             }
         }
     }
 
-    private func webSearchSourceRowContent(
-        index: Int,
-        title: String,
-        url: String?,
-        snippet: String?,
-        hasLink: Bool
-    ) -> some View {
-        HStack(alignment: .top, spacing: 9) {
+    private func webSearchSourceLineContent(index: Int, title: String, url: String?) -> some View {
+        HStack(alignment: .top, spacing: 8) {
             Text("\(index)")
-                .scaledFont(size: 10, weight: .bold)
+                .scaledFont(size: 10, weight: .semibold)
                 .foregroundStyle(theme.textTertiary)
-                .frame(width: 18, height: 18)
-                .background(Circle().fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.55 : 0.8)))
+                .frame(width: 16, alignment: .center)
 
-            webSearchFavicon(for: url, title: title, size: 20)
-                .padding(.top, 1)
-
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(title)
                     .scaledFont(size: 12, weight: .semibold)
                     .foregroundStyle(theme.textSecondary)
-                    .lineLimit(2)
-                if let snippet = snippet?.trimmingCharacters(in: .whitespacesAndNewlines), !snippet.isEmpty {
-                    Text(snippet)
-                        .scaledFont(size: 11, weight: .regular)
-                        .foregroundStyle(theme.textTertiary)
-                        .lineLimit(2)
-                }
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
                 if let url, let host = hostLabel(from: url) {
                     Text(host)
-                        .scaledFont(size: 11, weight: .regular)
+                        .scaledFont(size: 10, weight: .regular)
                         .foregroundStyle(theme.textTertiary)
                         .lineLimit(1)
                 }
@@ -425,40 +442,14 @@ struct StreamingStatusView: View {
 
             Spacer(minLength: 0)
 
-            if hasLink {
+            if url != nil {
                 Image(systemName: "arrow.up.right")
-                    .scaledFont(size: 10, weight: .semibold)
-                    .foregroundStyle(theme.brandPrimary.opacity(0.75))
+                    .scaledFont(size: 9, weight: .semibold)
+                    .foregroundStyle(theme.textTertiary)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.45 : 0.72))
-        )
-    }
-
-    @ViewBuilder
-    private func webSearchFavicon(for urlString: String?, title: String, size: CGFloat) -> some View {
-        let targetPixelSize = Int(size * UIScreen.main.scale)
-        let faviconURLs = urlString
-            .map { WebsiteFaviconResolver.candidateURLs(for: $0, size: max(64, targetPixelSize)) }
-            ?? []
-        FallbackCachedAsyncImage(urls: faviconURLs, targetPixelSize: targetPixelSize) { image in
-            image
-                .resizable()
-                .scaledToFill()
-        } placeholder: {
-            Image(systemName: "globe")
-                .scaledFont(size: max(10, size * 0.48), weight: .semibold)
-                .foregroundStyle(theme.textTertiary)
-                .frame(width: size, height: size)
-                .background(theme.surfaceContainerHighest)
-        }
-        .frame(width: size, height: size)
-        .clipShape(Circle())
-        .overlay(Circle().strokeBorder(theme.cardBorder.opacity(0.45), lineWidth: 0.5))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 3)
     }
 
     private func hostLabel(from urlString: String) -> String? {
