@@ -117,22 +117,62 @@ final class LocalOfficeDocumentService {
         let fileName = safeFileName(spec.fileName, fallback: "\(spec.title).docx", fileExtension: "docx")
         let documentURL = folder.appendingPathComponent(fileName)
         let draftURL = folder.appendingPathComponent("draft.json")
-        let previewURL = folder.appendingPathComponent("preview-1.png")
 
         let docx = try WordOpenXMLBuilder(spec: spec).build()
         try OfficeZipWriter(entries: docx).write(to: documentURL)
         try writeJSON(call, to: draftURL)
-        try writePNG(WordPreviewRenderer.render(spec: spec), to: previewURL)
+
+        var previewURLs: [URL] = []
+        let previewImages = WordPreviewRenderer.renderPages(spec: spec)
+        for (index, image) in previewImages.enumerated() {
+            let previewURL = folder.appendingPathComponent("preview-\(index + 1).png")
+            try writePNG(image, to: previewURL)
+            previewURLs.append(previewURL)
+        }
 
         return LocalOfficeDocumentResult(
             documentURL: documentURL,
-            previewURLs: [previewURL],
+            previewURLs: previewURLs,
             draftURL: draftURL,
             contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             documentType: "word",
             title: spec.title,
-            summary: "已生成 Word：\(fileName)，共 \(spec.sections.count) 个章节。",
+            summary: "已生成 Word：\(fileName)，共 \(spec.sections.count) 个章节、\(previewURLs.count) 页预览。",
             previewText: spec.previewText
+        )
+    }
+
+    func createPDF(from call: [String: Any]) async throws -> LocalOfficeDocumentResult {
+        let title = JSONValue.string(call["title"], fallback: "PDF 文档")
+        let folder = try makeOutputFolder(prefix: "pdf")
+        let fileName = safeFileName(JSONValue.string(call["file_name"]).nilIfEmpty, fallback: "\(title).pdf", fileExtension: "pdf")
+        let documentURL = folder.appendingPathComponent(fileName)
+        let draftURL = folder.appendingPathComponent("draft.json")
+
+        let render = PDFRenderPlan(call: call)
+        let pages = render.pages
+        guard !pages.isEmpty else {
+            throw OfficeDocumentError.renderFailed
+        }
+        try PDFDocumentRenderer.write(images: pages, title: render.title, to: documentURL)
+        try writeJSON(call, to: draftURL)
+
+        var previewURLs: [URL] = []
+        for (index, image) in pages.enumerated() {
+            let previewURL = folder.appendingPathComponent("preview-\(index + 1).png")
+            try writePNG(image, to: previewURL)
+            previewURLs.append(previewURL)
+        }
+
+        return LocalOfficeDocumentResult(
+            documentURL: documentURL,
+            previewURLs: previewURLs,
+            draftURL: draftURL,
+            contentType: "application/pdf",
+            documentType: "pdf",
+            title: render.title,
+            summary: "已生成 PDF：\(fileName)，共 \(pages.count) 页。",
+            previewText: render.previewText
         )
     }
 
@@ -350,7 +390,7 @@ private struct PresentationSpec: Sendable {
         let resolvedTitle = JSONValue.string(call["title"], fallback: "演示文稿")
         title = resolvedTitle
         fileName = JSONValue.string(call["file_name"]).nilIfEmpty
-        theme = PresentationTheme(raw: call["theme"] as? [String: Any])
+        theme = PresentationTheme(raw: call["theme"] as? [String: Any], hint: Self.themeHint(from: call))
         let rawSlides = JSONValue.array(call["slides"])
         if rawSlides.isEmpty {
             slides = [
@@ -377,21 +417,53 @@ private struct PresentationSpec: Sendable {
             return "\(index + 1). \(slide.title)\(bullets.isEmpty ? "" : "：\(bullets)")"
         }.joined(separator: "\n")
     }
+
+    private static func themeHint(from call: [String: Any]) -> String {
+        [
+            JSONValue.string(call["style"]),
+            JSONValue.string(call["design"]),
+            JSONValue.string(call["background_style"]),
+            JSONValue.string(call["theme"]),
+            JSONValue.string(call["title"]),
+            JSONValue.string(call["subtitle"])
+        ].filter { !$0.isEmpty }.joined(separator: " ")
+    }
 }
 
 private struct PresentationTheme: Sendable {
+    enum Style: String, Sendable {
+        case modern
+        case minimal
+        case deepBlue
+        case tech
+        case dark
+        case warm
+        case green
+        case violet
+    }
+
+    let style: Style
     let backgroundHex: String
     let primaryHex: String
     let accentHex: String
     let textHex: String
     let subtleHex: String
 
-    init(raw: [String: Any]?) {
-        backgroundHex = Self.hex(raw?["background"], fallback: "F7F8FA")
-        primaryHex = Self.hex(raw?["primary"], fallback: "111827")
-        accentHex = Self.hex(raw?["accent"], fallback: "2563EB")
-        textHex = Self.hex(raw?["text"], fallback: "111827")
-        subtleHex = Self.hex(raw?["subtle"], fallback: "6B7280")
+    init(raw: [String: Any]?, hint: String = "") {
+        let styleHint = [
+            JSONValue.string(raw?["style"]),
+            JSONValue.string(raw?["preset"]),
+            JSONValue.string(raw?["background_style"]),
+            JSONValue.string(raw?["mood"]),
+            hint
+        ].filter { !$0.isEmpty }.joined(separator: " ")
+        style = Self.style(from: styleHint)
+        let palette = Self.palette(for: style)
+        backgroundHex = Self.hex(raw?["background"], fallback: palette.background)
+        primaryHex = Self.hex(raw?["primary"], fallback: palette.primary)
+        accentHex = Self.hex(raw?["accent"], fallback: palette.accent)
+        textHex = Self.hex(raw?["text"], fallback: palette.text)
+        subtleHex = Self.hex(raw?["subtle"], fallback: palette.subtle)
     }
 
     private static func hex(_ value: Any?, fallback: String) -> String {
@@ -401,6 +473,39 @@ private struct PresentationTheme: Sendable {
         let hexCharacters = CharacterSet(charactersIn: "0123456789ABCDEF")
         guard raw.count == 6, raw.unicodeScalars.allSatisfy({ hexCharacters.contains($0) }) else { return fallback }
         return raw
+    }
+
+    private static func style(from text: String) -> Style {
+        let lower = text.lowercased()
+        if lower.contains("深蓝") || lower.contains("navy") || lower.contains("deep blue") || lower.contains("deep_blue") { return .deepBlue }
+        if lower.contains("科技") || lower.contains("tech") || lower.contains("ai") || lower.contains("cyber") { return .tech }
+        if lower.contains("暗") || lower.contains("黑") || lower.contains("dark") { return .dark }
+        if lower.contains("暖") || lower.contains("橙") || lower.contains("红") || lower.contains("warm") || lower.contains("orange") { return .warm }
+        if lower.contains("绿色") || lower.contains("环保") || lower.contains("生态") || lower.contains("green") { return .green }
+        if lower.contains("紫") || lower.contains("violet") || lower.contains("purple") { return .violet }
+        if lower.contains("极简") || lower.contains("简洁") || lower.contains("minimal") || lower.contains("clean") { return .minimal }
+        return .modern
+    }
+
+    private static func palette(for style: Style) -> (background: String, primary: String, accent: String, text: String, subtle: String) {
+        switch style {
+        case .modern:
+            return ("F7F8FA", "111827", "2563EB", "111827", "6B7280")
+        case .minimal:
+            return ("FFFFFF", "111827", "111827", "111827", "6B7280")
+        case .deepBlue:
+            return ("071326", "EAF2FF", "3B82F6", "F8FAFC", "B6C6E3")
+        case .tech:
+            return ("08111F", "ECFEFF", "22D3EE", "F8FAFC", "A7F3D0")
+        case .dark:
+            return ("111827", "F9FAFB", "60A5FA", "F9FAFB", "D1D5DB")
+        case .warm:
+            return ("FFF7ED", "2F241D", "EA580C", "1F2937", "78716C")
+        case .green:
+            return ("F0FDF4", "113124", "16A34A", "102A1D", "4B6357")
+        case .violet:
+            return ("F5F3FF", "2E1065", "7C3AED", "1F163D", "6D5D8A")
+        }
     }
 
     var backgroundColor: UIColor { UIColor(hex: backgroundHex) }
@@ -423,12 +528,14 @@ private struct WordSpec: Sendable {
     let title: String
     let fileName: String?
     let subtitle: String
+    let theme: DocumentTheme
     let sections: [WordSectionSpec]
 
     init(call: [String: Any]) {
         title = JSONValue.string(call["title"], fallback: "文档")
         fileName = JSONValue.string(call["file_name"]).nilIfEmpty
         subtitle = JSONValue.string(call["subtitle"])
+        theme = DocumentTheme(raw: call["theme"] as? [String: Any], hint: Self.themeHint(from: call))
         let rawSections = JSONValue.array(call["sections"])
         if rawSections.isEmpty {
             let paragraphs = JSONValue.stringArray(call["paragraphs"] ?? call["content"] ?? call["body"])
@@ -460,12 +567,45 @@ private struct WordSpec: Sendable {
                 .joined(separator: "：")
         }.joined(separator: "\n")
     }
+
+    private static func themeHint(from call: [String: Any]) -> String {
+        [
+            JSONValue.string(call["style"]),
+            JSONValue.string(call["design"]),
+            JSONValue.string(call["background_style"]),
+            JSONValue.string(call["theme"]),
+            JSONValue.string(call["title"]),
+            JSONValue.string(call["subtitle"])
+        ].filter { !$0.isEmpty }.joined(separator: " ")
+    }
 }
 
 private struct WordSectionSpec: Sendable {
     let heading: String
     let paragraphs: [String]
     let bullets: [String]
+}
+
+private struct DocumentTheme: Sendable {
+    let accentHex: String
+    let titleHex: String
+    let textHex: String
+    let subtleHex: String
+
+    init(raw: [String: Any]?, hint: String = "") {
+        let presentationTheme = PresentationTheme(raw: raw, hint: hint)
+        accentHex = presentationTheme.accentHex
+        titleHex = presentationTheme.style == .dark || presentationTheme.style == .deepBlue || presentationTheme.style == .tech
+            ? "111827"
+            : presentationTheme.primaryHex
+        textHex = "111827"
+        subtleHex = "6B7280"
+    }
+
+    var accentColor: UIColor { UIColor(hex: accentHex) }
+    var titleColor: UIColor { UIColor(hex: titleHex) }
+    var textColor: UIColor { UIColor(hex: textHex) }
+    var subtleColor: UIColor { UIColor(hex: subtleHex) }
 }
 
 private struct RenderedSlide: Sendable {
@@ -557,22 +697,20 @@ private struct SlidePreviewRenderer {
         let size = CGSize(width: 1280, height: 720)
         let renderer = UIGraphicsImageRenderer(size: size)
         return renderer.image { context in
-            theme.backgroundColor.setFill()
-            context.cgContext.fill(CGRect(origin: .zero, size: size))
-
-            theme.accentColor.setFill()
-            UIBezierPath(roundedRect: CGRect(x: 56, y: 52, width: 9, height: 560), cornerRadius: 4).fill()
-            UIBezierPath(ovalIn: CGRect(x: 1010, y: -140, width: 390, height: 390)).fill(with: .normal, alpha: 0.12)
-
             let isCover = slide.layout.lowercased().contains("cover") || index == 0
-            let titleSize: CGFloat = isCover ? 64 : 46
-            let titleRect = CGRect(x: 96, y: isCover ? 190 : 78, width: 940, height: isCover ? 160 : 80)
+            drawBackground(context.cgContext, size: size, theme: theme, index: index, isCover: isCover)
+
+            let isDark = theme.style == .deepBlue || theme.style == .tech || theme.style == .dark
+            let titleSize: CGFloat = isCover ? (isDark ? 68 : 64) : 46
+            let titleX: CGFloat = isDark ? 110 : (theme.style == .minimal ? 82 : 96)
+            let titleY: CGFloat = isCover ? (isDark ? 178 : 190) : 78
+            let titleRect = CGRect(x: titleX, y: titleY, width: isDark ? 980 : 940, height: isCover ? 166 : 80)
             drawText(slide.title, in: titleRect, font: .systemFont(ofSize: titleSize, weight: .bold), color: theme.textColor)
 
             if !slide.subtitle.isEmpty {
                 drawText(
                     slide.subtitle,
-                    in: CGRect(x: 100, y: isCover ? 348 : 138, width: 860, height: 70),
+                    in: CGRect(x: titleX + 4, y: isCover ? (isDark ? 350 : 348) : 138, width: isDark ? 900 : 860, height: 70),
                     font: .systemFont(ofSize: isCover ? 30 : 22, weight: .medium),
                     color: theme.subtleColor
                 )
@@ -594,6 +732,146 @@ private struct SlidePreviewRenderer {
         }
     }
 
+    private static func drawBackground(
+        _ context: CGContext,
+        size: CGSize,
+        theme: PresentationTheme,
+        index: Int,
+        isCover: Bool
+    ) {
+        let bounds = CGRect(origin: .zero, size: size)
+        switch theme.style {
+        case .deepBlue:
+            drawGradient(context, bounds: bounds, startHex: "061020", endHex: "102A6B")
+            drawDiagonalBand(context, points: [
+                CGPoint(x: 820, y: 0), CGPoint(x: size.width, y: 0),
+                CGPoint(x: size.width, y: size.height), CGPoint(x: 1040, y: size.height)
+            ], color: theme.accentColor.withAlphaComponent(0.22))
+            drawRule(x: 64, y: 72, width: 8, height: 540, color: theme.accentColor)
+            drawTopKicker(context, size: size, theme: theme, text: isCover ? "IEXA DECK" : "SECTION \(index + 1)")
+        case .tech:
+            drawGradient(context, bounds: bounds, startHex: "06111F", endHex: "0F172A")
+            drawGrid(context, size: size, color: theme.accentColor.withAlphaComponent(0.16), step: 44)
+            drawDiagonalBand(context, points: [
+                CGPoint(x: 860, y: 0), CGPoint(x: size.width, y: 0),
+                CGPoint(x: size.width, y: 250), CGPoint(x: 980, y: 350)
+            ], color: theme.accentColor.withAlphaComponent(0.24))
+            drawRule(x: 74, y: 84, width: 118, height: 6, color: theme.accentColor)
+            drawTopKicker(context, size: size, theme: theme, text: "AI WORKFLOW")
+        case .dark:
+            UIColor(hex: theme.backgroundHex).setFill()
+            context.fill(bounds)
+            drawDiagonalBand(context, points: [
+                CGPoint(x: 0, y: 530), CGPoint(x: size.width, y: 430),
+                CGPoint(x: size.width, y: size.height), CGPoint(x: 0, y: size.height)
+            ], color: UIColor.white.withAlphaComponent(0.06))
+            drawRule(x: 70, y: 70, width: 150, height: 7, color: theme.accentColor)
+        case .minimal:
+            UIColor.white.setFill()
+            context.fill(bounds)
+            drawRule(x: 76, y: 76, width: 1120, height: 2, color: UIColor(hex: "111827").withAlphaComponent(0.16))
+            drawRule(x: 76, y: 616, width: 180, height: 4, color: theme.accentColor)
+        case .warm:
+            UIColor(hex: theme.backgroundHex).setFill()
+            context.fill(bounds)
+            drawDiagonalBand(context, points: [
+                CGPoint(x: 0, y: 0), CGPoint(x: 330, y: 0),
+                CGPoint(x: 220, y: size.height), CGPoint(x: 0, y: size.height)
+            ], color: UIColor(hex: "FED7AA").withAlphaComponent(0.72))
+            drawRule(x: 82, y: 72, width: 8, height: 530, color: theme.accentColor)
+            drawRule(x: 1018, y: 92, width: 142, height: 142, color: UIColor(hex: "FDBA74").withAlphaComponent(0.35))
+        case .green:
+            UIColor(hex: theme.backgroundHex).setFill()
+            context.fill(bounds)
+            drawDiagonalBand(context, points: [
+                CGPoint(x: 920, y: 0), CGPoint(x: size.width, y: 0),
+                CGPoint(x: size.width, y: size.height), CGPoint(x: 780, y: size.height)
+            ], color: UIColor(hex: "BBF7D0").withAlphaComponent(0.58))
+            drawRule(x: 70, y: 72, width: 8, height: 540, color: theme.accentColor)
+            drawRule(x: 96, y: 612, width: 280, height: 5, color: theme.accentColor.withAlphaComponent(0.55))
+        case .violet:
+            UIColor(hex: theme.backgroundHex).setFill()
+            context.fill(bounds)
+            drawDiagonalBand(context, points: [
+                CGPoint(x: 0, y: 0), CGPoint(x: size.width, y: 0),
+                CGPoint(x: size.width, y: 150), CGPoint(x: 0, y: 250)
+            ], color: UIColor(hex: "DDD6FE").withAlphaComponent(0.72))
+            drawRule(x: 74, y: 86, width: 132, height: 8, color: theme.accentColor)
+            drawRule(x: 74, y: 106, width: 68, height: 8, color: theme.accentColor.withAlphaComponent(0.5))
+        case .modern:
+            UIColor(hex: theme.backgroundHex).setFill()
+            context.fill(bounds)
+            drawRule(x: 56, y: 52, width: 9, height: 560, color: theme.accentColor)
+            drawDiagonalBand(context, points: [
+                CGPoint(x: 1000, y: 0), CGPoint(x: size.width, y: 0),
+                CGPoint(x: size.width, y: 255), CGPoint(x: 1088, y: 300)
+            ], color: theme.accentColor.withAlphaComponent(0.12))
+        }
+    }
+
+    private static func drawGradient(_ context: CGContext, bounds: CGRect, startHex: String, endHex: String) {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let colors = [UIColor(hex: startHex).cgColor, UIColor(hex: endHex).cgColor] as CFArray
+        guard let gradient = CGGradient(colorsSpace: colorSpace, colors: colors, locations: [0, 1]) else {
+            UIColor(hex: startHex).setFill()
+            context.fill(bounds)
+            return
+        }
+        context.drawLinearGradient(
+            gradient,
+            start: CGPoint(x: bounds.minX, y: bounds.minY),
+            end: CGPoint(x: bounds.maxX, y: bounds.maxY),
+            options: []
+        )
+    }
+
+    private static func drawGrid(_ context: CGContext, size: CGSize, color: UIColor, step: CGFloat) {
+        context.saveGState()
+        context.setStrokeColor(color.cgColor)
+        context.setLineWidth(1)
+        var x: CGFloat = 0
+        while x <= size.width {
+            context.move(to: CGPoint(x: x, y: 0))
+            context.addLine(to: CGPoint(x: x, y: size.height))
+            x += step
+        }
+        var y: CGFloat = 0
+        while y <= size.height {
+            context.move(to: CGPoint(x: 0, y: y))
+            context.addLine(to: CGPoint(x: size.width, y: y))
+            y += step
+        }
+        context.strokePath()
+        context.restoreGState()
+    }
+
+    private static func drawDiagonalBand(_ context: CGContext, points: [CGPoint], color: UIColor) {
+        guard let first = points.first else { return }
+        context.saveGState()
+        context.beginPath()
+        context.move(to: first)
+        for point in points.dropFirst() {
+            context.addLine(to: point)
+        }
+        context.closePath()
+        context.setFillColor(color.cgColor)
+        context.fillPath()
+        context.restoreGState()
+    }
+
+    private static func drawRule(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, color: UIColor) {
+        color.setFill()
+        UIBezierPath(roundedRect: CGRect(x: x, y: y, width: width, height: height), cornerRadius: height / 2).fill()
+    }
+
+    private static func drawTopKicker(_ context: CGContext, size: CGSize, theme: PresentationTheme, text: String) {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.monospacedDigitSystemFont(ofSize: 16, weight: .semibold),
+            .foregroundColor: theme.subtleColor
+        ]
+        text.draw(in: CGRect(x: 110, y: 86, width: 320, height: 24), withAttributes: attrs)
+    }
+
     private static func drawBullets(_ bullets: [String], origin: CGPoint, width: CGFloat, theme: PresentationTheme) {
         for (index, bullet) in bullets.prefix(6).enumerated() {
             let y = origin.y + CGFloat(index) * 70
@@ -613,9 +891,13 @@ private struct SlidePreviewRenderer {
         let columns = max(1, min(rows.map(\.count).max() ?? 1, 5))
         let colWidth = width / CGFloat(columns)
         let rowHeight: CGFloat = 58
+        let dark = theme.style == .deepBlue || theme.style == .tech || theme.style == .dark
         for rowIndex in 0..<rows.count {
             let y = origin.y + CGFloat(rowIndex) * rowHeight
-            (rowIndex == 0 ? theme.accentColor.withAlphaComponent(0.14) : UIColor.white.withAlphaComponent(0.62)).setFill()
+            let fill = rowIndex == 0
+                ? theme.accentColor.withAlphaComponent(dark ? 0.28 : 0.14)
+                : (dark ? UIColor.white.withAlphaComponent(0.08) : UIColor.white.withAlphaComponent(0.62))
+            fill.setFill()
             UIBezierPath(roundedRect: CGRect(x: origin.x, y: y, width: width, height: rowHeight - 6), cornerRadius: 8).fill()
             for colIndex in 0..<columns {
                 let text = rows[rowIndex][safe: colIndex] ?? ""
@@ -645,103 +927,277 @@ private struct SlidePreviewRenderer {
 }
 
 private struct WordPreviewRenderer {
+    private enum BlockStyle {
+        case title
+        case subtitle
+        case heading
+        case paragraph
+        case bullet
+    }
+
+    private struct TextBlock {
+        let text: String
+        let style: BlockStyle
+    }
+
+    private static let pageSize = CGSize(width: 1000, height: 1414)
+    private static let pageInsets = UIEdgeInsets(top: 106, left: 116, bottom: 118, right: 116)
+
     static func render(spec: WordSpec) -> UIImage {
-        let size = CGSize(width: 1000, height: 1300)
-        let renderer = UIGraphicsImageRenderer(size: size)
+        renderPages(spec: spec).first ?? blankPage(spec: spec)
+    }
+
+    static func renderPages(spec: WordSpec) -> [UIImage] {
+        let blocks = makeBlocks(spec: spec)
+        let pages = paginate(blocks: blocks, theme: spec.theme)
+        guard !pages.isEmpty else { return [blankPage(spec: spec)] }
+        return pages.enumerated().map { index, page in
+            renderPage(blocks: page, spec: spec, pageNumber: index + 1, pageCount: pages.count)
+        }
+    }
+
+    private static func makeBlocks(spec: WordSpec) -> [TextBlock] {
+        var blocks: [TextBlock] = [TextBlock(text: spec.title, style: .title)]
+        if !spec.subtitle.isEmpty {
+            blocks.append(TextBlock(text: spec.subtitle, style: .subtitle))
+        }
+        for section in spec.sections {
+            if !section.heading.isEmpty {
+                blocks.append(TextBlock(text: section.heading, style: .heading))
+            }
+            for paragraph in section.paragraphs {
+                blocks.append(TextBlock(text: paragraph, style: .paragraph))
+            }
+            for bullet in section.bullets {
+                blocks.append(TextBlock(text: bullet, style: .bullet))
+            }
+        }
+        return blocks
+    }
+
+    private static func paginate(blocks: [TextBlock], theme: DocumentTheme) -> [[TextBlock]] {
+        let contentWidth = pageSize.width - pageInsets.left - pageInsets.right
+        let maxY = pageSize.height - pageInsets.bottom
+        var pages: [[TextBlock]] = []
+        var current: [TextBlock] = []
+        var y = pageInsets.top
+
+        for block in blocks {
+            let width = block.style == .bullet ? contentWidth - 34 : contentWidth
+            let blockHeight = height(for: block, width: width, theme: theme)
+            let spacing = spacingAfter(block.style)
+            if y + blockHeight > maxY, !current.isEmpty {
+                pages.append(current)
+                current = []
+                y = pageInsets.top
+            }
+            current.append(block)
+            y += blockHeight + spacing
+        }
+
+        if !current.isEmpty {
+            pages.append(current)
+        }
+        return pages
+    }
+
+    private static func renderPage(
+        blocks: [TextBlock],
+        spec: WordSpec,
+        pageNumber: Int,
+        pageCount: Int
+    ) -> UIImage {
+        let renderer = UIGraphicsImageRenderer(size: pageSize)
         return renderer.image { context in
-            UIColor(hex: "EEF2F7").setFill()
-            context.cgContext.fill(CGRect(origin: .zero, size: size))
-
-            let page = CGRect(x: 88, y: 64, width: 824, height: 1160)
             UIColor.white.setFill()
-            UIBezierPath(roundedRect: page, cornerRadius: 18).fill()
-            UIColor(hex: "D1D5DB").setStroke()
-            UIBezierPath(roundedRect: page, cornerRadius: 18).stroke()
+            context.cgContext.fill(CGRect(origin: .zero, size: pageSize))
 
-            var y = page.minY + 72
-            drawText(
-                spec.title,
-                in: CGRect(x: page.minX + 64, y: y, width: page.width - 128, height: 72),
-                font: .systemFont(ofSize: 42, weight: .bold),
-                color: UIColor(hex: "111827")
+            let contentRect = CGRect(
+                x: pageInsets.left,
+                y: pageInsets.top,
+                width: pageSize.width - pageInsets.left - pageInsets.right,
+                height: pageSize.height - pageInsets.top - pageInsets.bottom
             )
-            y += 78
 
-            if !spec.subtitle.isEmpty {
-                drawText(
-                    spec.subtitle,
-                    in: CGRect(x: page.minX + 64, y: y, width: page.width - 128, height: 42),
-                    font: .systemFont(ofSize: 22, weight: .medium),
-                    color: UIColor(hex: "6B7280")
-                )
-                y += 56
+            var y = contentRect.minY
+            for block in blocks {
+                let width = block.style == .bullet ? contentRect.width - 34 : contentRect.width
+                let height = height(for: block, width: width, theme: spec.theme)
+                switch block.style {
+                case .bullet:
+                    drawBullet(
+                        block.text,
+                        in: CGRect(x: contentRect.minX, y: y, width: contentRect.width, height: height),
+                        theme: spec.theme
+                    )
+                default:
+                    drawText(
+                        block.text,
+                        in: CGRect(x: contentRect.minX, y: y, width: width, height: height),
+                        style: block.style,
+                        theme: spec.theme
+                    )
+                }
+                y += height + spacingAfter(block.style)
             }
 
-            UIColor(hex: "2563EB").setFill()
-            UIBezierPath(roundedRect: CGRect(x: page.minX + 64, y: y, width: 96, height: 6), cornerRadius: 3).fill()
-            y += 34
-
-            for section in spec.sections.prefix(4) {
-                if !section.heading.isEmpty {
-                    drawText(
-                        section.heading,
-                        in: CGRect(x: page.minX + 64, y: y, width: page.width - 128, height: 40),
-                        font: .systemFont(ofSize: 26, weight: .semibold),
-                        color: UIColor(hex: "1F2937")
-                    )
-                    y += 46
-                }
-
-                for paragraph in section.paragraphs.prefix(3) {
-                    let rect = CGRect(x: page.minX + 64, y: y, width: page.width - 128, height: 58)
-                    drawText(
-                        paragraph,
-                        in: rect,
-                        font: .systemFont(ofSize: 19, weight: .regular),
-                        color: UIColor(hex: "374151")
-                    )
-                    y += 62
-                }
-
-                for bullet in section.bullets.prefix(4) {
-                    UIColor(hex: "2563EB").setFill()
-                    UIBezierPath(ovalIn: CGRect(x: page.minX + 72, y: y + 11, width: 9, height: 9)).fill()
-                    drawText(
-                        bullet,
-                        in: CGRect(x: page.minX + 96, y: y, width: page.width - 160, height: 34),
-                        font: .systemFont(ofSize: 19, weight: .medium),
-                        color: UIColor(hex: "374151")
-                    )
-                    y += 40
-                }
-
-                y += 16
-                if y > page.maxY - 140 { break }
-            }
-
-            let footerAttrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 16, weight: .medium),
-                .foregroundColor: UIColor(hex: "9CA3AF")
-            ]
-            "Iexa Office Agent · Word 文档预览".draw(
-                in: CGRect(x: page.minX + 64, y: page.maxY - 64, width: page.width - 128, height: 24),
-                withAttributes: footerAttrs
+            let footer = pageCount > 1 ? "\(pageNumber) / \(pageCount)" : "\(pageNumber)"
+            footer.draw(
+                in: CGRect(x: pageInsets.left, y: pageSize.height - 74, width: 160, height: 26),
+                withAttributes: [
+                    .font: UIFont.monospacedDigitSystemFont(ofSize: 15, weight: .regular),
+                    .foregroundColor: spec.theme.subtleColor
+                ]
             )
         }
     }
 
-    private static func drawText(_ text: String, in rect: CGRect, font: UIFont, color: UIColor) {
-        let style = NSMutableParagraphStyle()
-        style.lineBreakMode = .byTruncatingTail
-        style.lineSpacing = 5
+    private static func blankPage(spec: WordSpec) -> UIImage {
+        renderPage(blocks: [TextBlock(text: spec.title, style: .title)], spec: spec, pageNumber: 1, pageCount: 1)
+    }
+
+    private static func height(for block: TextBlock, width: CGFloat, theme: DocumentTheme) -> CGFloat {
+        let rect = (block.text as NSString).boundingRect(
+            with: CGSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes(for: block.style, theme: theme),
+            context: nil
+        )
+        return max(ceil(rect.height), minimumHeight(for: block.style))
+    }
+
+    private static func drawText(_ text: String, in rect: CGRect, style: BlockStyle, theme: DocumentTheme) {
         (text as NSString).draw(
             in: rect,
-            withAttributes: [
-                .font: font,
-                .foregroundColor: color,
-                .paragraphStyle: style
-            ]
+            withAttributes: attributes(for: style, theme: theme)
         )
+    }
+
+    private static func drawBullet(_ text: String, in rect: CGRect, theme: DocumentTheme) {
+        let bulletRect = CGRect(x: rect.minX + 8, y: rect.minY + 12, width: 8, height: 8)
+        theme.accentColor.setFill()
+        UIBezierPath(ovalIn: bulletRect).fill()
+        drawText(
+            text,
+            in: CGRect(x: rect.minX + 34, y: rect.minY, width: rect.width - 34, height: rect.height),
+            style: .bullet,
+            theme: theme
+        )
+    }
+
+    private static func attributes(for style: BlockStyle, theme: DocumentTheme) -> [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        paragraph.lineSpacing = style == .paragraph || style == .bullet ? 7 : 4
+        switch style {
+        case .title:
+            return [.font: UIFont.systemFont(ofSize: 42, weight: .bold), .foregroundColor: theme.titleColor, .paragraphStyle: paragraph]
+        case .subtitle:
+            return [.font: UIFont.systemFont(ofSize: 24, weight: .regular), .foregroundColor: theme.subtleColor, .paragraphStyle: paragraph]
+        case .heading:
+            return [.font: UIFont.systemFont(ofSize: 30, weight: .bold), .foregroundColor: theme.titleColor, .paragraphStyle: paragraph]
+        case .paragraph:
+            return [.font: UIFont.systemFont(ofSize: 23, weight: .regular), .foregroundColor: theme.textColor, .paragraphStyle: paragraph]
+        case .bullet:
+            return [.font: UIFont.systemFont(ofSize: 22, weight: .regular), .foregroundColor: theme.textColor, .paragraphStyle: paragraph]
+        }
+    }
+
+    private static func minimumHeight(for style: BlockStyle) -> CGFloat {
+        switch style {
+        case .title:
+            return 58
+        case .subtitle:
+            return 36
+        case .heading:
+            return 42
+        case .paragraph:
+            return 34
+        case .bullet:
+            return 32
+        }
+    }
+
+    private static func spacingAfter(_ style: BlockStyle) -> CGFloat {
+        switch style {
+        case .title:
+            return 22
+        case .subtitle:
+            return 28
+        case .heading:
+            return 16
+        case .paragraph:
+            return 18
+        case .bullet:
+            return 8
+        }
+    }
+}
+
+private struct PDFRenderPlan {
+    let title: String
+    let previewText: String
+    let pages: [UIImage]
+
+    init(call: [String: Any]) {
+        let mode = [
+            JSONValue.string(call["format"]),
+            JSONValue.string(call["mode"]),
+            JSONValue.string(call["source_type"]),
+            JSONValue.string(call["document_type"])
+        ].joined(separator: " ").lowercased()
+
+        if !JSONValue.array(call["slides"]).isEmpty
+            || mode.contains("ppt")
+            || mode.contains("slide")
+            || mode.contains("演示") {
+            let spec = PresentationSpec(call: call)
+            title = spec.title
+            previewText = spec.previewText
+            pages = spec.slides.enumerated().map { index, slide in
+                SlidePreviewRenderer.render(slide: slide, index: index, theme: spec.theme)
+            }
+        } else if !JSONValue.array(call["sheets"]).isEmpty
+            || call["rows"] != nil
+            || call["headers"] != nil
+            || mode.contains("excel")
+            || mode.contains("sheet")
+            || mode.contains("table")
+            || mode.contains("表格") {
+            let spec = ExcelSpec(call: call)
+            title = spec.title
+            previewText = spec.previewText
+            pages = [ExcelPreviewRenderer.render(spec: spec)]
+        } else {
+            let spec = WordSpec(call: call)
+            title = spec.title
+            previewText = spec.previewText
+            pages = WordPreviewRenderer.renderPages(spec: spec)
+        }
+    }
+}
+
+private struct PDFDocumentRenderer {
+    static func write(images: [UIImage], title: String, to url: URL) throws {
+        guard let first = images.first else {
+            throw OfficeDocumentError.renderFailed
+        }
+        let bounds = CGRect(origin: .zero, size: first.size)
+        let format = UIGraphicsPDFRendererFormat()
+        format.documentInfo = [
+            kCGPDFContextCreator as String: "Iexa",
+            kCGPDFContextTitle as String: title
+        ]
+        let renderer = UIGraphicsPDFRenderer(bounds: bounds, format: format)
+        let data = renderer.pdfData { context in
+            for image in images {
+                context.beginPage()
+                UIColor.white.setFill()
+                context.cgContext.fill(bounds)
+                image.draw(in: bounds)
+            }
+        }
+        try data.write(to: url, options: .atomic)
     }
 }
 
@@ -964,11 +1420,11 @@ private struct WordOpenXMLBuilder {
         """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-        <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Aptos" w:eastAsia="PingFang SC" w:hAnsi="Aptos"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
+        <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Aptos" w:eastAsia="PingFang SC" w:hAnsi="Aptos"/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="\(spec.theme.textHex)"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
         <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>
-        <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:qFormat/><w:pPr><w:spacing w:after="280"/></w:pPr><w:rPr><w:b/><w:sz w:val="52"/><w:szCs w:val="52"/><w:color w:val="111827"/></w:rPr></w:style>
-        <w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Normal"/><w:qFormat/><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/><w:color w:val="6B7280"/></w:rPr></w:style>
-        <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:spacing w:before="360" w:after="160"/></w:pPr><w:rPr><w:b/><w:sz w:val="34"/><w:szCs w:val="34"/><w:color w:val="1F2937"/></w:rPr></w:style>
+        <w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:qFormat/><w:pPr><w:spacing w:after="280"/></w:pPr><w:rPr><w:b/><w:sz w:val="52"/><w:szCs w:val="52"/><w:color w:val="\(spec.theme.titleHex)"/></w:rPr></w:style>
+        <w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Normal"/><w:qFormat/><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/><w:color w:val="\(spec.theme.subtleHex)"/></w:rPr></w:style>
+        <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:spacing w:before="360" w:after="160"/></w:pPr><w:rPr><w:b/><w:sz w:val="34"/><w:szCs w:val="34"/><w:color w:val="\(spec.theme.titleHex)"/></w:rPr></w:style>
         <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/><w:qFormat/><w:pPr><w:ind w:left="420"/></w:pPr></w:style>
         </w:styles>
         """

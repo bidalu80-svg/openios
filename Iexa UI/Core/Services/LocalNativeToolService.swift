@@ -13,6 +13,7 @@ enum LocalNativeOfficeKind: String, Sendable, Equatable {
     case excel
     case powerPoint
     case word
+    case pdf
 
     var displayName: String {
         switch self {
@@ -22,6 +23,8 @@ enum LocalNativeOfficeKind: String, Sendable, Equatable {
             return "PPT"
         case .word:
             return "Word"
+        case .pdf:
+            return "PDF"
         }
     }
 
@@ -33,6 +36,8 @@ enum LocalNativeOfficeKind: String, Sendable, Equatable {
             return "正在生成本地 PPT..."
         case .word:
             return "正在生成本地 Word..."
+        case .pdf:
+            return "正在生成本地 PDF..."
         }
     }
 }
@@ -94,6 +99,14 @@ final class LocalNativeToolService {
 
     static func officeActionKind(in content: String) -> LocalNativeOfficeKind? {
         let lower = content.lowercased()
+        if lower.contains("office.create_pdf")
+            || lower.contains("office_create_pdf")
+            || lower.contains("create_pdf")
+            || lower.contains("pdf.create")
+            || lower.range(of: #""action"\s*:\s*"pdf""#, options: .regularExpression) != nil
+            || lower.range(of: #""name"\s*:\s*"pdf""#, options: .regularExpression) != nil {
+            return .pdf
+        }
         if lower.contains("office.create_ppt")
             || lower.contains("office.create_powerpoint")
             || lower.contains("office_create_ppt")
@@ -157,6 +170,8 @@ final class LocalNativeToolService {
             return await executeCreatePowerPoint(call)
         case "office.create_word", "office.create_docx", "office_create_word", "create_word", "create_docx", "word.create", "docx.create", "word", "docx":
             return await executeCreateWord(call)
+        case "office.create_pdf", "office_create_pdf", "create_pdf", "pdf.create", "pdf":
+            return await executeCreatePDF(call)
         default:
             return [
                 "action": action.isEmpty ? "unknown" : action,
@@ -211,6 +226,21 @@ final class LocalNativeToolService {
         }
     }
 
+    private func executeCreatePDF(_ call: [String: Any]) async -> [String: Any] {
+        do {
+            let result = try await LocalOfficeDocumentService.shared.createPDF(from: call)
+            var payload = result.payload
+            payload["action"] = "office.create_pdf"
+            return payload
+        } catch {
+            return [
+                "action": "office.create_pdf",
+                "ok": false,
+                "error": error.localizedDescription
+            ]
+        }
+    }
+
     private static func files(from result: [String: Any]) -> [ChatMessageFile] {
         guard (result["ok"] as? Bool) == true else { return [] }
         var files: [ChatMessageFile] = []
@@ -251,6 +281,8 @@ final class LocalNativeToolService {
                 kind = .excel
             } else if action.contains("word") || action.contains("docx") || documentType == "word" {
                 kind = .word
+            } else if action.contains("pdf") || documentType == "pdf" {
+                kind = .pdf
             } else {
                 kind = nil
             }
