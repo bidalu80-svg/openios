@@ -1272,13 +1272,6 @@ private struct SlidePreviewRenderer {
         context.fillPath()
         context.restoreGState()
     }
-            drawDiagonalBand(context, points: [
-                CGPoint(x: 1000, y: 0), CGPoint(x: size.width, y: 0),
-                CGPoint(x: size.width, y: 255), CGPoint(x: 1088, y: 300)
-            ], color: theme.accentColor.withAlphaComponent(0.12))
-        }
-    }
-
     private static func drawGradient(_ context: CGContext, bounds: CGRect, startHex: String, endHex: String) {
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         let colors = [UIColor(hex: startHex).cgColor, UIColor(hex: endHex).cgColor] as CFArray
