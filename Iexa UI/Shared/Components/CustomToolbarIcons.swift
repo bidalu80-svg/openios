@@ -1,4 +1,55 @@
 import SwiftUI
+import UIKit
+
+private struct IexaNativeBlurView: UIViewRepresentable {
+    let style: UIBlurEffect.Style
+
+    func makeUIView(context: Context) -> UIVisualEffectView {
+        let view = UIVisualEffectView(effect: UIBlurEffect(style: style))
+        view.backgroundColor = .clear
+        return view
+    }
+
+    func updateUIView(_ uiView: UIVisualEffectView, context: Context) {
+        uiView.effect = UIBlurEffect(style: style)
+        uiView.backgroundColor = .clear
+    }
+}
+
+struct IexaNativeGlassFill<S: Shape>: View {
+    @Environment(\.theme) private var theme
+
+    let shape: S
+    var lightTintOpacity: Double = 0.42
+    var darkTintOpacity: Double = 0.18
+    var highlightOpacity: Double = 0.52
+
+    var body: some View {
+        IexaNativeBlurView(style: theme.isDark ? .systemChromeMaterialDark : .systemChromeMaterialLight)
+            .overlay {
+                shape.fill(baseTint)
+            }
+            .overlay {
+                shape.fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(theme.isDark ? 0.06 : highlightOpacity),
+                            Color.white.opacity(theme.isDark ? 0.02 : 0.16)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            }
+            .clipShape(shape)
+    }
+
+    private var baseTint: Color {
+        theme.isDark
+            ? Color.black.opacity(darkTintOpacity)
+            : Color.white.opacity(lightTintOpacity)
+    }
+}
 
 private struct IexaToolbarGlassBackground: ViewModifier {
     @Environment(\.theme) private var theme
@@ -8,36 +59,49 @@ private struct IexaToolbarGlassBackground: ViewModifier {
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            if compact && cornerRadius >= 20 {
-                content
-                    .glassEffect(.regular, in: Capsule(style: .continuous))
-                    .shadow(color: toolbarShadowColor, radius: compact ? 14 : 18, x: 0, y: 8)
-            } else {
-                content
-                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                    .shadow(color: toolbarShadowColor, radius: compact ? 14 : 18, x: 0, y: 8)
-            }
-        } else {
+        if compact && cornerRadius >= 20 {
+            let shape = Capsule(style: .continuous)
             content
                 .background {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(.regularMaterial)
-                        .overlay {
-                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                .fill(Color.white.opacity(theme.isDark ? 0.04 : (compact ? 0.20 : 0.26)))
-                        }
-                        .overlay {
-                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                .strokeBorder(Color.white.opacity(theme.isDark ? 0.16 : 0.70), lineWidth: 0.7)
-                        }
-                        .shadow(color: toolbarShadowColor, radius: compact ? 14 : 18, x: 0, y: 8)
+                    IexaNativeGlassFill(
+                        shape: shape,
+                        lightTintOpacity: 0.36,
+                        darkTintOpacity: 0.22,
+                        highlightOpacity: 0.50
+                    )
                 }
+                .clipShape(shape)
+                .overlay {
+                    shape.strokeBorder(toolbarStrokeColor, lineWidth: 0.7)
+                }
+                .shadow(color: toolbarShadowColor, radius: compact ? 18 : 22, x: 0, y: 9)
+        } else {
+            let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            content
+                .background {
+                    IexaNativeGlassFill(
+                        shape: shape,
+                        lightTintOpacity: 0.38,
+                        darkTintOpacity: 0.22,
+                        highlightOpacity: 0.52
+                    )
+                }
+                .clipShape(shape)
+                .overlay {
+                    shape.strokeBorder(toolbarStrokeColor, lineWidth: 0.7)
+                }
+                .shadow(color: toolbarShadowColor, radius: compact ? 18 : 22, x: 0, y: 9)
         }
     }
 
+    private var toolbarStrokeColor: Color {
+        theme.isDark
+            ? Color.white.opacity(0.14)
+            : Color.white.opacity(0.82)
+    }
+
     private var toolbarShadowColor: Color {
-        Color.black.opacity(theme.isDark ? 0.28 : 0.10)
+        Color.black.opacity(theme.isDark ? 0.30 : 0.12)
     }
 }
 

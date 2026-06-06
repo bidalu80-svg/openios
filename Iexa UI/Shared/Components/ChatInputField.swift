@@ -377,12 +377,12 @@ struct ChatInputField: View {
             }
         }
         .background {
-            RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
-                .fill(.regularMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
-                        .fill(composerGlassTint)
-                }
+            IexaNativeGlassFill(
+                shape: RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous),
+                lightTintOpacity: 0.44,
+                darkTintOpacity: 0.24,
+                highlightOpacity: 0.48
+            )
         }
         .clipShape(RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous))
         .overlay {
@@ -404,14 +404,10 @@ struct ChatInputField: View {
         text.contains("\n") || text.count > 60 ? 18 : 22
     }
 
-    private var composerGlassTint: Color {
-        Color.white.opacity(theme.isDark ? 0.05 : 0.30)
-    }
-
     private var composerBorderColor: Color {
         isFocused
             ? theme.brandPrimary.opacity(theme.isDark ? 0.45 : 0.30)
-            : Color.white.opacity(theme.isDark ? 0.12 : 0.72)
+            : Color.white.opacity(theme.isDark ? 0.14 : 0.80)
     }
 
     // MARK: - Inline Plus Button
