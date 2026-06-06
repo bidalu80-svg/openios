@@ -66,8 +66,8 @@ The native implementation behind `iexa_local_alpine_execute` should:
 6. Return a heap-allocated UTF-8 buffer and set `exit_code`.
 7. Free returned buffers in `iexa_local_alpine_free`.
 
-Do not use iSH's `main.m`, `AppDelegate.m`, `TerminalViewController.m`, or
-Storyboard/UI targets inside Iexa.
+Do not use iSH's `main.m`, `AppDelegate.m`, or `TerminalViewController.m`
+inside Iexa.
 
 ## Current Native File
 
