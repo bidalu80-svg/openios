@@ -868,6 +868,7 @@ struct ChatSettingsView: View {
                 // Built-in pills
                 quickPillToggle(id: "web", icon: "magnifyingglass", name: "网页搜索")
                 quickPillToggle(id: "image", icon: "photo", name: "图像生成")
+                quickPillToggle(id: "office", icon: "doc.richtext", name: "Office 文档")
 
                 // Server tools
                 if isLoadingTools {

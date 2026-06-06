@@ -28,6 +28,7 @@ struct ToolItem: Identifiable, Hashable {
 struct ToolsMenuSheet: View {
     @Binding var webSearchEnabled: Bool
     @Binding var imageGenerationEnabled: Bool
+    @Binding var localOfficeEnabled: Bool
     @Binding var codeInterpreterEnabled: Bool
     var isWebSearchAvailable: Bool = true
     var isImageGenerationAvailable: Bool = true
@@ -66,12 +67,9 @@ struct ToolsMenuSheet: View {
                             .padding(.horizontal, Spacing.md)
                     }
 
-                    // 内置工具区（网页搜索、生图、代码解释器）
-                    let hasBuiltins = isWebSearchAvailable || isImageGenerationAvailable || isCodeInterpreterAvailable
-                    if hasBuiltins {
-                        builtinToolsSection
-                            .padding(.horizontal, Spacing.md)
-                    }
+                    // 内置工具区（网页搜索、生图、Office、代码解释器）
+                    builtinToolsSection
+                        .padding(.horizontal, Spacing.md)
 
                     // 工具区
                     toolsSection
@@ -218,6 +216,15 @@ struct ToolsMenuSheet: View {
         )
     }
 
+    private var localOfficeToggle: some View {
+        featureToggleTile(
+            icon: "doc.richtext",
+            title: "Office 文档",
+            subtitle: "本地生成 Excel、PPT、Word 和 PDF",
+            isOn: $localOfficeEnabled
+        )
+    }
+
     private var codeInterpreterToggle: some View {
         featureToggleTile(
             icon: "chevron.left.forwardslash.chevron.right",
@@ -336,6 +343,8 @@ struct ToolsMenuSheet: View {
             if isImageGenerationAvailable {
                 imageGenerationToggle
             }
+
+            localOfficeToggle
 
             if isCodeInterpreterAvailable {
                 codeInterpreterToggle
@@ -621,6 +630,7 @@ struct ToolsMenuSheet: View {
             ToolsMenuSheet(
                 webSearchEnabled: .constant(false),
                 imageGenerationEnabled: .constant(false),
+                localOfficeEnabled: .constant(false),
                 codeInterpreterEnabled: .constant(false),
                 tools: [
                     ToolItem(

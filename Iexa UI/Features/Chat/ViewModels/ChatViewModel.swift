@@ -312,6 +312,7 @@ final class ChatViewModel {
             }
         }
     }
+    var localOfficeEnabled: Bool = false
     var codeInterpreterEnabled: Bool = false {
         didSet {
             guard !suppressBuiltinFeatureTracking else { return }
@@ -345,8 +346,8 @@ final class ChatViewModel {
     /// Prevents `syncToolSelectionWithDefaults()` from re-enabling them.
     private var userDisabledToolIds: Set<String> = []
     /// Built-in features (web_search, image_generation, code_interpreter) the user
-    /// has explicitly toggled OFF during this session. Prevents
-    /// `applyIncrementalModelDefaults()` from re-enabling them before each send.
+    /// has explicitly toggled OFF during this session. Prevents model/default
+    /// sync paths from re-enabling them silently.
     private var userDisabledBuiltinFeatures: Set<String> = []
     /// When `true`, mutations to `webSearchEnabled`, `imageGenerationEnabled`, and
     /// `codeInterpreterEnabled` do NOT update `userDisabledBuiltinFeatures`.
@@ -2036,7 +2037,10 @@ final class ChatViewModel {
         """
     }
 
-    private static func localNativeFunctionToolSchemas(includeBrowserTools: Bool) -> [[String: Any]] {
+    private static func localNativeFunctionToolSchemas(
+        includeBrowserTools: Bool,
+        includeOfficeTools: Bool
+    ) -> [[String: Any]] {
         var tools: [[String: Any]] = []
 
         if includeBrowserTools {
@@ -2079,7 +2083,8 @@ final class ChatViewModel {
             ])
         }
 
-        tools.append(contentsOf: [
+        if includeOfficeTools {
+            tools.append(contentsOf: [
             [
                 "type": "function",
                 "function": [
@@ -2188,7 +2193,8 @@ final class ChatViewModel {
                     ]
                 ]
             ]
-        ])
+            ])
+        }
 
         return tools
     }
@@ -5097,6 +5103,7 @@ final class ChatViewModel {
         cleanupStreaming()
         webSearchEnabled = false
         imageGenerationEnabled = false
+        localOfficeEnabled = false
         codeInterpreterEnabled = false
         isTemporaryChat = UserDefaults.standard.bool(forKey: "temporaryChatDefault")
         userDisabledToolIds = []
@@ -5164,10 +5171,6 @@ final class ChatViewModel {
                 return
             }
         }
-        if isChatWebSearchAllowed && !userDisabledBuiltinFeatures.contains("web_search") {
-            webSearchEnabled = true
-        }
-
         // Process audio attachments depending on transcription mode.
         // Server mode: audio was already uploaded via /api/v1/files/?process=true —
         //   treat it like any other uploaded file (pass through with its uploadedFileId).
@@ -9600,6 +9603,21 @@ final class ChatViewModel {
         let officeKind = LocalNativeToolService.officeActionKind(in: content)
         let browserAction = LocalNativeToolService.browserActionName(in: content)
 
+        if browserAction != nil, !isLocalBrowserNativeToolsEnabled {
+            return LocalNativeFunctionToolExecution(
+                toolContent: "Local browser/web search tools are disabled for this chat.",
+                completedAssistantTurn: false,
+                visibleContent: nil
+            )
+        }
+        if officeKind != nil, !localOfficeEnabled {
+            return LocalNativeFunctionToolExecution(
+                toolContent: "Local Office/PDF tools are disabled for this chat.",
+                completedAssistantTurn: false,
+                visibleContent: nil
+            )
+        }
+
         if let officeKind {
             markLocalOfficeGenerationStarted(messageId: assistantMessageId, kind: officeKind)
         } else if let browserAction {
@@ -9948,6 +9966,39 @@ final class ChatViewModel {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return true }
         return !localNativeFunctionToolsUnsupportedModels.contains(key)
+    }
+
+    private var isLocalBrowserNativeToolsEnabled: Bool {
+        isChatWebSearchAllowed && webSearchEnabled
+    }
+
+    private func latestUserTextForLocalNativeToolDecision() -> String? {
+        conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })?.content
+    }
+
+    private func shouldExposeLocalBrowserNativeTools(for text: String?) -> Bool {
+        guard isLocalBrowserNativeToolsEnabled,
+              let text,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        return Self.shouldExposeLocalBrowserTools(text)
+            || shouldResolveWebSearchContext(for: text)
+    }
+
+    private func shouldExposeLocalOfficeNativeTools(
+        for text: String?,
+        officeRevisionContext: String? = nil
+    ) -> Bool {
+        guard localOfficeEnabled,
+              let text,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        return Self.shouldExposeLocalOfficeTools(text)
+            || officeRevisionContext != nil
     }
 
     private static func errorLooksLikeUnsupportedNativeTools(_ error: Error) -> Bool {
@@ -11314,12 +11365,9 @@ final class ChatViewModel {
             return ["1", "true"].contains(value.lowercased())
         }
 
-        // Only enable features if admin has them on AND the user hasn't explicitly
-        // turned them off this session. Never force-disable ones the user turned on.
-        if isChatWebSearchAllowed
-            && !userDisabledBuiltinFeatures.contains("web_search") {
-            webSearchEnabled = true
-        }
+        // Only enable model-provided features that are not controlled by the
+        // current chat's per-turn web-search switch. Web search must respect
+        // the visible toggle exactly; do not silently turn it back on here.
         let nameSuggestsImageGeneration = shouldUseDirectImageGeneration(modelId: model.id)
             || shouldPreferChatNativeImageGeneration(modelId: model.id)
 
@@ -11557,12 +11605,24 @@ final class ChatViewModel {
         let nativeToolsDisabled = request.toolChoice?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() == "none"
+        let latestUserTextForLocalNativeTools = latestUserTextForLocalNativeToolDecision()
+        let shouldExposeBrowserTools = shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalNativeTools)
+        let localOfficeRevisionContextForNativeTools = localOfficeEnabled
+            ? latestUserTextForLocalNativeTools.flatMap { localOfficeRevisionSystemContext(for: $0) }
+            : nil
+        let shouldExposeOfficeTools = shouldExposeLocalOfficeNativeTools(
+            for: latestUserTextForLocalNativeTools,
+            officeRevisionContext: localOfficeRevisionContextForNativeTools
+        )
+        let shouldExposeLocalNativeTools = shouldExposeBrowserTools || shouldExposeOfficeTools
         if shouldUseLocalNativeFunctionTools(for: request.model),
+           shouldExposeLocalNativeTools,
            request.tools == nil,
            request.responsesTools?.isEmpty != false,
            !nativeToolsDisabled {
             request.tools = Self.localNativeFunctionToolSchemas(
-                includeBrowserTools: isChatWebSearchAllowed && webSearchEnabled
+                includeBrowserTools: shouldExposeBrowserTools,
+                includeOfficeTools: shouldExposeOfficeTools
             )
             request.toolChoice = "auto"
         }
@@ -13125,7 +13185,10 @@ final class ChatViewModel {
         """
     }
 
-    private static func localNativeToolSystemContext() -> String {
+    private static func localNativeToolSystemContext(
+        includeBrowserTools: Bool,
+        includeOfficeTools: Bool
+    ) -> String {
         let calendar = Calendar.current
         let now = Date()
         let startOfToday = calendar.startOfDay(for: now)
@@ -13141,16 +13204,94 @@ final class ChatViewModel {
         let todayEndText = formatter.string(from: endOfToday)
         let exampleEndText = formatter.string(from: exampleEventEnd)
         let timezoneName = TimeZone.current.identifier
-        return """
-        Iexa has on-device native iOS tools for device info, clipboard, local notifications, location, weather, calendar, local browser/web reading, and local Office/PDF document generation. These run locally on the user's device and do not require the remote server.
-        Iexa does not have a dedicated video storyboard, shot-by-shot storyboard, short-video storyboard, or storyboard image generation native tool. Do not claim that such a native tool exists. If a user asks for video storyboards, answer normally and only offer actually available alternatives such as PPT, Word, PDF, ordinary image generation, or Local Alpine when appropriate.
+        let browserToolDescription = includeBrowserTools ? "local browser/web reading, " : ""
+        let officeToolDescription = includeOfficeTools ? "local Office/PDF document generation" : ""
+        let joinedToolDescription = [
+            "device info",
+            "clipboard",
+            "local notifications",
+            "location",
+            "weather",
+            "calendar",
+            browserToolDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
+            officeToolDescription
+        ]
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+        let browserUseDescription = includeBrowserTools ? "search/open/read/screenshot/download webpages, " : ""
+        let officeUseDescription = includeOfficeTools ? "or directly create an Excel/PPT/Word/PDF file" : ""
+        let nativeUseDescription = [
+            "read device status/info",
+            "read/write clipboard text",
+            "show a local notification",
+            "get/use their current location",
+            "query current local weather",
+            "query local calendar events",
+            "create/delete a calendar event",
+            browserUseDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
+            officeUseDescription
+        ]
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+        let functionToolNames = [
+            includeBrowserTools ? "`web_search`, `browser_readable`" : nil,
+            includeOfficeTools ? "`office_create_*`" : nil
+        ]
+            .compactMap { $0 }
+            .joined(separator: ", ")
+        let functionToolInstruction = functionToolNames.isEmpty
+            ? ""
+            : "If OpenAI-style function tools named \(functionToolNames) are available in this request, call those real tools first. The iOS host will execute them and return the real result as a tool message in the same turn.\n"
+        let officeVsAlpineInstruction = includeOfficeTools
+            ? "For code execution, Python scripts, package installs, project edits, or \"write/run Python to generate a file\", use Local Alpine when available instead of the Office actions. The Office actions are for productized file creation from a document draft, not for replacing the Python/terminal agent.\n"
+            : ""
+        let browserActionExamples = includeBrowserTools ? """
+        ```iexa_native
+        {"action":"web.search","query":"OpenAI 最新 Responses API 工具","limit":6,"screenshot":true}
+        ```
+        ```iexa_native
+        {"action":"browser.readable","url":"https://example.com/article","screenshot":true,"max_length":8000}
+        ```
+        ```iexa_native
+        {"action":"browser.screenshot","url":"https://example.com"}
+        ```
+        ```iexa_native
+        {"action":"browser.fetch","url":"https://example.com/file.pdf"}
+        ```
+        """ : ""
+        let officeActionExamples = includeOfficeTools ? """
+        ```iexa_native
+        {"action":"office.create_excel","title":"销售周报","file_name":"销售周报.xlsx","sheets":[{"name":"汇总","headers":["指标","数值","备注"],"rows":[["销售额","128000","环比增长"],["订单数","342","本周新增"]]}]}
+        ```
+        ```iexa_native
+        {"action":"office.create_ppt","title":"产品介绍","file_name":"产品介绍.pptx","subtitle":"本地生成演示稿","theme":{"style":"deep_blue_tech","layout":"dashboard","decoration":"grid","background":"071326","background_2":"102A6B","surface":"12213D","accent":"22D3EE","text":"F8FAFC","subtle":"B6C6E3"},"slides":[{"layout":"cover","title":"产品介绍","subtitle":"2026 年规划"},{"layout":"dashboard","title":"核心能力","bullets":["本地自动化","多模型接入","文件生成"]},{"layout":"table","title":"计划","table":[["阶段","目标"],["MVP","生成并预览"],["增强","模板和图片"]]}]}
+        ```
+        ```iexa_native
+        {"action":"office.create_word","title":"产品方案","file_name":"产品方案.docx","subtitle":"本地生成文档","theme":{"style":"minimal","accent":"111827"},"sections":[{"heading":"背景","paragraphs":["目标用户需要一个本地优先的智能工作流。"]},{"heading":"核心能力","bullets":["多模型接入","本地文件生成","移动端预览和分享"]}]}
+        ```
+        ```iexa_native
+        {"action":"office.create_pdf","title":"项目汇报","file_name":"项目汇报.pdf","format":"slides","theme":{"style":"warm_business","layout":"split","decoration":"diagonal","background":"FFF7ED","background_2":"FED7AA","accent":"EA580C","text":"1F2937","subtle":"78716C"},"slides":[{"layout":"cover","title":"项目汇报","subtitle":"本地生成 PDF"},{"layout":"split","title":"关键进展","bullets":["目标清晰","风险可控","下一步明确"]}]}
+        ```
+        """ : ""
+        let browserInstructions = includeBrowserTools ? """
 
+        For browser/web actions, when real function tools are present, call `web_search` or `browser_readable`; when using the Markdown fallback, emit `web.search` or `browser.readable` in the `iexa_native` JSON. Search before answering whenever the answer depends on information that may have changed after training or that you are not confident is still true: current/latest/recent facts, software/app/game versions, patch notes, releases, prices, stocks, laws/policies, schedules, sports, weather, news, rankings, product availability, official announcements, live website content, or "what is it now / has it changed / which version" style questions. If you are unsure whether your knowledge is stale, search first; do not wait for the user to literally say 搜、查、搜索, or 联网. Do not use the browser for stable writing, translation, math, coding, or brainstorming unless the user asks for current/source-backed information.
+        Use `web_search` / `web.search` when there is no exact URL. Use `browser_readable` / `browser.readable` when a URL is known or after search results need verification. Set `screenshot:true` when the user may benefit from seeing the page; Iexa will show a clickable webpage source card with thumbnail in the chat. Use `browser.screenshot` for visual page checks and `browser.fetch` for downloadable files. After Iexa appends the real browser result, answer from that result; cite page titles/URLs plainly and do not claim you cannot browse.
+        """ : ""
+        let officeInstructions = includeOfficeTools ? """
+
+        For Office/PDF actions, when real function tools are present, call `office_create_excel`, `office_create_ppt`, `office_create_word`, or `office_create_pdf`; when using the Markdown fallback, emit `office.create_excel`, `office.create_ppt`, `office.create_word`, or `office.create_pdf` in the `iexa_native` JSON. Build a concise structured draft from the user's natural language and attachments. Always translate visual requests into a concrete `theme`: `style`, `layout`, `decoration`, `background`, `background_2`, `surface`, `accent`, `text`, and `subtle`. Supported style/layout/decoration hints include `deep_blue_tech`, `minimal`, `dark`, `warm_business`, `green`, `violet`, `editorial`, `luxury`, `playful`, `split`, `centered`, `card`, `dashboard`, `poster`, `sidebar`, `diagonal`, `circle`, `grid`, `dots`, `frame`, and `wave`. For "黑金", "金色商务", "高级商务", "奢华", or "premium/luxury", use `style:"luxury"` with a near-black `background`, a second dark `background_2`, gold `accent`, light `text`, and `decoration:"frame"` or `layout:"poster"`/`card`; never output a white minimal Word/PPT/PDF for those requests. If the user attaches a screenshot/template image, inspect it and approximate its visual fingerprint: dominant colors, dark/light mood, title placement, card/sidebar/split/dashboard/poster composition, border/shape/grid/dot/circle/wave decoration, and typography density. Put that fingerprint into `theme` and per-slide `layout`; do not reuse the default blue template when a different visual style was requested. If exact screenshot replication is impossible, still generate the closest local approximation instead of saying the tool cannot do it.
+
+        If a `[Latest local Office document for revision]` context is present and the user asks to modify, regenerate, restyle, improve, rewrite, or "改方案/换方案/按这个改", you must call a fresh Office/PDF function tool or emit a fresh Office/PDF `iexa_native` block using the previous structured draft as the base. Preserve useful existing content, apply the requested changes, and generate a new file. Do not answer with only a plan, explanation, or promise.
+
+        For PDF, use `office.create_pdf`; use `format:"slides"` with `slides` for deck-like PDFs, `format:"document"` with `sections` for report-like PDFs, or sheets/rows for table PDFs. If the user asks to convert the latest generated Office file to PDF, emit `office.create_pdf`; include the latest file URL as `source_url` when it is visible in context, otherwise the app will use the most recent local Office result automatically. If a key requirement is missing, choose a safe default instead of asking many setup questions. After Iexa appends the native tool result, continue from that real result and answer normally. If permissions are denied, location is not ready, notification permission is disabled, WeatherKit entitlement is unavailable, or Office/PDF generation fails, explain the exact local permission/state issue.
+        """ : ""
+        return """
+        Iexa has on-device native iOS tools for \(joinedToolDescription). These run locally on the user's device and do not require the remote server.
         Current device time: \(nowText), timezone: \(timezoneName). For relative requests such as "今天", "现在", "明天", or "查看日历", calculate the date range from this current device time. Do not reuse stale sample dates.
 
-        Use them only when the user asks to read device status/info, read/write clipboard text, show a local notification, get/use their current location, query current local weather, query local calendar events, create/delete a calendar event, search/open/read/screenshot/download webpages, or directly create an Excel/PPT/Word/PDF file. Do not emit this tool for ordinary conversation.
-        For code execution, Python scripts, package installs, project edits, or "write/run Python to generate a file", use Local Alpine when available instead of the Office actions. The Office actions are for productized file creation from a document draft, not for replacing the Python/terminal agent.
-        If OpenAI-style function tools named `web_search`, `browser_readable`, or `office_create_*` are available in this request, call those real tools first. The iOS host will execute them and return the real result as a tool message in the same turn.
-        If real function tools are not available, use the Markdown fallback by outputting exactly one fenced `iexa_native` JSON block and no fake tool-call syntax.
+        Use them only when the user asks to \(nativeUseDescription). Do not emit this tool for ordinary conversation.
+        \(officeVsAlpineInstruction)\(functionToolInstruction)If real function tools are not available, use the Markdown fallback by outputting exactly one fenced `iexa_native` JSON block and no fake tool-call syntax.
 
         Supported actions:
         ```iexa_native
@@ -13183,39 +13324,10 @@ final class ChatViewModel {
         ```iexa_native
         {"action":"delete_calendar_event","id":"event-id-from-list"}
         ```
-        ```iexa_native
-        {"action":"web.search","query":"OpenAI 最新 Responses API 工具","limit":6,"screenshot":true}
-        ```
-        ```iexa_native
-        {"action":"browser.readable","url":"https://example.com/article","screenshot":true,"max_length":8000}
-        ```
-        ```iexa_native
-        {"action":"browser.screenshot","url":"https://example.com"}
-        ```
-        ```iexa_native
-        {"action":"browser.fetch","url":"https://example.com/file.pdf"}
-        ```
-        ```iexa_native
-        {"action":"office.create_excel","title":"销售周报","file_name":"销售周报.xlsx","sheets":[{"name":"汇总","headers":["指标","数值","备注"],"rows":[["销售额","128000","环比增长"],["订单数","342","本周新增"]]}]}
-        ```
-        ```iexa_native
-        {"action":"office.create_ppt","title":"产品介绍","file_name":"产品介绍.pptx","subtitle":"本地生成演示稿","theme":{"style":"deep_blue_tech","layout":"dashboard","decoration":"grid","background":"071326","background_2":"102A6B","surface":"12213D","accent":"22D3EE","text":"F8FAFC","subtle":"B6C6E3"},"slides":[{"layout":"cover","title":"产品介绍","subtitle":"2026 年规划"},{"layout":"dashboard","title":"核心能力","bullets":["本地自动化","多模型接入","文件生成"]},{"layout":"table","title":"计划","table":[["阶段","目标"],["MVP","生成并预览"],["增强","模板和图片"]]}]}
-        ```
-        ```iexa_native
-        {"action":"office.create_word","title":"产品方案","file_name":"产品方案.docx","subtitle":"本地生成文档","theme":{"style":"minimal","accent":"111827"},"sections":[{"heading":"背景","paragraphs":["目标用户需要一个本地优先的智能工作流。"]},{"heading":"核心能力","bullets":["多模型接入","本地文件生成","移动端预览和分享"]}]}
-        ```
-        ```iexa_native
-        {"action":"office.create_pdf","title":"项目汇报","file_name":"项目汇报.pdf","format":"slides","theme":{"style":"warm_business","layout":"split","decoration":"diagonal","background":"FFF7ED","background_2":"FED7AA","accent":"EA580C","text":"1F2937","subtle":"78716C"},"slides":[{"layout":"cover","title":"项目汇报","subtitle":"本地生成 PDF"},{"layout":"split","title":"关键进展","bullets":["目标清晰","风险可控","下一步明确"]}]}
-        ```
-
-        For browser/web actions, when real function tools are present, call `web_search` or `browser_readable`; when using the Markdown fallback, emit `web.search` or `browser.readable` in the `iexa_native` JSON. Search before answering whenever the answer depends on information that may have changed after training or that you are not confident is still true: current/latest/recent facts, software/app/game versions, patch notes, releases, prices, stocks, laws/policies, schedules, sports, weather, news, rankings, product availability, official announcements, live website content, or "what is it now / has it changed / which version" style questions. If you are unsure whether your knowledge is stale, search first; do not wait for the user to literally say 搜、查、搜索, or 联网. Do not use the browser for stable writing, translation, math, coding, or brainstorming unless the user asks for current/source-backed information.
-        Use `web_search` / `web.search` when there is no exact URL. Use `browser_readable` / `browser.readable` when a URL is known or after search results need verification. Set `screenshot:true` when the user may benefit from seeing the page; Iexa will show a clickable webpage source card with thumbnail in the chat. Use `browser.screenshot` for visual page checks and `browser.fetch` for downloadable files. After Iexa appends the real browser result, answer from that result; cite page titles/URLs plainly and do not claim you cannot browse.
-
-        For Office/PDF actions, when real function tools are present, call `office_create_excel`, `office_create_ppt`, `office_create_word`, or `office_create_pdf`; when using the Markdown fallback, emit `office.create_excel`, `office.create_ppt`, `office.create_word`, or `office.create_pdf` in the `iexa_native` JSON. Build a concise structured draft from the user's natural language and attachments. Always translate visual requests into a concrete `theme`: `style`, `layout`, `decoration`, `background`, `background_2`, `surface`, `accent`, `text`, and `subtle`. Supported style/layout/decoration hints include `deep_blue_tech`, `minimal`, `dark`, `warm_business`, `green`, `violet`, `editorial`, `luxury`, `playful`, `split`, `centered`, `card`, `dashboard`, `poster`, `sidebar`, `diagonal`, `circle`, `grid`, `dots`, `frame`, and `wave`. For "黑金", "金色商务", "高级商务", "奢华", or "premium/luxury", use `style:"luxury"` with a near-black `background`, a second dark `background_2`, gold `accent`, light `text`, and `decoration:"frame"` or `layout:"poster"`/`card`; never output a white minimal Word/PPT/PDF for those requests. If the user attaches a screenshot/template image, inspect it and approximate its visual fingerprint: dominant colors, dark/light mood, title placement, card/sidebar/split/dashboard/poster composition, border/shape/grid/dot/circle/wave decoration, and typography density. Put that fingerprint into `theme` and per-slide `layout`; do not reuse the default blue template when a different visual style was requested. If exact screenshot replication is impossible, still generate the closest local approximation instead of saying the tool cannot do it.
-
-        If a `[Latest local Office document for revision]` context is present and the user asks to modify, regenerate, restyle, improve, rewrite, or "改方案/换方案/按这个改", you must call a fresh Office/PDF function tool or emit a fresh Office/PDF `iexa_native` block using the previous structured draft as the base. Preserve useful existing content, apply the requested changes, and generate a new file. Do not answer with only a plan, explanation, or promise.
-
-        For PDF, use `office.create_pdf`; use `format:"slides"` with `slides` for deck-like PDFs, `format:"document"` with `sections` for report-like PDFs, or sheets/rows for table PDFs. If the user asks to convert the latest generated Office file to PDF, emit `office.create_pdf`; include the latest file URL as `source_url` when it is visible in context, otherwise the app will use the most recent local Office result automatically. If a key requirement is missing, choose a safe default instead of asking many setup questions. After Iexa appends the native tool result, continue from that real result and answer normally. If permissions are denied, location is not ready, notification permission is disabled, WeatherKit entitlement is unavailable, or Office/PDF generation fails, explain the exact local permission/state issue.
+        \(browserActionExamples)
+        \(officeActionExamples)
+        \(browserInstructions)
+        \(officeInstructions)
         """
     }
 
@@ -13354,6 +13466,7 @@ final class ChatViewModel {
         hasAttachments: Bool
     ) async {
         guard isChatWebSearchAllowed else { return }
+        guard webSearchEnabled else { return }
         guard !hasAttachments else { return }
         guard !WebLinkContextResolver.containsHTTPURL(text) else { return }
         guard !shouldUseDirectImageGeneration(modelId: modelId),
@@ -13682,10 +13795,17 @@ final class ChatViewModel {
 
     private static func userExplicitlyRequestsWebSearch(_ text: String) -> Bool {
         let normalized = text
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         guard !normalized.isEmpty else { return false }
-        return normalized.contains("搜") || normalized.contains("查")
+        guard normalized != "搜", normalized != "查" else { return false }
+        let markers = [
+            "搜一下", "搜索", "帮我搜", "查一下", "查询", "帮我查",
+            "联网", "上网", "打开网页", "读取网页", "阅读网页", "网页", "网站", "网址",
+            "search", "browse", "lookup", "websearch", "openurl"
+        ]
+        return markers.contains { normalized.contains($0) }
     }
 
     private static func shouldUseWebSearchForKnowledgeSensitiveQuestion(_ text: String) -> Bool {
@@ -13928,10 +14048,13 @@ final class ChatViewModel {
             content = Self.promptWithImageSizeInstruction(trimmedContent, canvasSize: canvasSize, endpointSize: endpointSize)
         }
 
+        let webSearchContext = isLocalBrowserNativeToolsEnabled
+            ? webSearchContextsByMessageId[message.id]
+            : nil
         let extraContexts = [
             attachmentContextsByMessageId[message.id],
             webLinkContextsByMessageId[message.id],
-            webSearchContextsByMessageId[message.id]
+            webSearchContext
         ]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -14458,16 +14581,26 @@ final class ChatViewModel {
         let localSkillsContext = LocalSkillsService.shared.contextPrompt()
         let localNativeToolContext: String? = {
             guard let latestUserTextForLocalAlpine else { return nil }
-            let officeRevisionContext = localOfficeRevisionSystemContext(for: latestUserTextForLocalAlpine)
-            let shouldExposeBrowserTools = isChatWebSearchAllowed
-                && webSearchEnabled
-            let shouldExposeFunctionTools = shouldUseLocalNativeFunctionTools(for: localAlpineModelId)
-            let shouldExpose = shouldExposeFunctionTools
-                || Self.shouldExposeLocalNativeTools(latestUserTextForLocalAlpine)
+            let officeRevisionContext = localOfficeEnabled
+                ? localOfficeRevisionSystemContext(for: latestUserTextForLocalAlpine)
+                : nil
+            let shouldExposeBrowserTools = shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalAlpine)
+            let shouldExposeOfficeTools = shouldExposeLocalOfficeNativeTools(
+                for: latestUserTextForLocalAlpine,
+                officeRevisionContext: officeRevisionContext
+            )
+            let shouldExposeDeviceTools = Self.shouldExposeLocalDeviceNativeTools(latestUserTextForLocalAlpine)
+            let shouldExpose = shouldExposeDeviceTools
                 || shouldExposeBrowserTools
-                || officeRevisionContext != nil
+                || shouldExposeOfficeTools
             guard shouldExpose else { return nil }
-            return [Self.localNativeToolSystemContext(), officeRevisionContext]
+            return [
+                Self.localNativeToolSystemContext(
+                    includeBrowserTools: shouldExposeBrowserTools,
+                    includeOfficeTools: shouldExposeOfficeTools
+                ),
+                officeRevisionContext
+            ]
                 .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
                 .joined(separator: "\n\n")
@@ -15346,6 +15479,12 @@ final class ChatViewModel {
     private func executeLocalNativeTool(messageId: String, content: String) async {
         let officeKind = LocalNativeToolService.officeActionKind(in: content)
         let browserAction = LocalNativeToolService.browserActionName(in: content)
+        if browserAction != nil, !isLocalBrowserNativeToolsEnabled {
+            return
+        }
+        if officeKind != nil, !localOfficeEnabled {
+            return
+        }
         if let officeKind {
             markLocalOfficeGenerationStarted(messageId: messageId, kind: officeKind)
         } else if let browserAction {
@@ -16190,7 +16329,7 @@ final class ChatViewModel {
         appendSystemInstruction(instruction, marker: "[Local native tool result]", to: &messages)
     }
 
-    private static func shouldExposeLocalNativeTools(_ text: String) -> Bool {
+    private static func shouldExposeLocalDeviceNativeTools(_ text: String) -> Bool {
         let lower = text.lowercased()
         let markers = [
             "设备状态", "设备信息", "电量", "电池", "系统信息", "手机信息",
@@ -16199,16 +16338,23 @@ final class ChatViewModel {
             "定位", "位置", "我在哪", "附近", "坐标", "经纬度",
             "天气", "气温", "温度", "下雨", "降雨", "风速", "湿度", "冷不冷", "热不热",
             "日历", "日程", "行程", "事件", "提醒", "会议", "预约", "安排",
-            "excel", "xlsx", "表格文件", "电子表格", "报表文件", "生成报表", "做报表",
-            "ppt", "pptx", "powerpoint", "slides", "幻灯片", "演示文稿", "汇报文件", "课件",
-            "pdf", "pdf文件", "pdf文档", "生成pdf", "做成pdf", "转成pdf",
-            "word", "docx", "文档", "word文档", "写文档", "生成文档", "产品方案",
-            "方案文件", "做方案", "生成方案", "改方案", "重做方案", "换方案",
-            "修改方案", "优化方案", "完善方案", "重新生成方案",
             "device status", "device info", "battery", "clipboard", "pasteboard",
             "copy to clipboard", "read clipboard", "notification", "notify me",
             "calendar", "event", "schedule", "reminder", "location", "where am i",
-            "weather", "temperature", "rain", "wind", "humidity",
+            "weather", "temperature", "rain", "wind", "humidity"
+        ]
+        return markers.contains { lower.contains($0) }
+    }
+
+    private static func shouldExposeLocalOfficeTools(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let markers = [
+            "excel", "xlsx", "表格文件", "电子表格", "报表文件", "生成报表", "做报表",
+            "ppt", "pptx", "powerpoint", "slides", "幻灯片", "演示文稿", "汇报文件", "课件",
+            "pdf", "pdf文件", "pdf文档", "生成pdf", "做成pdf", "转成pdf",
+            "word", "docx", "word文档", "写文档", "生成文档", "产品方案",
+            "方案文件", "做方案", "生成方案", "改方案", "重做方案", "换方案",
+            "修改方案", "优化方案", "完善方案", "重新生成方案",
             "spreadsheet", "presentation", "slide deck", "make a deck", "word document", "docx", "document", "pdf"
         ]
         return markers.contains { lower.contains($0) }
@@ -18122,7 +18268,6 @@ final class ChatViewModel {
             }
         }
         lines.append("Use this capability data when deciding whether a user request should use chat, image generation, attachments, Local Alpine, or a different model.")
-        lines.append("Do not infer a dedicated video storyboard or shot-by-shot storyboard tool from image/video/model capabilities; Iexa has no such native tool.")
         lines.append("[/Current model capability]")
         return lines.joined(separator: "\n")
     }

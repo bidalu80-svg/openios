@@ -80,6 +80,7 @@ struct ChatInputField: View {
     // Tools menu bindings
     @Binding var webSearchEnabled: Bool
     @Binding var imageGenerationEnabled: Bool
+    @Binding var localOfficeEnabled: Bool
     @Binding var codeInterpreterEnabled: Bool
     var isWebSearchAvailable: Bool = true
     var isImageGenerationAvailable: Bool = true
@@ -193,7 +194,7 @@ struct ChatInputField: View {
 
     /// Whether any tool/feature is currently active.
     private var hasActiveFeatures: Bool {
-        webSearchEnabled || !selectedToolIds.isEmpty
+        webSearchEnabled || localOfficeEnabled || !selectedToolIds.isEmpty
     }
 
     /// Saved quick pill IDs from settings.
@@ -270,6 +271,7 @@ struct ChatInputField: View {
             ToolsMenuSheet(
                 webSearchEnabled: $webSearchEnabled,
                 imageGenerationEnabled: $imageGenerationEnabled,
+                localOfficeEnabled: $localOfficeEnabled,
                 codeInterpreterEnabled: $codeInterpreterEnabled,
                 isWebSearchAvailable: isWebSearchAvailable,
                 isImageGenerationAvailable: isImageGenerationAvailable,
@@ -923,6 +925,19 @@ struct ChatInputField: View {
                         }
                     ))
                 }
+            case "office":
+                pills.append(QuickPill(
+                    id: "office",
+                    icon: "doc.richtext",
+                    label: "Office",
+                    isActive: localOfficeEnabled,
+                    action: {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            localOfficeEnabled.toggle()
+                        }
+                        Haptics.play(.light)
+                    }
+                ))
             default:
                 // Show the pill even when tools haven't loaded yet (e.g. right after
                 // a new chat is created and the async loadTools() hasn't returned).

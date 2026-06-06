@@ -2070,6 +2070,7 @@ struct ChatDetailView: View {
                 onContextBudgetPreviewUpdate: { viewModel.updateLiveContextBudgetPreview() },
                 webSearchEnabled: $vm.webSearchEnabled,
                 imageGenerationEnabled: $vm.imageGenerationEnabled,
+                localOfficeEnabled: $vm.localOfficeEnabled,
                 codeInterpreterEnabled: $vm.codeInterpreterEnabled,
                 isWebSearchAvailable: chatWebSearchEnabled,
                 isImageGenerationAvailable: dependencies.authViewModel.featurePermissions.imageGeneration && isFeatureAvailable("image_generation", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableImageGeneration),
