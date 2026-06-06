@@ -379,9 +379,9 @@ struct ChatInputField: View {
         .background {
             IexaNativeGlassFill(
                 shape: RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous),
-                lightTintOpacity: 0.44,
-                darkTintOpacity: 0.24,
-                highlightOpacity: 0.48
+                lightTintOpacity: 0.18,
+                darkTintOpacity: 0.22,
+                highlightOpacity: 0.32
             )
         }
         .clipShape(RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous))
@@ -407,7 +407,7 @@ struct ChatInputField: View {
     private var composerBorderColor: Color {
         isFocused
             ? theme.brandPrimary.opacity(theme.isDark ? 0.45 : 0.30)
-            : Color.white.opacity(theme.isDark ? 0.14 : 0.80)
+            : Color.white.opacity(theme.isDark ? 0.14 : 0.66)
     }
 
     // MARK: - Inline Plus Button

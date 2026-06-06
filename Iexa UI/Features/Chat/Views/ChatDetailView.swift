@@ -4066,6 +4066,48 @@ struct ChatDetailView: View {
         openMessageFile(file)
     }
 
+    private func shareMessageVideoFile(_ file: ChatMessageFile) {
+        let fileName = file.name ?? file.url ?? "generated-video.mp4"
+        if let localURL = localPreviewURL(for: file) {
+            downloadedFileURL = localURL
+            Haptics.play(.light)
+            return
+        }
+
+        let candidates = [file.displayURL, file.url]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        if let dataURL = candidates.first(where: { $0.hasPrefix("data:video/") }) {
+            Task {
+                do {
+                    if let localURL = try await Self.localFileURL(fromDataURL: dataURL, fallbackName: fileName) {
+                        downloadedFileURL = localURL
+                        Haptics.play(.light)
+                    } else {
+                        openMessageFile(file)
+                    }
+                } catch {
+                    downloadErrorMessage = "视频保存失败：\(error.localizedDescription)"
+                    showDownloadError = true
+                }
+            }
+            return
+        }
+
+        if let fileId = candidates.compactMap(Self.serverFileId(from:)).first {
+            Task { await downloadAndShareFile(fileId: fileId) }
+            return
+        }
+
+        if let remote = candidates.compactMap(URL.init(string:)).first(where: { ["http", "https"].contains($0.scheme?.lowercased()) }) {
+            Task { await downloadAndShareRemoteFile(url: remote, suggestedName: fileName) }
+            return
+        }
+
+        openMessageFile(file)
+    }
+
     private func localPreviewURL(for file: ChatMessageFile) -> URL? {
         for value in [file.displayURL, file.url].compactMap({ $0 }) {
             if let url = URL(string: value), url.isFileURL {
@@ -4350,40 +4392,54 @@ struct ChatDetailView: View {
         let fileName = file.name ?? "generated-video.mp4"
         let fileExt = (fileName as NSString).pathExtension.lowercased()
 
-        return Button {
-            openMessageFile(file)
-        } label: {
-            VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 8) {
+            ZStack(alignment: .topTrailing) {
                 VideoAttachmentThumbnail(file: file)
                     .frame(width: 300, height: 168)
                     .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
 
-                HStack(spacing: 9) {
-                    Image(systemName: "play.rectangle.fill")
+                Button {
+                    shareMessageVideoFile(file)
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
                         .scaledFont(size: 15, weight: .semibold)
-                        .foregroundStyle(theme.brandPrimary)
-                    Text(fileName)
-                        .scaledFont(size: 14, weight: .semibold)
-                        .foregroundStyle(theme.textPrimary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 0)
-                    Text(fileAttachmentSubtitle(for: file, fallbackExtension: fileExt.isEmpty ? "mp4" : fileExt))
-                        .scaledFont(size: 11, weight: .medium)
-                        .foregroundStyle(theme.textTertiary)
-                        .lineLimit(1)
+                        .foregroundStyle(.white)
+                        .frame(width: 38, height: 38)
+                        .background(.black.opacity(0.54), in: Circle())
                 }
+                .buttonStyle(.plain)
+                .padding(8)
+                .accessibilityLabel("保存或分享视频")
             }
-            .padding(10)
-            .frame(maxWidth: 320, alignment: .leading)
-            .background(theme.surfaceContainer.opacity(0.82))
-            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
-                    .strokeBorder(theme.cardBorder.opacity(0.42), lineWidth: 0.5)
-            )
+
+            HStack(spacing: 9) {
+                Image(systemName: "play.rectangle.fill")
+                    .scaledFont(size: 15, weight: .semibold)
+                    .foregroundStyle(theme.brandPrimary)
+                Text(fileName)
+                    .scaledFont(size: 14, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                Text(fileAttachmentSubtitle(for: file, fallbackExtension: fileExt.isEmpty ? "mp4" : fileExt))
+                    .scaledFont(size: 11, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+                    .lineLimit(1)
+            }
         }
-        .buttonStyle(.plain)
+        .padding(10)
+        .frame(maxWidth: 320, alignment: .leading)
+        .background(theme.surfaceContainer.opacity(0.82))
+        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(0.42), lineWidth: 0.5)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+        .onTapGesture {
+            openMessageFile(file)
+        }
     }
 
     private func officeDocumentAttachmentCard(
@@ -8649,6 +8705,7 @@ private struct MessageFilePreviewSheet: View {
     @State private var textContent: String?
     @State private var previewImage: UIImage?
     @State private var videoURL: URL?
+    @State private var shareURL: URL?
     @State private var isLoading = false
     @State private var errorMessage: String?
 
@@ -8718,6 +8775,17 @@ private struct MessageFilePreviewSheet: View {
                     Button("完成") { dismiss() }
                         .foregroundStyle(theme.brandPrimary)
                 }
+                if let videoURL {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button {
+                            shareURL = videoURL
+                            Haptics.play(.light)
+                        } label: {
+                            Label("保存或分享", systemImage: "square.and.arrow.up")
+                        }
+                        .foregroundStyle(theme.brandPrimary)
+                    }
+                }
                 if let copyableText {
                     ToolbarItem(placement: .navigationBarLeading) {
                         Button {
@@ -8733,6 +8801,9 @@ private struct MessageFilePreviewSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .sheet(item: $shareURL) { url in
+            ShareSheetView(activityItems: [url])
+        }
         .task { await loadFileIfNeeded() }
     }
 
@@ -8905,8 +8976,8 @@ private struct MessageFilePreviewSheet: View {
 
         do {
             if Self.isVideoFile(file, loadedContentType: nil),
-               let directURL = directPlayableVideoURL {
-                videoURL = directURL
+               let playableURL = try await resolveVideoURLForPreview() {
+                videoURL = playableURL
                 contentType = file.contentType ?? "video/mp4"
                 previewImage = nil
                 textContent = nil
@@ -8947,13 +9018,45 @@ private struct MessageFilePreviewSheet: View {
         }
     }
 
-    private var directPlayableVideoURL: URL? {
+    private func resolveVideoURLForPreview() async throws -> URL? {
+        let fallbackName = fileName
+
         for ref in fileReferenceCandidates {
-            guard let url = URL(string: ref) else { continue }
-            if url.isFileURL || ["http", "https"].contains(url.scheme?.lowercased()) {
+            if ref.hasPrefix("data:video/") {
+                let payload = try await dataURLPayload(ref)
+                contentType = payload.contentType ?? file.contentType ?? "video/mp4"
+                return try await Self.writePreviewVideoData(
+                    payload.data,
+                    contentType: payload.contentType ?? file.contentType,
+                    fallbackName: fallbackName
+                )
+            }
+
+            if let url = URL(string: ref), url.isFileURL {
                 return url
             }
+
+            if let apiClient, let fileId = serverFileId(from: ref) {
+                let loaded = try await apiClient.getFileContent(id: fileId)
+                contentType = loaded.1
+                return try await Self.writePreviewVideoData(
+                    loaded.0,
+                    contentType: loaded.1,
+                    fallbackName: fallbackName
+                )
+            }
+
+            if let url = URL(string: ref),
+               ["http", "https"].contains(url.scheme?.lowercased()) {
+                let loaded = try await Self.downloadVideoForPreview(
+                    from: url,
+                    fallbackName: fallbackName
+                )
+                contentType = loaded.contentType ?? file.contentType ?? "video/mp4"
+                return loaded.url
+            }
         }
+
         return nil
     }
 
@@ -9011,6 +9114,45 @@ private struct MessageFilePreviewSheet: View {
             }
             return url
         }.value
+    }
+
+    private static func downloadVideoForPreview(
+        from url: URL,
+        fallbackName: String
+    ) async throws -> (url: URL, contentType: String?) {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 300
+        request.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("video/mp4,video/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+
+        let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+        let contentType = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type")
+        let ext: String
+        let lowerType = (contentType ?? "").lowercased()
+        if lowerType.contains("webm") {
+            ext = "webm"
+        } else if lowerType.contains("quicktime") || lowerType.contains("mov") {
+            ext = "mov"
+        } else {
+            ext = (fallbackName as NSString).pathExtension.isEmpty
+                ? "mp4"
+                : (fallbackName as NSString).pathExtension
+        }
+        let baseName = ((fallbackName as NSString).deletingPathExtension)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeName = baseName.isEmpty ? "generated-video" : baseName
+        let cacheDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("message_video_preview", isDirectory: true)
+        try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        let destination = cacheDir.appendingPathComponent("\(safeName)-remote-\(abs(url.absoluteString.hashValue)).\(ext)")
+        try await Task.detached(priority: .userInitiated) {
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+        }.value
+        return (destination, contentType)
     }
 
     private func loadData() async throws -> (data: Data, contentType: String?)? {
@@ -9119,20 +9261,33 @@ private struct MessageFilePreviewSheet: View {
 private struct MessageVideoPlayerView: View {
     let url: URL
 
-    @State private var player: AVPlayer?
-
     var body: some View {
-        VideoPlayer(player: player)
-            .onAppear {
-                let newPlayer = AVPlayer(url: url)
-                player = newPlayer
-                newPlayer.play()
-            }
-            .onDisappear {
-                player?.pause()
-                player = nil
-            }
+        SystemVideoPlayerView(url: url)
             .id(url)
+    }
+}
+
+private struct SystemVideoPlayerView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.player = AVPlayer(url: url)
+        controller.allowsPictureInPicturePlayback = true
+        controller.canStartPictureInPictureAutomaticallyFromInline = false
+        controller.showsPlaybackControls = true
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        if (controller.player?.currentItem?.asset as? AVURLAsset)?.url != url {
+            controller.player = AVPlayer(url: url)
+        }
+    }
+
+    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: ()) {
+        controller.player?.pause()
+        controller.player = nil
     }
 }
 
