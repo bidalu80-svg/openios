@@ -30,6 +30,9 @@ struct ToolsMenuSheet: View {
     @Binding var imageGenerationEnabled: Bool
     @Binding var localOfficeEnabled: Bool
     @Binding var codeInterpreterEnabled: Bool
+    var codeEditingEnabled: Bool = false
+    var isCodeEditingAvailable: Bool = false
+    var onCodeEditingToggle: (() -> Void)?
     var isWebSearchAvailable: Bool = true
     var isImageGenerationAvailable: Bool = true
     var isCodeInterpreterAvailable: Bool = true
@@ -67,7 +70,7 @@ struct ToolsMenuSheet: View {
                             .padding(.horizontal, Spacing.md)
                     }
 
-                    // 内置工具区（网页搜索、生图、Office、代码解释器）
+                    // 内置工具区（网页搜索、生图、Office、代码编辑、代码解释器）
                     builtinToolsSection
                         .padding(.horizontal, Spacing.md)
 
@@ -225,6 +228,16 @@ struct ToolsMenuSheet: View {
         )
     }
 
+    private var codeEditingToggle: some View {
+        featureToggleTile(
+            icon: "terminal",
+            title: "代码编辑",
+            subtitle: "本地编辑、运行和调试代码",
+            isOn: codeEditingEnabled,
+            action: onCodeEditingToggle
+        )
+    }
+
     private var codeInterpreterToggle: some View {
         featureToggleTile(
             icon: "chevron.left.forwardslash.chevron.right",
@@ -240,9 +253,27 @@ struct ToolsMenuSheet: View {
         subtitle: String?,
         isOn: Binding<Bool>
     ) -> some View {
+        featureToggleTile(
+            icon: icon,
+            title: title,
+            subtitle: subtitle,
+            isOn: isOn.wrappedValue,
+            action: {
+                isOn.wrappedValue.toggle()
+            }
+        )
+    }
+
+    private func featureToggleTile(
+        icon: String,
+        title: String,
+        subtitle: String?,
+        isOn: Bool,
+        action: (() -> Void)?
+    ) -> some View {
         Button {
             withAnimation(MicroAnimation.snappy) {
-                isOn.wrappedValue.toggle()
+                action?()
             }
             Haptics.play(.light)
         } label: {
@@ -250,14 +281,14 @@ struct ToolsMenuSheet: View {
                 // Icon glyph
                 toolGlyph(
                     systemImage: icon,
-                    isSelected: isOn.wrappedValue
+                    isSelected: isOn
                 )
 
                 // Title and subtitle
                 VStack(alignment: .leading, spacing: Spacing.xs) {
                     Text(title)
                         .scaledFont(size: 14)
-                        .fontWeight(isOn.wrappedValue ? .semibold : .medium)
+                        .fontWeight(isOn ? .semibold : .medium)
                         .foregroundStyle(theme.textPrimary)
 
                     if let subtitle, !subtitle.isEmpty {
@@ -271,24 +302,24 @@ struct ToolsMenuSheet: View {
                 Spacer()
 
                 // Toggle pill
-                togglePill(isOn: isOn.wrappedValue)
+                togglePill(isOn: isOn)
             }
             .padding(Spacing.sm)
-            .background(tileBackground(isOn: isOn.wrappedValue))
+            .background(tileBackground(isOn: isOn))
             .clipShape(
                 RoundedRectangle(cornerRadius: CornerRadius.input, style: .continuous)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: CornerRadius.input, style: .continuous)
                     .strokeBorder(
-                        tileBorderColor(isOn: isOn.wrappedValue),
+                        tileBorderColor(isOn: isOn),
                         lineWidth: 0.5
                     )
             )
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
-        .accessibilityValue(isOn.wrappedValue ? "已开启" : "已关闭")
+        .accessibilityValue(isOn ? "已开启" : "已关闭")
         .accessibilityAddTraits(.isToggle)
     }
 
@@ -345,6 +376,10 @@ struct ToolsMenuSheet: View {
             }
 
             localOfficeToggle
+
+            if isCodeEditingAvailable {
+                codeEditingToggle
+            }
 
             if isCodeInterpreterAvailable {
                 codeInterpreterToggle
@@ -632,6 +667,9 @@ struct ToolsMenuSheet: View {
                 imageGenerationEnabled: .constant(false),
                 localOfficeEnabled: .constant(false),
                 codeInterpreterEnabled: .constant(false),
+                codeEditingEnabled: false,
+                isCodeEditingAvailable: true,
+                onCodeEditingToggle: {},
                 tools: [
                     ToolItem(
                         name: "Web Search",

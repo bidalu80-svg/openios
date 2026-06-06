@@ -109,7 +109,7 @@ struct SettingsView: View {
                         SettingsCell(
                             icon: "bubble.left.and.bubble.right",
                             title: "聊天行为",
-                            subtitle: "触感、标题、联网搜索",
+                            subtitle: "触感、标题、工具行为",
                             showDivider: true,
                             accessory: .chevron
                         ) {
@@ -718,9 +718,11 @@ struct ChatSettingsView: View {
     @AppStorage("performanceWindowShowNetworkSpeed") private var performanceWindowShowNetworkSpeed = true
     @AppStorage("desktopPetEnabled") private var desktopPetEnabled = false
     @AppStorage("chatWebSearchEnabled") private var chatWebSearchEnabled = false
+    @AppStorage("chatInput.codeEditingEnabled") private var codeEditingEnabled = false
     @AppStorage("quickPills") private var quickPillsData: String = ""
     @State private var availableTools: [ToolItem] = []
     @State private var isLoadingTools = false
+    private let hiddenQuickPillIds: Set<String> = ["web", "office", "terminal", "code_edit"]
 
     /// Whether the server admin has enabled title generation globally.
     private var serverTitleGenEnabled: Bool {
@@ -733,7 +735,9 @@ struct ChatSettingsView: View {
     }
 
     private var selectedPillIds: Set<String> {
-        Set(quickPillsData.components(separatedBy: ",").filter { !$0.isEmpty })
+        Set(quickPillsData.components(separatedBy: ",").filter {
+            !$0.isEmpty && !hiddenQuickPillIds.contains($0)
+        })
     }
 
     private var performanceMetricSummary: String {
@@ -747,7 +751,9 @@ struct ChatSettingsView: View {
     }
 
     private func togglePill(_ id: String) {
-        var ids = quickPillsData.components(separatedBy: ",").filter { !$0.isEmpty }
+        var ids = quickPillsData.components(separatedBy: ",").filter {
+            !$0.isEmpty && !hiddenQuickPillIds.contains($0)
+        }
         if ids.contains(id) {
             ids.removeAll { $0 == id }
         } else {
@@ -771,10 +777,12 @@ struct ChatSettingsView: View {
             Section {
                 Toggle("联网搜索", isOn: $chatWebSearchEnabled)
                     .tint(theme.brandPrimary)
+                Toggle("代码编辑", isOn: $codeEditingEnabled)
+                    .tint(theme.brandPrimary)
             } header: {
-                Text("联网搜索")
+                Text("工具行为")
             } footer: {
-                Text("关闭后聊天不会自动联网，也不会执行模型请求的网页搜索；开启后输入框里的网页搜索功能才可用。")
+                Text("关闭联网搜索后聊天不会自动联网，也不会执行模型请求的网页搜索；代码编辑用于本地编辑、运行和调试代码。")
             }
 
             Section {
@@ -866,9 +874,7 @@ struct ChatSettingsView: View {
                     .listRowSeparator(.hidden)
 
                 // Built-in pills
-                quickPillToggle(id: "web", icon: "magnifyingglass", name: "网页搜索")
                 quickPillToggle(id: "image", icon: "photo", name: "图像生成")
-                quickPillToggle(id: "office", icon: "doc.richtext", name: "Office 文档")
 
                 // Server tools
                 if isLoadingTools {

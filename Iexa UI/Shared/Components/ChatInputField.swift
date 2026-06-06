@@ -150,6 +150,7 @@ struct ChatInputField: View {
 
     /// Quick pills preference from UserDefaults
     @AppStorage("quickPills") private var quickPillsData: String = ""
+    private static let hiddenInputQuickPillIds: Set<String> = ["web", "office", "terminal", "code_edit"]
 
     /// Whether any audio attachment is still being transcribed.
     private var isTranscribing: Bool {
@@ -194,13 +195,15 @@ struct ChatInputField: View {
 
     /// Whether any tool/feature is currently active.
     private var hasActiveFeatures: Bool {
-        webSearchEnabled || localOfficeEnabled || !selectedToolIds.isEmpty
+        webSearchEnabled || localOfficeEnabled || terminalEnabled || !selectedToolIds.isEmpty
     }
 
     /// Saved quick pill IDs from settings.
     private var savedQuickPillIds: [String] {
         guard !quickPillsData.isEmpty else { return [] }
-        return quickPillsData.components(separatedBy: ",").filter { !$0.isEmpty }
+        return quickPillsData.components(separatedBy: ",").filter {
+            !$0.isEmpty && !Self.hiddenInputQuickPillIds.contains($0)
+        }
     }
 
     private var hasQuickPills: Bool {
@@ -273,6 +276,9 @@ struct ChatInputField: View {
                 imageGenerationEnabled: $imageGenerationEnabled,
                 localOfficeEnabled: $localOfficeEnabled,
                 codeInterpreterEnabled: $codeInterpreterEnabled,
+                codeEditingEnabled: terminalEnabled,
+                isCodeEditingAvailable: isTerminalAvailable && onTerminalToggle != nil,
+                onCodeEditingToggle: onTerminalToggle,
                 isWebSearchAvailable: isWebSearchAvailable,
                 isImageGenerationAvailable: isImageGenerationAvailable,
                 isCodeInterpreterAvailable: isCodeInterpreterAvailable,
@@ -342,7 +348,6 @@ struct ChatInputField: View {
                 inlinePlusButton
                 textField
                 HStack(spacing: 8) {
-                    inlineTerminalButton
                     inlineDictationButton
                     trailingButton
                 }
@@ -517,109 +522,6 @@ struct ChatInputField: View {
         guard canSend else { return }
         onSend()
         dismissKeyboardAfterSubmit()
-    }
-
-    // MARK: - Inline Terminal Button
-
-    /// Compact terminal icon that sits inline in the text row.
-    /// - Single server: tap toggles on/off
-    /// - Multiple servers: tap opens a Menu for server selection
-    @ViewBuilder
-    private var inlineTerminalButton: some View {
-        if isTerminalAvailable, let onTerminalToggle {
-            let hasMultiple = availableTerminalServers.count > 1
-
-            if hasMultiple {
-                Menu {
-                    Button {
-                        withAnimation(.easeOut(duration: 0.15)) { onTerminalToggle() }
-                        Haptics.play(.light)
-                    } label: {
-                        Label(
-                            terminalEnabled ? "Disable Terminal" : "Enable Terminal",
-                            systemImage: terminalEnabled ? "xmark.circle" : "checkmark.circle"
-                        )
-                    }
-
-                    if terminalEnabled, let onBrowseFiles {
-                        Button {
-                            onBrowseFiles()
-                            Haptics.play(.light)
-                        } label: {
-                            Label("Browse Files", systemImage: "folder")
-                        }
-                    }
-
-                    Divider()
-
-                    ForEach(availableTerminalServers) { server in
-                        Button {
-                            onTerminalServerSelected?(server)
-                            if !terminalEnabled {
-                                withAnimation(.easeOut(duration: 0.15)) { onTerminalToggle() }
-                            }
-                            Haptics.play(.light)
-                        } label: {
-                            HStack {
-                                Text(server.displayName)
-                                if server.id == (availableTerminalServers.first(where: { $0.displayName == terminalServerName })?.id ?? "") {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    terminalIconLabel
-                }
-                .buttonStyle(.plain)
-                .disabled(!isEnabled)
-                .animation(.easeInOut(duration: 0.15), value: terminalEnabled)
-                .transition(.scale.combined(with: .opacity))
-            } else {
-                Button {
-                    withAnimation(.easeOut(duration: 0.15)) { onTerminalToggle() }
-                    Haptics.play(.light)
-                } label: {
-                    terminalIconLabel
-                }
-                .buttonStyle(.plain)
-                .disabled(!isEnabled)
-                .animation(.easeInOut(duration: 0.15), value: terminalEnabled)
-                .transition(.scale.combined(with: .opacity))
-            }
-        }
-    }
-
-    /// The compact circular terminal icon used in the inline position.
-    private var terminalIconLabel: some View {
-        Circle()
-            .fill(
-                terminalEnabled
-                    ? theme.brandPrimary.opacity(0.12)
-                    : Color.clear
-            )
-            .frame(width: 26, height: 26)
-            .overlay(
-                Image(systemName: "terminal")
-                    .scaledFont(size: 11, weight: .semibold)
-                    .foregroundStyle(
-                        terminalEnabled
-                            ? theme.brandPrimary
-                            : theme.textTertiary
-                    )
-            )
-            .overlay(
-                Circle()
-                    .strokeBorder(
-                        terminalEnabled
-                            ? theme.brandPrimary.opacity(0.4)
-                            : Color.clear,
-                        lineWidth: 1
-                    )
-            )
-            .opacity(isEnabled ? 1.0 : 0.4)
-            .accessibilityLabel("Terminal")
-            .accessibilityValue(terminalEnabled ? "Enabled" : "Disabled")
     }
 
     // MARK: - Inline Dictation Button
@@ -893,20 +795,7 @@ struct ChatInputField: View {
         for id in savedQuickPillIds {
             switch id {
             case "web":
-                if isWebSearchAvailable {
-                    pills.append(QuickPill(
-                        id: "web",
-                        icon: "globe",
-                        label: "联网搜索",
-                        isActive: webSearchEnabled,
-                        action: {
-                            withAnimation(.easeOut(duration: 0.15)) {
-                                webSearchEnabled.toggle()
-                            }
-                            Haptics.play(.light)
-                        }
-                    ))
-                }
+                continue
             case "image":
                 // Image Generation is a native feature toggle, not a tool.
                 // Sync the pill with imageGenerationEnabled so it matches
@@ -926,18 +815,9 @@ struct ChatInputField: View {
                     ))
                 }
             case "office":
-                pills.append(QuickPill(
-                    id: "office",
-                    icon: "doc.richtext",
-                    label: "Office",
-                    isActive: localOfficeEnabled,
-                    action: {
-                        withAnimation(.easeOut(duration: 0.15)) {
-                            localOfficeEnabled.toggle()
-                        }
-                        Haptics.play(.light)
-                    }
-                ))
+                continue
+            case "code_edit", "terminal":
+                continue
             default:
                 // Show the pill even when tools haven't loaded yet (e.g. right after
                 // a new chat is created and the async loadTools() hasn't returned).

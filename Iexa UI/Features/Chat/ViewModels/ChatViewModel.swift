@@ -225,6 +225,7 @@ final class ChatViewModel {
     private static let imageGenerationTogglePreferenceKey = "chatInput.imageGenerationEnabled"
     private static let localOfficeTogglePreferenceKey = "chatInput.localOfficeEnabled"
     private static let codeInterpreterTogglePreferenceKey = "chatInput.codeInterpreterEnabled"
+    private static let codeEditingTogglePreferenceKey = "chatInput.codeEditingEnabled"
     private static let directImageGenerationMaxConcurrency = 3
 
     /// Isolated store for streaming content. Only the actively streaming
@@ -362,7 +363,7 @@ final class ChatViewModel {
     /// sync paths from re-enabling them silently.
     private var userDisabledBuiltinFeatures: Set<String> = []
     /// When `true`, mutations to `webSearchEnabled`, `imageGenerationEnabled`,
-    /// `localOfficeEnabled`, and `codeInterpreterEnabled` do NOT update
+    /// `localOfficeEnabled`, `terminalEnabled`, and `codeInterpreterEnabled` do NOT update
     /// `userDisabledBuiltinFeatures` or persisted user switch preferences.
     /// Set during `syncUIWithModelDefaults()` and `restoreBuiltinFeatureState()`
     /// so those internal resets aren't misinterpreted as explicit user overrides.
@@ -375,7 +376,12 @@ final class ChatViewModel {
     /// Available terminal servers fetched from the backend.
     var availableTerminalServers: [TerminalServer] = []
     /// Whether the user has enabled terminal for this chat session.
-    var terminalEnabled: Bool = false
+    var terminalEnabled: Bool = false {
+        didSet {
+            guard !suppressBuiltinFeatureTracking else { return }
+            UserDefaults.standard.set(terminalEnabled, forKey: Self.codeEditingTogglePreferenceKey)
+        }
+    }
     /// The currently selected terminal server (auto-selects first if only one).
     var selectedTerminalServer: TerminalServer?
     var selectedTerminalIsLocalAlpine: Bool {
@@ -3241,6 +3247,7 @@ final class ChatViewModel {
 
     private func setupChatWebSearchSettingsObserver() {
         syncChatWebSearchPermission()
+        syncCodeEditingPreference()
         guard chatWebSearchSettingsObserver == nil else { return }
         chatWebSearchSettingsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
@@ -3249,6 +3256,7 @@ final class ChatViewModel {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.syncChatWebSearchPermission()
+                self?.syncCodeEditingPreference()
             }
         }
     }
@@ -3267,6 +3275,19 @@ final class ChatViewModel {
             webSearchEnabled = savedWebSearch ?? true
             suppressBuiltinFeatureTracking = false
         }
+    }
+
+    private func syncCodeEditingPreference() {
+        guard let savedCodeEditing = UserDefaults.standard.object(forKey: Self.codeEditingTogglePreferenceKey) as? Bool else {
+            return
+        }
+        guard terminalEnabled != savedCodeEditing else { return }
+        suppressBuiltinFeatureTracking = true
+        if savedCodeEditing, selectedTerminalServer == nil, let first = availableTerminalServers.first {
+            selectedTerminalServer = first
+        }
+        terminalEnabled = savedCodeEditing
+        suppressBuiltinFeatureTracking = false
     }
 
     /// Observes `.functionsConfigChanged` to re-resolve actions/filters for the
@@ -4220,6 +4241,7 @@ final class ChatViewModel {
             if selectedTerminalServer == nil || selectedTerminalServer?.isLocalAlpine != true {
                 selectedTerminalServer = TerminalServer.localAlpine
             }
+            syncCodeEditingPreference()
             return
         }
         guard let manager else {
@@ -4227,6 +4249,7 @@ final class ChatViewModel {
             if selectedTerminalServer == nil {
                 selectedTerminalServer = TerminalServer.localAlpine
             }
+            syncCodeEditingPreference()
             return
         }
         do {
@@ -4241,11 +4264,13 @@ final class ChatViewModel {
             if selectedTerminalServer == nil, let first = availableTerminalServers.first {
                 selectedTerminalServer = first
             }
+            syncCodeEditingPreference()
         } catch {
             availableTerminalServers = [TerminalServer.localAlpine]
             if selectedTerminalServer == nil {
                 selectedTerminalServer = TerminalServer.localAlpine
             }
+            syncCodeEditingPreference()
             logger.debug("Terminal servers fetch failed: \(error.localizedDescription)")
         }
     }
