@@ -185,6 +185,20 @@ final class LocalNativeToolService {
         }
     }
 
+    static func shortcutsActionName(in content: String) -> String? {
+        let lower = content.lowercased()
+        let actions = [
+            "shortcuts.run", "shortcut.run", "shortcuts_run", "run_shortcut",
+            "shortcuts.open", "shortcut.open", "shortcuts_open", "open_shortcut",
+            "shortcuts.edit", "shortcut.edit", "shortcuts_edit", "edit_shortcut",
+            "shortcuts.create", "shortcut.create", "shortcuts_create", "create_shortcut"
+        ]
+        return actions.first { action in
+            lower.contains(action)
+                || lower.contains(action.replacingOccurrences(of: ".", with: "\\."))
+        }
+    }
+
     private func execute(
         _ call: [String: Any],
         officeProgress: LocalOfficeProgressHandler?
@@ -220,6 +234,11 @@ final class LocalNativeToolService {
              "browser.screenshot", "browser_screenshot", "screenshot",
              "browser.fetch", "browser_fetch", "fetch":
             return await executeBrowserTool(action: action, call)
+        case "shortcuts.run", "shortcut.run", "shortcuts_run", "run_shortcut",
+             "shortcuts.open", "shortcut.open", "shortcuts_open", "open_shortcut",
+             "shortcuts.edit", "shortcut.edit", "shortcuts_edit", "edit_shortcut",
+             "shortcuts.create", "shortcut.create", "shortcuts_create", "create_shortcut":
+            return await executeShortcutsTool(action: action, call)
         case "office.create_excel", "office_create_excel", "create_excel", "excel.create", "excel":
             return await executeCreateExcel(call, progress: officeProgress)
         case "office.create_ppt", "office.create_powerpoint", "office_create_ppt", "create_ppt", "create_powerpoint", "ppt.create", "powerpoint.create", "ppt":
@@ -243,6 +262,161 @@ final class LocalNativeToolService {
             payload["action"] = action
         }
         return payload
+    }
+
+    private func executeShortcutsTool(action: String, _ call: [String: Any]) async -> [String: Any] {
+        let normalized = action
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if normalized.contains("run") {
+            let name = Self.firstString(
+                in: call,
+                keys: ["name", "shortcut_name", "shortcut", "title"]
+            )
+            guard let name, !name.isEmpty else {
+                return [
+                    "action": "shortcuts.run",
+                    "ok": false,
+                    "error": "Missing required field: name"
+                ]
+            }
+            let input = Self.firstString(
+                in: call,
+                keys: ["input", "text", "content", "message", "value"]
+            )
+            guard let url = Self.shortcutsRunURL(name: name, input: input) else {
+                return [
+                    "action": "shortcuts.run",
+                    "ok": false,
+                    "shortcut": name,
+                    "error": "Unable to build Shortcuts run URL"
+                ]
+            }
+            let didOpen = await openShortcutsURL(url)
+            return [
+                "action": "shortcuts.run",
+                "ok": didOpen,
+                "shortcut": name,
+                "input_provided": input?.isEmpty == false,
+                "summary": didOpen
+                    ? "已请求 iOS 运行快捷指令「\(name)」。如果系统需要权限或确认，会由快捷指令 App 处理。"
+                    : "无法打开 iOS 快捷指令。请确认系统已安装快捷指令 App。"
+            ]
+        }
+
+        if normalized.contains("create") || Self.boolValue(call["create"]) {
+            guard let url = URL(string: "shortcuts://create-shortcut") else {
+                return [
+                    "action": "shortcuts.create",
+                    "ok": false,
+                    "error": "Unable to build Shortcuts create URL"
+                ]
+            }
+            let didOpen = await openShortcutsURL(url)
+            return [
+                "action": "shortcuts.create",
+                "ok": didOpen,
+                "summary": didOpen
+                    ? "已打开 iOS 快捷指令创建界面。系统不允许第三方 App 静默写入完整快捷指令，用户需要在快捷指令 App 内确认并保存。"
+                    : "无法打开 iOS 快捷指令创建界面。请确认系统已安装快捷指令 App。",
+                "requires_user_confirmation": true
+            ]
+        }
+
+        let name = Self.firstString(
+            in: call,
+            keys: ["name", "shortcut_name", "shortcut", "title"]
+        )
+        let url: URL?
+        if let name, !name.isEmpty {
+            url = Self.shortcutsOpenURL(name: name)
+        } else {
+            url = URL(string: "shortcuts://")
+        }
+        guard let url else {
+            return [
+                "action": "shortcuts.open",
+                "ok": false,
+                "error": "Unable to build Shortcuts open URL"
+            ]
+        }
+        let didOpen = await openShortcutsURL(url)
+        return [
+            "action": "shortcuts.open",
+            "ok": didOpen,
+            "shortcut": name ?? "",
+            "summary": didOpen
+                ? (name?.isEmpty == false
+                    ? "已打开 iOS 快捷指令「\(name ?? "")」编辑界面，用户可在系统 App 内修改。"
+                    : "已打开 iOS 快捷指令 App。")
+                : "无法打开 iOS 快捷指令。请确认系统已安装快捷指令 App。",
+            "requires_user_confirmation": name?.isEmpty == false
+        ]
+    }
+
+    private static func firstString(in call: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            guard let value = call[key] else { continue }
+            let text: String?
+            if let string = value as? String {
+                text = string
+            } else if let number = value as? NSNumber {
+                text = number.stringValue
+            } else {
+                text = String(describing: value)
+            }
+            let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let trimmed, !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return nil
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool {
+        if let bool = value as? Bool {
+            return bool
+        }
+        if let number = value as? NSNumber {
+            return number.boolValue
+        }
+        if let string = value as? String {
+            let normalized = string
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            return ["1", "true", "yes", "y", "on"].contains(normalized)
+        }
+        return false
+    }
+
+    private static func shortcutsRunURL(name: String, input: String?) -> URL? {
+        var components = URLComponents()
+        components.scheme = "shortcuts"
+        components.host = "run-shortcut"
+        var queryItems = [URLQueryItem(name: "name", value: name)]
+        if let input, !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            queryItems.append(URLQueryItem(name: "input", value: "text"))
+            queryItems.append(URLQueryItem(name: "text", value: input))
+        }
+        components.queryItems = queryItems
+        return components.url
+    }
+
+    private static func shortcutsOpenURL(name: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "shortcuts"
+        components.host = "open-shortcut"
+        components.queryItems = [URLQueryItem(name: "name", value: name)]
+        return components.url
+    }
+
+    private func openShortcutsURL(_ url: URL) async -> Bool {
+        await withCheckedContinuation { continuation in
+            UIApplication.shared.open(url, options: [:]) { didOpen in
+                continuation.resume(returning: didOpen)
+            }
+        }
     }
 
     private func executeCreateExcel(

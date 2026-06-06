@@ -81,6 +81,7 @@ struct ChatInputField: View {
     @Binding var webSearchEnabled: Bool
     @Binding var imageGenerationEnabled: Bool
     @Binding var localOfficeEnabled: Bool
+    @Binding var shortcutsEnabled: Bool
     @Binding var codeInterpreterEnabled: Bool
     var isWebSearchAvailable: Bool = true
     var isImageGenerationAvailable: Bool = true
@@ -195,7 +196,7 @@ struct ChatInputField: View {
 
     /// Whether any tool/feature is currently active.
     private var hasActiveFeatures: Bool {
-        webSearchEnabled || localOfficeEnabled || terminalEnabled || !selectedToolIds.isEmpty
+        webSearchEnabled || localOfficeEnabled || shortcutsEnabled || terminalEnabled || !selectedToolIds.isEmpty
     }
 
     /// Saved quick pill IDs from settings.
@@ -275,6 +276,7 @@ struct ChatInputField: View {
                 webSearchEnabled: $webSearchEnabled,
                 imageGenerationEnabled: $imageGenerationEnabled,
                 localOfficeEnabled: $localOfficeEnabled,
+                shortcutsEnabled: $shortcutsEnabled,
                 codeInterpreterEnabled: $codeInterpreterEnabled,
                 codeEditingEnabled: terminalEnabled,
                 isCodeEditingAvailable: isTerminalAvailable && onTerminalToggle != nil,

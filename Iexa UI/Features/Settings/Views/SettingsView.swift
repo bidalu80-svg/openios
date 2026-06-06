@@ -719,6 +719,7 @@ struct ChatSettingsView: View {
     @AppStorage("desktopPetEnabled") private var desktopPetEnabled = false
     @AppStorage("chatWebSearchEnabled") private var chatWebSearchEnabled = false
     @AppStorage("chatInput.codeEditingEnabled") private var codeEditingEnabled = false
+    @AppStorage("chatInput.shortcutsEnabled") private var shortcutsEnabled = false
     @AppStorage("quickPills") private var quickPillsData: String = ""
     @State private var availableTools: [ToolItem] = []
     @State private var isLoadingTools = false
@@ -777,12 +778,14 @@ struct ChatSettingsView: View {
             Section {
                 Toggle("联网搜索", isOn: $chatWebSearchEnabled)
                     .tint(theme.brandPrimary)
+                Toggle("快捷指令", isOn: $shortcutsEnabled)
+                    .tint(theme.brandPrimary)
                 Toggle("代码编辑", isOn: $codeEditingEnabled)
                     .tint(theme.brandPrimary)
             } header: {
                 Text("工具行为")
             } footer: {
-                Text("关闭联网搜索后聊天不会自动联网，也不会执行模型请求的网页搜索；代码编辑用于本地编辑、运行和调试代码。")
+                Text("关闭对应开关后不会向模型注入该工具。快捷指令用于运行或打开用户已有的 iOS 快捷指令；系统不允许 App 静默创建或修改用户快捷指令。")
             }
 
             Section {

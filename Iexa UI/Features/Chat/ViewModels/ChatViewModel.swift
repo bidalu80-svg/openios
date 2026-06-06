@@ -224,6 +224,7 @@ final class ChatViewModel {
     private static let webSearchTogglePreferenceKey = "chatInput.webSearchEnabled"
     private static let imageGenerationTogglePreferenceKey = "chatInput.imageGenerationEnabled"
     private static let localOfficeTogglePreferenceKey = "chatInput.localOfficeEnabled"
+    private static let shortcutsTogglePreferenceKey = "chatInput.shortcutsEnabled"
     private static let codeInterpreterTogglePreferenceKey = "chatInput.codeInterpreterEnabled"
     private static let codeEditingTogglePreferenceKey = "chatInput.codeEditingEnabled"
     private static let directImageGenerationMaxConcurrency = 3
@@ -325,6 +326,12 @@ final class ChatViewModel {
             UserDefaults.standard.set(localOfficeEnabled, forKey: Self.localOfficeTogglePreferenceKey)
         }
     }
+    var shortcutsEnabled: Bool = false {
+        didSet {
+            guard !suppressBuiltinFeatureTracking else { return }
+            UserDefaults.standard.set(shortcutsEnabled, forKey: Self.shortcutsTogglePreferenceKey)
+        }
+    }
     var codeInterpreterEnabled: Bool = false {
         didSet {
             guard !suppressBuiltinFeatureTracking else { return }
@@ -363,7 +370,7 @@ final class ChatViewModel {
     /// sync paths from re-enabling them silently.
     private var userDisabledBuiltinFeatures: Set<String> = []
     /// When `true`, mutations to `webSearchEnabled`, `imageGenerationEnabled`,
-    /// `localOfficeEnabled`, `terminalEnabled`, and `codeInterpreterEnabled` do NOT update
+    /// `localOfficeEnabled`, `shortcutsEnabled`, `terminalEnabled`, and `codeInterpreterEnabled` do NOT update
     /// `userDisabledBuiltinFeatures` or persisted user switch preferences.
     /// Set during `syncUIWithModelDefaults()` and `restoreBuiltinFeatureState()`
     /// so those internal resets aren't misinterpreted as explicit user overrides.
@@ -2058,7 +2065,8 @@ final class ChatViewModel {
 
     private static func localNativeFunctionToolSchemas(
         includeBrowserTools: Bool,
-        includeOfficeTools: Bool
+        includeOfficeTools: Bool,
+        includeShortcutsTools: Bool
     ) -> [[String: Any]] {
         var tools: [[String: Any]] = []
 
@@ -2097,6 +2105,40 @@ final class ChatViewModel {
                             "max_length": ["type": "integer", "description": "Maximum readable text length."]
                         ],
                         "required": ["url"]
+                    ]
+                ]
+            ])
+        }
+
+        if includeShortcutsTools {
+            tools.append(contentsOf: [
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "shortcuts_run",
+                        "description": "Run an existing iOS Shortcut by exact name. Use only when the user asks to run/execute/trigger a Shortcut or an automation they already created. You may pass optional text input. iOS does not allow this app to silently create or modify arbitrary system shortcuts.",
+                        "parameters": [
+                            "type": "object",
+                            "properties": [
+                                "name": ["type": "string", "description": "Exact name of the existing Shortcut to run."],
+                                "input": ["type": "string", "description": "Optional text input to pass to the Shortcut."]
+                            ],
+                            "required": ["name"]
+                        ]
+                    ]
+                ],
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "shortcuts_open",
+                        "description": "Open the iOS Shortcuts app, or open an existing Shortcut's edit screen by exact name. Use for create/edit requests because iOS requires the user to confirm and save in the Shortcuts app; do not claim the Shortcut was silently created or modified.",
+                        "parameters": [
+                            "type": "object",
+                            "properties": [
+                                "name": ["type": "string", "description": "Optional exact Shortcut name to open for editing."],
+                                "create": ["type": "boolean", "description": "Set true to open the Shortcuts create screen."]
+                            ]
+                        ]
                     ]
                 ]
             ])
@@ -3248,6 +3290,7 @@ final class ChatViewModel {
     private func setupChatWebSearchSettingsObserver() {
         syncChatWebSearchPermission()
         syncCodeEditingPreference()
+        syncShortcutsPreference()
         guard chatWebSearchSettingsObserver == nil else { return }
         chatWebSearchSettingsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
@@ -3257,6 +3300,7 @@ final class ChatViewModel {
             Task { @MainActor [weak self] in
                 self?.syncChatWebSearchPermission()
                 self?.syncCodeEditingPreference()
+                self?.syncShortcutsPreference()
             }
         }
     }
@@ -3287,6 +3331,16 @@ final class ChatViewModel {
             selectedTerminalServer = first
         }
         terminalEnabled = savedCodeEditing
+        suppressBuiltinFeatureTracking = false
+    }
+
+    private func syncShortcutsPreference() {
+        guard let savedShortcuts = UserDefaults.standard.object(forKey: Self.shortcutsTogglePreferenceKey) as? Bool else {
+            return
+        }
+        guard shortcutsEnabled != savedShortcuts else { return }
+        suppressBuiltinFeatureTracking = true
+        shortcutsEnabled = savedShortcuts
         suppressBuiltinFeatureTracking = false
     }
 
@@ -9639,6 +9693,7 @@ final class ChatViewModel {
         let content = Self.localNativeFunctionToolEnvelopeContent(for: call)
         let officeKind = LocalNativeToolService.officeActionKind(in: content)
         let browserAction = LocalNativeToolService.browserActionName(in: content)
+        let shortcutsAction = LocalNativeToolService.shortcutsActionName(in: content)
 
         if browserAction != nil, !isLocalBrowserNativeToolsEnabled {
             return LocalNativeFunctionToolExecution(
@@ -9650,6 +9705,13 @@ final class ChatViewModel {
         if officeKind != nil, !localOfficeEnabled {
             return LocalNativeFunctionToolExecution(
                 toolContent: "Local Office/PDF tools are disabled for this chat.",
+                completedAssistantTurn: false,
+                visibleContent: nil
+            )
+        }
+        if shortcutsAction != nil, !shortcutsEnabled {
+            return LocalNativeFunctionToolExecution(
+                toolContent: "Local iOS Shortcuts tools are disabled for this chat.",
                 completedAssistantTurn: false,
                 visibleContent: nil
             )
@@ -9711,6 +9773,13 @@ final class ChatViewModel {
                         error: "模型返回的浏览器工具调用无法解析。"
                     ),
                     keepStreaming: true
+                )
+            }
+            if shortcutsAction != nil {
+                return LocalNativeFunctionToolExecution(
+                    toolContent: toolContent,
+                    completedAssistantTurn: false,
+                    visibleContent: nil
                 )
             }
             return LocalNativeFunctionToolExecution(
@@ -9776,6 +9845,14 @@ final class ChatViewModel {
                     error: "本地浏览器工具没有返回可用结果。"
                 ),
                 keepStreaming: true
+            )
+        }
+
+        if shortcutsAction != nil {
+            return LocalNativeFunctionToolExecution(
+                toolContent: Self.localNativeFunctionToolResultContent(result.summary),
+                completedAssistantTurn: false,
+                visibleContent: nil
             )
         }
 
@@ -9921,6 +9998,8 @@ final class ChatViewModel {
     private static let localNativeFunctionToolNames: Set<String> = [
         "web_search",
         "browser_readable",
+        "shortcuts_run",
+        "shortcuts_open",
         "office_create_excel",
         "office_create_ppt",
         "office_create_word",
@@ -9970,6 +10049,10 @@ final class ChatViewModel {
             return "web.search"
         case "browser_readable":
             return "browser.readable"
+        case "shortcuts_run":
+            return "shortcuts.run"
+        case "shortcuts_open":
+            return "shortcuts.open"
         case "office_create_excel":
             return "office.create_excel"
         case "office_create_ppt":
@@ -11466,6 +11549,7 @@ final class ChatViewModel {
         let savedWebSearch = UserDefaults.standard.object(forKey: Self.webSearchTogglePreferenceKey) as? Bool
         let savedImageGeneration = UserDefaults.standard.object(forKey: Self.imageGenerationTogglePreferenceKey) as? Bool
         let savedLocalOffice = UserDefaults.standard.object(forKey: Self.localOfficeTogglePreferenceKey) as? Bool
+        let savedShortcuts = UserDefaults.standard.object(forKey: Self.shortcutsTogglePreferenceKey) as? Bool
         let savedCodeInterpreter = UserDefaults.standard.object(forKey: Self.codeInterpreterTogglePreferenceKey) as? Bool
 
         // Reset feature toggles from persisted user choices first. If the user
@@ -11481,6 +11565,7 @@ final class ChatViewModel {
             || nameSuggestsImageGeneration
         imageGenerationEnabled = savedImageGeneration ?? modelDefaultImageGeneration
         localOfficeEnabled = savedLocalOffice ?? false
+        shortcutsEnabled = savedShortcuts ?? false
         codeInterpreterEnabled = savedCodeInterpreter ?? (defaults.contains("code_interpreter") && isTruthy("code_interpreter"))
         suppressBuiltinFeatureTracking = false
 
@@ -11661,7 +11746,10 @@ final class ChatViewModel {
             for: latestUserTextForLocalNativeTools,
             officeRevisionContext: localOfficeRevisionContextForNativeTools
         )
-        let shouldExposeLocalNativeTools = shouldExposeBrowserTools || shouldExposeOfficeTools
+        let shouldExposeShortcutsTools = shortcutsEnabled
+        let shouldExposeLocalNativeTools = shouldExposeBrowserTools
+            || shouldExposeOfficeTools
+            || shouldExposeShortcutsTools
         if shouldUseLocalNativeFunctionTools(for: request.model),
            shouldExposeLocalNativeTools,
            request.tools == nil,
@@ -11669,7 +11757,8 @@ final class ChatViewModel {
            !nativeToolsDisabled {
             request.tools = Self.localNativeFunctionToolSchemas(
                 includeBrowserTools: shouldExposeBrowserTools,
-                includeOfficeTools: shouldExposeOfficeTools
+                includeOfficeTools: shouldExposeOfficeTools,
+                includeShortcutsTools: shouldExposeShortcutsTools
             )
             request.toolChoice = "auto"
         }
@@ -13233,8 +13322,10 @@ final class ChatViewModel {
     }
 
     private static func localNativeToolSystemContext(
+        includeDeviceTools: Bool,
         includeBrowserTools: Bool,
-        includeOfficeTools: Bool
+        includeOfficeTools: Bool,
+        includeShortcutsTools: Bool
     ) -> String {
         let calendar = Calendar.current
         let now = Date()
@@ -13251,38 +13342,50 @@ final class ChatViewModel {
         let todayEndText = formatter.string(from: endOfToday)
         let exampleEndText = formatter.string(from: exampleEventEnd)
         let timezoneName = TimeZone.current.identifier
+        let deviceToolDescriptions = includeDeviceTools
+            ? ["device info", "clipboard", "local notifications", "location", "weather", "calendar"]
+            : []
         let browserToolDescription = includeBrowserTools ? "local browser/web reading, " : ""
         let officeToolDescription = includeOfficeTools ? "local Office/PDF document generation" : ""
-        let joinedToolDescription = [
-            "device info",
-            "clipboard",
-            "local notifications",
-            "location",
-            "weather",
-            "calendar",
+        let shortcutsToolDescription = includeShortcutsTools ? "iOS Shortcuts launcher" : ""
+        let joinedToolDescription = (
+            deviceToolDescriptions + [
             browserToolDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
-            officeToolDescription
-        ]
+            officeToolDescription,
+            shortcutsToolDescription
+            ]
+        )
             .filter { !$0.isEmpty }
             .joined(separator: ", ")
+        let deviceUseDescriptions = includeDeviceTools
+            ? [
+                "read device status/info",
+                "read/write clipboard text",
+                "show a local notification",
+                "get/use their current location",
+                "query current local weather",
+                "query local calendar events",
+                "create/delete a calendar event"
+            ]
+            : []
         let browserUseDescription = includeBrowserTools ? "search/open/read/screenshot/download webpages, " : ""
         let officeUseDescription = includeOfficeTools ? "or directly create an Excel/PPT/Word/PDF file" : ""
-        let nativeUseDescription = [
-            "read device status/info",
-            "read/write clipboard text",
-            "show a local notification",
-            "get/use their current location",
-            "query current local weather",
-            "query local calendar events",
-            "create/delete a calendar event",
+        let shortcutsUseDescription = includeShortcutsTools
+            ? "run an existing iOS Shortcut by exact name or open the Shortcuts app for user-confirmed editing"
+            : ""
+        let nativeUseDescription = (
+            deviceUseDescriptions + [
             browserUseDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
-            officeUseDescription
-        ]
+            officeUseDescription,
+            shortcutsUseDescription
+            ]
+        )
             .filter { !$0.isEmpty }
             .joined(separator: ", ")
         let functionToolNames = [
             includeBrowserTools ? "`web_search`, `browser_readable`" : nil,
-            includeOfficeTools ? "`office_create_*`" : nil
+            includeOfficeTools ? "`office_create_*`" : nil,
+            includeShortcutsTools ? "`shortcuts_run`, `shortcuts_open`" : nil
         ]
             .compactMap { $0 }
             .joined(separator: ", ")
@@ -13292,6 +13395,49 @@ final class ChatViewModel {
         let officeVsAlpineInstruction = includeOfficeTools
             ? "For code execution, Python scripts, package installs, project edits, or \"write/run Python to generate a file\", use Local Alpine when available instead of the Office actions. The Office actions are for productized file creation from a document draft, not for replacing the Python/terminal agent.\n"
             : ""
+        let deviceActionExamples = includeDeviceTools ? """
+        ```iexa_native
+        {"action":"device.status"}
+        ```
+        ```iexa_native
+        {"action":"device.info"}
+        ```
+        ```iexa_native
+        {"action":"clipboard.read"}
+        ```
+        ```iexa_native
+        {"action":"clipboard.write","text":"要复制的文本"}
+        ```
+        ```iexa_native
+        {"action":"system.notify","title":"Iexa","body":"提醒内容"}
+        ```
+        ```iexa_native
+        {"action":"get_location"}
+        ```
+        ```iexa_native
+        {"action":"get_weather"}
+        ```
+        ```iexa_native
+        {"action":"list_calendar_events","start":"\(todayStartText)","end":"\(todayEndText)"}
+        ```
+        ```iexa_native
+        {"action":"create_calendar_event","title":"会议","start":"\(nowText)","end":"\(exampleEndText)","location":"办公室","description":"讨论项目","alert_minutes":10}
+        ```
+        ```iexa_native
+        {"action":"delete_calendar_event","id":"event-id-from-list"}
+        ```
+        """ : ""
+        let shortcutsActionExamples = includeShortcutsTools ? """
+        ```iexa_native
+        {"action":"shortcuts.run","name":"每日记账","input":"午餐 35 元"}
+        ```
+        ```iexa_native
+        {"action":"shortcuts.open","name":"每日记账"}
+        ```
+        ```iexa_native
+        {"action":"shortcuts.create"}
+        ```
+        """ : ""
         let browserActionExamples = includeBrowserTools ? """
         ```iexa_native
         {"action":"web.search","query":"OpenAI 最新 Responses API 工具","limit":6,"screenshot":true}
@@ -13333,6 +13479,10 @@ final class ChatViewModel {
 
         For PDF, use `office.create_pdf`; use `format:"slides"` with `slides` for deck-like PDFs, `format:"document"` with `sections` for report-like PDFs, or sheets/rows for table PDFs. If the user asks to convert the latest generated Office file to PDF, emit `office.create_pdf`; include the latest file URL as `source_url` when it is visible in context, otherwise the app will use the most recent local Office result automatically. If a key requirement is missing, choose a safe default instead of asking many setup questions. After Iexa appends the native tool result, continue from that real result and answer normally. If permissions are denied, location is not ready, notification permission is disabled, WeatherKit entitlement is unavailable, or Office/PDF generation fails, explain the exact local permission/state issue.
         """ : ""
+        let shortcutsInstructions = includeShortcutsTools ? """
+
+        For iOS Shortcuts actions, when real function tools are present, call `shortcuts_run` or `shortcuts_open`; when using the Markdown fallback, emit `shortcuts.run`, `shortcuts.open`, or `shortcuts.create` in the `iexa_native` JSON. Use `shortcuts.run` only for an existing Shortcut name supplied by the user or obvious from context; include optional text input if the user wants to pass content into the Shortcut. Use `shortcuts.open` to open an existing Shortcut for user editing, and `shortcuts.create` only to open the system Shortcuts creation screen. iOS does not let third-party apps silently create, save, delete, or rewrite arbitrary user Shortcuts, so never claim that a Shortcut was created or modified until the user confirms it in the Shortcuts app. If the user asks whether you can use Shortcuts, say you can run/open existing iOS Shortcuts through the local tool when this feature is enabled.
+        """ : ""
         return """
         Iexa has on-device native iOS tools for \(joinedToolDescription). These run locally on the user's device and do not require the remote server.
         Current device time: \(nowText), timezone: \(timezoneName). For relative requests such as "今天", "现在", "明天", or "查看日历", calculate the date range from this current device time. Do not reuse stale sample dates.
@@ -13341,40 +13491,13 @@ final class ChatViewModel {
         \(officeVsAlpineInstruction)\(functionToolInstruction)If real function tools are not available, use the Markdown fallback by outputting exactly one fenced `iexa_native` JSON block and no fake tool-call syntax.
 
         Supported actions:
-        ```iexa_native
-        {"action":"device.status"}
-        ```
-        ```iexa_native
-        {"action":"device.info"}
-        ```
-        ```iexa_native
-        {"action":"clipboard.read"}
-        ```
-        ```iexa_native
-        {"action":"clipboard.write","text":"要复制的文本"}
-        ```
-        ```iexa_native
-        {"action":"system.notify","title":"Iexa","body":"提醒内容"}
-        ```
-        ```iexa_native
-        {"action":"get_location"}
-        ```
-        ```iexa_native
-        {"action":"get_weather"}
-        ```
-        ```iexa_native
-        {"action":"list_calendar_events","start":"\(todayStartText)","end":"\(todayEndText)"}
-        ```
-        ```iexa_native
-        {"action":"create_calendar_event","title":"会议","start":"\(nowText)","end":"\(exampleEndText)","location":"办公室","description":"讨论项目","alert_minutes":10}
-        ```
-        ```iexa_native
-        {"action":"delete_calendar_event","id":"event-id-from-list"}
-        ```
+        \(deviceActionExamples)
+        \(shortcutsActionExamples)
         \(browserActionExamples)
         \(officeActionExamples)
         \(browserInstructions)
         \(officeInstructions)
+        \(shortcutsInstructions)
         """
     }
 
@@ -14636,15 +14759,19 @@ final class ChatViewModel {
                 for: latestUserTextForLocalAlpine,
                 officeRevisionContext: officeRevisionContext
             )
+            let shouldExposeShortcutsTools = shortcutsEnabled
             let shouldExposeDeviceTools = Self.shouldExposeLocalDeviceNativeTools(latestUserTextForLocalAlpine)
             let shouldExpose = shouldExposeDeviceTools
                 || shouldExposeBrowserTools
                 || shouldExposeOfficeTools
+                || shouldExposeShortcutsTools
             guard shouldExpose else { return nil }
             return [
                 Self.localNativeToolSystemContext(
+                    includeDeviceTools: shouldExposeDeviceTools,
                     includeBrowserTools: shouldExposeBrowserTools,
-                    includeOfficeTools: shouldExposeOfficeTools
+                    includeOfficeTools: shouldExposeOfficeTools,
+                    includeShortcutsTools: shouldExposeShortcutsTools
                 ),
                 officeRevisionContext
             ]
@@ -15526,10 +15653,14 @@ final class ChatViewModel {
     private func executeLocalNativeTool(messageId: String, content: String) async {
         let officeKind = LocalNativeToolService.officeActionKind(in: content)
         let browserAction = LocalNativeToolService.browserActionName(in: content)
+        let shortcutsAction = LocalNativeToolService.shortcutsActionName(in: content)
         if browserAction != nil, !isLocalBrowserNativeToolsEnabled {
             return
         }
         if officeKind != nil, !localOfficeEnabled {
+            return
+        }
+        if shortcutsAction != nil, !shortcutsEnabled {
             return
         }
         if let officeKind {
@@ -15578,6 +15709,9 @@ final class ChatViewModel {
                         error: "模型返回的浏览器工具指令无法解析。"
                     )
                 )
+            }
+            if shortcutsAction != nil {
+                return
             }
             return
         }
@@ -16369,8 +16503,8 @@ final class ChatViewModel {
     private static func appendLocalNativeResultInstruction(to messages: inout [[String: Any]]) {
         let instruction = """
         [Local native tool result]
-        The latest Local Native message above is a real on-device iOS tool result for device info, clipboard, local notification, location, weather, calendar, local browser/web reading, or local Office document generation. Do not emit another `iexa_native` block in this turn.
-        Reply to the user in normal language only. If the local browser tool succeeded, answer from the returned page/search content and cite page titles/URLs plainly. If an Office document was generated, tell the user the file and previews are attached in the chat. If it failed, explain the permission/state problem and the next user action.
+        The latest Local Native message above is a real on-device iOS tool result for device info, clipboard, local notification, location, weather, calendar, local browser/web reading, local Office document generation, or iOS Shortcuts launching. Do not emit another `iexa_native` block in this turn.
+        Reply to the user in normal language only. If the local browser tool succeeded, answer from the returned page/search content and cite page titles/URLs plainly. If an Office document was generated, tell the user the file and previews are attached in the chat. If an iOS Shortcut was run or opened, summarize the requested shortcut action and mention any system/user confirmation requirement. If it failed, explain the permission/state problem and the next user action.
         [/Local native tool result]
         """
         appendSystemInstruction(instruction, marker: "[Local native tool result]", to: &messages)

@@ -29,6 +29,7 @@ struct ToolsMenuSheet: View {
     @Binding var webSearchEnabled: Bool
     @Binding var imageGenerationEnabled: Bool
     @Binding var localOfficeEnabled: Bool
+    @Binding var shortcutsEnabled: Bool
     @Binding var codeInterpreterEnabled: Bool
     var codeEditingEnabled: Bool = false
     var isCodeEditingAvailable: Bool = false
@@ -228,6 +229,15 @@ struct ToolsMenuSheet: View {
         )
     }
 
+    private var shortcutsToggle: some View {
+        featureToggleTile(
+            icon: "sparkles",
+            title: "快捷指令",
+            subtitle: "运行已有 iOS 快捷指令",
+            isOn: $shortcutsEnabled
+        )
+    }
+
     private var codeEditingToggle: some View {
         featureToggleTile(
             icon: "terminal",
@@ -376,6 +386,8 @@ struct ToolsMenuSheet: View {
             }
 
             localOfficeToggle
+
+            shortcutsToggle
 
             if isCodeEditingAvailable {
                 codeEditingToggle
@@ -666,6 +678,7 @@ struct ToolsMenuSheet: View {
                 webSearchEnabled: .constant(false),
                 imageGenerationEnabled: .constant(false),
                 localOfficeEnabled: .constant(false),
+                shortcutsEnabled: .constant(false),
                 codeInterpreterEnabled: .constant(false),
                 codeEditingEnabled: false,
                 isCodeEditingAvailable: true,
