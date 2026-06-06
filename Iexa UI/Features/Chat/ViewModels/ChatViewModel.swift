@@ -12023,7 +12023,7 @@ final class ChatViewModel {
         ]
         let endpointStyleImageName = haystack
             .split(whereSeparator: \.isWhitespace)
-            .contains(Self.isEndpointStyleImageModelToken)
+            .contains(where: Self.isEndpointStyleImageModelToken)
         if directEndpointTokens.contains(where: { haystack.contains($0) }) || endpointStyleImageName {
             return true
         }
@@ -12051,7 +12051,7 @@ final class ChatViewModel {
         ]
         let endpointStyleImageName = haystack
             .split(whereSeparator: \.isWhitespace)
-            .contains(Self.isEndpointStyleImageModelToken)
+            .contains(where: Self.isEndpointStyleImageModelToken)
         if directEndpointModels.contains(where: { haystack.contains($0) }) || endpointStyleImageName {
             return false
         }

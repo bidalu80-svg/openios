@@ -107,13 +107,13 @@ final class LocalCalendarService {
             }
         } else {
             switch status {
-            case .authorized:
+            case .authorized, .fullAccess:
                 return
             case .notDetermined:
                 let granted = try await requestLegacyEventAccess()
                 if granted { return }
                 throw LocalCalendarError.accessDenied
-            case .denied, .restricted:
+            case .denied, .restricted, .writeOnly:
                 throw LocalCalendarError.accessDenied
             @unknown default:
                 throw LocalCalendarError.accessDenied
