@@ -13143,6 +13143,7 @@ final class ChatViewModel {
         let timezoneName = TimeZone.current.identifier
         return """
         Iexa has on-device native iOS tools for device info, clipboard, local notifications, location, weather, calendar, local browser/web reading, and local Office/PDF document generation. These run locally on the user's device and do not require the remote server.
+        Iexa does not have a dedicated video storyboard, shot-by-shot storyboard, short-video storyboard, or storyboard image generation native tool. Do not claim that such a native tool exists. If a user asks for video storyboards, answer normally and only offer actually available alternatives such as PPT, Word, PDF, ordinary image generation, or Local Alpine when appropriate.
 
         Current device time: \(nowText), timezone: \(timezoneName). For relative requests such as "今天", "现在", "明天", or "查看日历", calculate the date range from this current device time. Do not reuse stale sample dates.
 
@@ -18121,6 +18122,7 @@ final class ChatViewModel {
             }
         }
         lines.append("Use this capability data when deciding whether a user request should use chat, image generation, attachments, Local Alpine, or a different model.")
+        lines.append("Do not infer a dedicated video storyboard or shot-by-shot storyboard tool from image/video/model capabilities; Iexa has no such native tool.")
         lines.append("[/Current model capability]")
         return lines.joined(separator: "\n")
     }
