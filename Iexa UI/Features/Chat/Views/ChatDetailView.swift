@@ -4256,8 +4256,10 @@ struct ChatDetailView: View {
         let imageFiles = Array(files.filter { file in
             isImageFile(file) && !officePreviewFiles.contains(file)
         }.prefix(9))
+        let videoFiles = files.filter { isVideoFile($0) }
         let nonImageFiles = files.filter {
             !isImageFile($0)
+                && !isVideoFile($0)
                 && $0.type != "collection"
                 && $0.type != "folder"
                 && !isOfficeDocumentFile($0)
@@ -4295,6 +4297,13 @@ struct ChatDetailView: View {
                 }
             }
         }
+        if !videoFiles.isEmpty {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                ForEach(Array(videoFiles.enumerated()), id: \.offset) { _, file in
+                    videoAttachmentCard(file: file)
+                }
+            }
+        }
         if !nonImageFiles.isEmpty {
             VStack(alignment: .leading, spacing: Spacing.sm) {
                 ForEach(Array(nonImageFiles.enumerated()), id: \.offset) { _, file in
@@ -4325,6 +4334,56 @@ struct ChatDetailView: View {
             || name.contains("slide-")
             || name.contains("/office agent/")
             || name.contains("office%20agent")
+    }
+
+    private func isVideoFile(_ file: ChatMessageFile) -> Bool {
+        let name = (file.name ?? file.url ?? file.displayURL ?? "").lowercased()
+        let ext = (name as NSString).pathExtension.lowercased()
+        let contentType = (file.contentType ?? "").lowercased()
+        return file.type == "video"
+            || contentType.hasPrefix("video/")
+            || ["mp4", "mov", "m4v", "webm", "avi", "mkv"].contains(ext)
+            || name.hasPrefix("data:video/")
+    }
+
+    private func videoAttachmentCard(file: ChatMessageFile) -> some View {
+        let fileName = file.name ?? "generated-video.mp4"
+        let fileExt = (fileName as NSString).pathExtension.lowercased()
+
+        return Button {
+            openMessageFile(file)
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                VideoAttachmentThumbnail(file: file)
+                    .frame(width: 300, height: 168)
+                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+
+                HStack(spacing: 9) {
+                    Image(systemName: "play.rectangle.fill")
+                        .scaledFont(size: 15, weight: .semibold)
+                        .foregroundStyle(theme.brandPrimary)
+                    Text(fileName)
+                        .scaledFont(size: 14, weight: .semibold)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    Text(fileAttachmentSubtitle(for: file, fallbackExtension: fileExt.isEmpty ? "mp4" : fileExt))
+                        .scaledFont(size: 11, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(1)
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: 320, alignment: .leading)
+            .background(theme.surfaceContainer.opacity(0.82))
+            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(0.42), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     private func officeDocumentAttachmentCard(
@@ -8458,6 +8517,126 @@ private struct OfficeAttachmentThumbnail: View {
     }
 }
 
+private struct VideoAttachmentThumbnail: View {
+    let file: ChatMessageFile
+
+    @Environment(\.theme) private var theme
+    @State private var image: UIImage?
+    @State private var didAttemptLoad = false
+
+    var body: some View {
+        ZStack {
+            Group {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(0.92),
+                            theme.brandPrimary.opacity(0.34)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    .overlay {
+                        Image(systemName: "film")
+                            .scaledFont(size: 34, weight: .semibold)
+                            .foregroundStyle(.white.opacity(0.42))
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+
+            Circle()
+                .fill(.white.opacity(0.92))
+                .frame(width: 48, height: 48)
+                .shadow(color: .black.opacity(0.16), radius: 10, x: 0, y: 4)
+                .overlay {
+                    Image(systemName: "play.fill")
+                        .scaledFont(size: 18, weight: .bold)
+                        .foregroundStyle(.black.opacity(0.82))
+                        .offset(x: 1)
+                }
+        }
+        .background(.black.opacity(0.86))
+        .task(id: file.url ?? file.displayURL ?? file.name ?? "") {
+            guard !didAttemptLoad || image == nil else { return }
+            didAttemptLoad = true
+            image = await Self.loadThumbnail(for: file)
+        }
+    }
+
+    private struct LoadedVideoThumbnail: @unchecked Sendable {
+        let image: UIImage
+    }
+
+    private static func loadThumbnail(for file: ChatMessageFile) async -> UIImage? {
+        guard let url = await videoURL(for: file) else { return nil }
+        let loaded = await Task.detached(priority: .utility) {
+            let asset = AVURLAsset(url: url)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 720, height: 720)
+            let time = CMTime(seconds: 0.12, preferredTimescale: 600)
+            guard let cgImage = try? generator.copyCGImage(at: time, actualTime: nil) else {
+                return nil as LoadedVideoThumbnail?
+            }
+            return LoadedVideoThumbnail(image: UIImage(cgImage: cgImage))
+        }.value
+        return loaded?.image
+    }
+
+    private static func videoURL(for file: ChatMessageFile) async -> URL? {
+        for reference in [file.displayURL, file.url].compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) }) {
+            if let url = URL(string: reference), url.isFileURL {
+                return url
+            }
+            if let url = URL(string: reference),
+               ["http", "https"].contains(url.scheme?.lowercased()) {
+                return url
+            }
+            if let url = try? await localVideoURL(fromDataURL: reference, fallbackName: file.name ?? "generated-video.mp4") {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private static func localVideoURL(fromDataURL dataURL: String, fallbackName: String) async throws -> URL? {
+        try await Task.detached(priority: .utility) {
+            guard dataURL.hasPrefix("data:video/"),
+                  let comma = dataURL.firstIndex(of: ",") else { return nil }
+            let header = String(dataURL[..<comma]).lowercased()
+            let encoded = String(dataURL[dataURL.index(after: comma)...])
+            guard let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters) else { return nil }
+            let ext: String
+            if header.contains("video/webm") {
+                ext = "webm"
+            } else if header.contains("video/quicktime") || header.contains("video/mov") {
+                ext = "mov"
+            } else {
+                ext = (fallbackName as NSString).pathExtension.isEmpty
+                    ? "mp4"
+                    : (fallbackName as NSString).pathExtension
+            }
+            let baseName = ((fallbackName as NSString).deletingPathExtension)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let safeName = baseName.isEmpty ? "generated-video" : baseName
+            let cacheDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("generated_video_cache", isDirectory: true)
+            try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+            let url = cacheDir.appendingPathComponent("\(safeName)-\(abs(dataURL.hashValue)).\(ext)")
+            if !FileManager.default.fileExists(atPath: url.path) {
+                try data.write(to: url)
+            }
+            return url
+        }.value
+    }
+}
+
 private struct MessageFilePreviewSheet: View {
     let file: ChatMessageFile
     let apiClient: APIClient?
@@ -8469,8 +8648,15 @@ private struct MessageFilePreviewSheet: View {
     @State private var contentType: String?
     @State private var textContent: String?
     @State private var previewImage: UIImage?
+    @State private var videoURL: URL?
     @State private var isLoading = false
     @State private var errorMessage: String?
+
+    init(file: ChatMessageFile, apiClient: APIClient?) {
+        self.file = file
+        self.apiClient = apiClient
+        _selectedTab = State(initialValue: Self.initialPreviewTab(for: file))
+    }
 
     private enum PreviewTab: CaseIterable, Hashable {
         case content
@@ -8627,6 +8813,10 @@ private struct MessageFilePreviewSheet: View {
             ProgressView("正在加载预览…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .foregroundStyle(theme.textSecondary)
+        } else if let videoURL, isVideoLike {
+            MessageVideoPlayerView(url: videoURL)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.black)
         } else if let image = previewImage, isImageLike {
             GeometryReader { geo in
                 ScrollView([.horizontal, .vertical], showsIndicators: false) {
@@ -8662,6 +8852,26 @@ private struct MessageFilePreviewSheet: View {
         isImageType(contentType)
     }
 
+    private var isVideoLike: Bool {
+        Self.isVideoFile(file, loadedContentType: contentType)
+    }
+
+    private static func initialPreviewTab(for file: ChatMessageFile) -> PreviewTab {
+        isVideoFile(file, loadedContentType: nil) ? .preview : .content
+    }
+
+    private static func isVideoFile(_ file: ChatMessageFile, loadedContentType: String?) -> Bool {
+        let name = (file.name ?? file.url ?? file.displayURL ?? "").lowercased()
+        let ext = (name as NSString).pathExtension.lowercased()
+        let fileContentType = (file.contentType ?? "").lowercased()
+        let loadedType = (loadedContentType ?? "").lowercased()
+        return file.type == "video"
+            || fileContentType.hasPrefix("video/")
+            || loadedType.hasPrefix("video/")
+            || ["mp4", "mov", "m4v", "webm", "avi", "mkv"].contains(ext)
+            || name.hasPrefix("data:video/")
+    }
+
     private func isImageType(_ loadedContentType: String?) -> Bool {
         file.type == "image"
             || file.contentType?.hasPrefix("image/") == true
@@ -8688,30 +8898,63 @@ private struct MessageFilePreviewSheet: View {
 
     @MainActor
     private func loadFileIfNeeded() async {
-        guard data == nil else { return }
+        guard data == nil && videoURL == nil else { return }
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
 
         do {
+            if Self.isVideoFile(file, loadedContentType: nil),
+               let directURL = directPlayableVideoURL {
+                videoURL = directURL
+                contentType = file.contentType ?? "video/mp4"
+                previewImage = nil
+                textContent = nil
+                selectedTab = .preview
+                return
+            }
+
             let extractedText = try await loadExtractedTextIfAvailable()
             if let loaded = try await loadData() {
                 data = loaded.data
                 contentType = loaded.contentType
-                if isImageType(loaded.contentType) {
-                    previewImage = await Self.decodePreviewImage(from: loaded.data)
-                } else {
+                if Self.isVideoFile(file, loadedContentType: loaded.contentType) {
+                    videoURL = try await Self.writePreviewVideoData(
+                        loaded.data,
+                        contentType: loaded.contentType ?? file.contentType,
+                        fallbackName: fileName
+                    )
                     previewImage = nil
+                    textContent = nil
+                    selectedTab = .preview
+                } else if isImageType(loaded.contentType) {
+                    videoURL = nil
+                    previewImage = await Self.decodePreviewImage(from: loaded.data)
+                    textContent = extractedText ?? decodedText(from: loaded.data, contentType: loaded.contentType)
+                } else {
+                    videoURL = nil
+                    previewImage = nil
+                    textContent = extractedText ?? decodedText(from: loaded.data, contentType: loaded.contentType)
                 }
-                textContent = extractedText ?? decodedText(from: loaded.data, contentType: loaded.contentType)
             } else {
                 textContent = extractedText
                 previewImage = nil
+                videoURL = nil
                 errorMessage = "缺少可读取的文件地址。"
             }
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private var directPlayableVideoURL: URL? {
+        for ref in fileReferenceCandidates {
+            guard let url = URL(string: ref) else { continue }
+            if url.isFileURL || ["http", "https"].contains(url.scheme?.lowercased()) {
+                return url
+            }
+        }
+        return nil
     }
 
     private func loadExtractedTextIfAvailable() async throws -> String? {
@@ -8737,6 +8980,37 @@ private struct MessageFilePreviewSheet: View {
             UIImage(data: data).map { DecodedPreviewImage(image: $0) }
         }.value
         return decoded?.image
+    }
+
+    private static func writePreviewVideoData(
+        _ data: Data,
+        contentType: String?,
+        fallbackName: String
+    ) async throws -> URL {
+        try await Task.detached(priority: .userInitiated) {
+            let ext: String
+            let lowerType = (contentType ?? "").lowercased()
+            if lowerType.contains("webm") {
+                ext = "webm"
+            } else if lowerType.contains("quicktime") || lowerType.contains("mov") {
+                ext = "mov"
+            } else {
+                ext = (fallbackName as NSString).pathExtension.isEmpty
+                    ? "mp4"
+                    : (fallbackName as NSString).pathExtension
+            }
+            let baseName = ((fallbackName as NSString).deletingPathExtension)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let safeName = baseName.isEmpty ? "generated-video" : baseName
+            let cacheDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("message_video_preview", isDirectory: true)
+            try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+            let url = cacheDir.appendingPathComponent("\(safeName)-\(data.count)-\(abs(data.hashValue)).\(ext)")
+            if !FileManager.default.fileExists(atPath: url.path) {
+                try data.write(to: url)
+            }
+            return url
+        }.value
     }
 
     private func loadData() async throws -> (data: Data, contentType: String?)? {
@@ -8839,6 +9113,26 @@ private struct MessageFilePreviewSheet: View {
         return String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .utf16)
             ?? String(data: data, encoding: .isoLatin1)
+    }
+}
+
+private struct MessageVideoPlayerView: View {
+    let url: URL
+
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        VideoPlayer(player: player)
+            .onAppear {
+                let newPlayer = AVPlayer(url: url)
+                player = newPlayer
+                newPlayer.play()
+            }
+            .onDisappear {
+                player?.pause()
+                player = nil
+            }
+            .id(url)
     }
 }
 
