@@ -1258,29 +1258,17 @@ final class APIClient: @unchecked Sendable {
         imageData: Data? = nil,
         imageFileName: String = "image.png"
     ) async throws -> String {
-        var body: [String: Any] = [
-            "model": model,
-            "prompt": prompt,
-            "n": 1,
-            "size": size
-        ]
-        if let duration {
-            body["duration"] = duration
-        }
-
-        let bodyVariants: [[String: Any]] = {
-            guard let imageData else { return [body] }
-            let dataURL = "data:\(mimeType(for: imageFileName));base64,\(imageData.base64EncodedString())"
-            return [
-                body.merging(["image": dataURL]) { _, new in new },
-                body.merging(["image_url": dataURL]) { _, new in new },
-                body.merging(["input_image": dataURL]) { _, new in new },
-                body.merging(["images": [dataURL]]) { _, new in new },
-                body
-            ]
-        }()
+        let bodyVariants = videoGenerationBodyVariants(
+            prompt: prompt,
+            model: model,
+            size: size,
+            duration: duration,
+            imageData: imageData,
+            imageFileName: imageFileName
+        )
 
         let paths = [
+            "/videos",
             "/videos/generations",
             "/video/generations",
             "/videos/generate",
@@ -1300,6 +1288,17 @@ final class APIClient: @unchecked Sendable {
                     if let videoReference = firstVideoReference(in: json) {
                         return videoReference
                     }
+                    if let taskId = firstVideoTaskId(in: json) {
+                        return try await pollVideoGenerationTask(taskId: taskId)
+                    }
+                    lastError = APIError.responseDecoding(
+                        underlying: NSError(
+                            domain: "APIClient",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "视频生成任务已创建，但接口没有返回视频地址或任务 ID。"]
+                        ),
+                        data: nil
+                    )
                 } catch {
                     lastError = error
                     let apiError = APIError.from(error)
@@ -1335,6 +1334,250 @@ final class APIClient: @unchecked Sendable {
             images: [ImageEditSource(data: imageData, fileName: fileName)],
             size: size
         )
+    }
+
+    private func videoGenerationBodyVariants(
+        prompt: String,
+        model: String,
+        size: String,
+        duration: Int?,
+        imageData: Data?,
+        imageFileName: String
+    ) -> [[String: Any]] {
+        let normalizedSize = normalizedVideoSize(for: size)
+        var sizeValues = [normalizedSize]
+        if normalizedSize != size {
+            sizeValues.append(size)
+        }
+
+        var baseVariants: [[String: Any]] = []
+        for sizeValue in sizeValues {
+            var base: [String: Any] = [
+                "model": model,
+                "prompt": prompt,
+                "n": 1,
+                "size": sizeValue
+            ]
+            if let duration {
+                let seconds = min(max(duration, 1), 60)
+                baseVariants.append(base.merging(["seconds": "\(seconds)"]) { _, new in new })
+                baseVariants.append(base.merging(["duration_seconds": seconds]) { _, new in new })
+                baseVariants.append(base.merging(["duration": seconds]) { _, new in new })
+                if let dimensions = videoDimensions(from: sizeValue) {
+                    baseVariants.append(base.merging([
+                        "width": dimensions.width,
+                        "height": dimensions.height,
+                        "seconds": "\(seconds)",
+                        "num_frames": videoFrameCount(for: seconds),
+                        "frame_rate": 24
+                    ]) { _, new in new })
+                }
+            } else {
+                baseVariants.append(base)
+                if let dimensions = videoDimensions(from: sizeValue) {
+                    baseVariants.append(base.merging([
+                        "width": dimensions.width,
+                        "height": dimensions.height,
+                        "num_frames": 121,
+                        "frame_rate": 24
+                    ]) { _, new in new })
+                }
+            }
+        }
+
+        baseVariants = deduplicatedJSONDictionaries(baseVariants)
+
+        guard let imageData else {
+            return baseVariants
+        }
+
+        let dataURL = "data:\(mimeType(for: imageFileName));base64,\(imageData.base64EncodedString())"
+        var variants: [[String: Any]] = []
+        for body in baseVariants {
+            variants.append(body.merging(["image": dataURL]) { _, new in new })
+            variants.append(body.merging(["image_url": dataURL]) { _, new in new })
+            variants.append(body.merging(["input_image": dataURL]) { _, new in new })
+            variants.append(body.merging(["first_frame_image": dataURL]) { _, new in new })
+            variants.append(body.merging(["reference_image": dataURL]) { _, new in new })
+            variants.append(body.merging(["images": [dataURL]]) { _, new in new })
+            variants.append(body)
+        }
+        return deduplicatedJSONDictionaries(variants)
+    }
+
+    private func normalizedVideoSize(for size: String) -> String {
+        guard let dimensions = videoDimensions(from: size) else {
+            return "1152x768"
+        }
+        let ratio = Double(dimensions.width) / Double(dimensions.height)
+        if abs(ratio - 1.0) < 0.08 {
+            return "1024x1024"
+        }
+        return ratio > 1.0 ? "1152x768" : "768x1152"
+    }
+
+    private func videoDimensions(from size: String) -> (width: Int, height: Int)? {
+        let parts = size.lowercased()
+            .split(separator: "x", maxSplits: 1)
+            .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard parts.count == 2,
+              (64...4096).contains(parts[0]),
+              (64...4096).contains(parts[1]) else {
+            return nil
+        }
+        return (parts[0], parts[1])
+    }
+
+    private func videoFrameCount(for seconds: Int) -> Int {
+        let raw = max(1, seconds) * 24
+        let lower = max(1, ((raw - 1) / 8) * 8 + 1)
+        let upper = lower + 8
+        return abs(raw - lower) <= abs(raw - upper) ? lower : upper
+    }
+
+    private func deduplicatedJSONDictionaries(_ values: [[String: Any]]) -> [[String: Any]] {
+        var seen = Set<String>()
+        var result: [[String: Any]] = []
+        for value in values {
+            let key: String
+            if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+               let json = String(data: data, encoding: .utf8) {
+                key = json
+            } else {
+                key = "\(value)"
+            }
+            guard seen.insert(key).inserted else { continue }
+            result.append(value)
+        }
+        return result
+    }
+
+    private func pollVideoGenerationTask(
+        taskId: String,
+        timeout: TimeInterval = 600
+    ) async throws -> String {
+        let startedAt = Date()
+        let statusPaths = videoTaskStatusPaths(taskId: taskId)
+        var lastPayload: Any?
+        var lastError: Error?
+        var delay: TimeInterval = 3
+
+        while Date().timeIntervalSince(startedAt) < timeout {
+            try Task.checkCancellation()
+
+            for path in statusPaths {
+                do {
+                    let payload = try await requestAnyJSON(
+                        path: path,
+                        method: .get,
+                        timeout: 60
+                    )
+                    lastPayload = payload
+
+                    if let reference = firstVideoReference(in: payload) {
+                        return reference
+                    }
+
+                    switch videoTaskState(in: payload) {
+                    case .completed:
+                        if let reference = try await fetchVideoTaskContent(taskId: taskId) {
+                            return reference
+                        }
+                    case .failed(let message):
+                        throw APIError.responseDecoding(
+                            underlying: NSError(
+                                domain: "APIClient",
+                                code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: message ?? "视频生成任务失败。"]
+                            ),
+                            data: nil
+                        )
+                    case .pending, .none:
+                        break
+                    }
+
+                    lastError = nil
+                    break
+                } catch {
+                    lastError = error
+                    let apiError = APIError.from(error)
+                    if case .httpError(let statusCode, _, _) = apiError,
+                       [400, 404, 405, 409, 422].contains(statusCode) {
+                        continue
+                    }
+                    throw error
+                }
+            }
+
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            delay = min(delay + 1, 10)
+        }
+
+        throw APIError.responseDecoding(
+            underlying: NSError(
+                domain: "APIClient",
+                code: -1,
+                userInfo: [
+                    NSLocalizedDescriptionKey: videoTaskTimeoutMessage(
+                        payload: lastPayload,
+                        lastError: lastError
+                    )
+                ]
+            ),
+            data: nil
+        )
+    }
+
+    private func fetchVideoTaskContent(taskId: String) async throws -> String? {
+        let contentPaths = videoTaskContentPaths(taskId: taskId)
+        var lastError: Error?
+
+        for path in contentPaths {
+            do {
+                let (data, response) = try await network.requestRaw(
+                    path: path,
+                    method: .get,
+                    timeout: 600
+                )
+                guard !data.isEmpty else { continue }
+
+                if let payload = try? JSONSerialization.jsonObject(with: data),
+                   let reference = firstVideoReference(in: payload) {
+                    return reference
+                }
+
+                if let text = String(data: data, encoding: .utf8),
+                   let reference = firstVideoReference(in: text) {
+                    return reference
+                }
+
+                let contentType = normalizedContentType(
+                    response.value(forHTTPHeaderField: "Content-Type")
+                )
+                guard !contentType.contains("json"),
+                      !contentType.contains("text/html") else {
+                    continue
+                }
+
+                let mime = contentType.hasPrefix("video/")
+                    ? contentType
+                    : "video/mp4"
+                return "data:\(mime);base64,\(data.base64EncodedString())"
+            } catch {
+                lastError = error
+                let apiError = APIError.from(error)
+                if case .httpError(let statusCode, _, _) = apiError,
+                   [400, 404, 405, 409, 422].contains(statusCode) {
+                    continue
+                }
+                throw error
+            }
+        }
+
+        if let lastError {
+            throw lastError
+        }
+        return nil
     }
 
     func editImage(
@@ -1725,8 +1968,9 @@ final class APIClient: @unchecked Sendable {
 
         if let dict = value as? [String: Any] {
             for key in [
-                "url", "video_url", "video", "b64_json", "base64",
-                "file_url", "download_url", "output_url"
+                "url", "video_url", "videoUrl", "videoURL", "video",
+                "remixed_from_video_id", "remixedFromVideoId",
+                "b64_json", "base64", "file_url", "download_url", "output_url"
             ] {
                 if let reference = firstVideoReference(in: dict[key]) {
                     return reference
@@ -1749,6 +1993,215 @@ final class APIClient: @unchecked Sendable {
         }
 
         return nil
+    }
+
+    private enum VideoTaskState {
+        case pending
+        case completed
+        case failed(String?)
+    }
+
+    private func firstVideoTaskId(in value: Any?) -> String? {
+        guard let value else { return nil }
+
+        if let dict = value as? [String: Any] {
+            for key in ["task_id", "taskId", "taskID"] {
+                if let id = trimmedNonEmptyString(dict[key]) {
+                    return id
+                }
+            }
+
+            if let id = trimmedNonEmptyString(dict["id"]) {
+                let object = trimmedNonEmptyString(dict["object"])?.lowercased() ?? ""
+                let status = videoStatusStrings(in: dict).map { $0.lowercased() }
+                if id.hasPrefix("task_")
+                    || object.contains("video")
+                    || status.contains(where: isPendingVideoStatus) {
+                    return id
+                }
+            }
+
+            for key in ["data", "output", "task", "job", "result", "results"] {
+                if let id = firstVideoTaskId(in: dict[key]) {
+                    return id
+                }
+            }
+            return nil
+        }
+
+        if let array = value as? [Any] {
+            for item in array {
+                if let id = firstVideoTaskId(in: item) {
+                    return id
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func videoTaskState(in value: Any?) -> VideoTaskState? {
+        let statuses = videoStatusStrings(in: value)
+            .map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        if statuses.contains(where: isFailedVideoStatus) {
+            return .failed(videoTaskFailureMessage(in: value))
+        }
+        if statuses.contains(where: isPendingVideoStatus) {
+            return .pending
+        }
+        if statuses.contains(where: isCompletedVideoStatus) {
+            return .completed
+        }
+        if let message = videoTaskFailureMessage(in: value) {
+            return .failed(message)
+        }
+        return nil
+    }
+
+    private func videoStatusStrings(in value: Any?) -> [String] {
+        guard let value else { return [] }
+
+        if let dict = value as? [String: Any] {
+            var statuses: [String] = []
+            for key in ["status", "state", "phase", "task_status", "taskStatus", "taskState"] {
+                if let status = trimmedNonEmptyString(dict[key]) {
+                    statuses.append(status)
+                }
+            }
+            for key in ["data", "output", "task", "job", "result", "results", "video", "videos"] {
+                statuses.append(contentsOf: videoStatusStrings(in: dict[key]))
+            }
+            return statuses
+        }
+
+        if let array = value as? [Any] {
+            return array.flatMap { videoStatusStrings(in: $0) }
+        }
+
+        return []
+    }
+
+    private func videoTaskFailureMessage(in value: Any?) -> String? {
+        guard let value else { return nil }
+
+        if let dict = value as? [String: Any] {
+            for key in ["error", "error_message", "errorMessage", "reason", "detail"] {
+                if let message = trimmedNonEmptyString(dict[key]),
+                   message.lowercased() != "null",
+                   !isBenignVideoTaskMessage(message) {
+                    return message
+                }
+                if let nested = videoTaskFailureMessage(in: dict[key]) {
+                    return nested
+                }
+            }
+            for key in ["data", "output", "task", "job", "result", "results"] {
+                if let message = videoTaskFailureMessage(in: dict[key]) {
+                    return message
+                }
+            }
+        }
+
+        if let array = value as? [Any] {
+            for item in array {
+                if let message = videoTaskFailureMessage(in: item) {
+                    return message
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func isPendingVideoStatus(_ value: String) -> Bool {
+        [
+            "queued", "queue", "pending", "processing", "running",
+            "in_progress", "in-progress", "not_start", "not-start",
+            "not_started", "not-started", "submitted", "created",
+            "starting", "generating", "building", "waiting"
+        ].contains(value)
+    }
+
+    private func isCompletedVideoStatus(_ value: String) -> Bool {
+        [
+            "completed", "complete", "succeeded", "succeed",
+            "success", "finished", "done", "available"
+        ].contains(value)
+    }
+
+    private func isFailedVideoStatus(_ value: String) -> Bool {
+        [
+            "failed", "failure", "error", "cancelled", "canceled",
+            "rejected", "timeout", "expired"
+        ].contains(value)
+    }
+
+    private func isBenignVideoTaskMessage(_ value: String) -> Bool {
+        let lower = value.lowercased()
+        return lower == "success"
+            || lower == "ok"
+            || lower == "queued"
+            || lower == "pending"
+            || lower == "processing"
+            || lower == "not_start"
+    }
+
+    private func videoTaskStatusPaths(taskId: String) -> [String] {
+        let id = encodedPathSegment(taskId)
+        return [
+            "/videos/\(id)",
+            "/video/generations/\(id)",
+            "/videos/generations/\(id)",
+            "/video/generate/\(id)",
+            "/videos/generate/\(id)"
+        ]
+    }
+
+    private func videoTaskContentPaths(taskId: String) -> [String] {
+        let id = encodedPathSegment(taskId)
+        return [
+            "/videos/\(id)/content",
+            "/video/generations/\(id)/content",
+            "/videos/generations/\(id)/content",
+            "/video/generate/\(id)/content",
+            "/videos/generate/\(id)/content"
+        ]
+    }
+
+    private func videoTaskTimeoutMessage(payload: Any?, lastError: Error?) -> String {
+        let suffix: String
+        let statuses = videoStatusStrings(in: payload)
+        if !statuses.isEmpty {
+            suffix = "当前状态：\(statuses.joined(separator: " / "))。"
+        } else if let lastError {
+            suffix = "最后错误：\(lastError.localizedDescription)"
+        } else {
+            suffix = "服务端暂未返回完成状态。"
+        }
+        return "视频生成任务已创建，但在限定时间内没有完成。\(suffix)"
+    }
+
+    private func trimmedNonEmptyString(_ value: Any?) -> String? {
+        guard let string = value as? String else { return nil }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func encodedPathSegment(_ value: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    private func normalizedContentType(_ value: String?) -> String {
+        (value ?? "application/octet-stream")
+            .components(separatedBy: ";")
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            ?? "application/octet-stream"
     }
 
     private func looksLikeBase64Image(_ string: String) -> Bool {

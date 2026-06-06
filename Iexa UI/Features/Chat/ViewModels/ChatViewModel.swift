@@ -1419,7 +1419,17 @@ final class ChatViewModel {
     }
 
     private static func isImageFile(_ file: ChatMessageFile) -> Bool {
-        file.type == "image" || (file.contentType ?? "").hasPrefix("image/")
+        file.type == "image" || (file.contentType ?? "").lowercased().hasPrefix("image/")
+    }
+
+    private static func isVideoFile(_ file: ChatMessageFile) -> Bool {
+        let contentType = (file.contentType ?? "").lowercased()
+        let name = (file.name ?? file.url ?? file.displayURL ?? "").lowercased()
+        let ext = (name as NSString).pathExtension.lowercased()
+        return file.type == "video"
+            || contentType.hasPrefix("video/")
+            || ["mp4", "mov", "m4v", "webm", "avi", "mkv"].contains(ext)
+            || name.hasPrefix("data:video/")
     }
 
     private static func isRenderableImageReference(_ value: String?) -> Bool {
@@ -1549,10 +1559,18 @@ final class ChatViewModel {
         var sanitized = file
 
         if let url = sanitized.url {
-            sanitized.url = safeMessageFileReference(url, isImage: isImageFile(sanitized))
+            sanitized.url = safeMessageFileReference(
+                url,
+                isImage: isImageFile(sanitized),
+                isVideo: isVideoFile(sanitized)
+            )
         }
         if let displayURL = sanitized.displayURL {
-            sanitized.displayURL = safeMessageFileReference(displayURL, isImage: isImageFile(sanitized))
+            sanitized.displayURL = safeMessageFileReference(
+                displayURL,
+                isImage: isImageFile(sanitized),
+                isVideo: isVideoFile(sanitized)
+            )
         }
 
         if isImageFile(sanitized),
@@ -1568,13 +1586,16 @@ final class ChatViewModel {
         return sanitized
     }
 
-    private static func safeMessageFileReference(_ value: String, isImage: Bool) -> String? {
+    private static func safeMessageFileReference(_ value: String, isImage: Bool, isVideo: Bool = false) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
         if isImage, let dataURI = normalizedImageDataURI(trimmed) {
             guard let compact = compactImageDataURI(dataURI) else { return nil }
             return writeGeneratedImageToCache(dataURL: compact)
+        }
+        if isVideo, trimmed.prefix(11).lowercased() == "data:video/" {
+            return writeGeneratedVideoToCache(dataURL: trimmed)
         }
 
         if trimmed.hasPrefix("data:") || trimmed.hasPrefix("image:data/") {
@@ -12002,11 +12023,7 @@ final class ChatViewModel {
         ]
         let endpointStyleImageName = haystack
             .split(whereSeparator: \.isWhitespace)
-            .contains { token in
-                token.hasSuffix("-image")
-                    || token.hasSuffix("_image")
-                    || token.hasSuffix(".image")
-            }
+            .contains(Self.isEndpointStyleImageModelToken)
         if directEndpointTokens.contains(where: { haystack.contains($0) }) || endpointStyleImageName {
             return true
         }
@@ -12034,11 +12051,7 @@ final class ChatViewModel {
         ]
         let endpointStyleImageName = haystack
             .split(whereSeparator: \.isWhitespace)
-            .contains { token in
-                token.hasSuffix("-image")
-                    || token.hasSuffix("_image")
-                    || token.hasSuffix(".image")
-            }
+            .contains(Self.isEndpointStyleImageModelToken)
         if directEndpointModels.contains(where: { haystack.contains($0) }) || endpointStyleImageName {
             return false
         }
@@ -12058,6 +12071,16 @@ final class ChatViewModel {
             return true
         }
         return false
+    }
+
+    private static func isEndpointStyleImageModelToken(_ token: Substring) -> Bool {
+        let value = String(token)
+        return value.hasSuffix("-image")
+            || value.hasSuffix("_image")
+            || value.hasSuffix(".image")
+            || value.contains("-image-")
+            || value.contains("_image_")
+            || value.contains(".image.")
     }
 
     private func shouldUseDirectVideoGeneration(modelId: String) -> Bool {
@@ -12569,6 +12592,52 @@ final class ChatViewModel {
         }
     }
 
+    private static func writeGeneratedVideoToCache(dataURL: String) -> String? {
+        guard let data = mediaData(fromDataURL: dataURL) else { return nil }
+        let contentType = videoContentType(for: dataURL)
+        let fileExtension = fileExtension(forVideoContentType: contentType)
+        let baseDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let directory = baseDirectory.appendingPathComponent("iexa-generated-videos", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let fileURL = directory.appendingPathComponent("\(stableImageHash(data)).\(fileExtension)")
+            if !FileManager.default.fileExists(atPath: fileURL.path) {
+                try data.write(to: fileURL, options: [.atomic])
+            }
+            return fileURL.absoluteString
+        } catch {
+            return nil
+        }
+    }
+
+    private static func mediaData(fromDataURL dataURL: String) -> Data? {
+        guard let comma = dataURL.firstIndex(of: ",") else { return nil }
+        let header = dataURL[..<comma].lowercased()
+        guard header.contains(";base64") else { return nil }
+        let encoded = String(dataURL[dataURL.index(after: comma)...])
+        return Data(base64Encoded: encoded, options: .ignoreUnknownCharacters)
+    }
+
+    private static func videoContentType(for reference: String) -> String {
+        let header = reference.prefix(128).lowercased()
+        let ext = URL(string: reference)?.pathExtension.lowercased()
+            ?? (reference as NSString).pathExtension.lowercased()
+        if header.hasPrefix("data:video/webm") || ext == "webm" { return "video/webm" }
+        if header.hasPrefix("data:video/quicktime") || ext == "mov" { return "video/quicktime" }
+        if header.hasPrefix("data:video/x-m4v") || ext == "m4v" { return "video/x-m4v" }
+        return "video/mp4"
+    }
+
+    private static func fileExtension(forVideoContentType contentType: String) -> String {
+        switch contentType {
+        case "video/webm": return "webm"
+        case "video/quicktime": return "mov"
+        case "video/x-m4v": return "m4v"
+        default: return "mp4"
+        }
+    }
+
     private static func stableImageHash(_ data: Data) -> String {
         var hash: UInt64 = 14_695_981_039_346_656_037
         for byte in data {
@@ -12724,18 +12793,22 @@ final class ChatViewModel {
         messageId: String,
         videoReference: String
     ) {
-        let fileName = videoReference.hasPrefix("data:video/")
-            ? "generated-video.mp4"
-            : ((URL(string: videoReference)?.lastPathComponent).flatMap { $0.isEmpty ? nil : $0 } ?? "generated-video.mp4")
-        let contentType: String = {
-            let lower = fileName.lowercased()
-            if lower.hasSuffix(".mov") { return "video/quicktime" }
-            if lower.hasSuffix(".webm") { return "video/webm" }
-            return "video/mp4"
+        let isInlineVideoData = videoReference.prefix(11).lowercased() == "data:video/"
+        guard let resolvedReference = Self.safeMessageFileReference(videoReference, isImage: false, isVideo: true)
+                ?? (isInlineVideoData ? nil : videoReference) else {
+            return
+        }
+        let contentType = Self.videoContentType(for: videoReference)
+        let fileName: String = {
+            if isInlineVideoData {
+                return "generated-video.\(Self.fileExtension(forVideoContentType: contentType))"
+            }
+            return (URL(string: resolvedReference)?.lastPathComponent).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "generated-video.\(Self.fileExtension(forVideoContentType: contentType))"
         }()
         let file = ChatMessageFile(
             type: "video",
-            url: videoReference,
+            url: resolvedReference,
             name: fileName,
             contentType: contentType,
             displayURL: nil
