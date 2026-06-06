@@ -9,6 +9,14 @@ private func localAlpinePreviewShouldUseWebView(_ url: URL) -> Bool {
     return ["html", "htm", "xhtml", "svg"].contains(url.pathExtension.lowercased())
 }
 
+private struct LocalAlpineConsoleContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 // MARK: - Local Alpine Terminal Console
 
 struct LocalAlpineTerminalConsoleView: View {
@@ -35,6 +43,8 @@ struct LocalAlpineTerminalConsoleView: View {
     @State private var isPollingSessionOutput = false
     @State private var streamingCommandSessionID: Int?
     @State private var consoleOutputRevision = 0
+    @State private var consoleContentHeight: CGFloat = 0
+    @State private var consoleViewportHeight: CGFloat = 0
     @State private var previewFileURL: URL?
     @State private var previewWebURL: WebPreviewURL?
 
@@ -125,40 +135,64 @@ struct LocalAlpineTerminalConsoleView: View {
                                 commandLine
                                     .id("commandLine")
                             }
-                            .frame(minWidth: max(1, geometry.size.width - 8), alignment: .leading)
+                            .background(
+                                GeometryReader { contentGeometry in
+                                    Color.clear.preference(
+                                        key: LocalAlpineConsoleContentHeightKey.self,
+                                        value: contentGeometry.size.height
+                                    )
+                                }
+                            )
+                            .frame(
+                                minWidth: max(1, geometry.size.width - 8),
+                                minHeight: geometry.size.height,
+                                alignment: .topLeading
+                            )
                             .padding(.horizontal, 2)
                             .padding(.top, 0)
                             .padding(.bottom, 18)
                         }
-                        .onChange(of: entries.count) { _, _ in
-                            guard !entries.isEmpty else { return }
-                            withAnimation(.easeOut(duration: 0.16)) {
-                                proxy.scrollTo("commandLine", anchor: .bottom)
+                        .defaultScrollAnchor(.top)
+                        .onAppear {
+                            consoleViewportHeight = geometry.size.height
+                            DispatchQueue.main.async {
+                                scrollConsoleToBottomIfNeeded(proxy, availableHeight: geometry.size.height, animated: false)
                             }
+                        }
+                        .onChange(of: geometry.size.height) { _, value in
+                            consoleViewportHeight = value
+                        }
+                        .onPreferenceChange(LocalAlpineConsoleContentHeightKey.self) { value in
+                            let previousHeight = consoleContentHeight
+                            consoleContentHeight = value
+                            guard value > previousHeight else { return }
+                            DispatchQueue.main.async {
+                                scrollConsoleToBottomIfNeeded(
+                                    proxy,
+                                    availableHeight: geometry.size.height,
+                                    contentHeight: value,
+                                    animated: false
+                                )
+                            }
+                        }
+                        .onChange(of: entries.count) { _, _ in
+                            scrollConsoleToBottomIfNeeded(proxy, availableHeight: geometry.size.height, animated: true)
                         }
                         .onChange(of: commandInputHeight) { _, _ in
-                            guard !entries.isEmpty else { return }
-                            withAnimation(.easeOut(duration: 0.12)) {
-                                proxy.scrollTo("commandLine", anchor: .bottom)
-                            }
+                            scrollConsoleToBottomIfNeeded(proxy, availableHeight: geometry.size.height, animated: true)
                         }
                         .onChange(of: consoleOutputRevision) { _, _ in
-                            guard !entries.isEmpty else { return }
-                            withAnimation(.easeOut(duration: 0.12)) {
-                                proxy.scrollTo("commandLine", anchor: .bottom)
-                            }
+                            scrollConsoleToBottomIfNeeded(proxy, availableHeight: geometry.size.height, animated: true)
                         }
                         .onChange(of: interactiveOutput) { _, _ in
-                            guard usesInteractiveSession,
-                                  shouldAutoScrollInteractiveOutput(availableHeight: geometry.size.height) else { return }
-                            withAnimation(.easeOut(duration: 0.12)) {
-                                proxy.scrollTo("commandLine", anchor: .bottom)
-                            }
+                            guard usesInteractiveSession else { return }
+                            scrollConsoleToBottomIfNeeded(proxy, availableHeight: geometry.size.height, animated: true)
                         }
                     }
                 }
                 .padding(.horizontal, 2)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -986,6 +1020,27 @@ struct LocalAlpineTerminalConsoleView: View {
         interactiveOutput += sanitized
     }
 
+    private func scrollConsoleToBottomIfNeeded(
+        _ proxy: ScrollViewProxy,
+        availableHeight: CGFloat,
+        contentHeight: CGFloat? = nil,
+        animated: Bool
+    ) {
+        let viewportHeight = max(1, availableHeight > 0 ? availableHeight : consoleViewportHeight)
+        let measuredContentHeight = contentHeight ?? consoleContentHeight
+        let shouldFollowBottom = measuredContentHeight > viewportHeight + 18
+        guard shouldFollowBottom else { return }
+
+        let action = {
+            proxy.scrollTo("commandLine", anchor: .bottom)
+        }
+        if animated {
+            withAnimation(.easeOut(duration: 0.12), action)
+        } else {
+            action()
+        }
+    }
+
     private static func sanitizedTerminalOutput(_ output: String) -> String {
         let escape = "\u{1B}"
         let patterns = [
@@ -999,20 +1054,6 @@ struct LocalAlpineTerminalConsoleView: View {
         }
         .replacingOccurrences(of: "\u{0007}", with: "")
         .replacingOccurrences(of: "\u{0008}", with: "")
-    }
-
-    private func terminalLineCount(in output: String) -> Int {
-        output
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .count
-    }
-
-    private func shouldAutoScrollInteractiveOutput(availableHeight: CGFloat) -> Bool {
-        let lineHeight = max(1, terminalOutputFontSize * 1.35)
-        let visibleRows = max(6, Int(availableHeight / lineHeight))
-        return terminalLineCount(in: interactiveOutput) > visibleRows
     }
 
     private func interactiveCursorPosition() -> (row: Int, column: Int) {
