@@ -292,6 +292,7 @@ struct TokenUsageDailySummary: Identifiable, Sendable {
     let mediaTokens: Int
     let totalTokens: Int
     let requestCount: Int
+    let exactRequestCount: Int
 
     var id: String { day }
 }
@@ -394,7 +395,8 @@ final class TokenUsageHistoryStore {
                 cachedTokens: dayRecords.reduce(0) { $0 + $1.cachedTokens },
                 mediaTokens: dayRecords.reduce(0) { $0 + $1.mediaTokens },
                 totalTokens: dayRecords.reduce(0) { $0 + $1.totalTokens },
-                requestCount: dayRecords.count
+                requestCount: dayRecords.count,
+                exactRequestCount: dayRecords.filter(\.isExact).count
             )
         }
         .sorted { $0.day < $1.day }
@@ -532,6 +534,7 @@ struct TokenUsageStatisticsView: View {
                 summaryGrid
                 rangePicker
                 dailyChart
+                dailyDetails
                 modelBreakdown
                 recentRequests
                 clearButton
@@ -632,6 +635,27 @@ struct TokenUsageStatisticsView: View {
                     }
                 }
                 .frame(height: 220)
+            }
+        }
+        .usagePanel(theme: theme)
+    }
+
+    private var dailyDetails: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("每日明细", icon: "calendar")
+
+            if summaries.isEmpty {
+                emptyState("暂无每日记录", icon: "calendar")
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(summaries.reversed())) { summary in
+                        dailySummaryRow(summary)
+
+                        if summary.id != summaries.first?.id {
+                            Divider().overlay(theme.divider.opacity(0.5))
+                        }
+                    }
+                }
             }
         }
         .usagePanel(theme: theme)
@@ -800,6 +824,67 @@ struct TokenUsageStatisticsView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 24)
+    }
+
+    private func dailySummaryRow(_ summary: TokenUsageDailySummary) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(summary.date.formatted(.dateTime.month().day().weekday(.abbreviated)))
+                        .scaledFont(size: 13, weight: .semibold)
+                        .foregroundStyle(theme.textPrimary)
+                    Text("\(summary.requestCount) 次请求 · \(summary.exactRequestCount)/\(summary.requestCount) 精确")
+                        .scaledFont(size: 11, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                }
+
+                Spacer(minLength: 8)
+
+                Text(TokenUsageHistoryStore.compactTokenCount(summary.totalTokens))
+                    .scaledFont(size: 15, weight: .bold)
+                    .monospacedDigit()
+                    .foregroundStyle(theme.textPrimary)
+            }
+
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 8)
+                ],
+                spacing: 8
+            ) {
+                usageTokenChip("输入", value: summary.inputTokens, tint: theme.brandPrimary)
+                usageTokenChip("输出", value: summary.outputTokens, tint: .cyan)
+                if summary.cachedTokens > 0 {
+                    usageTokenChip("缓存", value: summary.cachedTokens, tint: theme.success)
+                }
+                if summary.mediaTokens > 0 {
+                    usageTokenChip("媒体", value: summary.mediaTokens, tint: .purple)
+                }
+            }
+        }
+        .padding(.vertical, 10)
+    }
+
+    private func usageTokenChip(_ label: String, value: Int, tint: Color) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(tint)
+                .frame(width: 5, height: 5)
+            Text(label)
+                .scaledFont(size: 10, weight: .medium)
+                .foregroundStyle(theme.textTertiary)
+            Text(TokenUsageHistoryStore.compactTokenCount(value))
+                .scaledFont(size: 10, weight: .semibold)
+                .monospacedDigit()
+                .foregroundStyle(theme.textSecondary)
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(tint.opacity(0.1), in: Capsule())
     }
 
     private func color(for model: TokenUsageModelSummary) -> Color {
