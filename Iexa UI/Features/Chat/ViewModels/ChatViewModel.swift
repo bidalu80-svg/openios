@@ -221,6 +221,10 @@ final class ChatViewModel {
     // MARK: - Published State
 
     private static let chatWebSearchEnabledKey = "chatWebSearchEnabled"
+    private static let webSearchTogglePreferenceKey = "chatInput.webSearchEnabled"
+    private static let imageGenerationTogglePreferenceKey = "chatInput.imageGenerationEnabled"
+    private static let localOfficeTogglePreferenceKey = "chatInput.localOfficeEnabled"
+    private static let codeInterpreterTogglePreferenceKey = "chatInput.codeInterpreterEnabled"
     private static let directImageGenerationMaxConcurrency = 3
 
     /// Isolated store for streaming content. Only the actively streaming
@@ -300,6 +304,7 @@ final class ChatViewModel {
             } else {
                 userDisabledBuiltinFeatures.insert("web_search")
             }
+            UserDefaults.standard.set(webSearchEnabled, forKey: Self.webSearchTogglePreferenceKey)
         }
     }
     var imageGenerationEnabled: Bool = false {
@@ -310,9 +315,15 @@ final class ChatViewModel {
             } else {
                 userDisabledBuiltinFeatures.insert("image_generation")
             }
+            UserDefaults.standard.set(imageGenerationEnabled, forKey: Self.imageGenerationTogglePreferenceKey)
         }
     }
-    var localOfficeEnabled: Bool = false
+    var localOfficeEnabled: Bool = false {
+        didSet {
+            guard !suppressBuiltinFeatureTracking else { return }
+            UserDefaults.standard.set(localOfficeEnabled, forKey: Self.localOfficeTogglePreferenceKey)
+        }
+    }
     var codeInterpreterEnabled: Bool = false {
         didSet {
             guard !suppressBuiltinFeatureTracking else { return }
@@ -321,6 +332,7 @@ final class ChatViewModel {
             } else {
                 userDisabledBuiltinFeatures.insert("code_interpreter")
             }
+            UserDefaults.standard.set(codeInterpreterEnabled, forKey: Self.codeInterpreterTogglePreferenceKey)
         }
     }
     /// Whether memory is enabled for this chat session.
@@ -349,8 +361,9 @@ final class ChatViewModel {
     /// has explicitly toggled OFF during this session. Prevents model/default
     /// sync paths from re-enabling them silently.
     private var userDisabledBuiltinFeatures: Set<String> = []
-    /// When `true`, mutations to `webSearchEnabled`, `imageGenerationEnabled`, and
-    /// `codeInterpreterEnabled` do NOT update `userDisabledBuiltinFeatures`.
+    /// When `true`, mutations to `webSearchEnabled`, `imageGenerationEnabled`,
+    /// `localOfficeEnabled`, and `codeInterpreterEnabled` do NOT update
+    /// `userDisabledBuiltinFeatures` or persisted user switch preferences.
     /// Set during `syncUIWithModelDefaults()` and `restoreBuiltinFeatureState()`
     /// so those internal resets aren't misinterpreted as explicit user overrides.
     private var suppressBuiltinFeatureTracking: Bool = false
@@ -3248,8 +3261,11 @@ final class ChatViewModel {
             suppressBuiltinFeatureTracking = true
             webSearchEnabled = false
             suppressBuiltinFeatureTracking = false
-        } else if allowed, changed, !userDisabledBuiltinFeatures.contains("web_search") {
-            webSearchEnabled = true
+        } else if allowed, changed {
+            let savedWebSearch = UserDefaults.standard.object(forKey: Self.webSearchTogglePreferenceKey) as? Bool
+            suppressBuiltinFeatureTracking = true
+            webSearchEnabled = savedWebSearch ?? true
+            suppressBuiltinFeatureTracking = false
         }
     }
 
@@ -5101,10 +5117,6 @@ final class ChatViewModel {
         errorMessage = nil
         refreshContextBudgetStatus()
         cleanupStreaming()
-        webSearchEnabled = false
-        imageGenerationEnabled = false
-        localOfficeEnabled = false
-        codeInterpreterEnabled = false
         isTemporaryChat = UserDefaults.standard.bool(forKey: "temporaryChatDefault")
         userDisabledToolIds = []
         userDisabledBuiltinFeatures = []
@@ -11364,6 +11376,8 @@ final class ChatViewModel {
             guard let value = caps[key] else { return false }
             return ["1", "true"].contains(value.lowercased())
         }
+        let savedImageGeneration = UserDefaults.standard.object(forKey: Self.imageGenerationTogglePreferenceKey) as? Bool
+        let savedCodeInterpreter = UserDefaults.standard.object(forKey: Self.codeInterpreterTogglePreferenceKey) as? Bool
 
         // Only enable model-provided features that are not controlled by the
         // current chat's per-turn web-search switch. Web search must respect
@@ -11374,10 +11388,12 @@ final class ChatViewModel {
         if (model.supportsImageGeneration
             || (defaults.contains("image_generation") && isTruthy("image_generation"))
             || nameSuggestsImageGeneration)
+            && savedImageGeneration != false
             && !userDisabledBuiltinFeatures.contains("image_generation") {
             imageGenerationEnabled = true
         }
         if defaults.contains("code_interpreter") && isTruthy("code_interpreter")
+            && savedCodeInterpreter != false
             && !userDisabledBuiltinFeatures.contains("code_interpreter") {
             codeInterpreterEnabled = true
         }
@@ -11422,19 +11438,25 @@ final class ChatViewModel {
             return ["1", "true"].contains(value.lowercased())
         }
 
-        // Reset all feature toggles to match THIS model's config.
-        // Each toggle is set to true only if the model has it as a
-        // default AND the capability is enabled. This ensures switching
-        // models correctly reflects per-model feature availability.
-        // Suppress tracking so these internal resets don't pollute userDisabledBuiltinFeatures.
+        let savedWebSearch = UserDefaults.standard.object(forKey: Self.webSearchTogglePreferenceKey) as? Bool
+        let savedImageGeneration = UserDefaults.standard.object(forKey: Self.imageGenerationTogglePreferenceKey) as? Bool
+        let savedLocalOffice = UserDefaults.standard.object(forKey: Self.localOfficeTogglePreferenceKey) as? Bool
+        let savedCodeInterpreter = UserDefaults.standard.object(forKey: Self.codeInterpreterTogglePreferenceKey) as? Bool
+
+        // Reset feature toggles from persisted user choices first. If the user
+        // has never changed a switch, fall back to the model/global defaults.
+        // Suppress tracking so these internal resets don't overwrite the saved
+        // switch preferences or mark them as explicit current-session changes.
         suppressBuiltinFeatureTracking = true
-        webSearchEnabled = isChatWebSearchAllowed
+        webSearchEnabled = isChatWebSearchAllowed && (savedWebSearch ?? isChatWebSearchAllowed)
         let nameSuggestsImageGeneration = shouldUseDirectImageGeneration(modelId: model.id)
             || shouldPreferChatNativeImageGeneration(modelId: model.id)
-        imageGenerationEnabled = model.supportsImageGeneration
+        let modelDefaultImageGeneration = model.supportsImageGeneration
             || (defaults.contains("image_generation") && isTruthy("image_generation"))
             || nameSuggestsImageGeneration
-        codeInterpreterEnabled = defaults.contains("code_interpreter") && isTruthy("code_interpreter")
+        imageGenerationEnabled = savedImageGeneration ?? modelDefaultImageGeneration
+        localOfficeEnabled = savedLocalOffice ?? false
+        codeInterpreterEnabled = savedCodeInterpreter ?? (defaults.contains("code_interpreter") && isTruthy("code_interpreter"))
         suppressBuiltinFeatureTracking = false
 
         // Memory is local-first. Fetch the local setting once for all models.
@@ -11734,8 +11756,8 @@ final class ChatViewModel {
         let modelNameSuggestsImageGeneration = selectedModelId.map {
             shouldUseDirectImageGeneration(modelId: $0) || shouldPreferChatNativeImageGeneration(modelId: $0)
         } ?? false
-        let shouldEnableImageGeneration = !userDisabledBuiltinFeatures.contains("image_generation")
-            && (imageGenerationEnabled || modelAllowsImageGeneration || modelNameSuggestsImageGeneration)
+        let shouldEnableImageGeneration = imageGenerationEnabled
+            && (modelAllowsImageGeneration || modelNameSuggestsImageGeneration || selectedModel?.supportsImageGeneration == true)
 
         // Use ONLY the current toggle state. Server defaults are already applied
         // to these toggles at init time via syncUIWithModelDefaults() — which runs
