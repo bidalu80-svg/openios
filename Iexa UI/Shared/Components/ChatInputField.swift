@@ -376,20 +376,26 @@ struct ChatInputField: View {
                     ))
             }
         }
-        .background(composerBackground)
-        .clipShape(RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous))
-        .overlay(
+        .background {
             RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
-                .strokeBorder(composerBorderColor, lineWidth: 0.5)
-        )
-        // Subtle shadow — upward only, no competing directions
+                .fill(.regularMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
+                        .fill(composerGlassTint)
+                }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
+                .strokeBorder(composerBorderColor, lineWidth: isFocused ? 0.8 : 0.6)
+        }
         .shadow(
             color: theme.isDark
-                ? Color.black.opacity(isFocused ? 0.3 : 0.2)
-                : Color.black.opacity(isFocused ? 0.1 : 0.06),
-            radius: 8,
+                ? Color.black.opacity(isFocused ? 0.36 : 0.28)
+                : Color.black.opacity(isFocused ? 0.14 : 0.10),
+            radius: isFocused ? 24 : 18,
             x: 0,
-            y: 2
+            y: 10
         )
     }
 
@@ -398,16 +404,14 @@ struct ChatInputField: View {
         text.contains("\n") || text.count > 60 ? 18 : 22
     }
 
-    private var composerBackground: Color {
-        theme.isDark
-            ? theme.cardBackground.opacity(0.95)
-            : theme.inputBackground
+    private var composerGlassTint: Color {
+        Color.white.opacity(theme.isDark ? 0.05 : 0.30)
     }
 
     private var composerBorderColor: Color {
         isFocused
-            ? theme.brandPrimary.opacity(0.35)
-            : theme.cardBorder.opacity(0.4)
+            ? theme.brandPrimary.opacity(theme.isDark ? 0.45 : 0.30)
+            : Color.white.opacity(theme.isDark ? 0.12 : 0.72)
     }
 
     // MARK: - Inline Plus Button

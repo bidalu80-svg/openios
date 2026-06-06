@@ -12,26 +12,32 @@ private struct IexaToolbarGlassBackground: ViewModifier {
             if compact && cornerRadius >= 20 {
                 content
                     .glassEffect(.regular, in: Capsule(style: .continuous))
+                    .shadow(color: toolbarShadowColor, radius: compact ? 14 : 18, x: 0, y: 8)
             } else {
                 content
                     .glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                    .shadow(color: toolbarShadowColor, radius: compact ? 14 : 18, x: 0, y: 8)
             }
         } else {
             content
                 .background {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(.ultraThinMaterial)
+                        .fill(.regularMaterial)
                         .overlay {
                             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                .fill(theme.cardBackground.opacity(theme.isDark ? 0.10 : (compact ? 0.18 : 0.24)))
+                                .fill(Color.white.opacity(theme.isDark ? 0.04 : (compact ? 0.20 : 0.26)))
                         }
                         .overlay {
                             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                .strokeBorder(Color.white.opacity(theme.isDark ? 0.14 : 0.42), lineWidth: 0.5)
+                                .strokeBorder(Color.white.opacity(theme.isDark ? 0.16 : 0.70), lineWidth: 0.7)
                         }
-                        .shadow(color: Color.black.opacity(theme.isDark ? 0.18 : 0.07), radius: compact ? 8 : 10, x: 0, y: 5)
+                        .shadow(color: toolbarShadowColor, radius: compact ? 14 : 18, x: 0, y: 8)
                 }
         }
+    }
+
+    private var toolbarShadowColor: Color {
+        Color.black.opacity(theme.isDark ? 0.28 : 0.10)
     }
 }
 
