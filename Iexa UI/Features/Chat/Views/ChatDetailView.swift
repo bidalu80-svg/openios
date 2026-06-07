@@ -863,7 +863,6 @@ struct ChatDetailView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private static let agentFloatingPreviewStepLimit = 24
-    private static let bottomScrollAnchorId = "iexa-chat-bottom-scroll-anchor"
     private let logger = Logger(subsystem: "com.openui", category: "ChatDetailView")
 
     private let initialConversationId: String?
@@ -879,8 +878,7 @@ struct ChatDetailView: View {
 
     // MARK: Scroll state (iOS 18 ScrollPosition API)
     /// iOS 18+ declarative scroll position. Used with `.scrollPosition($scrollPosition)`
-    /// to drive programmatic scrolling via `scrollTo(edge:)` and
-    /// `scrollTo(id:anchor:)`.
+    /// to drive programmatic scrolling via `scrollTo(edge:)`.
     @State private var scrollPosition: ScrollPosition = .init()
     /// True when the user has manually scrolled away from the bottom.
     @State private var isScrolledUp = false
@@ -897,10 +895,7 @@ struct ChatDetailView: View {
     /// Keeps a newly sent turn anchored at the top of the viewport until
     /// the user explicitly follows the bottom again.
     @State private var pinCurrentTurnStartForLatestTurn = false
-    /// True after the user taps the down button or manually returns to the
-    /// bottom during a stream, so token growth keeps tracking the latest line.
-    @State private var followLatestDuringStreaming = false
-    /// Timestamp of the last *programmatic* scroll.
+    /// Timestamp of the last *programmatic* scroll-to-bottom.
     /// Used both as a streaming throttle guard (prevent pump-scroll more than 10hz)
     /// and as a suppressor to prevent the offset-change handler from falsely
     /// interpreting a programmatic scroll animation as a manual upward drag.
@@ -1463,9 +1458,8 @@ struct ChatDetailView: View {
         if loadedCount > 0 {
             isScrolledUp = false
             pinCurrentTurnStartForLatestTurn = false
-            followLatestDuringStreaming = false
             try? await Task.sleep(nanoseconds: 60_000_000) // 60ms layout settle
-            scrollToLatestMessageWithoutAnimation(anchor: .bottom)
+            scrollPosition.scrollTo(edge: .bottom)
         }
         await viewModel.fetchPinnedModels()
         // Rebuild prompts after load() — models are now fetched with fresh
@@ -2326,7 +2320,7 @@ struct ChatDetailView: View {
         }
         .onAppear {
             // Snap instantly to bottom on chat open.
-            scrollToLatestMessageWithoutAnimation(anchor: .bottom)
+            scrollPosition.scrollTo(edge: .bottom)
         }
         // Keep agent activity state in sync with hidden/system messages.
         // Actual transcript scrolling is driven by transcriptMessageIds below,
@@ -2357,24 +2351,24 @@ struct ChatDetailView: View {
             let latestVisibleRole = transcriptMessages.last?.role
             if latestVisibleRole == .user {
                 pinCurrentTurnStartForLatestTurn = true
-                followLatestDuringStreaming = false
                 if keyboard.isVisible {
-                    repinToCurrentTurnStartIfFollowing(after: 0)
-                    repinToCurrentTurnStartIfFollowing(after: 0.06)
-                    repinToCurrentTurnStartIfFollowing(after: 0.18)
+                    if oldIds.isEmpty {
+                        repinToCurrentTurnStartIfFollowing(after: 0.06)
+                        repinToCurrentTurnStartIfFollowing(after: 0.18)
+                    } else {
+                        repinToCurrentTurnStartIfFollowing(after: 0.06)
+                        repinToCurrentTurnStartIfFollowing(after: 0.18)
+                    }
                 } else {
                     withAnimation(.easeOut(duration: 0.28)) {
                         scrollToCurrentTurnStart(anchor: .top)
                     }
-                    repinToCurrentTurnStartIfFollowing(after: 0.06)
-                    repinToCurrentTurnStartIfFollowing(after: 0.18)
                 }
             } else if oldIds.isEmpty && !keyboard.isVisible {
                 // First visible assistant/content in a new chat — smooth ease-out.
                 pinCurrentTurnStartForLatestTurn = false
-                followLatestDuringStreaming = true
                 withAnimation(.easeOut(duration: 0.3)) {
-                    scrollToLatestMessage(anchor: .bottom)
+                    scrollPosition.scrollTo(edge: .bottom)
                 }
             } else if keyboard.isVisible {
                 // Keep the keyboard in place and pin the turn start, not the
@@ -2386,9 +2380,8 @@ struct ChatDetailView: View {
                 smoothRepinToCurrentTurnStartIfFollowing(after: 0.04)
             } else {
                 // Keyboard already hidden (follow-ups, etc.) — scroll now.
-                followLatestDuringStreaming = true
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
-                    scrollToLatestMessage(anchor: .bottom)
+                    scrollPosition.scrollTo(edge: .bottom)
                 }
             }
         }
@@ -2402,9 +2395,7 @@ struct ChatDetailView: View {
                 // the assistant placeholder has not become visible yet, keep
                 // the user-sent turn start pinned instead of jumping to the
                 // ScrollView bottom.
-                if followLatestDuringStreaming {
-                    scrollToLatestMessageWithoutAnimation(anchor: .bottom)
-                } else if pinCurrentTurnStartForLatestTurn {
+                if pinCurrentTurnStartForLatestTurn {
                     scrollToCurrentTurnStartWithoutAnimation(anchor: .top)
                 } else if viewModel.messages.count <= 2 {
                     scrollToLatestMessageWithoutAnimation(anchor: .bottom)
@@ -2430,8 +2421,8 @@ struct ChatDetailView: View {
         .onChange(of: isScrolledUp) { oldValue, newValue in
             if oldValue == true && newValue == false && viewModel.isStreaming {
                 pinCurrentTurnStartForLatestTurn = false
-                followLatestDuringStreaming = true
                 scrollToLatestMessage(anchor: .bottom)
+                scrollToLatestMessageAfterLayout(after: 0.06)
             }
         }
     }
@@ -2445,7 +2436,6 @@ struct ChatDetailView: View {
                     messagesList
                 }
             }
-            .scrollTargetLayout()
             .padding(.top, 8)
             .padding(.bottom, 8)
             .frame(maxWidth: iPadMaxContentWidth)
@@ -2493,7 +2483,6 @@ struct ChatDetailView: View {
                 let threshold: CGFloat = viewModel.isStreaming ? 2 : 8
                 if newOffset.y < lastScrollOffset - threshold {
                     if !isScrolledUp { isScrolledUp = true }
-                    followLatestDuringStreaming = false
                 }
             }
             if abs(newOffset.y - lastScrollOffset) > 2 {
@@ -2513,21 +2502,12 @@ struct ChatDetailView: View {
                 viewState_containerHeight = newSize.height
             }
 
-            if (contentChanged || containerChanged)
-                && pinCurrentTurnStartForLatestTurn
-                && !isScrolledUp {
-                repinToCurrentTurnStartIfFollowing(after: 0)
-            }
-
             // Smooth scroll-to-bottom during active streaming:
             // When the content height grows (new tokens pushed layout taller)
             // and the user hasn't scrolled up, animate to the bottom so new
             // content slides in smoothly instead of snapping.
             let grew = newSize.width > oldContentHeight + 1
-            if grew
-                && viewModel.isStreaming
-                && !isScrolledUp
-                && (!pinCurrentTurnStartForLatestTurn || followLatestDuringStreaming) {
+            if grew && viewModel.isStreaming && !isScrolledUp && !pinCurrentTurnStartForLatestTurn {
                 let now = Date()
                 if now.timeIntervalSince(lastProgrammaticScrollTime) > 0.2 {
                     lastProgrammaticScrollTime = now
@@ -2547,8 +2527,7 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private var scrollToBottomFAB: some View {
-        if (distanceFromBottom > 100
-            || (pinCurrentTurnStartForLatestTurn && distanceFromBottom > 24))
+        if (isScrolledUp || (pinCurrentTurnStartForLatestTurn && distanceFromBottom > 100))
             && !viewModel.messages.isEmpty
             && !viewModel.isLoadingConversation {
             ZStack {
@@ -2569,13 +2548,12 @@ struct ChatDetailView: View {
                     // Disengage auto-scroll lock first so the streaming pump
                     // doesn't fight the scroll animation we're about to start.
                     pinCurrentTurnStartForLatestTurn = false
-                    followLatestDuringStreaming = true
                     isScrolledUp = false
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
                         scrollToLatestMessage(anchor: .bottom)
                     }
-                    scrollToLatestMessageAfterLayout(after: 0.05)
-                    scrollToLatestMessageAfterLayout(after: 0.16)
+                    scrollToLatestMessageAfterLayout(after: 0.06)
+                    scrollToLatestMessageAfterLayout(after: 0.18)
                     Haptics.play(.light)
                 }
             )
@@ -2607,40 +2585,47 @@ struct ChatDetailView: View {
 
     // MARK: - Messages List
 
-    private var currentTurnBottomSpacerHeight: CGFloat {
-        guard pinCurrentTurnStartForLatestTurn, !transcriptMessages.isEmpty else { return 0 }
-        return max(viewState_containerHeight, 0)
+    private var lastTurnMinHeight: CGFloat {
+        let containerHeight = max(viewState_containerHeight, 0)
+        guard containerHeight > 1 else { return 0 }
+
+        // Keep the last turn filling the currently visible ScrollView
+        // viewport.
+        return containerHeight
     }
 
-    private func scrollToBottomWithoutAnimation(anchor: UnitPoint = .bottom) {
+    private func scrollToBottomWithoutAnimation() {
         var transaction = Transaction()
         transaction.disablesAnimations = true
-        lastProgrammaticScrollTime = Date()
         withTransaction(transaction) {
-            if transcriptMessages.isEmpty {
-                scrollPosition.scrollTo(edge: .bottom)
-            } else {
-                scrollPosition.scrollTo(id: Self.bottomScrollAnchorId, anchor: anchor)
-            }
+            scrollPosition.scrollTo(edge: .bottom)
         }
     }
 
     private func scrollToLatestMessage(anchor: UnitPoint = .bottom) {
         lastProgrammaticScrollTime = Date()
-        guard !transcriptMessages.isEmpty else {
+        guard let lastMessageId = transcriptMessages.last?.id else {
             scrollPosition.scrollTo(edge: .bottom)
             return
         }
-        scrollPosition.scrollTo(id: Self.bottomScrollAnchorId, anchor: anchor)
+        scrollPosition.scrollTo(id: lastMessageId, anchor: anchor)
     }
 
     private func scrollToLatestMessageWithoutAnimation(anchor: UnitPoint = .bottom) {
-        scrollToBottomWithoutAnimation(anchor: anchor)
+        guard let lastMessageId = transcriptMessages.last?.id else {
+            scrollToBottomWithoutAnimation()
+            return
+        }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollPosition.scrollTo(id: lastMessageId, anchor: anchor)
+        }
     }
 
     private func scrollToLatestMessageAfterLayout(after delay: TimeInterval) {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            guard followLatestDuringStreaming, !isScrolledUp else { return }
+            guard !pinCurrentTurnStartForLatestTurn, !isScrolledUp else { return }
             scrollToLatestMessageWithoutAnimation(anchor: .bottom)
         }
     }
@@ -2652,14 +2637,12 @@ struct ChatDetailView: View {
             scrollToBottomWithoutAnimation()
             return
         }
-        lastProgrammaticScrollTime = Date()
         scrollPosition.scrollTo(id: turnStartId, anchor: anchor)
     }
 
     private func scrollToCurrentTurnStartWithoutAnimation(anchor: UnitPoint = .top) {
         var transaction = Transaction()
         transaction.disablesAnimations = true
-        lastProgrammaticScrollTime = Date()
         withTransaction(transaction) {
             scrollToCurrentTurnStart(anchor: anchor)
         }
@@ -2693,25 +2676,46 @@ struct ChatDetailView: View {
         }
     }
 
-    /// Renders the visible transcript as a single stable sequence so SwiftUI
-    /// keeps message identity intact while streaming grows the latest row.
+    /// Splits messages into two groups around the last conversation turn.
+    ///
+    /// The **last turn** is defined as the last user message plus any
+    /// assistant/system messages that follow it. This group is wrapped in a
+    /// `VStack` with `minHeight: viewportHeight, alignment: .top`. This keeps
+    /// the user's sent message near the **top** of the viewport, with the AI
+    /// response streaming in below it.
+    ///
+    /// All earlier messages render at their natural height.
     private var messagesList: some View {
         let messages = transcriptMessages
 
+        let indexMap = Dictionary(messages.enumerated().map { ($1.id, $0) },
+                                  uniquingKeysWith: { first, _ in first })
+
+        // Split point: index of the last user message within the rendered list.
+        // Everything from here to the end is the "last turn".
+        // If there are no user messages, splitAt == count → no split, all normal.
+        let lastUserIdx = messages.lastIndex(where: { $0.role == .user })
+        let splitAt = lastUserIdx ?? messages.count
+
         return Group {
-            ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+            // ── Messages before the last turn (natural height) ──
+            ForEach(Array(messages.prefix(splitAt))) { message in
+                let index = indexMap[message.id] ?? 0
                 messageRow(message: message, index: index)
                     .id(message.id)
             }
 
-            Color.clear
-                .frame(height: 1)
-                .id(Self.bottomScrollAnchorId)
-                .accessibilityHidden(true)
-
-            Color.clear
-                .frame(height: currentTurnBottomSpacerHeight)
-                .accessibilityHidden(true)
+            // ── Last turn (user msg + assistant reply) with minHeight ──
+            if splitAt < messages.count {
+                VStack(spacing: 0) {
+                    ForEach(Array(messages.suffix(from: splitAt))) { message in
+                        let index = indexMap[message.id] ?? 0
+                        messageRow(message: message, index: index)
+                            .id(message.id)
+                    }
+                }
+                .frame(minHeight: lastTurnMinHeight, alignment: .top)
+            }
         }
     }
 
