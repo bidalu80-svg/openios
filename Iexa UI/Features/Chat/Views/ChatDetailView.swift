@@ -863,6 +863,7 @@ struct ChatDetailView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private static let agentFloatingPreviewStepLimit = 24
+    private static let currentTurnTopAnchorId = "iexa-chat-current-turn-top-anchor"
     private let logger = Logger(subsystem: "com.openui", category: "ChatDetailView")
 
     private let initialConversationId: String?
@@ -2589,7 +2590,12 @@ struct ChatDetailView: View {
 
         // Keep the last turn filling the currently visible ScrollView
         // viewport.
-        return containerHeight
+        return max(containerHeight - currentTurnTopInset, 0)
+    }
+
+    private var currentTurnTopInset: CGFloat {
+        guard pinCurrentTurnStartForLatestTurn else { return 0 }
+        return horizontalSizeClass == .regular ? 64 : 96
     }
 
     private func scrollToBottomWithoutAnimation() {
@@ -2635,7 +2641,11 @@ struct ChatDetailView: View {
             scrollToBottomWithoutAnimation()
             return
         }
-        scrollPosition.scrollTo(id: turnStartId, anchor: anchor)
+        if pinCurrentTurnStartForLatestTurn && currentTurnTopInset > 0 {
+            scrollPosition.scrollTo(id: Self.currentTurnTopAnchorId, anchor: anchor)
+        } else {
+            scrollPosition.scrollTo(id: turnStartId, anchor: anchor)
+        }
     }
 
     private func scrollToCurrentTurnStartWithoutAnimation(anchor: UnitPoint = .top) {
@@ -2705,6 +2715,13 @@ struct ChatDetailView: View {
 
             // ── Last turn (user msg + assistant reply) with minHeight ──
             if splitAt < messages.count {
+                if currentTurnTopInset > 0 {
+                    Color.clear
+                        .frame(height: currentTurnTopInset)
+                        .id(Self.currentTurnTopAnchorId)
+                        .accessibilityHidden(true)
+                }
+
                 VStack(spacing: 0) {
                     ForEach(Array(messages.suffix(from: splitAt))) { message in
                         let index = indexMap[message.id] ?? 0
