@@ -863,6 +863,7 @@ struct ChatDetailView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private static let agentFloatingPreviewStepLimit = 24
+    private static let bottomScrollAnchorId = "iexa-chat-bottom-scroll-anchor"
     private let logger = Logger(subsystem: "com.openui", category: "ChatDetailView")
 
     private let initialConversationId: String?
@@ -878,7 +879,8 @@ struct ChatDetailView: View {
 
     // MARK: Scroll state (iOS 18 ScrollPosition API)
     /// iOS 18+ declarative scroll position. Used with `.scrollPosition($scrollPosition)`
-    /// to drive programmatic scrolling via `scrollTo(edge:)`.
+    /// to drive programmatic scrolling via `scrollTo(edge:)` and
+    /// `scrollTo(id:anchor:)`.
     @State private var scrollPosition: ScrollPosition = .init()
     /// True when the user has manually scrolled away from the bottom.
     @State private var isScrolledUp = false
@@ -895,7 +897,7 @@ struct ChatDetailView: View {
     /// Keeps a newly sent turn anchored at the top of the viewport until
     /// the user explicitly follows the bottom again.
     @State private var pinCurrentTurnStartForLatestTurn = false
-    /// Timestamp of the last *programmatic* scroll-to-bottom.
+    /// Timestamp of the last *programmatic* scroll.
     /// Used both as a streaming throttle guard (prevent pump-scroll more than 10hz)
     /// and as a suppressor to prevent the offset-change handler from falsely
     /// interpreting a programmatic scroll animation as a manual upward drag.
@@ -1459,7 +1461,7 @@ struct ChatDetailView: View {
             isScrolledUp = false
             pinCurrentTurnStartForLatestTurn = false
             try? await Task.sleep(nanoseconds: 60_000_000) // 60ms layout settle
-            scrollPosition.scrollTo(edge: .bottom)
+            scrollToLatestMessageWithoutAnimation(anchor: .bottom)
         }
         await viewModel.fetchPinnedModels()
         // Rebuild prompts after load() — models are now fetched with fresh
@@ -2320,7 +2322,7 @@ struct ChatDetailView: View {
         }
         .onAppear {
             // Snap instantly to bottom on chat open.
-            scrollPosition.scrollTo(edge: .bottom)
+            scrollToLatestMessageWithoutAnimation(anchor: .bottom)
         }
         // Keep agent activity state in sync with hidden/system messages.
         // Actual transcript scrolling is driven by transcriptMessageIds below,
@@ -2368,7 +2370,7 @@ struct ChatDetailView: View {
                 // First visible assistant/content in a new chat — smooth ease-out.
                 pinCurrentTurnStartForLatestTurn = false
                 withAnimation(.easeOut(duration: 0.3)) {
-                    scrollPosition.scrollTo(edge: .bottom)
+                    scrollToLatestMessage(anchor: .bottom)
                 }
             } else if keyboard.isVisible {
                 // Keep the keyboard in place and pin the turn start, not the
@@ -2381,7 +2383,7 @@ struct ChatDetailView: View {
             } else {
                 // Keyboard already hidden (follow-ups, etc.) — scroll now.
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
-                    scrollPosition.scrollTo(edge: .bottom)
+                    scrollToLatestMessage(anchor: .bottom)
                 }
             }
         }
@@ -2420,7 +2422,7 @@ struct ChatDetailView: View {
         // tokens keep the view anchored at the bottom.
         .onChange(of: isScrolledUp) { oldValue, newValue in
             if oldValue == true && newValue == false && viewModel.isStreaming {
-                scrollPosition.scrollTo(edge: .bottom)
+                scrollToLatestMessage(anchor: .bottom)
             }
         }
     }
@@ -2434,6 +2436,7 @@ struct ChatDetailView: View {
                     messagesList
                 }
             }
+            .scrollTargetLayout()
             .padding(.top, 8)
             .padding(.bottom, 8)
             .frame(maxWidth: iPadMaxContentWidth)
@@ -2443,7 +2446,8 @@ struct ChatDetailView: View {
         .background(ScrollViewHorizontalLock())
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(editingMessageId != nil ? .never : .interactively)
-        .scrollPosition($scrollPosition)
+        .defaultScrollAnchor(.bottom)
+        .scrollPosition($scrollPosition, anchor: .bottom)
         // Detect scroll position to show/hide FAB + auto-load pagination
         .onScrollGeometryChange(for: CGPoint.self) { geo in
             geo.contentOffset
@@ -2513,7 +2517,7 @@ struct ChatDetailView: View {
                         scrollToLatestMessageWithoutAnimation(anchor: .bottom)
                     } else {
                         withAnimation(.easeOut(duration: 0.15)) {
-                            scrollPosition.scrollTo(edge: .bottom)
+                            scrollToLatestMessage(anchor: .bottom)
                         }
                     }
                 }
@@ -2525,7 +2529,7 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private var scrollToBottomFAB: some View {
-        if (isScrolledUp || (pinCurrentTurnStartForLatestTurn && distanceFromBottom > 100))
+        if distanceFromBottom > 100
             && !viewModel.messages.isEmpty
             && !viewModel.isLoadingConversation {
             ZStack {
@@ -2548,7 +2552,7 @@ struct ChatDetailView: View {
                     pinCurrentTurnStartForLatestTurn = false
                     isScrolledUp = false
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
-                        scrollPosition.scrollTo(edge: .bottom)
+                        scrollToLatestMessage(anchor: .bottom)
                     }
                     Haptics.play(.light)
                 }
@@ -2581,33 +2585,30 @@ struct ChatDetailView: View {
 
     // MARK: - Messages List
 
-    private var lastTurnMinHeight: CGFloat {
-        let containerHeight = max(viewState_containerHeight, 0)
-        guard containerHeight > 1 else { return 0 }
-
-        // Keep the last turn filling the currently visible ScrollView
-        // viewport.
-        return containerHeight
-    }
-
-    private func scrollToBottomWithoutAnimation() {
+    private func scrollToBottomWithoutAnimation(anchor: UnitPoint = .bottom) {
         var transaction = Transaction()
         transaction.disablesAnimations = true
+        lastProgrammaticScrollTime = Date()
         withTransaction(transaction) {
-            scrollPosition.scrollTo(edge: .bottom)
+            if transcriptMessages.isEmpty {
+                scrollPosition.scrollTo(edge: .bottom)
+            } else {
+                scrollPosition.scrollTo(id: Self.bottomScrollAnchorId, anchor: anchor)
+            }
         }
+    }
+
+    private func scrollToLatestMessage(anchor: UnitPoint = .bottom) {
+        lastProgrammaticScrollTime = Date()
+        guard !transcriptMessages.isEmpty else {
+            scrollPosition.scrollTo(edge: .bottom)
+            return
+        }
+        scrollPosition.scrollTo(id: Self.bottomScrollAnchorId, anchor: anchor)
     }
 
     private func scrollToLatestMessageWithoutAnimation(anchor: UnitPoint = .bottom) {
-        guard let lastMessageId = transcriptMessages.last?.id else {
-            scrollToBottomWithoutAnimation()
-            return
-        }
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            scrollPosition.scrollTo(id: lastMessageId, anchor: anchor)
-        }
+        scrollToBottomWithoutAnimation(anchor: anchor)
     }
 
     private func scrollToCurrentTurnStart(anchor: UnitPoint = .top) {
@@ -2617,12 +2618,14 @@ struct ChatDetailView: View {
             scrollToBottomWithoutAnimation()
             return
         }
+        lastProgrammaticScrollTime = Date()
         scrollPosition.scrollTo(id: turnStartId, anchor: anchor)
     }
 
     private func scrollToCurrentTurnStartWithoutAnimation(anchor: UnitPoint = .top) {
         var transaction = Transaction()
         transaction.disablesAnimations = true
+        lastProgrammaticScrollTime = Date()
         withTransaction(transaction) {
             scrollToCurrentTurnStart(anchor: anchor)
         }
@@ -2656,46 +2659,21 @@ struct ChatDetailView: View {
         }
     }
 
-    /// Splits messages into two groups around the last conversation turn.
-    ///
-    /// The **last turn** is defined as the last user message plus any
-    /// assistant/system messages that follow it. This group is wrapped in a
-    /// `VStack` with `minHeight: viewportHeight, alignment: .top`. This keeps
-    /// the user's sent message near the **top** of the viewport, with the AI
-    /// response streaming in below it.
-    ///
-    /// All earlier messages render at their natural height.
+    /// Renders the visible transcript as a single stable sequence so SwiftUI
+    /// keeps message identity intact while streaming grows the latest row.
     private var messagesList: some View {
         let messages = transcriptMessages
 
-        let indexMap = Dictionary(messages.enumerated().map { ($1.id, $0) },
-                                  uniquingKeysWith: { first, _ in first })
-
-        // Split point: index of the last user message within the rendered list.
-        // Everything from here to the end is the "last turn".
-        // If there are no user messages, splitAt == count → no split, all normal.
-        let lastUserIdx = messages.lastIndex(where: { $0.role == .user })
-        let splitAt = lastUserIdx ?? messages.count
-
         return Group {
-            // ── Messages before the last turn (natural height) ──
-            ForEach(Array(messages.prefix(splitAt))) { message in
-                let index = indexMap[message.id] ?? 0
+            ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
                 messageRow(message: message, index: index)
                     .id(message.id)
             }
 
-            // ── Last turn (user msg + assistant reply) with minHeight ──
-            if splitAt < messages.count {
-                VStack(spacing: 0) {
-                    ForEach(Array(messages.suffix(from: splitAt))) { message in
-                        let index = indexMap[message.id] ?? 0
-                        messageRow(message: message, index: index)
-                            .id(message.id)
-                    }
-                }
-                .frame(minHeight: lastTurnMinHeight, alignment: .top)
-            }
+            Color.clear
+                .frame(height: 1)
+                .id(Self.bottomScrollAnchorId)
+                .accessibilityHidden(true)
         }
     }
 

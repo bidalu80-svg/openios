@@ -19,7 +19,7 @@ private struct IexaNativeBlurView: UIViewRepresentable {
     }
 }
 
-struct IexaNativeGlassFill<S: Shape>: View {
+struct IexaNativeGlassFill<S: InsettableShape>: View {
     @Environment(\.theme) private var theme
 
     let shape: S
@@ -28,30 +28,80 @@ struct IexaNativeGlassFill<S: Shape>: View {
     var highlightOpacity: Double = 0.52
 
     var body: some View {
-        IexaNativeBlurView(style: theme.isDark ? .systemThinMaterialDark : .systemUltraThinMaterialLight)
-            .overlay {
-                shape.fill(baseTint)
-            }
-            .overlay {
-                shape.fill(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(theme.isDark ? 0.10 : highlightOpacity),
-                            Color.white.opacity(theme.isDark ? 0.03 : highlightOpacity * 0.34),
-                            Color.white.opacity(0.0)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+        if #available(iOS 26.0, *) {
+            shape.fill(.clear)
+                .glassBackgroundEffect(in: shape)
+                .overlay {
+                    shape.strokeBorder(
+                        Color.white.opacity(theme.isDark ? 0.12 : 0.42),
+                        lineWidth: theme.isDark ? 0.55 : 0.5
                     )
-                )
-            }
-            .clipShape(shape)
+                }
+                .overlay {
+                    shape.strokeBorder(
+                        Color.black.opacity(theme.isDark ? 0.14 : 0.05),
+                        lineWidth: 0.45
+                    )
+                    .blendMode(.multiply)
+                }
+                .clipShape(shape)
+        } else {
+            IexaNativeBlurView(style: fallbackBlurStyle)
+                .overlay {
+                    shape.fill(baseTint)
+                }
+                .overlay {
+                    shape.fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(theme.isDark ? 0.28 : highlightOpacity),
+                                Color.white.opacity(theme.isDark ? 0.11 : highlightOpacity * 0.40),
+                                Color.white.opacity(0.0)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                }
+                .overlay {
+                    shape.fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(theme.isDark ? 0.04 : 0.08),
+                                Color.clear,
+                                Color.black.opacity(theme.isDark ? 0.10 : 0.04)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .blendMode(theme.isDark ? .softLight : .screen)
+                }
+                .overlay {
+                    shape.strokeBorder(
+                        Color.white.opacity(theme.isDark ? 0.20 : 0.50),
+                        lineWidth: theme.isDark ? 0.7 : 0.65
+                    )
+                }
+                .overlay {
+                    shape.strokeBorder(
+                        Color.black.opacity(theme.isDark ? 0.12 : 0.06),
+                        lineWidth: 0.5
+                    )
+                    .blendMode(.multiply)
+                }
+                .clipShape(shape)
+        }
     }
 
     private var baseTint: Color {
         theme.isDark
-            ? Color.black.opacity(darkTintOpacity)
+            ? Color.white.opacity(darkTintOpacity * 0.42)
             : Color.white.opacity(lightTintOpacity)
+    }
+
+    private var fallbackBlurStyle: UIBlurEffect.Style {
+        theme.isDark ? .systemUltraThinMaterialDark : .systemUltraThinMaterialLight
     }
 }
 
@@ -69,43 +119,43 @@ private struct IexaToolbarGlassBackground: ViewModifier {
                 .background {
                     IexaNativeGlassFill(
                         shape: shape,
-                        lightTintOpacity: 0.16,
-                        darkTintOpacity: 0.20,
-                        highlightOpacity: 0.34
+                        lightTintOpacity: 0.11,
+                        darkTintOpacity: 0.16,
+                        highlightOpacity: 0.44
                     )
                 }
                 .clipShape(shape)
                 .overlay {
-                    shape.strokeBorder(toolbarStrokeColor, lineWidth: 0.65)
+                    shape.strokeBorder(toolbarStrokeColor, lineWidth: 0.7)
                 }
-                .shadow(color: toolbarShadowColor, radius: compact ? 18 : 22, x: 0, y: 9)
+                .shadow(color: toolbarShadowColor, radius: compact ? 15 : 19, x: 0, y: 7)
         } else {
             let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             content
                 .background {
                     IexaNativeGlassFill(
                         shape: shape,
-                        lightTintOpacity: 0.17,
-                        darkTintOpacity: 0.20,
-                        highlightOpacity: 0.34
+                        lightTintOpacity: 0.12,
+                        darkTintOpacity: 0.16,
+                        highlightOpacity: 0.44
                     )
                 }
                 .clipShape(shape)
                 .overlay {
-                    shape.strokeBorder(toolbarStrokeColor, lineWidth: 0.65)
+                    shape.strokeBorder(toolbarStrokeColor, lineWidth: 0.7)
                 }
-                .shadow(color: toolbarShadowColor, radius: compact ? 18 : 22, x: 0, y: 9)
+                .shadow(color: toolbarShadowColor, radius: compact ? 15 : 19, x: 0, y: 7)
         }
     }
 
     private var toolbarStrokeColor: Color {
         theme.isDark
-            ? Color.white.opacity(0.14)
-            : Color.white.opacity(0.70)
+            ? Color.white.opacity(0.18)
+            : Color.white.opacity(0.48)
     }
 
     private var toolbarShadowColor: Color {
-        Color.black.opacity(theme.isDark ? 0.30 : 0.10)
+        Color.black.opacity(theme.isDark ? 0.24 : 0.08)
     }
 }
 
