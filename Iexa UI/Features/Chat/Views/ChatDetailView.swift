@@ -2352,13 +2352,11 @@ struct ChatDetailView: View {
             if latestVisibleRole == .user {
                 pinCurrentTurnStartForLatestTurn = true
                 if keyboard.isVisible {
-                    if oldIds.isEmpty {
-                        repinToCurrentTurnStartIfFollowing(after: 0.06)
-                        repinToCurrentTurnStartIfFollowing(after: 0.18)
-                    } else {
-                        repinToCurrentTurnStartIfFollowing(after: 0.06)
-                        repinToCurrentTurnStartIfFollowing(after: 0.18)
+                    withAnimation(.easeOut(duration: 0.22)) {
+                        scrollToCurrentTurnStart(anchor: .top)
                     }
+                    repinToCurrentTurnStartIfFollowing(after: 0.06)
+                    repinToCurrentTurnStartIfFollowing(after: 0.18)
                 } else {
                     withAnimation(.easeOut(duration: 0.28)) {
                         scrollToCurrentTurnStart(anchor: .top)
