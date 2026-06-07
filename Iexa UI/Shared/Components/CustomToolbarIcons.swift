@@ -30,7 +30,7 @@ struct IexaNativeGlassFill<S: InsettableShape>: View {
     var body: some View {
         if #available(iOS 26.0, *) {
             shape.fill(.clear)
-                .glassBackgroundEffect(in: shape)
+                .glassEffect(.regular, in: shape)
                 .overlay {
                     shape.strokeBorder(
                         Color.white.opacity(theme.isDark ? 0.12 : 0.42),
