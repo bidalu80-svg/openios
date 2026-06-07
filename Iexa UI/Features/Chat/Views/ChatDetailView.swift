@@ -2353,15 +2353,11 @@ struct ChatDetailView: View {
             if latestVisibleRole == .user {
                 pinCurrentTurnStartForLatestTurn = true
                 if keyboard.isVisible {
-                    withAnimation(.easeOut(duration: 0.22)) {
-                        scrollToCurrentTurnStart(anchor: .top)
-                    }
+                    animateCurrentTurnStartAfterLayout(after: 0, duration: 0.22)
                     repinToCurrentTurnStartIfFollowing(after: 0.06)
                     repinToCurrentTurnStartIfFollowing(after: 0.18)
                 } else {
-                    withAnimation(.easeOut(duration: 0.28)) {
-                        scrollToCurrentTurnStart(anchor: .top)
-                    }
+                    animateCurrentTurnStartAfterLayout(after: 0, duration: 0.28)
                 }
             } else if oldIds.isEmpty && !keyboard.isVisible {
                 // First visible assistant/content in a new chat — smooth ease-out.
@@ -2653,6 +2649,21 @@ struct ChatDetailView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             scrollToCurrentTurnStart(anchor: anchor)
+        }
+    }
+
+    private func animateCurrentTurnStartAfterLayout(after delay: TimeInterval = 0, duration: TimeInterval) {
+        let action = {
+            guard pinCurrentTurnStartForLatestTurn, !transcriptMessages.isEmpty, !isScrolledUp else { return }
+            lastProgrammaticScrollTime = Date()
+            withAnimation(.easeOut(duration: duration)) {
+                scrollToCurrentTurnStart(anchor: .top)
+            }
+        }
+        if delay <= 0 {
+            DispatchQueue.main.async(execute: action)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
         }
     }
 
