@@ -2446,8 +2446,7 @@ struct ChatDetailView: View {
         .background(ScrollViewHorizontalLock())
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(editingMessageId != nil ? .never : .interactively)
-        .defaultScrollAnchor(.bottom)
-        .scrollPosition($scrollPosition, anchor: .bottom)
+        .scrollPosition($scrollPosition)
         // Detect scroll position to show/hide FAB + auto-load pagination
         .onScrollGeometryChange(for: CGPoint.self) { geo in
             geo.contentOffset
@@ -2502,6 +2501,12 @@ struct ChatDetailView: View {
             }
             if containerChanged {
                 viewState_containerHeight = newSize.height
+            }
+
+            if (contentChanged || containerChanged)
+                && pinCurrentTurnStartForLatestTurn
+                && !isScrolledUp {
+                repinToCurrentTurnStartIfFollowing(after: 0)
             }
 
             // Smooth scroll-to-bottom during active streaming:
