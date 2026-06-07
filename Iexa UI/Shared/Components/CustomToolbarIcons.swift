@@ -31,19 +31,6 @@ struct IexaNativeGlassFill<S: InsettableShape>: View {
         if #available(iOS 26.0, *) {
             shape.fill(.clear)
                 .glassEffect(.regular, in: shape)
-                .overlay {
-                    shape.strokeBorder(
-                        Color.white.opacity(theme.isDark ? 0.12 : 0.42),
-                        lineWidth: theme.isDark ? 0.55 : 0.5
-                    )
-                }
-                .overlay {
-                    shape.strokeBorder(
-                        Color.black.opacity(theme.isDark ? 0.14 : 0.05),
-                        lineWidth: 0.45
-                    )
-                    .blendMode(.multiply)
-                }
                 .clipShape(shape)
         } else {
             IexaNativeBlurView(style: fallbackBlurStyle)
@@ -125,10 +112,7 @@ private struct IexaToolbarGlassBackground: ViewModifier {
                     )
                 }
                 .clipShape(shape)
-                .overlay {
-                    shape.strokeBorder(toolbarStrokeColor, lineWidth: 0.7)
-                }
-                .shadow(color: toolbarShadowColor, radius: compact ? 15 : 19, x: 0, y: 7)
+                .modifier(IexaLegacyToolbarGlassChrome(shape: shape, compact: compact))
         } else {
             let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             content
@@ -141,6 +125,23 @@ private struct IexaToolbarGlassBackground: ViewModifier {
                     )
                 }
                 .clipShape(shape)
+                .modifier(IexaLegacyToolbarGlassChrome(shape: shape, compact: compact))
+        }
+    }
+}
+
+private struct IexaLegacyToolbarGlassChrome<S: InsettableShape>: ViewModifier {
+    @Environment(\.theme) private var theme
+
+    let shape: S
+    let compact: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content
+        } else {
+            content
                 .overlay {
                     shape.strokeBorder(toolbarStrokeColor, lineWidth: 0.7)
                 }

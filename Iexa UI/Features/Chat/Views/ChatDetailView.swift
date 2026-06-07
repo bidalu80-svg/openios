@@ -2585,6 +2585,11 @@ struct ChatDetailView: View {
 
     // MARK: - Messages List
 
+    private var currentTurnBottomSpacerHeight: CGFloat {
+        guard pinCurrentTurnStartForLatestTurn, !transcriptMessages.isEmpty else { return 0 }
+        return max(viewState_containerHeight, 0)
+    }
+
     private func scrollToBottomWithoutAnimation(anchor: UnitPoint = .bottom) {
         var transaction = Transaction()
         transaction.disablesAnimations = true
@@ -2673,6 +2678,10 @@ struct ChatDetailView: View {
             Color.clear
                 .frame(height: 1)
                 .id(Self.bottomScrollAnchorId)
+                .accessibilityHidden(true)
+
+            Color.clear
+                .frame(height: currentTurnBottomSpacerHeight)
                 .accessibilityHidden(true)
         }
     }
