@@ -586,7 +586,7 @@ final class LocalNativeToolService {
                 ?? (result["link"] as? String)
             let query = result["query"] as? String
             let summary = (result["summary"] as? String)
-                ?? (ok ? "本地浏览器工具已完成。" : "本地浏览器工具失败。")
+                ?? (ok ? "搜索完成。" : "搜索失败。")
             let previewImages = result["preview_images"] as? [String] ?? []
             var items = browserItems(from: result["items"])
             if items.isEmpty, let url {
