@@ -12126,8 +12126,10 @@ final class ChatViewModel {
         let modelNameSuggestsImageGeneration = selectedModelId.map {
             shouldUseDirectImageGeneration(modelId: $0) || shouldPreferChatNativeImageGeneration(modelId: $0)
         } ?? false
+        let appSideImageGenerationAvailable = currentProviderType == .iexa
+            && canUseDirectImageEndpointProvider
         let shouldEnableImageGeneration = imageGenerationEnabled
-            && (modelAllowsImageGeneration || modelNameSuggestsImageGeneration || selectedModel?.supportsImageGeneration == true)
+            && (appSideImageGenerationAvailable || modelAllowsImageGeneration || modelNameSuggestsImageGeneration || selectedModel?.supportsImageGeneration == true)
 
         // Use ONLY the current toggle state. Server defaults are already applied
         // to these toggles at init time via syncUIWithModelDefaults() — which runs
