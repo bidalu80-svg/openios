@@ -2086,10 +2086,30 @@ final class ChatViewModel {
 
     private static func localNativeFunctionToolSchemas(
         includeBrowserTools: Bool,
+        includeImageTools: Bool,
         includeOfficeTools: Bool,
         includeShortcutsTools: Bool
     ) -> [[String: Any]] {
         var tools: [[String: Any]] = []
+
+        if includeImageTools {
+            tools.append([
+                "type": "function",
+                "function": [
+                    "name": "image_generation",
+                    "description": "Generate or edit images through Iexa's app-side image generation endpoint when the user naturally asks to create, draw, design, render, or edit an image. Use this even if the current chat model does not natively output images. Do not use for ordinary discussion, image analysis, or capability questions.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "prompt": ["type": "string", "description": "The complete visual prompt to render or edit."],
+                            "size": ["type": "string", "description": "Optional canvas size such as 1024x1024, 1536x1024, 1792x1024, or auto."],
+                            "count": ["type": "integer", "description": "Optional number of images to generate, 1-9."]
+                        ],
+                        "required": ["prompt"]
+                    ]
+                ]
+            ])
+        }
 
         if includeBrowserTools {
             tools.append([
@@ -5278,7 +5298,7 @@ final class ChatViewModel {
         }
         if isStreaming {
             guard canSendWhileStreaming else { return }
-            guard canStartIndependentDirectMediaGeneration(modelId: modelId) else {
+            guard canStartIndependentDirectMediaGeneration(modelId: modelId, text: text) else {
                 errorMessage = "当前仍有图片/视频生成任务在进行；可以继续提交新的图片/视频生成请求，普通对话请先停止或等待完成。"
                 return
             }
@@ -5622,9 +5642,10 @@ final class ChatViewModel {
 
         // Assistant placeholder
         let assistantMessageId = UUID().uuidString
-        let isDirectImageGenerationPlaceholder = canUseDirectImageEndpointProvider
-            && shouldUseDirectImageGeneration(modelId: modelId)
-            && !shouldPreferChatNativeImageGeneration(modelId: modelId)
+        let isDirectImageGenerationPlaceholder = canStartIndependentDirectImageGeneration(
+            modelId: modelId,
+            text: modelPromptText
+        )
         conversation?.messages.append(ChatMessage(
             id: assistantMessageId, role: .assistant, content: "",
             timestamp: .now, model: modelId, isStreaming: true,
@@ -5710,7 +5731,10 @@ final class ChatViewModel {
         completionTask?.cancel()
         completionTask = nil
 
-        let shouldUseIndependentDirectMediaGeneration = canStartIndependentDirectMediaGeneration(modelId: modelId)
+        let shouldUseIndependentDirectMediaGeneration = canStartIndependentDirectMediaGeneration(
+            modelId: modelId,
+            text: modelPromptText
+        )
 
         if shouldUseIndependentDirectMediaGeneration {
             startIndependentDirectMediaGeneration(
@@ -8311,6 +8335,10 @@ final class ChatViewModel {
                     )
                 }
                 let imagePrompt = modelPromptText.trimmingCharacters(in: .whitespacesAndNewlines)
+                let preferServerDefaultImageModel = self.shouldPreferServerDefaultImageModel(
+                    modelId: modelId,
+                    text: imagePrompt
+                )
                 let requestedImageCount = Self.requestedImageCount(from: imagePrompt)
                 let requestedCanvasSize = Self.requestedImageCanvasSize(from: imagePrompt)
                 let requestedImageSize = Self.imageEndpointSize(for: requestedCanvasSize)
@@ -8344,7 +8372,8 @@ final class ChatViewModel {
                     requestedCanvasSize: requestedCanvasSize,
                     editImages: editImages,
                     manager: manager,
-                    originalPromptWasEmpty: imagePrompt.isEmpty
+                    originalPromptWasEmpty: imagePrompt.isEmpty,
+                    preferServerDefaultModel: preferServerDefaultImageModel
                 )
                 try Task.checkCancellation()
                 if generatedImageSlots.isEmpty {
@@ -9711,6 +9740,12 @@ final class ChatViewModel {
         assistantMessageId: String
     ) async -> LocalNativeFunctionToolExecution {
         localNativeToolExecutedMessageIds.insert(assistantMessageId)
+        if call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "image_generation" {
+            return await executeLocalImageGenerationToolCall(
+                call,
+                assistantMessageId: assistantMessageId
+            )
+        }
         let content = Self.localNativeFunctionToolEnvelopeContent(for: call)
         let officeKind = LocalNativeToolService.officeActionKind(in: content)
         let browserAction = LocalNativeToolService.browserActionName(in: content)
@@ -9884,6 +9919,174 @@ final class ChatViewModel {
         )
     }
 
+    private func executeLocalImageGenerationToolCall(
+        _ call: LocalAlpineNativeToolCall,
+        assistantMessageId: String
+    ) async -> LocalNativeFunctionToolExecution {
+        guard imageGenerationEnabled, let manager else {
+            return LocalNativeFunctionToolExecution(
+                toolContent: "Image generation is disabled for this chat.",
+                completedAssistantTurn: false,
+                visibleContent: nil
+            )
+        }
+        guard currentProviderType != .anthropic else {
+            let message = "Claude/Anthropic 不提供图片生成端点。"
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: "",
+                isStreaming: false,
+                error: ChatMessageError(content: message)
+            )
+            return LocalNativeFunctionToolExecution(
+                toolContent: message,
+                completedAssistantTurn: true,
+                visibleContent: nil
+            )
+        }
+
+        var arguments: [String: Any] = [:]
+        if let data = call.arguments.data(using: .utf8),
+           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            arguments = dict
+        }
+        let rawPrompt = (arguments["prompt"] as? String)
+            ?? (arguments["query"] as? String)
+            ?? (arguments["description"] as? String)
+            ?? call.arguments
+        let imagePrompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !imagePrompt.isEmpty else {
+            let message = "请输入图片生成提示词。"
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: "",
+                isStreaming: false,
+                error: ChatMessageError(content: message)
+            )
+            return LocalNativeFunctionToolExecution(
+                toolContent: message,
+                completedAssistantTurn: true,
+                visibleContent: nil
+            )
+        }
+
+        let requestedCount = min(max(Self.nativeToolIntValue(arguments["count"]) ?? Self.requestedImageCount(from: imagePrompt), 1), 9)
+        let requestedCanvasSize = (arguments["size"] as? String)
+            .flatMap { Self.requestedImageCanvasSize(from: $0) }
+            ?? Self.requestedImageCanvasSize(from: imagePrompt)
+        let requestedImageSize = Self.imageEndpointSize(for: requestedCanvasSize)
+        let promptForAPI = Self.promptWithImageSizeInstruction(
+            imagePrompt,
+            canvasSize: requestedCanvasSize,
+            endpointSize: requestedImageSize
+        )
+        let prompts = Self.imageVariantPrompts(
+            basePrompt: promptForAPI,
+            requestedCount: requestedCount
+        )
+        await RunLiveActivityService.shared.update(
+            id: assistantMessageId,
+            title: "正在创建图片",
+            detail: requestedCount > 1 ? "正在生成 \(requestedCount) 张不同图片" : imagePrompt,
+            phase: "生成",
+            progress: 0.35,
+            isIndeterminate: true,
+            force: true
+        )
+        updateAssistantMessage(
+            id: assistantMessageId,
+            content: "",
+            isStreaming: true,
+            status: ChatStatusUpdate(
+                action: "image_generation",
+                description: requestedCount > 1 ? "正在生成 \(requestedCount) 张图片" : "正在创建图片",
+                done: false,
+                occurredAt: .now
+            )
+        )
+
+        do {
+            let slots = try await generateDirectImageSlots(
+                prompts: prompts,
+                modelId: selectedModelId ?? conversation?.model ?? call.name,
+                requestedImageSize: requestedImageSize,
+                requestedCanvasSize: requestedCanvasSize,
+                editImages: [],
+                manager: manager,
+                originalPromptWasEmpty: false,
+                preferServerDefaultModel: true
+            )
+            guard !slots.isEmpty else {
+                throw APIError.unknown(
+                    underlying: NSError(
+                        domain: "ChatViewModel",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "没有成功生成图片。"]
+                    )
+                )
+            }
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: "",
+                isStreaming: false,
+                status: ChatStatusUpdate(
+                    action: "image_generation",
+                    description: "图片生成已结束",
+                    done: true,
+                    occurredAt: .now
+                )
+            )
+            var successCount = 0
+            for (slotIndex, slot) in slots.enumerated() {
+                switch slot {
+                case .image(let imageReference, let displayReference):
+                    successCount += 1
+                    attachGeneratedImageFile(
+                        messageId: assistantMessageId,
+                        imageReference: imageReference,
+                        displayReference: displayReference
+                    )
+                case .failure:
+                    attachGeneratedImageFailurePlaceholder(
+                        messageId: assistantMessageId,
+                        index: slotIndex + 1
+                    )
+                }
+            }
+            recordTokenUsageForCompletedTurn(
+                assistantMessageId: assistantMessageId,
+                userText: conversation?.messages.last(where: { $0.role == .user })?.content ?? imagePrompt,
+                assistantText: "",
+                userAttachments: [],
+                mediaKind: .image,
+                mediaCount: max(successCount, 1)
+            )
+            await persistLocalConversationIfNeeded()
+            await sendCompletionNotificationIfNeeded(content: "图片生成已结束")
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            return LocalNativeFunctionToolExecution(
+                toolContent: "Generated \(successCount) image(s).",
+                completedAssistantTurn: true,
+                visibleContent: ""
+            )
+        } catch {
+            let message = Self.localizedGenerationError(error)
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: "",
+                isStreaming: false,
+                error: ChatMessageError(content: message)
+            )
+            await persistLocalConversationIfNeeded()
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            return LocalNativeFunctionToolExecution(
+                toolContent: message,
+                completedAssistantTurn: true,
+                visibleContent: nil
+            )
+        }
+    }
+
     private func completeLocalOfficeFunctionGeneration(
         messageId: String,
         document: LocalNativeOfficeDocument,
@@ -10017,6 +10220,7 @@ final class ChatViewModel {
     }
 
     private static let localNativeFunctionToolNames: Set<String> = [
+        "image_generation",
         "web_search",
         "browser_readable",
         "shortcuts_run",
@@ -10066,6 +10270,8 @@ final class ChatViewModel {
 
     private static func localNativeActionName(forFunctionName name: String) -> String {
         switch name.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "image_generation":
+            return "image.generate"
         case "web_search":
             return "web.search"
         case "browser_readable":
@@ -10090,6 +10296,29 @@ final class ChatViewModel {
     private static func localNativeFunctionToolResultContent(_ summary: String) -> String {
         let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
         return String((trimmed.isEmpty ? "Local native tool completed." : trimmed).prefix(16_000))
+    }
+
+    private static func nativeToolIntValue(_ value: Any?) -> Int? {
+        switch value {
+        case let int as Int:
+            return int
+        case let number as NSNumber:
+            return number.intValue
+        case let string as String:
+            return Int(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        default:
+            return nil
+        }
+    }
+
+    private func shouldExposeLocalImageNativeTools(for text: String?) -> Bool {
+        guard canUseDirectImageEndpointProvider,
+              imageGenerationEnabled,
+              let text,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        return true
     }
 
     private func shouldUseLocalAlpineNativeTools(for modelId: String?) -> Bool {
@@ -11762,6 +11991,7 @@ final class ChatViewModel {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() == "none"
         let latestUserTextForLocalNativeTools = latestUserTextForLocalNativeToolDecision()
+        let shouldExposeImageTools = shouldExposeLocalImageNativeTools(for: latestUserTextForLocalNativeTools)
         let shouldExposeBrowserTools = shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalNativeTools)
         let localOfficeRevisionContextForNativeTools = localOfficeEnabled
             ? latestUserTextForLocalNativeTools.flatMap { localOfficeRevisionSystemContext(for: $0) }
@@ -11771,7 +12001,8 @@ final class ChatViewModel {
             officeRevisionContext: localOfficeRevisionContextForNativeTools
         )
         let shouldExposeShortcutsTools = shortcutsEnabled
-        let shouldExposeLocalNativeTools = shouldExposeBrowserTools
+        let shouldExposeLocalNativeTools = shouldExposeImageTools
+            || shouldExposeBrowserTools
             || shouldExposeOfficeTools
             || shouldExposeShortcutsTools
         if shouldUseLocalNativeFunctionTools(for: request.model),
@@ -11781,6 +12012,7 @@ final class ChatViewModel {
            !nativeToolsDisabled {
             request.tools = Self.localNativeFunctionToolSchemas(
                 includeBrowserTools: shouldExposeBrowserTools,
+                includeImageTools: shouldExposeImageTools,
                 includeOfficeTools: shouldExposeOfficeTools,
                 includeShortcutsTools: shouldExposeShortcutsTools
             )
@@ -12004,11 +12236,41 @@ final class ChatViewModel {
         return providerType != .iexa && providerType != .anthropic
     }
 
-    private func canStartIndependentDirectMediaGeneration(modelId: String) -> Bool {
-        (canUseDirectVideoEndpointProvider && shouldUseDirectVideoGeneration(modelId: modelId))
-            || (canUseDirectImageEndpointProvider
-                && shouldUseDirectImageGeneration(modelId: modelId)
-                && !shouldPreferChatNativeImageGeneration(modelId: modelId))
+    private func canStartIndependentDirectMediaGeneration(modelId: String, text: String? = nil) -> Bool {
+        if canUseDirectVideoEndpointProvider && shouldUseDirectVideoGeneration(modelId: modelId) {
+            return true
+        }
+        return canStartIndependentDirectImageGeneration(modelId: modelId, text: text)
+    }
+
+    private func canStartIndependentDirectImageGeneration(modelId: String, text: String? = nil) -> Bool {
+        guard canUseDirectImageEndpointProvider else { return false }
+        if shouldUseDirectImageGeneration(modelId: modelId)
+            && !shouldPreferChatNativeImageGeneration(modelId: modelId) {
+            return true
+        }
+        guard imageGenerationEnabled,
+              let text,
+              Self.looksLikeDirectImageGenerationRequest(text) else {
+            return false
+        }
+        guard !shouldUseModelDrivenImageGeneration(for: modelId) else {
+            return false
+        }
+        return !shouldPreferChatNativeImageGeneration(modelId: modelId)
+    }
+
+    private func shouldUseModelDrivenImageGeneration(for modelId: String) -> Bool {
+        imageGenerationEnabled
+            && (currentProviderType == .iexa || shouldUseLocalNativeFunctionTools(for: modelId))
+    }
+
+    private func shouldPreferServerDefaultImageModel(modelId: String, text: String) -> Bool {
+        guard canStartIndependentDirectImageGeneration(modelId: modelId, text: text) else {
+            return false
+        }
+        return !(shouldUseDirectImageGeneration(modelId: modelId)
+            && !shouldPreferChatNativeImageGeneration(modelId: modelId))
     }
 
     private func shouldUseDirectImageGeneration(modelId: String) -> Bool {
@@ -12363,6 +12625,51 @@ final class ChatViewModel {
         return keywords.contains { lowercased.contains($0) }
     }
 
+    private static func looksLikeDirectImageGenerationRequest(_ text: String) -> Bool {
+        let lowercased = text.lowercased()
+        let capabilityQuestions = [
+            "能生图", "可以生图", "有生图", "生图功能", "生成图片功能",
+            "can you generate image", "can you generate images", "image generation capability"
+        ]
+        if capabilityQuestions.contains(where: { lowercased.contains($0) }) {
+            return false
+        }
+
+        let analysisRequests = [
+            "分析这张", "看看这张", "识别这张", "解释这张", "描述这张",
+            "图片里", "图里", "照片里",
+            "analyze this image", "describe this image", "what is in this image"
+        ]
+        let explicitGeneration = [
+            "生图", "生成图", "生成一张", "生成图片", "生成图像",
+            "画一张", "画个", "绘制", "做一张", "制作海报", "生成海报",
+            "生成头像", "生成logo", "设计logo",
+            "generate an image", "create an image", "make an image",
+            "draw a", "draw me", "create a poster", "generate a poster",
+            "create a logo", "design a logo"
+        ]
+        if analysisRequests.contains(where: { lowercased.contains($0) })
+            && !explicitGeneration.contains(where: { lowercased.contains($0) }) {
+            return false
+        }
+        if explicitGeneration.contains(where: { lowercased.contains($0) }) {
+            return true
+        }
+
+        let imagePromptSignals = [
+            "ultra realistic", "photorealistic", "cinematic", "commercial photo",
+            "studio lighting", "wide landscape", "portrait composition",
+            "pixels", "not square", "not cropped", "no watermark",
+            "negative prompt", "prompt:", "style/medium"
+        ]
+        let mediaNouns = [
+            "image", "photo", "poster", "wallpaper", "avatar", "logo",
+            "图片", "照片", "海报", "壁纸", "头像", "插画"
+        ]
+        return mediaNouns.contains(where: { lowercased.contains($0) })
+            && imagePromptSignals.contains(where: { lowercased.contains($0) })
+    }
+
     private static func requestedVideoDuration(from prompt: String) -> Int? {
         let pattern = #"(?<!\d)(\d{1,3})\s*(秒|s|sec|seconds)(?![A-Za-z])"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
@@ -12388,7 +12695,8 @@ final class ChatViewModel {
         requestedCanvasSize: String?,
         editImages: [ImageEditSource],
         manager: ConversationManager,
-        originalPromptWasEmpty: Bool
+        originalPromptWasEmpty: Bool,
+        preferServerDefaultModel: Bool = false
     ) async throws -> [GeneratedImageSlot] {
         guard !prompts.isEmpty else { return [] }
         if editImages.isEmpty && originalPromptWasEmpty {
@@ -12410,13 +12718,14 @@ final class ChatViewModel {
                 guard let next = iterator.next() else { break }
                 let index = next.offset
                 let prompt = next.element
-                group.addTask { [manager, editImages] in
+                group.addTask { [manager, editImages, preferServerDefaultModel] in
                     let result = await Self.generateDirectImageReference(
                         prompt: prompt,
                         modelId: modelId,
                         requestedImageSize: requestedImageSize,
                         editImages: editImages,
-                        manager: manager
+                        manager: manager,
+                        preferServerDefaultModel: preferServerDefaultModel
                     )
                     return (index, result)
                 }
@@ -12441,13 +12750,14 @@ final class ChatViewModel {
                 if let next = iterator.next() {
                     let index = next.offset
                     let prompt = next.element
-                    group.addTask { [manager, editImages] in
+                    group.addTask { [manager, editImages, preferServerDefaultModel] in
                         let result = await Self.generateDirectImageReference(
                             prompt: prompt,
                             modelId: modelId,
                             requestedImageSize: requestedImageSize,
                             editImages: editImages,
-                            manager: manager
+                            manager: manager,
+                            preferServerDefaultModel: preferServerDefaultModel
                         )
                         return (index, result)
                     }
@@ -12463,7 +12773,8 @@ final class ChatViewModel {
         modelId: String,
         requestedImageSize: String,
         editImages: [ImageEditSource],
-        manager: ConversationManager
+        manager: ConversationManager,
+        preferServerDefaultModel: Bool = false
     ) async -> Result<String, Error> {
         do {
             try Task.checkCancellation()
@@ -12473,7 +12784,8 @@ final class ChatViewModel {
                     try await manager.generateImage(
                         prompt: prompt,
                         model: modelId,
-                        size: requestedImageSize
+                        size: requestedImageSize,
+                        preferServerDefaultModel: preferServerDefaultModel
                     )
                 }
             } else {
@@ -12482,7 +12794,8 @@ final class ChatViewModel {
                         prompt: prompt,
                         model: modelId,
                         images: editImages,
-                        size: requestedImageSize
+                        size: requestedImageSize,
+                        preferServerDefaultModel: preferServerDefaultModel
                     )
                 }
             }
@@ -13402,6 +13715,7 @@ final class ChatViewModel {
     private static func localNativeToolSystemContext(
         includeDeviceTools: Bool,
         includeBrowserTools: Bool,
+        includeImageTools: Bool,
         includeOfficeTools: Bool,
         includeShortcutsTools: Bool
     ) -> String {
@@ -13424,11 +13738,13 @@ final class ChatViewModel {
             ? ["device info", "clipboard", "local notifications", "location", "weather", "calendar"]
             : []
         let browserToolDescription = includeBrowserTools ? "local browser/web reading, " : ""
+        let imageToolDescription = includeImageTools ? "app-side image generation, " : ""
         let officeToolDescription = includeOfficeTools ? "local Office/PDF document generation" : ""
         let shortcutsToolDescription = includeShortcutsTools ? "iOS Shortcuts launcher" : ""
         let joinedToolDescription = (
             deviceToolDescriptions + [
             browserToolDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
+            imageToolDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
             officeToolDescription,
             shortcutsToolDescription
             ]
@@ -13447,6 +13763,7 @@ final class ChatViewModel {
             ]
             : []
         let browserUseDescription = includeBrowserTools ? "search/open/read/screenshot/download webpages, " : ""
+        let imageUseDescription = includeImageTools ? "generate or edit images through the app-side image endpoint, " : ""
         let officeUseDescription = includeOfficeTools ? "or directly create an Excel/PPT/Word/PDF file" : ""
         let shortcutsUseDescription = includeShortcutsTools
             ? "run an existing iOS Shortcut by exact name or open the Shortcuts app for user-confirmed editing"
@@ -13454,6 +13771,7 @@ final class ChatViewModel {
         let nativeUseDescription = (
             deviceUseDescriptions + [
             browserUseDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
+            imageUseDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
             officeUseDescription,
             shortcutsUseDescription
             ]
@@ -13461,6 +13779,7 @@ final class ChatViewModel {
             .filter { !$0.isEmpty }
             .joined(separator: ", ")
         let functionToolNames = [
+            includeImageTools ? "`image_generation`" : nil,
             includeBrowserTools ? "`web_search`, `browser_readable`" : nil,
             includeOfficeTools ? "`office_create_*`" : nil,
             includeShortcutsTools ? "`shortcuts_run`, `shortcuts_open`" : nil
@@ -13473,6 +13792,10 @@ final class ChatViewModel {
         let officeVsAlpineInstruction = includeOfficeTools
             ? "For code execution, Python scripts, package installs, project edits, or \"write/run Python to generate a file\", use Local Alpine when available instead of the Office actions. The Office actions are for productized file creation from a document draft, not for replacing the Python/terminal agent.\n"
             : ""
+        let imageInstructions = includeImageTools ? """
+
+        For image generation/editing requests, call `image_generation` when the real function tool is present. Use it when the user naturally asks to create, draw, design, render, or generate an image, poster, wallpaper, avatar, logo, product photo, illustration, or other visual asset. The current chat model does not need to natively support image output; Iexa will execute the app-side image endpoint and attach the generated image. Do not call it for ordinary conversation, capability questions, or image analysis.
+        """ : ""
         let deviceActionExamples = includeDeviceTools ? """
         ```iexa_native
         {"action":"device.status"}
@@ -13574,6 +13897,7 @@ final class ChatViewModel {
         \(browserActionExamples)
         \(officeActionExamples)
         \(browserInstructions)
+        \(imageInstructions)
         \(officeInstructions)
         \(shortcutsInstructions)
         """
@@ -14838,6 +15162,8 @@ final class ChatViewModel {
                 ? localOfficeRevisionSystemContext(for: latestUserTextForLocalAlpine)
                 : nil
             let shouldExposeBrowserTools = shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalAlpine)
+            let shouldExposeImageTools = shouldUseLocalNativeFunctionTools(for: localAlpineModelId)
+                && shouldExposeLocalImageNativeTools(for: latestUserTextForLocalAlpine)
             let shouldExposeOfficeTools = shouldExposeLocalOfficeNativeTools(
                 for: latestUserTextForLocalAlpine,
                 officeRevisionContext: officeRevisionContext
@@ -14845,6 +15171,7 @@ final class ChatViewModel {
             let shouldExposeShortcutsTools = shortcutsEnabled
             let shouldExposeDeviceTools = Self.shouldExposeLocalDeviceNativeTools(latestUserTextForLocalAlpine)
             let shouldExpose = shouldExposeDeviceTools
+                || shouldExposeImageTools
                 || shouldExposeBrowserTools
                 || shouldExposeOfficeTools
                 || shouldExposeShortcutsTools
@@ -14853,6 +15180,7 @@ final class ChatViewModel {
                 Self.localNativeToolSystemContext(
                     includeDeviceTools: shouldExposeDeviceTools,
                     includeBrowserTools: shouldExposeBrowserTools,
+                    includeImageTools: shouldExposeImageTools,
                     includeOfficeTools: shouldExposeOfficeTools,
                     includeShortcutsTools: shouldExposeShortcutsTools
                 ),
@@ -14864,7 +15192,9 @@ final class ChatViewModel {
         }()
         let modelCapabilityContext = Self.modelCapabilitySystemContext(
             model: selectedModel,
-            modelId: selectedModelId ?? conversation.model
+            modelId: selectedModelId ?? conversation.model,
+            appSideImageGenerationAvailable: shouldUseLocalNativeFunctionTools(for: localAlpineModelId)
+                && shouldExposeLocalImageNativeTools(for: latestUserTextForLocalAlpine)
         )
         let feedbackPreferenceContext = AssistantFeedbackPreferenceStore.systemContext()
         let combinedSystemPrompt = [asyncEffectiveSP, modelCapabilityContext, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localNativeToolContext, localSoulContext, localSkillsContext, memoryContext, feedbackPreferenceContext]
@@ -18496,7 +18826,11 @@ final class ChatViewModel {
         appendSystemInstruction(instruction, marker: "[Local Alpine final summary]", to: &messages)
     }
 
-    private static func modelCapabilitySystemContext(model: AIModel?, modelId: String?) -> String? {
+    private static func modelCapabilitySystemContext(
+        model: AIModel?,
+        modelId: String?,
+        appSideImageGenerationAvailable: Bool = false
+    ) -> String? {
         let resolvedModelId = (modelId ?? model?.id ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard model != nil || !resolvedModelId.isEmpty else { return nil }
 
@@ -18530,6 +18864,10 @@ final class ChatViewModel {
             if !model.tags.isEmpty {
                 lines.append("tags: \(model.tags.joined(separator: ", "))")
             }
+        }
+        if appSideImageGenerationAvailable {
+            lines.append("app_side_image_generation_available: true")
+            lines.append("app_side_image_generation_note: If an `image_generation` function tool is available and the user asks to create or edit an image, call that tool even when supports_image_generation is false.")
         }
         lines.append("Use this capability data when deciding whether a user request should use chat, image generation, attachments, Local Alpine, or a different model.")
         lines.append("[/Current model capability]")

@@ -2253,21 +2253,21 @@ struct ChatDetailView: View {
     }
 
     /// Checks whether a feature (web_search, image_generation, code_interpreter)
-    /// should be visible in the tools sheet. A feature is available only when:
-    /// 1. The server-level feature flag is enabled (from `/api/config`), AND
-    /// 2. The selected model has that capability enabled (from `info.meta.capabilities`).
-    ///
-    /// If the admin unchecks a capability on the model, the toggle disappears
-    /// from the app — the model simply can't use it.
+    /// should be visible in the tools sheet. Server-level feature flags come
+    /// from `/api/config`. Image generation is app-side, so it only needs the
+    /// global image endpoint to be enabled; other provider tools still require
+    /// selected-model capability metadata.
     private func isFeatureAvailable(_ capabilityKey: String, serverEnabled: Bool?) -> Bool {
         // Server must have the feature enabled globally
         guard serverEnabled == true else { return false }
+        // Image generation is app-side: any chat model can ask Iexa to call the
+        // server's image endpoint when this global feature is enabled.
+        if capabilityKey == "image_generation" {
+            return true
+        }
         // Model must have the capability enabled
         guard let model = viewModel.selectedModel else {
             return serverEnabled == true
-        }
-        if capabilityKey == "image_generation" && model.supportsImageGeneration {
-            return true
         }
         if model.defaultFeatureIds.contains(capabilityKey) || model.builtinTools[capabilityKey] == true {
             return true

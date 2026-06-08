@@ -615,6 +615,20 @@ final class APIClient: @unchecked Sendable {
         }
     }
 
+    private func configuredImageModel(editing: Bool) async -> String? {
+        guard providerType == .iexa,
+              let config = try? await getImageConfig() else {
+            return nil
+        }
+        let raw = editing
+            ? (config.imageEditModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? config.imageGenerationModel
+                : config.imageEditModel)
+            : config.imageGenerationModel
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     private func isXAIImageModel(_ model: String) -> Bool {
         let raw = model.lowercased()
         return raw.contains("grok-imagine")
@@ -798,27 +812,54 @@ final class APIClient: @unchecked Sendable {
         )
     }
 
-    func generateImage(prompt: String, model: String, size: String = "1024x1024") async throws -> String {
-        if isXAIImageModel(model) {
+    func generateImage(
+        prompt: String,
+        model: String,
+        size: String = "1024x1024",
+        preferServerDefaultModel: Bool = false
+    ) async throws -> String {
+        let configuredModel = preferServerDefaultModel
+            ? await configuredImageModel(editing: false)
+            : nil
+        let shouldUseServerDefaultModel = preferServerDefaultModel && providerType == .iexa
+        let requestModel = (configuredModel ?? (shouldUseServerDefaultModel ? "" : model))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if isXAIImageModel(requestModel) {
             return try await generateXAIImage(
                 prompt: prompt,
-                model: model,
+                model: requestModel,
                 size: size,
                 images: []
             )
         }
 
-        let baseBody: [String: Any] = [
-            "model": model,
-            "prompt": prompt,
-            "n": 1,
-            "size": size
-        ]
-        let countBody = baseBody.merging([
-            "count": 1,
-            "stream": false,
-            "moderation": "auto"
-        ]) { _, new in new }
+        let modelImageBodyVariants: [[String: Any]] = requestModel.isEmpty ? [] : {
+            let baseBody: [String: Any] = [
+                "model": requestModel,
+                "prompt": prompt,
+                "n": 1,
+                "size": size
+            ]
+            let countBody = baseBody.merging([
+                "count": 1,
+                "stream": false,
+                "moderation": "auto"
+            ]) { _, new in new }
+            return [
+                baseBody,
+                countBody,
+                baseBody.merging(["response_format": "url"]) { _, new in new },
+                baseBody.merging(["response_format": "b64_json"]) { _, new in new },
+                baseBody.merging(["input": prompt]) { _, new in new },
+                [
+                    "model": requestModel,
+                    "input": prompt,
+                    "n": 1,
+                    "size": size
+                ]
+            ]
+        }()
         let promptOnlyBody: [String: Any] = [
             "prompt": prompt,
             "n": 1,
@@ -829,18 +870,7 @@ final class APIClient: @unchecked Sendable {
             "stream": false,
             "moderation": "auto"
         ]) { _, new in new }
-        let imageBodyVariants: [[String: Any]] = [
-            baseBody,
-            countBody,
-            baseBody.merging(["response_format": "url"]) { _, new in new },
-            baseBody.merging(["response_format": "b64_json"]) { _, new in new },
-            baseBody.merging(["input": prompt]) { _, new in new },
-            [
-                "model": model,
-                "input": prompt,
-                "n": 1,
-                "size": size
-            ],
+        let promptOnlyImageBodyVariants: [[String: Any]] = [
             promptOnlyBody,
             promptOnlyCountBody,
             promptOnlyBody.merging(["response_format": "url"]) { _, new in new },
@@ -851,35 +881,36 @@ final class APIClient: @unchecked Sendable {
                 "size": size
             ]
         ]
-        let chatBodyVariants: [[String: Any]] = [
+        let imageBodyVariants = shouldUseServerDefaultModel
+            ? (promptOnlyImageBodyVariants + modelImageBodyVariants)
+            : (modelImageBodyVariants + promptOnlyImageBodyVariants)
+        let chatBodyVariants: [[String: Any]] = requestModel.isEmpty ? [] : [
             [
-                "model": model,
+                "model": requestModel,
                 "stream": false,
                 "messages": [["role": "user", "content": prompt]],
                 "features": ["image_generation": true]
             ],
             [
-                "model": model,
+                "model": requestModel,
                 "stream": false,
                 "messages": [["role": "user", "content": prompt]],
                 "modalities": ["text", "image"]
             ],
             [
-                "model": model,
+                "model": requestModel,
                 "stream": false,
                 "input": prompt
             ]
         ]
         let responsesPath = "/responses"
-        let responsesBodyVariants = responsesImageGenerationBodyVariants(
+        let responsesBodyVariants = requestModel.isEmpty ? [] : responsesImageGenerationBodyVariants(
             prompt: prompt,
-            model: model,
+            model: requestModel,
             size: size
         )
-        let paths = imageGenerationPaths + [
-            responsesPath,
-            chatCompletionsPath
-        ]
+        let toolFallbackPaths = shouldUseServerDefaultModel ? [] : [responsesPath, chatCompletionsPath]
+        let paths = imageGenerationPaths + toolFallbackPaths
 
         var lastError: Error?
         for path in paths {
@@ -1326,13 +1357,15 @@ final class APIClient: @unchecked Sendable {
         model: String,
         imageData: Data,
         fileName: String = "image.png",
-        size: String = "1024x1024"
+        size: String = "1024x1024",
+        preferServerDefaultModel: Bool = false
     ) async throws -> String {
         try await editImage(
             prompt: prompt,
             model: model,
             images: [ImageEditSource(data: imageData, fileName: fileName)],
-            size: size
+            size: size,
+            preferServerDefaultModel: preferServerDefaultModel
         )
     }
 
@@ -1584,16 +1617,29 @@ final class APIClient: @unchecked Sendable {
         prompt: String,
         model: String,
         images: [ImageEditSource],
-        size: String = "1024x1024"
+        size: String = "1024x1024",
+        preferServerDefaultModel: Bool = false
     ) async throws -> String {
         let editImages = Array(images.prefix(16))
         guard let firstImage = editImages.first else {
-            return try await generateImage(prompt: prompt, model: model, size: size)
-        }
-        if isXAIImageModel(model) {
-            return try await generateXAIImage(
+            return try await generateImage(
                 prompt: prompt,
                 model: model,
+                size: size,
+                preferServerDefaultModel: preferServerDefaultModel
+            )
+        }
+        let configuredModel = preferServerDefaultModel
+            ? await configuredImageModel(editing: true)
+            : nil
+        let shouldUseServerDefaultModel = preferServerDefaultModel && providerType == .iexa
+        let requestModel = (configuredModel ?? (shouldUseServerDefaultModel ? "" : model))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if isXAIImageModel(requestModel) {
+            return try await generateXAIImage(
+                prompt: prompt,
+                model: requestModel,
                 size: size,
                 images: editImages
             )
@@ -1603,7 +1649,7 @@ final class APIClient: @unchecked Sendable {
         for path in imageEditPaths {
             for requestBody in imageEditJSONBodyVariants(
                 prompt: prompt,
-                model: model,
+                model: requestModel,
                 size: size,
                 images: editImages
             ) {
@@ -1664,15 +1710,18 @@ final class APIClient: @unchecked Sendable {
         for path in imageEditPaths {
             for files in multipartVariants {
                 do {
+                    var fields: [String: String] = [
+                        "prompt": prompt,
+                        "n": "1",
+                        "size": size
+                    ]
+                    if !requestModel.isEmpty {
+                        fields["model"] = requestModel
+                    }
                     let json = try await network.uploadMultipart(
                         path: path,
                         files: files,
-                        additionalFields: [
-                            "model": model,
-                            "prompt": prompt,
-                            "n": "1",
-                            "size": size
-                        ],
+                        additionalFields: fields,
                         timeout: 300
                     )
 
@@ -1696,10 +1745,24 @@ final class APIClient: @unchecked Sendable {
             }
         }
 
+        guard !requestModel.isEmpty, !shouldUseServerDefaultModel else {
+            if let lastError {
+                throw lastError
+            }
+            throw APIError.responseDecoding(
+                underlying: NSError(
+                    domain: "APIClient",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
+                ),
+                data: nil
+            )
+        }
+
         do {
             return try await generateImageViaResponses(
                 prompt: prompt,
-                model: model,
+                model: requestModel,
                 size: size,
                 images: editImages
             )
@@ -1708,7 +1771,7 @@ final class APIClient: @unchecked Sendable {
                 do {
                     return try await generateImageViaResponses(
                         prompt: prompt,
-                        model: model,
+                        model: requestModel,
                         size: size,
                         images: [firstImage]
                     )
@@ -1748,30 +1811,28 @@ final class APIClient: @unchecked Sendable {
         guard let first = encodedImages.first else { return [] }
 
         var variants: [[String: Any]] = []
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let modelField: [String: Any] = trimmedModel.isEmpty ? [:] : ["model": trimmedModel]
         if encodedImages.count > 1 {
-            variants.append([
-                "model": model,
+            variants.append(modelField.merging([
                 "prompt": prompt,
                 "images": encodedImages.map { $0.object }
-            ])
+            ]) { _, new in new })
         }
 
         variants.append(contentsOf: [
-            [
-                "model": model,
+            modelField.merging([
                 "prompt": prompt,
                 "image": first.object
-            ],
-            [
-                "model": model,
+            ]) { _, new in new },
+            modelField.merging([
                 "prompt": prompt,
                 "image": first.url
-            ],
-            [
-                "model": model,
+            ]) { _, new in new },
+            modelField.merging([
                 "prompt": prompt,
                 "image_url": first.url
-            ]
+            ]) { _, new in new }
         ])
 
         let trimmedSize = size.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -209,8 +209,18 @@ final class ConversationManager: @unchecked Sendable {
         try await apiClient.getModels()
     }
 
-    func generateImage(prompt: String, model: String, size: String = "1024x1024") async throws -> String {
-        try await apiClient.generateImage(prompt: prompt, model: model, size: size)
+    func generateImage(
+        prompt: String,
+        model: String,
+        size: String = "1024x1024",
+        preferServerDefaultModel: Bool = false
+    ) async throws -> String {
+        try await apiClient.generateImage(
+            prompt: prompt,
+            model: model,
+            size: size,
+            preferServerDefaultModel: preferServerDefaultModel
+        )
     }
 
     func generateVideo(
@@ -236,14 +246,16 @@ final class ConversationManager: @unchecked Sendable {
         model: String,
         imageData: Data,
         fileName: String,
-        size: String = "1024x1024"
+        size: String = "1024x1024",
+        preferServerDefaultModel: Bool = false
     ) async throws -> String {
         try await apiClient.editImage(
             prompt: prompt,
             model: model,
             imageData: imageData,
             fileName: fileName,
-            size: size
+            size: size,
+            preferServerDefaultModel: preferServerDefaultModel
         )
     }
 
@@ -251,13 +263,15 @@ final class ConversationManager: @unchecked Sendable {
         prompt: String,
         model: String,
         images: [ImageEditSource],
-        size: String = "1024x1024"
+        size: String = "1024x1024",
+        preferServerDefaultModel: Bool = false
     ) async throws -> String {
         try await apiClient.editImage(
             prompt: prompt,
             model: model,
             images: images,
-            size: size
+            size: size,
+            preferServerDefaultModel: preferServerDefaultModel
         )
     }
 
