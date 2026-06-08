@@ -227,6 +227,7 @@ final class ChatViewModel {
     private static let shortcutsTogglePreferenceKey = "chatInput.shortcutsEnabled"
     private static let codeInterpreterTogglePreferenceKey = "chatInput.codeInterpreterEnabled"
     private static let codeEditingTogglePreferenceKey = "chatInput.codeEditingEnabled"
+    private static let quickPillsPreferenceKey = "quickPills"
     private static let directImageGenerationMaxConcurrency = 3
 
     /// Isolated store for streaming content. Only the actively streaming
@@ -318,6 +319,7 @@ final class ChatViewModel {
                 userDisabledBuiltinFeatures.insert("image_generation")
             }
             UserDefaults.standard.set(imageGenerationEnabled, forKey: Self.imageGenerationTogglePreferenceKey)
+            Self.setImageQuickPillVisible(imageGenerationEnabled)
         }
     }
     var localOfficeEnabled: Bool = false {
@@ -3331,6 +3333,7 @@ final class ChatViewModel {
 
     private func setupChatWebSearchSettingsObserver() {
         syncChatWebSearchPermission()
+        syncImageGenerationPreference()
         syncCodeEditingPreference()
         syncShortcutsPreference()
         guard chatWebSearchSettingsObserver == nil else { return }
@@ -3341,6 +3344,7 @@ final class ChatViewModel {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.syncChatWebSearchPermission()
+                self?.syncImageGenerationPreference()
                 self?.syncCodeEditingPreference()
                 self?.syncShortcutsPreference()
             }
@@ -3362,6 +3366,37 @@ final class ChatViewModel {
             suppressBuiltinFeatureTracking = false
         }
     }
+
+    private func syncImageGenerationPreference() {
+        guard let savedImageGeneration = UserDefaults.standard.object(forKey: Self.imageGenerationTogglePreferenceKey) as? Bool else {
+            return
+        }
+        guard imageGenerationEnabled != savedImageGeneration else { return }
+        suppressBuiltinFeatureTracking = true
+        imageGenerationEnabled = savedImageGeneration
+        suppressBuiltinFeatureTracking = false
+        if savedImageGeneration {
+            userDisabledBuiltinFeatures.remove("image_generation")
+        } else {
+            userDisabledBuiltinFeatures.insert("image_generation")
+        }
+    }
+
+    private static func setImageQuickPillVisible(_ isVisible: Bool) {
+        var ids = UserDefaults.standard.string(forKey: quickPillsPreferenceKey)?
+            .components(separatedBy: ",")
+            .filter { !$0.isEmpty } ?? []
+        let containsImage = ids.contains("image")
+        if isVisible, !containsImage {
+            ids.append("image")
+        } else if !isVisible, containsImage {
+            ids.removeAll { $0 == "image" }
+        } else {
+            return
+        }
+        UserDefaults.standard.set(ids.joined(separator: ","), forKey: quickPillsPreferenceKey)
+    }
+
 
     private func syncCodeEditingPreference() {
         guard let savedCodeEditing = UserDefaults.standard.object(forKey: Self.codeEditingTogglePreferenceKey) as? Bool else {
@@ -9478,6 +9513,122 @@ final class ChatViewModel {
         let arguments: String
     }
 
+    private enum LocalAlpineNativeLoopDecision {
+        case allow
+        case warn(String)
+        case block(String)
+
+        var message: String? {
+            switch self {
+            case .allow:
+                return nil
+            case .warn(let message), .block(let message):
+                return message
+            }
+        }
+
+        var shouldExecute: Bool {
+            if case .allow = self { return true }
+            return false
+        }
+
+        var isBlocked: Bool {
+            if case .block = self { return true }
+            return false
+        }
+    }
+
+    private struct LocalAlpineNativeLoopGuard {
+        private let warningThreshold = 2
+        private let blockThreshold = 3
+        private var countsBySignature: [String: Int] = [:]
+
+        mutating func checkBeforeExecution(_ call: LocalAlpineNativeToolCall) -> LocalAlpineNativeLoopDecision {
+            let signature = Self.signature(for: call)
+            let count = (countsBySignature[signature] ?? 0) + 1
+            countsBySignature[signature] = count
+
+            if count >= blockThreshold {
+                return .block("""
+                [LOOP BLOCKED] The app blocked this repeated Local Alpine tool call before execution.
+                Tool: \(Self.displayName(for: call))
+                Repeated identical arguments: \(count) times in this assistant turn.
+                Do not call the same tool again. Use the previous tool result, choose a different concrete action, or answer with the current limitation.
+                """)
+            }
+            if count >= warningThreshold {
+                return .warn("""
+                [LOOP WARNING] This Local Alpine tool call repeats identical arguments already used in this assistant turn.
+                Tool: \(Self.displayName(for: call))
+                Repeated identical arguments: \(count) times.
+                Stop repeating this call unless a previous edit/write changed the file or state.
+                """)
+            }
+            return .allow
+        }
+
+        mutating func recordProgressBoundary() {
+            countsBySignature.removeAll()
+        }
+
+        private static func signature(for call: LocalAlpineNativeToolCall) -> String {
+            let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let arguments = normalizedArguments(from: call.arguments)
+            return "\(name):\(arguments)"
+        }
+
+        private static func displayName(for call: LocalAlpineNativeToolCall) -> String {
+            call.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "unknown" : call.name
+        }
+
+        private static func normalizedArguments(from raw: String) -> String {
+            guard let data = raw.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) else {
+                return normalizeScalar(raw)
+            }
+            let normalized = normalizeJSONValue(object)
+            guard JSONSerialization.isValidJSONObject(normalized),
+                  let normalizedData = try? JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys]),
+                  let normalizedString = String(data: normalizedData, encoding: .utf8) else {
+                return normalizeScalar(raw)
+            }
+            return normalizedString
+        }
+
+        private static func normalizeJSONValue(_ value: Any) -> Any {
+            if let dictionary = value as? [String: Any] {
+                var normalized: [String: Any] = [:]
+                for (key, rawValue) in dictionary {
+                    let normalizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    guard normalizedKey != "tool_title" else { continue }
+                    normalized[normalizedKey] = normalizeJSONValue(rawValue)
+                }
+                return normalized
+            }
+            if let array = value as? [Any] {
+                return array.map(normalizeJSONValue(_:))
+            }
+            if let string = value as? String {
+                return normalizeScalar(string)
+            }
+            if let number = value as? NSNumber {
+                return number
+            }
+            if value is NSNull {
+                return NSNull()
+            }
+            return "\(value)"
+        }
+
+        private static func normalizeScalar(_ value: String) -> String {
+            value
+                .replacingOccurrences(of: "\\", with: "/")
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+        }
+    }
+
     private final class LocalAlpineNativeToolCallAccumulator {
         private struct Partial {
             var id: String = ""
@@ -9627,6 +9778,7 @@ final class ChatViewModel {
         var request = initialRequest
         var apiMessages = initialRequest.messages
         var exactUsage: [String: Any]?
+        var loopGuard = LocalAlpineNativeLoopGuard()
 
         for _ in 0..<localAlpineAgentMaxSteps {
             request.messages = apiMessages
@@ -9648,13 +9800,63 @@ final class ChatViewModel {
             guard !calls.isEmpty else { return exactUsage }
 
             apiMessages.append(Self.openAIToolCallAssistantMessage(for: calls))
+            var blockedLoopMessage: String?
+            var madeProgress = false
             for call in calls {
+                let decision = loopGuard.checkBeforeExecution(call)
+                if !decision.shouldExecute {
+                    let message = decision.message ?? "[LOOP WARNING] Repeated Local Alpine tool call skipped."
+                    if decision.isBlocked {
+                        blockedLoopMessage = message
+                    }
+                    apiMessages.append([
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": message
+                    ])
+                    continue
+                }
+
                 let result = await executeLocalAlpineNativeToolCall(call, assistantMessageId: assistantMessageId)
+                if Self.localAlpineAgentResultMutatesState(result) {
+                    madeProgress = true
+                }
                 apiMessages.append([
                     "role": "tool",
                     "tool_call_id": call.id,
                     "content": Self.localAlpineNativeToolResultContent(result)
                 ])
+            }
+            if madeProgress {
+                loopGuard.recordProgressBoundary()
+            }
+            if let blockedLoopMessage {
+                apiMessages.append([
+                    "role": "system",
+                    "content": """
+                    Local Alpine agent loop guard stopped repeated tool execution.
+                    \(blockedLoopMessage)
+                    Answer the user now. Summarize what was completed, what is still unresolved, and the exact next different action needed. Do not call more tools for this turn.
+                    """
+                ])
+                request.messages = apiMessages
+                request.tools = nil
+                request.toolChoice = "none"
+                let finalStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                for try await event in finalStream {
+                    if Task.isCancelled { break }
+                    if let usage = event.usage, !usage.isEmpty {
+                        exactUsage = usage
+                    }
+                    applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
+                    if event.isFinished { break }
+                }
+                if acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let fallback = Self.localAlpineNativeLoopBlockedFallbackMessage(blockedLoopMessage)
+                    acc.replace(fallback)
+                    updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                }
+                return exactUsage
             }
         }
 
@@ -10271,6 +10473,25 @@ final class ChatViewModel {
         let body = result.summary.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallback = result.didExecute ? "Local Alpine tool completed." : "Local Alpine tool did not execute."
         return String((body.isEmpty ? fallback : body).prefix(16_000))
+    }
+
+    private static func localAlpineAgentResultMutatesState(_ result: LocalAlpineAgentResult) -> Bool {
+        result.editedFileCount > 0
+            || !result.writtenFiles.isEmpty
+            || result.commandResults.contains { localAlpineCommandMutatesState($0.command) }
+    }
+
+    private static func localAlpineNativeLoopBlockedFallbackMessage(_ blockedMessage: String) -> String {
+        let cleaned = blockedMessage
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return """
+        我先停下，避免继续重复执行同一个本地工具。
+
+        \(cleaned)
+
+        这通常表示当前 Agent loop 已经没有新的有效动作。下一步需要换一个不同的检查/修改路径，或者根据已有结果总结当前状态。
+        """
     }
 
     private static let localNativeFunctionToolNames: Set<String> = [
@@ -17271,7 +17492,7 @@ final class ChatViewModel {
             .filter { !$0.isEmpty }
         guard !commands.isEmpty else { return false }
         let inspectionPatterns = [
-            #"^(?:pwd|ls\b|find\b|grep\b|rg\b|cat\b|sed\s+-n\b|head\b|tail\b|wc\b|stat\b|file\b|tree\b)"#,
+            #"^(?:pwd|ls\b|find\b|grep\b|rg\b|cat\b|read_file\b|file_read\b|open_file\b|sed\s+-n\b|head\b|tail\b|wc\b|stat\b|file\b|tree\b)"#,
             #"^(?:command\s+-v|which\b|apk\s+info\b|apk\s+search\b)"#,
             #"^(?:python3?|pip3?|node|npm|lua(?:5\.\d)?|gcc|g\+\+|clang|make)\s+(?:--version|-v|version|list|show|freeze)\b"#
         ]

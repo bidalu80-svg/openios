@@ -215,8 +215,15 @@ struct ToolsMenuSheet: View {
         featureToggleTile(
             icon: "photo.badge.plus",
             title: "图像生成",
-            subtitle: "根据文字描述生成图片",
-            isOn: $imageGenerationEnabled
+            subtitle: isImageGenerationAvailable
+                ? "根据文字描述生成图片"
+                : "当前站点或权限不可用；可关闭以停止注入",
+            isOn: imageGenerationEnabled,
+            isEnabled: isImageGenerationAvailable || imageGenerationEnabled,
+            action: {
+                guard isImageGenerationAvailable || imageGenerationEnabled else { return }
+                imageGenerationEnabled.toggle()
+            }
         )
     }
 
@@ -279,9 +286,11 @@ struct ToolsMenuSheet: View {
         title: String,
         subtitle: String?,
         isOn: Bool,
+        isEnabled: Bool = true,
         action: (() -> Void)?
     ) -> some View {
         Button {
+            guard isEnabled else { return }
             withAnimation(MicroAnimation.snappy) {
                 action?()
             }
@@ -328,8 +337,10 @@ struct ToolsMenuSheet: View {
             )
         }
         .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1.0 : OpacityLevel.disabled)
         .accessibilityLabel(title)
-        .accessibilityValue(isOn ? "已开启" : "已关闭")
+        .accessibilityValue(isEnabled ? (isOn ? "已开启" : "已关闭") : "不可用")
         .accessibilityAddTraits(.isToggle)
     }
 
@@ -381,9 +392,7 @@ struct ToolsMenuSheet: View {
                 webSearchToggle
             }
 
-            if isImageGenerationAvailable {
-                imageGenerationToggle
-            }
+            imageGenerationToggle
 
             localOfficeToggle
 

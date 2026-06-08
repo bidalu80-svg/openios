@@ -331,10 +331,12 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let command = call.command?.trimmingCharacters(in: .whitespacesAndNewlines)
             return command?.isEmpty == false ? command : nil
         })
+        let structuredToolPathsByName = Self.structuredToolPathsByName(from: toolCalls)
         for (index, result) in commandResults.enumerated() {
             let command = result.command.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !command.isEmpty, command.lowercased() != "write_files" else { continue }
             guard !existingCommands.contains(command) else { continue }
+            guard !Self.commandDuplicatesStructuredTool(command, toolPathsByName: structuredToolPathsByName) else { continue }
             steps.append(
                 AgentActivityStep(
                     id: "command-\(index)-\(command.hashValue)",
@@ -365,6 +367,74 @@ private struct AgentActivityItem: Identifiable, Hashable {
             }
         }
         return concreteSteps.isEmpty ? localStatusPlaceholders : concreteSteps
+    }
+
+    private static func structuredToolPathsByName(from toolCalls: [LocalAlpineToolCall]) -> [String: Set<String>] {
+        var pathsByName: [String: Set<String>] = [:]
+        for call in toolCalls {
+            let names = structuredToolCommandNames(for: call.name)
+            guard !names.isEmpty else { continue }
+            let paths = call.filePaths
+                .map(normalizedPath(_:))
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            guard !paths.isEmpty else { continue }
+            for name in names {
+                for path in paths {
+                    pathsByName[name, default: []].formUnion(structuredToolPathAliases(for: path))
+                }
+            }
+        }
+        return pathsByName
+    }
+
+    private static func structuredToolCommandNames(for toolName: String) -> Set<String> {
+        switch toolName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "read_file", "read_files", "read", "file_read", "open_file", "cat":
+            return ["read_file", "file_read", "open_file"]
+        case "edit_file", "edit_files", "replace_file", "edit", "file_edit":
+            return ["edit_file", "file_edit"]
+        case "write_files", "write_file", "write", "file_write":
+            return ["write_files", "write_file", "file_write"]
+        case "patch_file", "patch_files", "apply_patch", "patch":
+            return ["patch_file", "apply_patch"]
+        case "delete_file", "delete_files", "remove_file", "remove_files", "file_delete":
+            return ["delete_file", "delete_files", "remove_file", "remove_files", "file_delete"]
+        default:
+            return []
+        }
+    }
+
+    private static func commandDuplicatesStructuredTool(
+        _ command: String,
+        toolPathsByName: [String: Set<String>]
+    ) -> Bool {
+        let parts = command
+            .split(separator: " ", maxSplits: 1)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard let rawName = parts.first?.lowercased(),
+              let paths = toolPathsByName[rawName],
+              !paths.isEmpty else {
+            return false
+        }
+        guard parts.count > 1 else { return false }
+        let normalizedArgument = normalizedPath(parts[1])
+        guard !normalizedArgument.isEmpty else { return false }
+        return !structuredToolPathAliases(for: normalizedArgument).isDisjoint(with: paths)
+    }
+
+    private static func structuredToolPathAliases(for path: String) -> Set<String> {
+        let normalized = normalizedPath(path)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return [] }
+        var aliases: Set<String> = [normalized, (normalized as NSString).lastPathComponent]
+        if normalized.hasPrefix("/mnt/iexa/") {
+            let relative = String(normalized.dropFirst("/mnt/iexa/".count))
+            aliases.insert(relative)
+            aliases.insert((relative as NSString).lastPathComponent)
+        } else if !normalized.hasPrefix("/") {
+            aliases.insert("/mnt/iexa/\(normalized)")
+        }
+        return aliases
     }
 
     private static func statusSteps(
