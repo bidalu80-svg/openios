@@ -9786,12 +9786,12 @@ final class ChatViewModel {
                     document: LocalNativeBrowserDocument(
                         ok: false,
                         action: browserAction,
-                        title: "本地浏览器",
+                        title: "搜索网页",
                         url: nil,
                         query: nil,
-                        summary: "模型返回的浏览器工具调用无法解析。",
+                        summary: "模型返回的搜索指令无法解析。",
                         items: [],
-                        error: "模型返回的浏览器工具调用无法解析。"
+                        error: "模型返回的搜索指令无法解析。"
                     ),
                     keepStreaming: true
                 )
@@ -9858,12 +9858,12 @@ final class ChatViewModel {
                 document: LocalNativeBrowserDocument(
                     ok: false,
                     action: browserAction,
-                    title: "本地浏览器",
+                    title: "搜索网页",
                     url: nil,
                     query: nil,
-                    summary: "本地浏览器工具没有返回可用结果。",
+                    summary: "搜索没有返回可用结果。",
                     items: [],
-                    error: "本地浏览器工具没有返回可用结果。"
+                    error: "搜索没有返回可用结果。"
                 ),
                 keepStreaming: true
             )
@@ -15774,12 +15774,12 @@ final class ChatViewModel {
                     document: LocalNativeBrowserDocument(
                         ok: false,
                         action: browserAction,
-                        title: "本地浏览器",
+                        title: "搜索网页",
                         url: nil,
                         query: nil,
-                        summary: "模型返回的浏览器工具指令无法解析。",
+                        summary: "模型返回的搜索指令无法解析。",
                         items: [],
-                        error: "模型返回的浏览器工具指令无法解析。"
+                        error: "模型返回的搜索指令无法解析。"
                     )
                 )
             }
@@ -15828,12 +15828,12 @@ final class ChatViewModel {
                 document: LocalNativeBrowserDocument(
                     ok: false,
                     action: browserAction ?? "browser",
-                    title: "本地浏览器",
+                    title: "搜索网页",
                     url: nil,
                     query: nil,
-                    summary: "本地浏览器工具没有返回可用结果。",
+                    summary: "搜索没有返回可用结果。",
                     items: [],
-                    error: "本地浏览器工具没有返回可用结果。"
+                    error: "搜索没有返回可用结果。"
                 )
             )
             inheritedStatusHistory = localNativeContinuationStatusHistory(from: messageId)
@@ -15920,7 +15920,7 @@ final class ChatViewModel {
         )
         updateLocalBrowserToolMessage(
             messageId: messageId,
-            content: document.ok ? "本地浏览器已完成：\(document.title)" : "本地浏览器失败：\(document.error ?? document.summary)",
+            content: document.ok ? "搜索完成：\(document.title)" : "搜索失败：\(document.error ?? document.summary)",
             isStreaming: keepStreaming,
             status: status
         )
@@ -15991,15 +15991,15 @@ final class ChatViewModel {
     private func localBrowserToolRunningTitle(for actionName: String) -> String {
         let action = actionName.lowercased()
         if action.contains("search") || action.contains("搜索") || action.contains("web.search") {
-            return "本地浏览器正在搜索网页..."
+            return "正在搜索网络..."
         }
         if action.contains("screenshot") {
-            return "本地浏览器正在生成网页缩略图..."
+            return "正在生成网页缩略图..."
         }
         if action.contains("fetch") {
-            return "本地浏览器正在下载网页资源..."
+            return "正在下载网页资源..."
         }
-        return "本地浏览器正在读取网页..."
+        return "正在读取网页..."
     }
 
     private func markLocalOfficeGenerationStarted(messageId: String, kind: LocalNativeOfficeKind) {
