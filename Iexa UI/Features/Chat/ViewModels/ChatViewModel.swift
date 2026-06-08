@@ -623,8 +623,9 @@ final class ChatViewModel {
 
     private func runLiveActivityKind(modelId: String, prompt: String) -> String {
         if shouldUseDirectVideoGeneration(modelId: modelId) { return "video" }
-        if shouldUseDirectImageGeneration(modelId: modelId)
-            || shouldPreferChatNativeImageGeneration(modelId: modelId) {
+        if imageGenerationEnabled,
+           (shouldUseDirectImageGeneration(modelId: modelId)
+            || shouldPreferChatNativeImageGeneration(modelId: modelId)) {
             return "image"
         }
         return "chat"
@@ -5708,10 +5709,8 @@ final class ChatViewModel {
         )
 
         // Build API messages with image content fetched from server
-        let imageCanvasInstructionMessageId = (imageGenerationEnabled
-            || shouldUseDirectImageGeneration(modelId: modelId)
-            || shouldPreferChatNativeImageGeneration(modelId: modelId))
-            && Self.looksLikeImageGenerationRequest(modelPromptText)
+        let imageCanvasInstructionMessageId = imageGenerationEnabled
+            && Self.looksLikeDirectImageGenerationRequest(modelPromptText)
             ? userMessage.id
             : nil
         let useLocalAlpineNativeToolsForThisTurn =
@@ -5835,7 +5834,8 @@ final class ChatViewModel {
                         return
                     }
 
-                    if self.shouldUseDirectImageGeneration(modelId: modelId),
+                    if self.imageGenerationEnabled,
+                       self.shouldUseDirectImageGeneration(modelId: modelId),
                        !self.shouldPreferChatNativeImageGeneration(modelId: modelId) {
                         do {
                             guard self.currentProviderType != .anthropic else {
@@ -6382,12 +6382,14 @@ final class ChatViewModel {
             return false
         }
 
-        if shouldUseDirectImageGeneration(modelId: modelId)
-            || shouldPreferChatNativeImageGeneration(modelId: modelId) {
-            return true
-        }
-        if imageGenerationEnabled && Self.looksLikeImageGenerationRequest(normalized) {
-            return true
+        if imageGenerationEnabled {
+            if shouldUseDirectImageGeneration(modelId: modelId)
+                || shouldPreferChatNativeImageGeneration(modelId: modelId) {
+                return true
+            }
+            if Self.looksLikeDirectImageGenerationRequest(normalized) {
+                return true
+            }
         }
         return shouldUseDirectVideoGeneration(modelId: modelId)
     }
@@ -9935,12 +9937,11 @@ final class ChatViewModel {
             updateAssistantMessage(
                 id: assistantMessageId,
                 content: "",
-                isStreaming: false,
-                error: ChatMessageError(content: message)
+                isStreaming: true
             )
             return LocalNativeFunctionToolExecution(
-                toolContent: message,
-                completedAssistantTurn: true,
+                toolContent: "\(message)\nExplain this limitation to the user in normal language. Do not call `image_generation` again for this same user message.",
+                completedAssistantTurn: false,
                 visibleContent: nil
             )
         }
@@ -9960,12 +9961,11 @@ final class ChatViewModel {
             updateAssistantMessage(
                 id: assistantMessageId,
                 content: "",
-                isStreaming: false,
-                error: ChatMessageError(content: message)
+                isStreaming: true
             )
             return LocalNativeFunctionToolExecution(
-                toolContent: message,
-                completedAssistantTurn: true,
+                toolContent: "\(message)\nAsk the user for a concrete image prompt in normal language. Do not call `image_generation` again for this same user message.",
+                completedAssistantTurn: false,
                 visibleContent: nil
             )
         }
@@ -10028,20 +10028,6 @@ final class ChatViewModel {
                     )
                 )
             }
-            appendStatusUpdate(
-                id: assistantMessageId,
-                status: ChatStatusUpdate(
-                    action: "image_generation",
-                    description: "图片生成已结束",
-                    done: true,
-                    occurredAt: .now
-                )
-            )
-            updateAssistantMessage(
-                id: assistantMessageId,
-                content: "",
-                isStreaming: false
-            )
             var successCount = 0
             for (slotIndex, slot) in slots.enumerated() {
                 switch slot {
@@ -10059,6 +10045,52 @@ final class ChatViewModel {
                     )
                 }
             }
+            guard successCount > 0 else {
+                let message = "图片生成接口没有返回可用图片数据。"
+                appendStatusUpdate(
+                    id: assistantMessageId,
+                    status: ChatStatusUpdate(
+                        action: "image_generation",
+                        description: "图片生成失败",
+                        done: true,
+                        occurredAt: .now
+                    )
+                )
+                updateAssistantMessage(
+                    id: assistantMessageId,
+                    content: "",
+                    isStreaming: true
+                )
+                await persistLocalConversationIfNeeded()
+                NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                let toolContent = """
+                Image generation failed.
+                Prompt: \(imagePrompt)
+                Requested size: \(requestedImageSize)
+                Error: \(message)
+
+                Explain to the user in normal language why no image was produced and what they can try next. Do not call `image_generation` again for this same user message unless the user explicitly asks to retry.
+                """
+                return LocalNativeFunctionToolExecution(
+                    toolContent: toolContent,
+                    completedAssistantTurn: false,
+                    visibleContent: nil
+                )
+            }
+            appendStatusUpdate(
+                id: assistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "image_generation",
+                    description: "图片生成已结束",
+                    done: true,
+                    occurredAt: .now
+                )
+            )
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: "",
+                isStreaming: false
+            )
             recordTokenUsageForCompletedTurn(
                 assistantMessageId: assistantMessageId,
                 userText: conversation?.messages.last(where: { $0.role == .user })?.content ?? imagePrompt,
@@ -10077,17 +10109,33 @@ final class ChatViewModel {
             )
         } catch {
             let message = Self.localizedGenerationError(error)
+            appendStatusUpdate(
+                id: assistantMessageId,
+                status: ChatStatusUpdate(
+                    action: "image_generation",
+                    description: "图片生成失败",
+                    done: true,
+                    occurredAt: .now
+                )
+            )
             updateAssistantMessage(
                 id: assistantMessageId,
                 content: "",
-                isStreaming: false,
-                error: ChatMessageError(content: message)
+                isStreaming: true
             )
             await persistLocalConversationIfNeeded()
             NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            let toolContent = """
+            Image generation failed.
+            Prompt: \(imagePrompt)
+            Requested size: \(requestedImageSize)
+            Error: \(message)
+
+            Explain to the user in normal language why no image was produced and what they can try next. Do not call `image_generation` again for this same user message unless the user explicitly asks to retry.
+            """
             return LocalNativeFunctionToolExecution(
-                toolContent: message,
-                completedAssistantTurn: true,
+                toolContent: toolContent,
+                completedAssistantTurn: false,
                 visibleContent: nil
             )
         }
@@ -10321,7 +10369,7 @@ final class ChatViewModel {
         guard canUseDirectImageEndpointProvider,
               imageGenerationEnabled,
               let text,
-              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              Self.looksLikeDirectImageGenerationRequest(text) else {
             return false
         }
         return true
@@ -12169,11 +12217,9 @@ final class ChatViewModel {
         // Web search is handled by the local WKWebView browser pipeline so the
         // app can show clickable source cards and thumbnails consistently.
 
-        if shouldEnableOpenAIResponsesImageGenerationTool(modelId: request.model) {
+        if shouldEnableOpenAIResponsesImageGenerationTool(modelId: request.model),
+           Self.looksLikeDirectImageGenerationRequest(Self.lastUserText(in: request.messages)) {
             tools.append(["type": "image_generation"])
-            if Self.looksLikeImageGenerationRequest(Self.lastUserText(in: request.messages)) {
-                request.responsesToolChoice = ["type": "image_generation"]
-            }
         }
 
         if codeInterpreterEnabled {
@@ -12252,13 +12298,12 @@ final class ChatViewModel {
     }
 
     private func canStartIndependentDirectImageGeneration(modelId: String, text: String? = nil) -> Bool {
-        guard canUseDirectImageEndpointProvider else { return false }
+        guard canUseDirectImageEndpointProvider, imageGenerationEnabled else { return false }
         if shouldUseDirectImageGeneration(modelId: modelId)
             && !shouldPreferChatNativeImageGeneration(modelId: modelId) {
             return true
         }
-        guard imageGenerationEnabled,
-              let text,
+        guard let text,
               Self.looksLikeDirectImageGenerationRequest(text) else {
             return false
         }
@@ -12635,11 +12680,29 @@ final class ChatViewModel {
 
     private static func looksLikeDirectImageGenerationRequest(_ text: String) -> Bool {
         let lowercased = text.lowercased()
+        let trimmed = lowercased.trimmingCharacters(in: .whitespacesAndNewlines)
         let capabilityQuestions = [
             "能生图", "可以生图", "有生图", "生图功能", "生成图片功能",
+            "能不能生图", "会不会生图",
             "can you generate image", "can you generate images", "image generation capability"
         ]
         if capabilityQuestions.contains(where: { lowercased.contains($0) }) {
+            return false
+        }
+        let troubleshootingTerms = [
+            "为什么", "为啥", "怎么回事", "什么原因", "原因", "不行", "失败",
+            "报错", "错误", "没生成", "没有生成", "没收到", "收不到",
+            "why", "what happened", "what went wrong", "failed", "failure",
+            "error", "not working", "did not generate", "didn't generate"
+        ]
+        let retryGenerationTerms = [
+            "重新生成", "再生成", "重试生成", "再试一次生成", "再来一张",
+            "换一张", "重新画", "重新做一张",
+            "regenerate", "generate again", "try generating again",
+            "make another image", "create another image", "draw another"
+        ]
+        if troubleshootingTerms.contains(where: { lowercased.contains($0) })
+            && !retryGenerationTerms.contains(where: { lowercased.contains($0) }) {
             return false
         }
 
@@ -12651,16 +12714,41 @@ final class ChatViewModel {
         let explicitGeneration = [
             "生图", "生成图", "生成一张", "生成图片", "生成图像",
             "画一张", "画个", "绘制", "做一张", "制作海报", "生成海报",
-            "生成头像", "生成logo", "设计logo",
+            "生成头像", "生成logo", "设计logo", "编辑这张图", "改这张图", "修改这张图",
             "generate an image", "create an image", "make an image",
             "draw a", "draw me", "create a poster", "generate a poster",
-            "create a logo", "design a logo"
+            "create a logo", "design a logo", "edit this image"
         ]
+        if retryGenerationTerms.contains(where: { lowercased.contains($0) }) {
+            return true
+        }
         if analysisRequests.contains(where: { lowercased.contains($0) })
             && !explicitGeneration.contains(where: { lowercased.contains($0) }) {
             return false
         }
         if explicitGeneration.contains(where: { lowercased.contains($0) }) {
+            return true
+        }
+        let imperativeImagePrefixes = [
+            "画", "绘", "做", "制作", "设计", "生成", "出", "来一张",
+            "make ", "create ", "draw ", "design ", "render "
+        ]
+        let imageObjects = [
+            "图", "图片", "图像", "照片", "海报", "壁纸", "头像", "插画", "logo",
+            "image", "photo", "poster", "wallpaper", "avatar", "illustration", "logo"
+        ]
+        if imperativeImagePrefixes.contains(where: { trimmed.hasPrefix($0) })
+            && imageObjects.contains(where: { lowercased.contains($0) }) {
+            return true
+        }
+        let assistedImperativeSignals = [
+            "帮我生成", "请生成", "给我生成",
+            "帮我画", "请画", "给我画",
+            "帮我做", "请做", "给我做",
+            "帮我设计", "请设计", "给我设计"
+        ]
+        if assistedImperativeSignals.contains(where: { lowercased.contains($0) })
+            && imageObjects.contains(where: { lowercased.contains($0) }) {
             return true
         }
 
@@ -14049,8 +14137,10 @@ final class ChatViewModel {
         guard webSearchEnabled else { return }
         guard !hasAttachments else { return }
         guard !WebLinkContextResolver.containsHTTPURL(text) else { return }
-        guard !shouldUseDirectImageGeneration(modelId: modelId),
-              !shouldPreferChatNativeImageGeneration(modelId: modelId),
+        guard !(imageGenerationEnabled && (
+            shouldUseDirectImageGeneration(modelId: modelId)
+                || shouldPreferChatNativeImageGeneration(modelId: modelId)
+        )),
               !shouldUseDirectVideoGeneration(modelId: modelId) else {
             return
         }
