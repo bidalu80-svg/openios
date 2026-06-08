@@ -10120,13 +10120,16 @@ final class ChatViewModel {
     }
 
     private func shouldExposeLocalBrowserNativeTools(for text: String?) -> Bool {
-        guard isLocalBrowserNativeToolsEnabled,
-              let text,
+        guard isLocalBrowserNativeToolsEnabled else { return false }
+        guard let text,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return false
         }
-        return Self.shouldExposeLocalBrowserTools(text)
-            || shouldResolveWebSearchContext(for: text)
+
+        // Minis-style behavior: when web search is enabled, expose the browser
+        // tools consistently and let the model decide whether this turn needs
+        // live web access.
+        return true
     }
 
     private func shouldExposeLocalOfficeNativeTools(
@@ -11900,8 +11903,10 @@ final class ChatViewModel {
         // the request, the toggle reflects either the server default OR the user's
         // explicit override. Checking server defaults again here would ignore the
         // user toggling a feature OFF mid-chat (the original bug).
-        // Keep server-side web_search disabled. The UI toggle now means
-        // "inject client-side browser search context before sending".
+        // Keep server-side web_search disabled. The UI toggle is handled by the
+        // local WKWebView browser tools (native function loop when available,
+        // Markdown fallback otherwise), so server search cannot race client
+        // browser results.
         features.webSearch = false
         if shouldEnableImageGeneration {
             features.imageGeneration = true
@@ -13722,6 +13727,11 @@ final class ChatViewModel {
             webSearchContextsByMessageId[userMessageId] = currentTimeContext
             return
         }
+
+        // In native function mode the model sees real web_search/browser_readable
+        // tools and should decide whether to call them. Keep prompt injection for
+        // providers that cannot run the native tool loop.
+        guard !shouldUseLocalNativeFunctionTools(for: modelId) else { return }
 
         if isWebSearchCapabilityQuestion(text) {
             webSearchContextsByMessageId[userMessageId] = modelWebSearchAvailabilityPrompt()
