@@ -9993,16 +9993,19 @@ final class ChatViewModel {
             isIndeterminate: true,
             force: true
         )
-        updateAssistantMessage(
+        appendStatusUpdate(
             id: assistantMessageId,
-            content: "",
-            isStreaming: true,
             status: ChatStatusUpdate(
                 action: "image_generation",
                 description: requestedCount > 1 ? "正在生成 \(requestedCount) 张图片" : "正在创建图片",
                 done: false,
                 occurredAt: .now
             )
+        )
+        updateAssistantMessage(
+            id: assistantMessageId,
+            content: "",
+            isStreaming: true
         )
 
         do {
@@ -10025,16 +10028,19 @@ final class ChatViewModel {
                     )
                 )
             }
-            updateAssistantMessage(
+            appendStatusUpdate(
                 id: assistantMessageId,
-                content: "",
-                isStreaming: false,
                 status: ChatStatusUpdate(
                     action: "image_generation",
                     description: "图片生成已结束",
                     done: true,
                     occurredAt: .now
                 )
+            )
+            updateAssistantMessage(
+                id: assistantMessageId,
+                content: "",
+                isStreaming: false
             )
             var successCount = 0
             for (slotIndex, slot) in slots.enumerated() {
