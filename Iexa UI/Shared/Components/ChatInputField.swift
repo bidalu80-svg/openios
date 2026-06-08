@@ -151,7 +151,7 @@ struct ChatInputField: View {
 
     /// Quick pills preference from UserDefaults
     @AppStorage("quickPills") private var quickPillsData: String = ""
-    private static let hiddenInputQuickPillIds: Set<String> = ["web", "office", "terminal", "code_edit"]
+    private static let hiddenInputQuickPillIds: Set<String> = ["web", "image", "office", "terminal", "code_edit"]
 
     /// Whether any audio attachment is still being transcribed.
     private var isTranscribing: Bool {
@@ -796,27 +796,7 @@ struct ChatInputField: View {
 
         for id in savedQuickPillIds {
             switch id {
-            case "web":
-                continue
-            case "image":
-                // Image Generation is a native feature toggle, not a tool.
-                // Sync the pill with imageGenerationEnabled so it matches
-                // the toggle in the tools sheet.
-                pills.append(QuickPill(
-                    id: "image",
-                    icon: "photo",
-                    label: "Image",
-                    isActive: imageGenerationEnabled,
-                    action: {
-                        withAnimation(.easeOut(duration: 0.15)) {
-                            imageGenerationEnabled.toggle()
-                        }
-                        Haptics.play(.light)
-                    }
-                ))
-            case "office":
-                continue
-            case "code_edit", "terminal":
+            case "web", "image", "office", "code_edit", "terminal":
                 continue
             default:
                 // Show the pill even when tools haven't loaded yet (e.g. right after
