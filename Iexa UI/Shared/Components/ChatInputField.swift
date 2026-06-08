@@ -802,20 +802,18 @@ struct ChatInputField: View {
                 // Image Generation is a native feature toggle, not a tool.
                 // Sync the pill with imageGenerationEnabled so it matches
                 // the toggle in the tools sheet.
-                if isImageGenerationAvailable {
-                    pills.append(QuickPill(
-                        id: "image",
-                        icon: "photo",
-                        label: "Image",
-                        isActive: imageGenerationEnabled,
-                        action: {
-                            withAnimation(.easeOut(duration: 0.15)) {
-                                imageGenerationEnabled.toggle()
-                            }
-                            Haptics.play(.light)
+                pills.append(QuickPill(
+                    id: "image",
+                    icon: "photo",
+                    label: "Image",
+                    isActive: imageGenerationEnabled,
+                    action: {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            imageGenerationEnabled.toggle()
                         }
-                    ))
-                }
+                        Haptics.play(.light)
+                    }
+                ))
             case "office":
                 continue
             case "code_edit", "terminal":

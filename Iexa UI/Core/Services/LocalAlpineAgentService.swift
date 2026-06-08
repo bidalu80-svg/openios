@@ -4473,7 +4473,19 @@ actor LocalAlpineAgentService {
 
         let issue: String?
         let replacement: String?
-        if Self.commandMatches(normalized, pattern: #"\bfind\b[^;&|]*\s-printf\b"#) {
+        if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)(apt|apt-get|yum|dnf|pacman|brew)\b"#) {
+            issue = "This is not an Alpine package command. Local Alpine uses `apk`, not Debian/Ubuntu/Fedora/Arch/Homebrew package managers."
+            replacement = "Use `apk info -e <pkg>`, `apk search <pkg>`, or `apk add --no-cache <pkg>` inside Local Alpine."
+        } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)sudo\b"#) {
+            issue = "`sudo` is not available or needed in this Local Alpine sandbox."
+            replacement = "Run the bounded Alpine command directly, or use `apk add --no-cache <pkg>` for package installs."
+        } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)(systemctl|service|launchctl)\b"#) {
+            issue = "Service managers such as `systemctl`, `service`, and `launchctl` are outside this Local Alpine/iSH command model."
+            replacement = "Use foreground commands, `command -v`, version checks, config inspection, or a bounded process check instead."
+        } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)(open|osascript|pbcopy|pbpaste|powershell|pwsh|cmd\.exe)\b"#) {
+            issue = "This is a host desktop/Windows/macOS command, not an Alpine Linux command."
+            replacement = "Use Local Alpine tools only. For previews, create a file under `/mnt/iexa` and use `iexa-open /mnt/iexa/<file>` when appropriate."
+        } else if Self.commandMatches(normalized, pattern: #"\bfind\b[^;&|]*\s-printf\b"#) {
             issue = "`find -printf` is a GNU find extension; BusyBox find in this runtime does not support it."
             replacement = "Use `glob`/`list_dir`, or `find PATH -type f -print | sed -n '1,200p'`."
         } else if Self.commandMatches(normalized, pattern: #"\bgrep\b[^;&|]*\s-[A-Za-z]*P[A-Za-z]*\b"#) {
@@ -4504,7 +4516,7 @@ actor LocalAlpineAgentService {
         return """
         BusyBox/ash compatibility guard.
 
-        This command was not run because it uses syntax that commonly fails in the Local Alpine BusyBox/ash runtime.
+        This command was not run because it is outside the Local Alpine command boundary or uses syntax that commonly fails in the Local Alpine BusyBox/ash runtime.
 
         Issue: \(issue ?? "unsupported command syntax")
         Rewrite: \(replacement ?? "Use POSIX sh/ash syntax or the structured Local Alpine wrappers.")

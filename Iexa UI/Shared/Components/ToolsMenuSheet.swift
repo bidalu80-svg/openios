@@ -217,11 +217,10 @@ struct ToolsMenuSheet: View {
             title: "图像生成",
             subtitle: isImageGenerationAvailable
                 ? "根据文字描述生成图片"
-                : "当前站点或权限不可用；可关闭以停止注入",
+                : "控制普通聊天模型的生图工具注入",
             isOn: imageGenerationEnabled,
-            isEnabled: isImageGenerationAvailable || imageGenerationEnabled,
+            isEnabled: true,
             action: {
-                guard isImageGenerationAvailable || imageGenerationEnabled else { return }
                 imageGenerationEnabled.toggle()
             }
         )

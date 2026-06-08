@@ -432,6 +432,20 @@ actor LocalAlpineTerminalService {
         try data.write(to: directory.appendingPathComponent(safeName), options: .atomic)
     }
 
+    func materializeAttachment(
+        data: Data,
+        fileName: String,
+        messageId: String,
+        index: Int
+    ) async throws -> String {
+        let safeMessageId = sanitizedPathComponent(messageId, fallback: "message")
+        let safeName = try sanitizedFileName(fileName)
+        let destination = "/.iexa_attachments/\(safeMessageId)"
+        let targetName = "\(max(1, index + 1))-\(safeName)"
+        try await writeFile(data: data, fileName: targetName, destinationPath: destination)
+        return "/mnt/iexa\(destination)/\(targetName)"
+    }
+
     func deleteRootFSItem(path: String) async throws {
         let rootPath = try normalizedRootFSPath(path)
         guard isDeletableRootFSPath(rootPath) else {
@@ -629,9 +643,12 @@ actor LocalAlpineTerminalService {
         }
 
         guard status.isRuntimeLinked else {
-            let result = await execute(command: trimmed, cwd: cwd, cwdIsRuntimePath: cwdIsRuntimePath)
-            await onOutput(result.output)
-            return result
+            return LocalAlpineCommandResult(
+                command: trimmed,
+                output: "Local Alpine native runtime is not linked; command was not executed.",
+                exitCode: 126,
+                interactiveRequest: nil
+            )
         }
 
         let runtimeRootFSURL: URL
@@ -670,16 +687,19 @@ actor LocalAlpineTerminalService {
         if let cleanupPath = materialized.cleanupPath {
             try? await deleteItem(path: cleanupPath)
         }
-        if let streamedResult {
-            if runtimeLikelyStarted(from: streamedResult) {
-                nativeRuntimeStarted = true
-            }
-            return streamedResult
+        guard let streamedResult else {
+            return LocalAlpineCommandResult(
+                command: trimmed,
+                output: "Local Alpine streaming session could not be started; command was not re-run.",
+                exitCode: 126,
+                interactiveRequest: nil
+            )
         }
 
-        let result = await execute(command: trimmed, cwd: cwd, cwdIsRuntimePath: cwdIsRuntimePath)
-        await onOutput(result.output)
-        return result
+        if runtimeLikelyStarted(from: streamedResult) {
+            nativeRuntimeStarted = true
+        }
+        return streamedResult
     }
 
     private func resultByExtractingOpenMarkers(_ result: LocalAlpineCommandResult) -> LocalAlpineCommandResult {
@@ -1710,6 +1730,15 @@ actor LocalAlpineTerminalService {
             throw LocalAlpineError.invalidPath(rawName)
         }
         return name
+    }
+
+    private func sanitizedPathComponent(_ rawValue: String, fallback: String) -> String {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sanitized = trimmed
+            .replacingOccurrences(of: #"[^A-Za-z0-9._-]+"#, with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".-_"))
+        guard !sanitized.isEmpty else { return fallback }
+        return String(sanitized.prefix(80))
     }
 }
 

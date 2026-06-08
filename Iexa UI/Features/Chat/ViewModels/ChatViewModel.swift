@@ -319,7 +319,6 @@ final class ChatViewModel {
                 userDisabledBuiltinFeatures.insert("image_generation")
             }
             UserDefaults.standard.set(imageGenerationEnabled, forKey: Self.imageGenerationTogglePreferenceKey)
-            Self.setImageQuickPillVisible(imageGenerationEnabled)
         }
     }
     var localOfficeEnabled: Bool = false {
@@ -625,9 +624,9 @@ final class ChatViewModel {
 
     private func runLiveActivityKind(modelId: String, prompt: String) -> String {
         if shouldUseDirectVideoGeneration(modelId: modelId) { return "video" }
-        if imageGenerationEnabled,
-           (shouldUseDirectImageGeneration(modelId: modelId)
-            || shouldPreferChatNativeImageGeneration(modelId: modelId)) {
+        if shouldUseDirectImageGeneration(modelId: modelId)
+            || shouldPreferChatNativeImageGeneration(modelId: modelId)
+            || (imageGenerationEnabled && Self.looksLikeDirectImageGenerationRequest(prompt)) {
             return "image"
         }
         return "chat"
@@ -640,6 +639,15 @@ final class ChatViewModel {
         case "terminal", "install": return "本地 Alpine"
         default: return "Iexa 正在回复"
         }
+    }
+
+    var selectedModelCanGenerateImages: Bool {
+        guard canUseDirectImageEndpointProvider,
+              let modelId = selectedModelId ?? conversation?.model else {
+            return false
+        }
+        return shouldUseDirectImageGeneration(modelId: modelId)
+            || shouldPreferChatNativeImageGeneration(modelId: modelId)
     }
 
     private func localAlpineLiveActivityKind(for command: String) -> String {
@@ -1871,6 +1879,49 @@ final class ChatViewModel {
         """
     }
 
+    private func materializeLocalAlpineAttachmentsIfNeeded(
+        _ attachments: [ChatAttachment],
+        messageId: String,
+        enabled: Bool
+    ) async -> String? {
+        guard enabled, !attachments.isEmpty else { return nil }
+
+        var lines: [String] = []
+        var failedNames: [String] = []
+
+        for (index, attachment) in attachments.enumerated() {
+            guard let data = attachment.data else { continue }
+            do {
+                let path = try await LocalAlpineTerminalService.shared.materializeAttachment(
+                    data: data,
+                    fileName: attachment.name,
+                    messageId: messageId,
+                    index: index
+                )
+                let contentType = mimeType(for: attachment.name)
+                lines.append("- \(attachment.name) -> \(path) (\(contentType), \(data.count) bytes)")
+            } catch {
+                failedNames.append(attachment.name)
+                DiagnosticLogManager.shared.error(
+                    "Local Alpine attachment materialize failed name=\(attachment.name) error=\(error.localizedDescription)",
+                    category: "Chat"
+                )
+            }
+        }
+
+        guard !lines.isEmpty else { return nil }
+        var context = """
+        [Local Alpine attached files]
+        The following user attachments were copied into the Local Alpine workspace. Use these paths with `read_file`, `grep`, `command`, or other Local Alpine tools instead of relying on external iOS file URLs.
+        \(lines.joined(separator: "\n"))
+        [/Local Alpine attached files]
+        """
+        if !failedNames.isEmpty {
+            context += "\n\nSome attachments could not be copied into Local Alpine: \(failedNames.joined(separator: ", "))"
+        }
+        return context
+    }
+
     private static func inlineFenceLanguage(for name: String) -> String {
         let ext = (name as NSString).pathExtension.lowercased()
         switch ext {
@@ -1979,7 +2030,8 @@ final class ChatViewModel {
     private static let localAlpineBusyBoxCompatibilityNotes = """
         BusyBox/ash compatibility:
         - Prefer structured wrappers (`list_dir`, `glob`, `grep`, `verify`, `browser_use`) for common list/search/check/fetch work; the host converts them into bounded BusyBox-safe commands.
-        - If raw `command` is necessary, write POSIX sh/ash only. Avoid GNU/macOS/bash-only syntax unless a prior command proves support.
+        - If raw `command` is necessary, write POSIX sh/ash only. Never route Local Alpine work to Open Terminal, a server terminal, iOS/macOS shell commands, or Debian/Ubuntu package commands.
+        - Non-Alpine command families are rejected by the app before execution: `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, `open`, `osascript`, `powershell`, and `cmd.exe`. Translate those intentions to Alpine/BusyBox equivalents.
         - Known bad patterns here: `find -printf`, `grep -P`, `sed -i ''`, Bash `[[ ... ]]`, `source`, `mapfile`, `readarray`, and process substitution `<(...)` or `>(...)`.
         - Safe replacements: `find PATH -type f -print | sed -n '1,200p'`, `grep -E`, `. ./script.sh`, `[ ... ]`, and `while IFS= read -r line; do ...; done`.
         - Waiting/polling: use the JSON `delay`/`delay_seconds` field on a `command`/`shell_execute` step instead of putting `sleep` in shell text or `time.sleep()` in generated scripts/tests.
@@ -1992,13 +2044,13 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "shell_execute",
-                    "description": "Run one bounded POSIX sh/BusyBox ash command in the local Alpine workspace. Use only for list/search/run/install/build/test/verify work. Do not use shell heredocs, echo, printf, cat, tee, or inline writer scripts to create source files; use file_write/file_edit instead. Use the delay argument instead of shell sleep or Python time.sleep().",
+                    "description": "Run one bounded POSIX sh/BusyBox ash command inside Iexa's isolated Alpine rootfs. This tool never runs Open Terminal, server terminal, iOS, macOS, Windows, Debian, or Ubuntu commands. The user workspace is /mnt/iexa; relative paths resolve there. Use only for list/search/run/install/build/test/verify work. Do not scan the whole rootfs for user files; start under /mnt/iexa unless the user asks for runtime/system inspection. Do not use shell heredocs, echo, printf, cat, tee, or inline writer scripts to create source files; use file_write/file_edit instead. Use the delay argument instead of shell sleep or Python time.sleep().",
                     "parameters": [
                         "type": "object",
                         "properties": [
                             "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
                             "command": ["type": "string", "description": "POSIX sh/BusyBox ash command under 1000 characters."],
-                            "cwd": ["type": "string", "description": "Working directory. Defaults to /mnt/iexa."],
+                            "cwd": ["type": "string", "description": "Working directory. Defaults to /mnt/iexa. Use /mnt/iexa for user files and project work; use rootfs paths like /usr or /etc only for bounded runtime inspection."],
                             "timeout": ["type": "integer", "description": "Timeout in seconds for the command."],
                             "delay": ["type": "number", "description": "Optional host-side delay before running the command, in seconds."]
                         ],
@@ -2010,7 +2062,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "file_read",
-                    "description": "Read a UTF-8 text file from /mnt/iexa or the Alpine rootfs before editing or inspecting it.",
+                    "description": "Read a UTF-8 text file. For user/project files, read under /mnt/iexa; use Alpine rootfs paths only for bounded runtime/system inspection. Prefer this over shell cat/sed/nl because the app returns metadata and can detect no-progress loops.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2029,7 +2081,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "file_write",
-                    "description": "Create or overwrite a UTF-8 text file directly. Use this for new source files or complete same-path rewrites so indentation and code structure are preserved.",
+                    "description": "Create or overwrite a UTF-8 text file in the user workspace. Use /mnt/iexa or relative paths for project files; do not write to Alpine system paths unless the user explicitly asks and the path is appropriate. Use this for new source files or complete same-path rewrites so indentation and code structure are preserved.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2047,7 +2099,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "file_edit",
-                    "description": "Modify an existing UTF-8 text file by exact replacement. Always read the file first, then replace the precise old_string. Use replace_all only when every match should change.",
+                    "description": "Modify an existing UTF-8 text file by exact replacement. Use for /mnt/iexa user/project files unless the user explicitly targets a sandbox rootfs file. Always read the file first, then replace the precise old_string. Use replace_all only when every match should change.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2070,17 +2122,23 @@ final class ChatViewModel {
         Use the provided native tools for local work: `file_read`, `file_write`, `file_edit`, and `shell_execute`. The iOS host executes each tool call in the local Alpine workspace and returns the real tool result to this same model turn. Do not fake results.
 
         Environment:
-        - Workspace: `/mnt/iexa`; relative paths resolve there.
+        - Workspace: `/mnt/iexa`; relative paths resolve there. This is the bidirectional app/user workspace, similar to Minis `/var/minis/workspace`.
+        - Execution boundary: every tool call runs only inside the embedded Local Alpine/iSH runtime. Do not ask for, invoke, or rely on Open Terminal, server terminals, iOS/macOS host commands, Windows commands, Debian, or Ubuntu commands for this Local Alpine task.
+        - The Alpine rootfs is sandbox-internal. Paths such as `/bin`, `/etc`, `/usr`, `/lib`, `/var`, `/tmp`, `/root`, and `/home` are inside the local Alpine environment, not the iOS host filesystem.
+        - For user files, projects, generated artifacts, attachments, and previewable outputs, stay under `/mnt/iexa`. Do not scan the whole rootfs to look for user files; list/search `/mnt/iexa` first unless the user explicitly asks for runtime/system inspection.
         - Shell: Alpine Linux with BusyBox/ash, not bash/macOS/Ubuntu.
         - Package manager: `apk`; never use `apt`, `yum`, `dnf`, `brew`, `sudo`, `systemctl`, or macOS-only commands.
 
         Tool rules:
         - Create source files with `file_write`. Modify existing files with `file_read` followed by `file_edit` or a complete same-path `file_write`.
+        - Treat `file_write`, `file_edit`, and deletion targets outside `/mnt/iexa` as advanced sandbox-rootfs operations. Only do them when the user explicitly names that path or when a package/runtime setup requires it.
+        - Prefer `file_read` for source inspection instead of shell `cat`, `sed`, `nl`, or inline Python readers; structured reads include line metadata and help the app detect no-progress loops.
         - Never write source code through `shell_execute` using heredocs, redirection, `echo`, `printf`, `cat`, `tee`, or inline Python writer scripts.
         - Use `shell_execute` only for bounded list/search/run/install/build/test/verify commands.
         - Commands must be POSIX sh/BusyBox ash compatible. Avoid `find -printf`, `grep -P`, Bash `[[ ... ]]`, `source`, arrays, process substitution, and GNU/macOS-only flags.
         - If a delay is needed, use the tool `delay` argument. Avoid shell `sleep` and generated Python `time.sleep()`.
         - One step should finish before the next decision. A file write plus one matching verification command is allowed; unrelated follow-up work waits for the returned result.
+        - Do not repeatedly read or edit the same file when a previous tool result already showed the same state. After two failed/no-op attempts, stop and explain the blocker or choose a different verification path.
         - If a tool result shows success and the user goal is complete, stop tool use and answer normally with a concise real summary.
         - If native tools are rejected by the provider, fallback is one fenced `iexa_alpine` block using the same structured JSON shape.
         [/Local Alpine native tools]
@@ -2319,6 +2377,7 @@ final class ChatViewModel {
           {"command":"pwd && ls -la","cwd":"/mnt/iexa"}
           ```
         - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
+        - Execution boundary: every command is executed by the embedded Local Alpine/iSH runtime only, not by Open Terminal, a remote server terminal, iOS/macOS shell, Windows shell, Debian, or Ubuntu. Use Alpine/BusyBox/POSIX commands.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
         - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`. Accepted delay keys are `delay`, `delay_seconds`, or `delaySeconds`; use them instead of shell/Python sleeps.
         - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `file_edit` -> `edit_file`, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
@@ -3368,6 +3427,14 @@ final class ChatViewModel {
     }
 
     private func syncImageGenerationPreference() {
+        guard !selectedModelCanGenerateImages else {
+            if !imageGenerationEnabled {
+                suppressBuiltinFeatureTracking = true
+                imageGenerationEnabled = true
+                suppressBuiltinFeatureTracking = false
+            }
+            return
+        }
         guard let savedImageGeneration = UserDefaults.standard.object(forKey: Self.imageGenerationTogglePreferenceKey) as? Bool else {
             return
         }
@@ -3381,22 +3448,6 @@ final class ChatViewModel {
             userDisabledBuiltinFeatures.insert("image_generation")
         }
     }
-
-    private static func setImageQuickPillVisible(_ isVisible: Bool) {
-        var ids = UserDefaults.standard.string(forKey: quickPillsPreferenceKey)?
-            .components(separatedBy: ",")
-            .filter { !$0.isEmpty } ?? []
-        let containsImage = ids.contains("image")
-        if isVisible, !containsImage {
-            ids.append("image")
-        } else if !isVisible, containsImage {
-            ids.removeAll { $0 == "image" }
-        } else {
-            return
-        }
-        UserDefaults.standard.set(ids.joined(separator: ","), forKey: quickPillsPreferenceKey)
-    }
-
 
     private func syncCodeEditingPreference() {
         guard let savedCodeEditing = UserDefaults.standard.object(forKey: Self.codeEditingTogglePreferenceKey) as? Bool else {
@@ -5572,7 +5623,13 @@ final class ChatViewModel {
         attachments = []
 
         let messageText = currentText
-        let modelAttachmentContext = inlineTextSnippets
+        let userMessageId = UUID().uuidString
+        let localAlpineAttachmentContext = await materializeLocalAlpineAttachmentsIfNeeded(
+            currentAttachments,
+            messageId: userMessageId,
+            enabled: localAlpineModeForThisTurn && !shouldKeepMediaRoute && !shouldKeepNativeLinkRoute
+        )
+        let modelAttachmentContext = (inlineTextSnippets + [localAlpineAttachmentContext].compactMap { $0 })
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
@@ -5627,12 +5684,17 @@ final class ChatViewModel {
                 contentType: nil
             ))
         }
+        let userMessageMetadata = localAlpineAttachmentContext.map {
+            ["iexa_local_alpine_attachment_context": $0]
+        }
         let userMessage = ChatMessage(
+            id: userMessageId,
             role: .user,
             content: messageText,
             timestamp: .now,
             attachmentIds: uploadedAttachmentIds,
-            files: messageFiles
+            files: messageFiles,
+            metadata: userMessageMetadata
         )
 
         // Capture the ID of the last message before appending the user message.
@@ -5703,7 +5765,8 @@ final class ChatViewModel {
             content: messageText,
             timestamp: userMessage.timestamp,
             files: isOpenAICompatibleProvider ? messageFiles : Self.serverPersistableFiles(messageFiles),
-            models: userNodeModels
+            models: userNodeModels,
+            metadata: userMessageMetadata
         )
         let assistantHistoryNode = HistoryNode(
             id: assistantMessageId,
@@ -5869,8 +5932,7 @@ final class ChatViewModel {
                         return
                     }
 
-                    if self.imageGenerationEnabled,
-                       self.shouldUseDirectImageGeneration(modelId: modelId),
+                    if self.shouldUseDirectImageGeneration(modelId: modelId),
                        !self.shouldPreferChatNativeImageGeneration(modelId: modelId) {
                         do {
                             guard self.currentProviderType != .anthropic else {
@@ -6417,14 +6479,12 @@ final class ChatViewModel {
             return false
         }
 
-        if imageGenerationEnabled {
-            if shouldUseDirectImageGeneration(modelId: modelId)
-                || shouldPreferChatNativeImageGeneration(modelId: modelId) {
-                return true
-            }
-            if Self.looksLikeDirectImageGenerationRequest(normalized) {
-                return true
-            }
+        if shouldUseDirectImageGeneration(modelId: modelId)
+            || shouldPreferChatNativeImageGeneration(modelId: modelId) {
+            return true
+        }
+        if imageGenerationEnabled && Self.looksLikeDirectImageGenerationRequest(normalized) {
+            return true
         }
         return shouldUseDirectVideoGeneration(modelId: modelId)
     }
@@ -9528,8 +9588,7 @@ final class ChatViewModel {
         }
 
         var shouldExecute: Bool {
-            if case .allow = self { return true }
-            return false
+            !isBlocked
         }
 
         var isBlocked: Bool {
@@ -9541,7 +9600,16 @@ final class ChatViewModel {
     private struct LocalAlpineNativeLoopGuard {
         private let warningThreshold = 2
         private let blockThreshold = 3
+        private let noProgressWarningThreshold = 2
+        private let noProgressBlockThreshold = 3
+        private let targetInspectionWarningThreshold = 4
+        private let targetInspectionBlockThreshold = 6
+        private let targetMutationWarningThreshold = 3
+        private let targetMutationBlockThreshold = 4
         private var countsBySignature: [String: Int] = [:]
+        private var countsByObservation: [String: Int] = [:]
+        private var inspectionCountsByTarget: [String: Int] = [:]
+        private var mutationCountsByTarget: [String: Int] = [:]
 
         mutating func checkBeforeExecution(_ call: LocalAlpineNativeToolCall) -> LocalAlpineNativeLoopDecision {
             let signature = Self.signature(for: call)
@@ -9567,14 +9635,183 @@ final class ChatViewModel {
             return .allow
         }
 
-        mutating func recordProgressBoundary() {
-            countsBySignature.removeAll()
+        mutating func recordAfterExecution(
+            _ call: LocalAlpineNativeToolCall,
+            result: LocalAlpineAgentResult
+        ) -> LocalAlpineNativeLoopDecision {
+            var decision: LocalAlpineNativeLoopDecision = .allow
+            let observationKey = "\(Self.signature(for: call)):\(Self.resultSignature(for: result))"
+            let observationCount = (countsByObservation[observationKey] ?? 0) + 1
+            countsByObservation[observationKey] = observationCount
+
+            if observationCount >= noProgressBlockThreshold {
+                decision = Self.stronger(decision, .block("""
+                [LOOP BLOCKED] The app blocked this Local Alpine tool loop after execution.
+                Tool: \(Self.displayName(for: call))
+                Identical arguments returned the same result \(observationCount) times in this assistant turn.
+                Stop retrying. Use the existing result, summarize the blocker, or choose a genuinely different action.
+                """))
+            } else if observationCount >= noProgressWarningThreshold {
+                decision = Self.stronger(decision, .warn("""
+                [LOOP WARNING] This Local Alpine tool call produced the same result again.
+                Tool: \(Self.displayName(for: call))
+                Identical no-progress result count: \(observationCount).
+                Do not repeat this call unless you have a different concrete input or verification path.
+                """))
+            }
+
+            for target in Self.inspectionTargets(call: call, result: result) {
+                let count = (inspectionCountsByTarget[target] ?? 0) + 1
+                inspectionCountsByTarget[target] = count
+                if count >= targetInspectionBlockThreshold {
+                    decision = Self.stronger(decision, .block("""
+                    [LOOP BLOCKED] The app blocked repeated inspection of the same Local Alpine target.
+                    Target: \(Self.compactTarget(target))
+                    Inspected \(count) times in this assistant turn.
+                    Stop rereading the same file/range. Use the already returned snippets, make one different edit/verification, or answer with the current limitation.
+                    """))
+                } else if count >= targetInspectionWarningThreshold {
+                    decision = Self.stronger(decision, .warn("""
+                    [LOOP WARNING] This turn has inspected the same Local Alpine target \(count) times.
+                    Target: \(Self.compactTarget(target))
+                    Avoid rereading unless the next read has a new, bounded line range that is required.
+                    """))
+                }
+            }
+
+            for target in Self.mutationTargets(call: call, result: result) {
+                let count = (mutationCountsByTarget[target] ?? 0) + 1
+                mutationCountsByTarget[target] = count
+                if count >= targetMutationBlockThreshold {
+                    decision = Self.stronger(decision, .block("""
+                    [LOOP BLOCKED] The app blocked repeated edits/writes to the same Local Alpine target.
+                    Target: \(Self.compactTarget(target))
+                    Mutated \(count) times in this assistant turn.
+                    Stop editing this file again in the same loop. Run one verification if already available, summarize what changed, and explain the next different fix if it is still unresolved.
+                    """))
+                } else if count >= targetMutationWarningThreshold {
+                    decision = Self.stronger(decision, .warn("""
+                    [LOOP WARNING] This turn has edited/written the same Local Alpine target \(count) times.
+                    Target: \(Self.compactTarget(target))
+                    Consolidate from the current file state and verify instead of issuing another near-identical edit.
+                    """))
+                }
+            }
+
+            return decision
         }
 
         private static func signature(for call: LocalAlpineNativeToolCall) -> String {
             let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let arguments = normalizedArguments(from: call.arguments)
             return "\(name):\(arguments)"
+        }
+
+        private static func resultSignature(for result: LocalAlpineAgentResult) -> String {
+            let commands = result.commandResults.map { commandResult in
+                [
+                    normalizeScalar(commandResult.cwd),
+                    normalizeScalar(commandResult.command),
+                    commandResult.exitCode.map(String.init) ?? "nil",
+                    stableHash(normalizeOutput(commandResult.outputPreview))
+                ].joined(separator: "|")
+            }
+            let files = result.writtenFiles.map { file in
+                [
+                    normalizeScalar(file.path),
+                    String(file.byteCount),
+                    String(file.lineCount),
+                    stableHash(normalizeOutput(file.previewTailLines.joined(separator: "\n")))
+                ].joined(separator: "|")
+            }
+            let tools = result.toolCalls
+                .filter { $0.phase == .result }
+                .map { toolCall in
+                    [
+                        normalizeScalar(toolCall.name),
+                        normalizeScalar(toolCall.cwd),
+                        toolCall.exitCode.map(String.init) ?? "nil",
+                        toolCall.failed ? "failed" : "ok",
+                        stableHash(normalizeOutput(toolCall.outputPreview ?? "")),
+                        toolCall.filePaths.compactMap { normalizedTarget($0, cwd: toolCall.cwd) }.joined(separator: ",")
+                    ].joined(separator: "|")
+                }
+            let raw = [
+                result.didExecute ? "executed" : "not_executed",
+                result.hadFailure ? "failed" : "ok",
+                String(result.executedCommandCount),
+                String(result.editedFileCount),
+                stableHash(normalizeOutput(result.summary)),
+                commands.joined(separator: "\n"),
+                files.joined(separator: "\n"),
+                tools.joined(separator: "\n")
+            ].joined(separator: "\u{1f}")
+            return stableHash(raw)
+        }
+
+        private static func inspectionTargets(
+            call: LocalAlpineNativeToolCall,
+            result: LocalAlpineAgentResult
+        ) -> Set<String> {
+            var targets = Set<String>()
+            let callName = normalizeScalar(call.name)
+            if isInspectionTool(callName), let arguments = decodedArguments(call.arguments) {
+                targets.formUnion(targetsFromJSON(arguments, cwd: nil))
+            }
+            for toolCall in result.toolCalls where toolCall.phase == .result {
+                let name = normalizeScalar(toolCall.name)
+                guard isInspectionTool(name) else { continue }
+                targets.formUnion(toolCall.filePaths.compactMap { normalizedTarget($0, cwd: toolCall.cwd) })
+                if let command = toolCall.command {
+                    targets.formUnion(commandTargets(command, cwd: toolCall.cwd, inspectionOnly: true))
+                }
+            }
+            for commandResult in result.commandResults {
+                targets.formUnion(commandTargets(commandResult.command, cwd: commandResult.cwd, inspectionOnly: true))
+            }
+            return targets.subtracting(mutationTargets(call: call, result: result))
+        }
+
+        private static func mutationTargets(
+            call: LocalAlpineNativeToolCall,
+            result: LocalAlpineAgentResult
+        ) -> Set<String> {
+            var targets = Set<String>()
+            targets.formUnion(result.writtenFiles.compactMap { normalizedTarget($0.path, cwd: nil) })
+            let callName = normalizeScalar(call.name)
+            if isMutationTool(callName), let arguments = decodedArguments(call.arguments) {
+                targets.formUnion(targetsFromJSON(arguments, cwd: nil))
+            }
+            for toolCall in result.toolCalls where toolCall.phase == .result {
+                let name = normalizeScalar(toolCall.name)
+                guard isMutationTool(name) else { continue }
+                targets.formUnion(toolCall.filePaths.compactMap { normalizedTarget($0, cwd: toolCall.cwd) })
+                if let command = toolCall.command {
+                    targets.formUnion(commandTargets(command, cwd: toolCall.cwd, inspectionOnly: false))
+                }
+            }
+            for commandResult in result.commandResults where commandLooksMutating(commandResult.command) {
+                targets.formUnion(commandTargets(commandResult.command, cwd: commandResult.cwd, inspectionOnly: false))
+            }
+            return targets
+        }
+
+        private static func stronger(
+            _ current: LocalAlpineNativeLoopDecision,
+            _ candidate: LocalAlpineNativeLoopDecision
+        ) -> LocalAlpineNativeLoopDecision {
+            switch (current, candidate) {
+            case (.block, _):
+                return current
+            case (_, .block):
+                return candidate
+            case (.warn, _):
+                return current
+            case (_, .warn):
+                return candidate
+            case (.allow, .allow):
+                return current
+            }
         }
 
         private static func displayName(for call: LocalAlpineNativeToolCall) -> String {
@@ -9620,6 +9857,177 @@ final class ChatViewModel {
             return "\(value)"
         }
 
+        private static func decodedArguments(_ raw: String) -> Any? {
+            guard let data = raw.data(using: .utf8) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data)
+        }
+
+        private static func targetsFromJSON(_ value: Any, cwd: String?) -> Set<String> {
+            var targets = Set<String>()
+            if let dictionary = value as? [String: Any] {
+                for (key, rawValue) in dictionary {
+                    let normalizedKey = normalizeScalar(key)
+                    if ["path", "file", "filename", "target", "destination"].contains(normalizedKey),
+                       let path = rawValue as? String,
+                       let target = normalizedTarget(path, cwd: cwd) {
+                        targets.insert(target)
+                    } else if ["paths", "files", "targets"].contains(normalizedKey),
+                              let values = rawValue as? [Any] {
+                        for value in values {
+                            if let path = value as? String,
+                               let target = normalizedTarget(path, cwd: cwd) {
+                                targets.insert(target)
+                            }
+                        }
+                    }
+                    targets.formUnion(targetsFromJSON(rawValue, cwd: cwd))
+                }
+            } else if let array = value as? [Any] {
+                for item in array {
+                    targets.formUnion(targetsFromJSON(item, cwd: cwd))
+                }
+            }
+            return targets
+        }
+
+        private static func isInspectionTool(_ name: String) -> Bool {
+            [
+                "read_file", "read_files", "read", "file_read", "open_file", "cat",
+                "list_dir", "list", "ls", "file_list", "directory_list",
+                "glob", "find_files", "grep", "search_files", "verify", "check"
+            ].contains(name)
+        }
+
+        private static func isMutationTool(_ name: String) -> Bool {
+            [
+                "edit_file", "edit_files", "replace_file", "modify_file", "file_edit", "edit",
+                "patch_file", "patch_files", "apply_patch", "patch",
+                "write_files", "write_file", "file_write", "write",
+                "delete_file", "delete_files", "remove_file", "remove_files", "file_delete", "delete", "rm"
+            ].contains(name)
+        }
+
+        private static func commandLooksMutating(_ command: String) -> Bool {
+            let normalized = normalizeScalar(command)
+            let patterns = [
+                #"(^|[;&|]\s*)apk\s+add\b"#,
+                #"(^|[;&|]\s*)(?:python3?\s+-m\s+pip|pip3?|npm|yarn|pnpm)\s+(?:install|i|add)\b"#,
+                #"(^|[;&|]\s*)(?:rm|mv|cp|mkdir|touch|chmod|chown|ln)\b"#,
+                #"(^|[;&|]\s*)(?:git\s+(?:checkout|switch|merge|pull|reset|clean|apply|am)|patch)\b"#,
+                #"(^|[;&|]\s*)(?:sed|perl)\s+[^;&|]*\s-i\b"#,
+                #"(?:^|[^0-9])(?:>>?|1>)\s*[^;&|]+"#
+            ]
+            return patterns.contains {
+                normalized.range(of: $0, options: .regularExpression) != nil
+            }
+        }
+
+        private static func commandTargets(
+            _ command: String,
+            cwd: String?,
+            inspectionOnly: Bool
+        ) -> Set<String> {
+            let normalized = command.replacingOccurrences(of: "\\", with: "/")
+            let patterns: [String] = inspectionOnly
+                ? [
+                    #"\b(?:read_file|file_read|cat|head|tail|stat|file|wc)\s+(?:-[A-Za-z0-9]+\s+)*(?:[0-9]+\s+)?['"]?([^'"\s;|&]+)"#,
+                    #"\bnl\s+-ba\s+['"]?([^'"\s;|&]+)"#,
+                    #"\bsed\s+-n\s+['"]?[0-9, p]+['"]?\s+['"]?([^'"\s;|&]+)"#,
+                    #"\bgrep\b[^;&|]*\s+['"]?([^'"\s;|&]+\.[A-Za-z0-9_+-]+)"#
+                ]
+                : [
+                    #"\b(?:edit_file|file_edit|patch_file|write_file|file_write|write_files|rm|touch)\s+(?:-[A-Za-z0-9]+\s+)*['"]?([^'"\s;|&]+)"#,
+                    #"(?:>>?|1>)\s*['"]?([^'"\s;|&]+)"#,
+                    #"\b(?:mv|cp)\s+(?:-[A-Za-z0-9]+\s+)*['"]?([^'"\s;|&]+)"#
+                ]
+            var targets = Set<String>()
+            for pattern in patterns {
+                targets.formUnion(firstGroupMatches(pattern: pattern, in: normalized).compactMap {
+                    normalizedTarget($0, cwd: cwd)
+                })
+            }
+            return targets
+        }
+
+        private static func firstGroupMatches(pattern: String, in value: String) -> [String] {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                return []
+            }
+            let range = NSRange(value.startIndex..<value.endIndex, in: value)
+            return regex.matches(in: value, range: range).compactMap { match in
+                guard match.numberOfRanges > 1,
+                      let groupRange = Range(match.range(at: 1), in: value) else {
+                    return nil
+                }
+                return String(value[groupRange])
+            }
+        }
+
+        private static func normalizedTarget(_ raw: String, cwd: String?) -> String? {
+            var target = raw
+                .replacingOccurrences(of: "\\", with: "/")
+                .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "'\"`")))
+            target = target.trimmingCharacters(in: CharacterSet(charactersIn: ".,:)];"))
+            guard !target.isEmpty,
+                  target != ".",
+                  target != "/",
+                  !target.hasPrefix("-"),
+                  !target.lowercased().hasPrefix("http://"),
+                  !target.lowercased().hasPrefix("https://"),
+                  !target.lowercased().hasPrefix("minis://") else {
+                return nil
+            }
+
+            let workspacePrefix = "/mnt/iexa/"
+            if target.hasPrefix(workspacePrefix) {
+                target = String(target.dropFirst(workspacePrefix.count))
+            } else if target == "/mnt/iexa" {
+                target = "."
+            } else if !target.hasPrefix("/"),
+                      let cwd,
+                      !cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                var normalizedCwd = cwd
+                    .replacingOccurrences(of: "\\", with: "/")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if normalizedCwd.hasPrefix(workspacePrefix) {
+                    normalizedCwd = String(normalizedCwd.dropFirst(workspacePrefix.count))
+                }
+                if normalizedCwd == "/mnt/iexa" || normalizedCwd == "." {
+                    normalizedCwd = ""
+                }
+                if !normalizedCwd.isEmpty && !normalizedCwd.hasPrefix("/") {
+                    target = "\(normalizedCwd)/\(target)"
+                }
+            }
+            while target.hasPrefix("./") {
+                target.removeFirst(2)
+            }
+            target = target.replacingOccurrences(of: #"/+"#, with: "/", options: .regularExpression)
+            return target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+
+        private static func normalizeOutput(_ value: String) -> String {
+            String(value.prefix(16_000))
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+                .replacingOccurrences(of: #"[ \t]+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        private static func stableHash(_ value: String) -> String {
+            var hash: UInt64 = 1_469_598_103_934_665_603
+            for byte in value.utf8.prefix(20_000) {
+                hash ^= UInt64(byte)
+                hash = hash &* 1_099_511_628_211
+            }
+            return String(hash, radix: 16)
+        }
+
+        private static func compactTarget(_ target: String) -> String {
+            guard target.count > 140 else { return target }
+            return "...\(target.suffix(137))"
+        }
+
         private static func normalizeScalar(_ value: String) -> String {
             value
                 .replacingOccurrences(of: "\\", with: "/")
@@ -9638,6 +10046,8 @@ final class ChatViewModel {
 
         private var partials: [Int: Partial] = [:]
         private var order: [Int] = []
+        private var assignedIdsByIndex: [Int: String] = [:]
+        private var idCounts: [String: Int] = [:]
         private(set) var sawToolFinish = false
 
         func absorb(_ event: SSEEvent) {
@@ -9667,14 +10077,27 @@ final class ChatViewModel {
                       !partial.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     return nil
                 }
-                let id = partial.id.trimmingCharacters(in: .whitespacesAndNewlines)
+                let id = uniqueToolCallId(for: index, rawId: partial.id)
                 let arguments = partial.arguments.trimmingCharacters(in: .whitespacesAndNewlines)
                 return LocalAlpineNativeToolCall(
-                    id: id.isEmpty ? "call_\(index)" : id,
+                    id: id,
                     name: partial.name,
                     arguments: arguments.isEmpty ? "{}" : arguments
                 )
             }
+        }
+
+        private func uniqueToolCallId(for index: Int, rawId: String) -> String {
+            if let existing = assignedIdsByIndex[index] {
+                return existing
+            }
+            let trimmed = rawId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let base = trimmed.isEmpty ? "call_\(index)" : trimmed
+            let count = (idCounts[base] ?? 0) + 1
+            idCounts[base] = count
+            let resolved = count == 1 ? base : "\(base)_\(count)"
+            assignedIdsByIndex[index] = resolved
+            return resolved
         }
 
         private func absorbToolCalls(_ value: Any?, replaceArguments: Bool) {
@@ -9801,13 +10224,24 @@ final class ChatViewModel {
 
             apiMessages.append(Self.openAIToolCallAssistantMessage(for: calls))
             var blockedLoopMessage: String?
-            var madeProgress = false
+            var shouldSkipRemainingCalls = false
             for call in calls {
+                if shouldSkipRemainingCalls {
+                    let message = blockedLoopMessage ?? "[LOOP BLOCKED] Local Alpine tool execution was stopped."
+                    apiMessages.append([
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": message
+                    ])
+                    continue
+                }
+
                 let decision = loopGuard.checkBeforeExecution(call)
                 if !decision.shouldExecute {
                     let message = decision.message ?? "[LOOP WARNING] Repeated Local Alpine tool call skipped."
                     if decision.isBlocked {
                         blockedLoopMessage = message
+                        shouldSkipRemainingCalls = true
                     }
                     apiMessages.append([
                         "role": "tool",
@@ -9817,18 +10251,25 @@ final class ChatViewModel {
                     continue
                 }
 
+                let preExecutionWarning = decision.message
                 let result = await executeLocalAlpineNativeToolCall(call, assistantMessageId: assistantMessageId)
-                if Self.localAlpineAgentResultMutatesState(result) {
-                    madeProgress = true
+                let postExecutionDecision = loopGuard.recordAfterExecution(call, result: result)
+                var content = Self.localAlpineNativeToolResultContent(result)
+                if let preExecutionWarning {
+                    content += "\n\n\(preExecutionWarning)"
+                }
+                if let message = postExecutionDecision.message {
+                    content += "\n\n\(message)"
+                }
+                if postExecutionDecision.isBlocked {
+                    blockedLoopMessage = postExecutionDecision.message
+                    shouldSkipRemainingCalls = true
                 }
                 apiMessages.append([
                     "role": "tool",
                     "tool_call_id": call.id,
-                    "content": Self.localAlpineNativeToolResultContent(result)
+                    "content": content
                 ])
-            }
-            if madeProgress {
-                loopGuard.recordProgressBoundary()
             }
             if let blockedLoopMessage {
                 apiMessages.append([
@@ -9840,19 +10281,24 @@ final class ChatViewModel {
                     """
                 ])
                 request.messages = apiMessages
-                request.tools = nil
-                request.toolChoice = "none"
-                let finalStream = try await manager.sendPreferredOpenAIStreaming(request: request)
-                for try await event in finalStream {
-                    if Task.isCancelled { break }
-                    if let usage = event.usage, !usage.isEmpty {
-                        exactUsage = usage
+                Self.disableAgentToolsForResultContinuation(&request)
+                let fallback = Self.localAlpineNativeLoopBlockedFallbackMessage(blockedLoopMessage)
+                do {
+                    let finalStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                    for try await event in finalStream {
+                        if Task.isCancelled { break }
+                        if let usage = event.usage, !usage.isEmpty {
+                            exactUsage = usage
+                        }
+                        applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
+                        if event.isFinished { break }
                     }
-                    applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
-                    if event.isFinished { break }
+                } catch {
+                    acc.replace(fallback)
+                    updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                    return exactUsage
                 }
                 if acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let fallback = Self.localAlpineNativeLoopBlockedFallbackMessage(blockedLoopMessage)
                     acc.replace(fallback)
                     updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
                 }
@@ -9860,13 +10306,41 @@ final class ChatViewModel {
             }
         }
 
-        throw APIError.unknown(
-            underlying: NSError(
-                domain: "ChatViewModel",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "本地 Agent 已达到最大步骤数，已停止以避免重复执行。"]
-            )
-        )
+        let maxStepMessage = """
+        [LOOP BLOCKED] Local Alpine reached the maximum tool step count (\(localAlpineAgentMaxSteps)) for this assistant turn.
+        The app stopped tool execution to avoid an unstable repeated read/write loop. Answer the user now with what was completed, what is still unresolved, and the next different action needed.
+        """
+        apiMessages.append([
+            "role": "system",
+            "content": """
+            Local Alpine agent loop guard reached the max-step circuit breaker.
+            \(maxStepMessage)
+            Do not call more tools for this turn.
+            """
+        ])
+        request.messages = apiMessages
+        Self.disableAgentToolsForResultContinuation(&request)
+        let fallback = Self.localAlpineNativeLoopBlockedFallbackMessage(maxStepMessage)
+        do {
+            let finalStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+            for try await event in finalStream {
+                if Task.isCancelled { break }
+                if let usage = event.usage, !usage.isEmpty {
+                    exactUsage = usage
+                }
+                applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
+                if event.isFinished { break }
+            }
+        } catch {
+            acc.replace(fallback)
+            updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+            return exactUsage
+        }
+        if acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            acc.replace(fallback)
+            updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+        }
+        return exactUsage
     }
 
     private struct LocalNativeFunctionToolExecution {
@@ -9884,6 +10358,47 @@ final class ChatViewModel {
         var request = initialRequest
         var apiMessages = initialRequest.messages
         var exactUsage: [String: Any]?
+        var callCountsBySignature: [String: Int] = [:]
+        var browserSearchCount = 0
+        var browserReadCount = 0
+        var browserToolCount = 0
+        var lastNativeToolFallback: String?
+
+        func streamFinalWithoutTools(reason: String, fallback: String?) async throws -> [String: Any]? {
+            let resolvedFallback = fallback ?? lastNativeToolFallback
+            apiMessages.append([
+                "role": "system",
+                "content": reason
+            ])
+            request.messages = apiMessages
+            Self.disableAgentToolsForResultContinuation(&request)
+            do {
+                let finalStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                for try await event in finalStream {
+                    if Task.isCancelled { break }
+                    if let usage = event.usage, !usage.isEmpty {
+                        exactUsage = usage
+                    }
+                    applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
+                    if event.isFinished { break }
+                }
+            } catch {
+                if let resolvedFallback,
+                   !resolvedFallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    acc.replace(resolvedFallback)
+                    updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                    return exactUsage
+                }
+                throw error
+            }
+            if acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let resolvedFallback,
+               !resolvedFallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                acc.replace(resolvedFallback)
+                updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+            }
+            return exactUsage
+        }
 
         for _ in 0..<4 {
             request.messages = apiMessages
@@ -9911,7 +10426,58 @@ final class ChatViewModel {
             }
 
             apiMessages.append(Self.openAIToolCallAssistantMessage(for: calls))
+            var needsFinalAnswerWithoutTools = false
+            var finalAnswerFallback: String?
             for call in calls {
+                if needsFinalAnswerWithoutTools {
+                    apiMessages.append([
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": "[TOOL LOOP BLOCKED] A previous local native tool call in this turn already provided enough result data. Use the existing tool result and answer now."
+                    ])
+                    continue
+                }
+
+                let signature = Self.localNativeFunctionCallSignature(call)
+                let count = (callCountsBySignature[signature] ?? 0) + 1
+                callCountsBySignature[signature] = count
+                if count > 1 {
+                    let message = """
+                    [TOOL LOOP BLOCKED] The app blocked a repeated local native tool call before execution.
+                    Tool: \(call.name)
+                    Reason: identical arguments were already executed in this assistant turn.
+                    Use the previous tool result and answer the user now. Do not call the same tool again.
+                    """
+                    apiMessages.append([
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": message
+                    ])
+                    needsFinalAnswerWithoutTools = true
+                    finalAnswerFallback = Self.localNativeFunctionLoopBlockedFallbackMessage(message)
+                    continue
+                }
+
+                let browserKind = Self.localNativeBrowserToolKind(call)
+                if browserToolCount >= 3
+                    || (browserKind == .search && browserSearchCount >= 2)
+                    || (browserKind == .readable && browserReadCount >= 2) {
+                    let message = """
+                    [TOOL LOOP BLOCKED] The app stopped additional browser tool calls for this same user message.
+                    Tool: \(call.name)
+                    Reason: the current turn already used enough browser/search tools to answer from available results.
+                    Use the previous search/page results and answer the user now. Do not call browser tools again for this turn.
+                    """
+                    apiMessages.append([
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": message
+                    ])
+                    needsFinalAnswerWithoutTools = true
+                    finalAnswerFallback = Self.localNativeFunctionLoopBlockedFallbackMessage(message)
+                    continue
+                }
+
                 let execution = await executeLocalNativeFunctionToolCall(
                     call,
                     assistantMessageId: assistantMessageId
@@ -9927,15 +10493,53 @@ final class ChatViewModel {
                     "tool_call_id": call.id,
                     "content": execution.toolContent
                 ])
+                if browserKind != nil {
+                    browserToolCount += 1
+                    if browserKind == .search {
+                        browserSearchCount += 1
+                    } else {
+                        browserReadCount += 1
+                    }
+                    lastNativeToolFallback = Self.localNativeBrowserFallbackMessage(from: execution.toolContent)
+                    if browserKind == .readable || browserToolCount >= 3 || browserSearchCount >= 2 {
+                        needsFinalAnswerWithoutTools = true
+                        finalAnswerFallback = lastNativeToolFallback
+                    }
+                } else if Self.isLocalNativeImageFunctionToolCall(call) {
+                    needsFinalAnswerWithoutTools = true
+                    lastNativeToolFallback = Self.localNativeImageToolFallbackMessage(from: execution.toolContent)
+                    finalAnswerFallback = lastNativeToolFallback
+                } else if Self.isLocalNativeShortcutsFunctionToolCall(call) {
+                    needsFinalAnswerWithoutTools = true
+                    lastNativeToolFallback = Self.localNativeGenericToolFallbackMessage(from: execution.toolContent)
+                    finalAnswerFallback = lastNativeToolFallback
+                }
+            }
+
+            if needsFinalAnswerWithoutTools {
+                return try await streamFinalWithoutTools(
+                    reason: """
+                    A local native tool already returned the real result for this turn.
+                    Answer the user now using the tool result above. Do not call more tools again for this same user message.
+                    If the tool result is an error, explain the concrete reason and what the user can try next instead of retrying the tool.
+                    """,
+                    fallback: finalAnswerFallback
+                )
             }
         }
 
-        throw APIError.unknown(
-            underlying: NSError(
-                domain: "ChatViewModel",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "本地原生工具已达到最大步骤数，已停止以避免重复执行。"]
-            )
+        let message = "本地原生工具已达到最大步骤数，已停止以避免重复执行。"
+        apiMessages.append([
+            "role": "system",
+            "content": """
+            Local native tool loop guard reached the max-step circuit breaker.
+            \(message)
+            Answer the user now from the available tool results. Do not call more tools for this turn.
+            """
+        ])
+        return try await streamFinalWithoutTools(
+            reason: "Do not call more tools. Summarize the available result or blocker now.",
+            fallback: "我先停下，避免继续重复调用本地工具。\n\n\(message)"
         )
     }
 
@@ -10475,12 +11079,6 @@ final class ChatViewModel {
         return String((body.isEmpty ? fallback : body).prefix(16_000))
     }
 
-    private static func localAlpineAgentResultMutatesState(_ result: LocalAlpineAgentResult) -> Bool {
-        result.editedFileCount > 0
-            || !result.writtenFiles.isEmpty
-            || result.commandResults.contains { localAlpineCommandMutatesState($0.command) }
-    }
-
     private static func localAlpineNativeLoopBlockedFallbackMessage(_ blockedMessage: String) -> String {
         let cleaned = blockedMessage
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
@@ -10520,6 +11118,164 @@ final class ChatViewModel {
         localNativeFunctionToolNames.contains(
             call.name.trimmingCharacters(in: .whitespacesAndNewlines)
         )
+    }
+
+    private enum LocalNativeBrowserToolKind: Equatable {
+        case search
+        case readable
+    }
+
+    private static func isLocalNativeImageFunctionToolCall(_ call: LocalAlpineNativeToolCall) -> Bool {
+        call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "image_generation"
+    }
+
+    private static func isLocalNativeShortcutsFunctionToolCall(_ call: LocalAlpineNativeToolCall) -> Bool {
+        switch call.name.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "shortcuts_run", "shortcuts_open":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func localNativeBrowserToolKind(_ call: LocalAlpineNativeToolCall) -> LocalNativeBrowserToolKind? {
+        switch call.name.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "web_search":
+            return .search
+        case "browser_readable":
+            return .readable
+        default:
+            return nil
+        }
+    }
+
+    private static func localNativeFunctionCallSignature(_ call: LocalAlpineNativeToolCall) -> String {
+        let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedArguments: String
+        if let data = call.arguments.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) {
+            normalizedArguments = localNativeNormalizedJSONString(object) ?? normalizeToolArgumentScalar(call.arguments)
+        } else {
+            normalizedArguments = normalizeToolArgumentScalar(call.arguments)
+        }
+        return "\(name):\(normalizedArguments)"
+    }
+
+    private static func localNativeNormalizedJSONString(_ value: Any) -> String? {
+        let normalized = localNativeNormalizedJSONValue(value)
+        guard JSONSerialization.isValidJSONObject(normalized),
+              let data = try? JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys]),
+              let string = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return string
+    }
+
+    private static func localNativeNormalizedJSONValue(_ value: Any) -> Any {
+        if let dictionary = value as? [String: Any] {
+            var normalized: [String: Any] = [:]
+            for (key, rawValue) in dictionary {
+                let normalizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                guard normalizedKey != "tool_title" else { continue }
+                normalized[normalizedKey] = localNativeNormalizedJSONValue(rawValue)
+            }
+            return normalized
+        }
+        if let array = value as? [Any] {
+            return array.map(localNativeNormalizedJSONValue(_:))
+        }
+        if let string = value as? String {
+            return normalizeToolArgumentScalar(string)
+        }
+        if let number = value as? NSNumber {
+            return number
+        }
+        if value is NSNull {
+            return NSNull()
+        }
+        return "\(value)"
+    }
+
+    private static func normalizeToolArgumentScalar(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "/")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private static func localNativeFunctionLoopBlockedFallbackMessage(_ blockedMessage: String) -> String {
+        let cleaned = blockedMessage
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return """
+        我先停下，避免继续重复调用同一个工具。
+
+        \(cleaned)
+        """
+    }
+
+    private static func localNativeBrowserFallbackMessage(from toolContent: String) -> String {
+        if let summary = firstJSONStringValue(in: toolContent, key: "summary"),
+           !summary.isEmpty {
+            return summary
+        }
+        if let error = firstJSONStringValue(in: toolContent, key: "error"),
+           !error.isEmpty {
+            return "联网搜索失败：\(error)"
+        }
+        return "联网搜索已经返回结果，但模型没有生成总结。请重试或换一个更具体的搜索词。"
+    }
+
+    private static func localNativeImageToolFallbackMessage(from toolContent: String) -> String {
+        if toolContent.localizedCaseInsensitiveContains("Image generation failed") {
+            return "图片生成没有成功。\(toolContent.prefix(800))"
+        }
+        return "图片工具已经返回结果，但模型没有生成总结。请重试或换一个更具体的图片描述。"
+    }
+
+    private static func localNativeGenericToolFallbackMessage(from toolContent: String) -> String {
+        if let summary = firstJSONStringValue(in: toolContent, key: "summary"),
+           !summary.isEmpty {
+            return summary
+        }
+        if let error = firstJSONStringValue(in: toolContent, key: "error"),
+           !error.isEmpty {
+            return "本地工具执行失败：\(error)"
+        }
+        let trimmed = toolContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return String(trimmed.prefix(800))
+        }
+        return "本地工具已返回，但模型没有生成总结。"
+    }
+
+    private static func firstJSONStringValue(in text: String, key: String) -> String? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else {
+            return nil
+        }
+        return firstJSONStringValue(in: object, key: key)
+    }
+
+    private static func firstJSONStringValue(in value: Any, key: String) -> String? {
+        if let dictionary = value as? [String: Any] {
+            if let string = dictionary[key] as? String {
+                return string.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            for rawValue in dictionary.values {
+                if let match = firstJSONStringValue(in: rawValue, key: key) {
+                    return match
+                }
+            }
+        } else if let array = value as? [Any] {
+            for item in array {
+                if let match = firstJSONStringValue(in: item, key: key) {
+                    return match
+                }
+            }
+        }
+        return nil
     }
 
     private static func localNativeFunctionToolEnvelopeContent(for call: LocalAlpineNativeToolCall) -> String {
@@ -10623,8 +11379,18 @@ final class ChatViewModel {
         })?.content
     }
 
+    private func latestUserMessageHasResolvedWebSearchContext() -> Bool {
+        guard let message = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        }) else {
+            return false
+        }
+        return webSearchContextsByMessageId[message.id]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
     private func shouldExposeLocalBrowserNativeTools(for text: String?) -> Bool {
         guard isLocalBrowserNativeToolsEnabled else { return false }
+        guard !latestUserMessageHasResolvedWebSearchContext() else { return false }
         guard let text,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return false
@@ -12018,12 +12784,15 @@ final class ChatViewModel {
         // Only enable model-provided features that are not controlled by the
         // current chat's per-turn web-search switch. Web search must respect
         // the visible toggle exactly; do not silently turn it back on here.
-        let nameSuggestsImageGeneration = shouldUseDirectImageGeneration(modelId: model.id)
+        let nativeImageModel = shouldUseDirectImageGeneration(modelId: model.id)
             || shouldPreferChatNativeImageGeneration(modelId: model.id)
-
-        if (model.supportsImageGeneration
+        let modelDefaultImageGeneration = model.supportsImageGeneration
             || (defaults.contains("image_generation") && isTruthy("image_generation"))
-            || nameSuggestsImageGeneration)
+            || nativeImageModel
+
+        if nativeImageModel {
+            imageGenerationEnabled = true
+        } else if modelDefaultImageGeneration
             && savedImageGeneration != false
             && !userDisabledBuiltinFeatures.contains("image_generation") {
             imageGenerationEnabled = true
@@ -12086,12 +12855,12 @@ final class ChatViewModel {
         // switch preferences or mark them as explicit current-session changes.
         suppressBuiltinFeatureTracking = true
         webSearchEnabled = isChatWebSearchAllowed && (savedWebSearch ?? isChatWebSearchAllowed)
-        let nameSuggestsImageGeneration = shouldUseDirectImageGeneration(modelId: model.id)
+        let nativeImageModel = shouldUseDirectImageGeneration(modelId: model.id)
             || shouldPreferChatNativeImageGeneration(modelId: model.id)
         let modelDefaultImageGeneration = model.supportsImageGeneration
             || (defaults.contains("image_generation") && isTruthy("image_generation"))
-            || nameSuggestsImageGeneration
-        imageGenerationEnabled = savedImageGeneration ?? modelDefaultImageGeneration
+            || nativeImageModel
+        imageGenerationEnabled = nativeImageModel ? true : (savedImageGeneration ?? modelDefaultImageGeneration)
         localOfficeEnabled = savedLocalOffice ?? false
         shortcutsEnabled = savedShortcuts ?? false
         codeInterpreterEnabled = savedCodeInterpreter ?? (defaults.contains("code_interpreter") && isTruthy("code_interpreter"))
@@ -12358,6 +13127,25 @@ final class ChatViewModel {
         if !bgTasks.isEmpty { request.backgroundTasks = bgTasks }
     }
 
+    private static func disableAgentToolsForResultContinuation(_ request: inout ChatCompletionRequest) {
+        request.tools = nil
+        request.toolChoice = "none"
+        request.responsesTools = nil
+        request.responsesToolChoice = "none"
+        request.toolIds = []
+        request.skillIds = []
+        request.toolServers = []
+        request.terminalId = nil
+        request.features = ChatCompletionRequest.ChatFeatures()
+        request.backgroundTasks = nil
+        if var params = request.params {
+            params.removeValue(forKey: "function_calling")
+            params.removeValue(forKey: "tool_choice")
+            params.removeValue(forKey: "tools")
+            request.params = params
+        }
+    }
+
     private static func applyLocalAlpineOutputTokenCap(to params: inout [String: Any]) {
         let cap = 8_192
         let keys = ["max_tokens", "max_completion_tokens", "max_output_tokens"]
@@ -12519,11 +13307,12 @@ final class ChatViewModel {
     }
 
     private func canStartIndependentDirectImageGeneration(modelId: String, text: String? = nil) -> Bool {
-        guard canUseDirectImageEndpointProvider, imageGenerationEnabled else { return false }
+        guard canUseDirectImageEndpointProvider else { return false }
         if shouldUseDirectImageGeneration(modelId: modelId)
             && !shouldPreferChatNativeImageGeneration(modelId: modelId) {
             return true
         }
+        guard imageGenerationEnabled else { return false }
         guard let text,
               Self.looksLikeDirectImageGenerationRequest(text) else {
             return false
@@ -14358,10 +15147,8 @@ final class ChatViewModel {
         guard webSearchEnabled else { return }
         guard !hasAttachments else { return }
         guard !WebLinkContextResolver.containsHTTPURL(text) else { return }
-        guard !(imageGenerationEnabled && (
-            shouldUseDirectImageGeneration(modelId: modelId)
-                || shouldPreferChatNativeImageGeneration(modelId: modelId)
-        )),
+        guard !(shouldUseDirectImageGeneration(modelId: modelId)
+            || shouldPreferChatNativeImageGeneration(modelId: modelId)),
               !shouldUseDirectVideoGeneration(modelId: modelId) else {
             return
         }
@@ -16018,7 +16805,14 @@ final class ChatViewModel {
 
     private func scheduleLocalWorkspaceAgentIfNeeded(messageId: String, content: String, error: ChatMessageError?) {
         guard error == nil else { return }
-        guard let role = conversation?.messages.first(where: { $0.id == messageId })?.role, role == .assistant else { return }
+        guard let message = conversation?.messages.first(where: { $0.id == messageId }),
+              message.role == .assistant else { return }
+        if message.metadata?["iexa_local_native_continuation"] == "true"
+            || message.metadata?["iexa_local_alpine_continuation"] == "true"
+            || message.metadata?["iexa_local_alpine_final_summary"] == "true" {
+            localWorkspaceAgentExecutedMessageIds.insert(messageId)
+            return
+        }
         guard shouldExecuteLocalWorkspaceAgentForCurrentRequest() else { return }
         guard !localWorkspaceAgentExecutedMessageIds.contains(messageId) else { return }
 
@@ -16316,6 +17110,10 @@ final class ChatViewModel {
         guard !localAlpineAutoExecutionPaused else { return }
         guard let message = conversation?.messages.first(where: { $0.id == messageId }),
               message.role == .assistant else { return }
+        if message.metadata?["iexa_local_native_continuation"] == "true" {
+            localAlpineAgentExecutedMessageIds.insert(messageId)
+            return
+        }
         if message.metadata?["iexa_local_alpine_final_summary"] != nil {
             return
         }
@@ -16372,7 +17170,13 @@ final class ChatViewModel {
     private func scheduleLocalNativeToolIfNeeded(messageId: String, content: String, error: ChatMessageError?) {
         guard error == nil else { return }
         guard LocalNativeToolService.containsNativeToolBlock(content) else { return }
-        guard conversation?.messages.first(where: { $0.id == messageId }).map(Self.isLocalNativeToolResult) != true else {
+        guard let message = conversation?.messages.first(where: { $0.id == messageId }) else { return }
+        guard Self.isLocalNativeToolResult(message) != true else {
+            return
+        }
+        guard message.metadata?["iexa_local_native_continuation"] != "true",
+              message.metadata?["iexa_local_alpine_continuation"] != "true" else {
+            localNativeToolExecutedMessageIds.insert(messageId)
             return
         }
         guard !localNativeToolExecutedMessageIds.contains(messageId) else { return }
@@ -16949,6 +17753,7 @@ final class ChatViewModel {
                     parentId: parentId
                 )
                 await self.populateCommonRequestFields(&request)
+                Self.disableAgentToolsForResultContinuation(&request)
 
                 if self.isOpenAICompatibleProvider {
                     let stream = try await manager.sendPreferredOpenAIStreaming(
@@ -18241,6 +19046,9 @@ final class ChatViewModel {
                     request.toolChoice = "none"
                 }
                 await self.populateCommonRequestFields(&request)
+                if finalSummaryOnly {
+                    Self.disableAgentToolsForResultContinuation(&request)
+                }
 
                 if self.isOpenAICompatibleProvider {
                     if !useLocalAlpineNativeToolsForContinuation {

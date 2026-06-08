@@ -143,9 +143,10 @@ import Foundation
                 .inset(by: window.safeAreaInsets)
                 .insetBy(dx: horizontalPadding, dy: verticalPadding)
             guard safeBounds.width > size.width, safeBounds.height > size.height else {
+                let fallbackY = anchor.y - size.height - 28
                 return CGRect(
                     x: max(0, min(anchor.x - size.width / 2, window.bounds.width - size.width)),
-                    y: max(0, min(anchor.y + 34, window.bounds.height - size.height)),
+                    y: max(0, min(fallbackY, window.bounds.height - size.height)),
                     width: size.width,
                     height: size.height
                 )
@@ -165,18 +166,20 @@ import Foundation
             }
 
             let centeredX = anchor.x - size.width / 2
+            let aboveGap: CGFloat = 28
+            let belowGap: CGFloat = 42
             let candidates = [
-                CGRect(x: clampedX(centeredX, in: usable), y: anchor.y + 42, width: size.width, height: size.height),
-                CGRect(x: clampedX(centeredX, in: usable), y: anchor.y - size.height - 54, width: size.width, height: size.height),
+                CGRect(x: clampedX(centeredX, in: usable), y: anchor.y - size.height - aboveGap, width: size.width, height: size.height),
                 CGRect(x: anchor.x - size.width - 30, y: anchor.y - size.height / 2, width: size.width, height: size.height),
-                CGRect(x: anchor.x + 30, y: anchor.y - size.height / 2, width: size.width, height: size.height)
+                CGRect(x: anchor.x + 30, y: anchor.y - size.height / 2, width: size.width, height: size.height),
+                CGRect(x: clampedX(centeredX, in: usable), y: anchor.y + belowGap, width: size.width, height: size.height)
             ]
             if let preferred = candidates.first(where: { usable.contains($0) }) {
                 return preferred
             }
 
             let fallbackX = clampedX(centeredX, in: usable)
-            let fallbackY = min(max(usable.minY, anchor.y + 42), usable.maxY - size.height)
+            let fallbackY = min(max(usable.minY, anchor.y - size.height - aboveGap), usable.maxY - size.height)
             return CGRect(x: fallbackX, y: fallbackY, width: size.width, height: size.height)
         }
 

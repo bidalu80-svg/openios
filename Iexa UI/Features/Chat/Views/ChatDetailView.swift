@@ -2144,7 +2144,10 @@ struct ChatDetailView: View {
                 shortcutsEnabled: $vm.shortcutsEnabled,
                 codeInterpreterEnabled: $vm.codeInterpreterEnabled,
                 isWebSearchAvailable: chatWebSearchEnabled,
-                isImageGenerationAvailable: dependencies.authViewModel.featurePermissions.imageGeneration && isFeatureAvailable("image_generation", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableImageGeneration),
+                isImageGenerationAvailable: viewModel.selectedModelCanGenerateImages || (
+                    dependencies.authViewModel.featurePermissions.imageGeneration
+                        && isFeatureAvailable("image_generation", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableImageGeneration)
+                ),
                 isCodeInterpreterAvailable: dependencies.authViewModel.featurePermissions.codeInterpreter && isFeatureAvailable("code_interpreter", serverEnabled: dependencies.authViewModel.backendConfig?.features?.enableCodeInterpreter),
                 tools: vm.availableTools,
                 selectedToolIds: $vm.selectedToolIds,
