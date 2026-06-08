@@ -1216,14 +1216,14 @@ struct ChatDetailView: View {
             if hasVisibleActivity {
                 return false
             }
-            if message.isStreaming {
+            if isMessageVisuallyStreaming(message) {
                 return false
             }
             return message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && messageHasProcessOnlyStatus(message)
         }
         if metadata["iexa_local_alpine_final_summary"] != nil {
-            return !message.isStreaming
+            return !isMessageVisuallyStreaming(message)
                 && message.error == nil
                 && message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
@@ -1233,7 +1233,7 @@ struct ChatDetailView: View {
                 || metadata["iexa_local_alpine_missing_tool_correction"] != nil {
                 return true
             }
-            if message.isStreaming {
+            if isMessageVisuallyStreaming(message) {
                 return false
             }
             if contentContainsLocalAlpineInstruction(message.content) {
@@ -1254,7 +1254,7 @@ struct ChatDetailView: View {
             return true
         }
         if message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           !message.isStreaming,
+           !isMessageVisuallyStreaming(message),
            messageHasProcessOnlyStatus(message) {
             return true
         }
@@ -2590,6 +2590,54 @@ struct ChatDetailView: View {
         return containerHeight
     }
 
+    private struct MessageTurnGroup: Identifiable {
+        let id: String
+        let messages: [ChatMessage]
+
+        var containsUserMessage: Bool {
+            messages.contains { $0.role == .user }
+        }
+    }
+
+    private func messageTurnGroups(from messages: [ChatMessage]) -> [MessageTurnGroup] {
+        var groups: [MessageTurnGroup] = []
+        var currentMessages: [ChatMessage] = []
+        var currentId: String?
+
+        func flushCurrentGroup() {
+            guard !currentMessages.isEmpty else { return }
+            groups.append(MessageTurnGroup(
+                id: currentId ?? currentMessages[0].id,
+                messages: currentMessages
+            ))
+            currentMessages.removeAll(keepingCapacity: true)
+            currentId = nil
+        }
+
+        for message in messages {
+            if message.role == .user || currentMessages.isEmpty {
+                flushCurrentGroup()
+                currentMessages = [message]
+                currentId = message.id
+            } else {
+                currentMessages.append(message)
+            }
+        }
+
+        flushCurrentGroup()
+        return groups
+    }
+
+    private var isAnyMessageVisuallyStreaming: Bool {
+        viewModel.isStreaming || viewModel.streamingStore.isActive
+    }
+
+    private func isMessageVisuallyStreaming(_ message: ChatMessage) -> Bool {
+        message.isStreaming
+            || (viewModel.streamingStore.streamingMessageId == message.id
+                && viewModel.streamingStore.isActive)
+    }
+
     private func scrollToBottomWithoutAnimation() {
         var transaction = Transaction()
         transaction.disablesAnimations = true
@@ -2656,46 +2704,36 @@ struct ChatDetailView: View {
         }
     }
 
-    /// Splits messages into two groups around the last conversation turn.
+    /// Groups messages by conversation turn.
     ///
-    /// The **last turn** is defined as the last user message plus any
-    /// assistant/system messages that follow it. This group is wrapped in a
-    /// `VStack` with `minHeight: viewportHeight, alignment: .top`. This keeps
-    /// the user's sent message near the **top** of the viewport, with the AI
-    /// response streaming in below it.
+    /// Each user message starts a stable `VStack` that owns the assistant/system
+    /// messages following it. Keeping prior turns in their original container
+    /// prevents LazyVStack from reparenting old rows when a new message is sent.
+    /// The latest user turn still gets `minHeight: viewportHeight`, which keeps
+    /// the user's sent message near the **top** of the viewport while the AI
+    /// response streams in below it.
     ///
     /// All earlier messages render at their natural height.
     private var messagesList: some View {
         let messages = transcriptMessages
+        let turnGroups = messageTurnGroups(from: messages)
+        let lastTurnGroupId = turnGroups.last(where: { $0.containsUserMessage })?.id
 
         let indexMap = Dictionary(messages.enumerated().map { ($1.id, $0) },
                                   uniquingKeysWith: { first, _ in first })
 
-        // Split point: index of the last user message within the rendered list.
-        // Everything from here to the end is the "last turn".
-        // If there are no user messages, splitAt == count → no split, all normal.
-        let lastUserIdx = messages.lastIndex(where: { $0.role == .user })
-        let splitAt = lastUserIdx ?? messages.count
-
-        return Group {
-            // ── Messages before the last turn (natural height) ──
-            ForEach(Array(messages.prefix(splitAt))) { message in
-                let index = indexMap[message.id] ?? 0
-                messageRow(message: message, index: index)
-                    .id(message.id)
-            }
-
-            // ── Last turn (user msg + assistant reply) with minHeight ──
-            if splitAt < messages.count {
-                VStack(spacing: 0) {
-                    ForEach(Array(messages.suffix(from: splitAt))) { message in
-                        let index = indexMap[message.id] ?? 0
-                        messageRow(message: message, index: index)
-                            .id(message.id)
-                    }
+        return ForEach(turnGroups) { group in
+            VStack(spacing: 0) {
+                ForEach(group.messages) { message in
+                    let index = indexMap[message.id] ?? 0
+                    messageRow(message: message, index: index)
+                        .id(message.id)
                 }
-                .frame(minHeight: lastTurnMinHeight, alignment: .top)
             }
+            .frame(
+                minHeight: group.id == lastTurnGroupId ? lastTurnMinHeight : 0,
+                alignment: .top
+            )
         }
     }
 
@@ -2743,7 +2781,7 @@ struct ChatDetailView: View {
             }
 
             // ── Tool-generated images ──
-            if message.role == .assistant && !message.isStreaming {
+            if message.role == .assistant && !isMessageVisuallyStreaming(message) {
                 let vIdx = activeVersionIndex[message.id] ?? -1
                 let displayFiles: [ChatMessageFile] = {
                     if vIdx >= 0 && vIdx < message.versions.count {
@@ -2760,7 +2798,7 @@ struct ChatDetailView: View {
 
             // ── Sources bar ──
             if message.role == .assistant
-                && !message.isStreaming
+                && !isMessageVisuallyStreaming(message)
                 && !messageLatestVisibleStatusIsWebSearch(message) {
                 let vIdx = activeVersionIndex[message.id] ?? -1
                 let displaySources: [ChatSourceReference] = {
@@ -2786,7 +2824,7 @@ struct ChatDetailView: View {
             }
 
             // ── Assistant action bar (always visible) ──
-            if message.role == .assistant && !message.isStreaming && shouldShowAssistantActionBar(for: message) {
+            if message.role == .assistant && !isMessageVisuallyStreaming(message) && shouldShowAssistantActionBar(for: message) {
                 assistantActionBar(for: message)
                     .padding(.horizontal, Spacing.screenPadding)
                     .padding(.top, Spacing.xs)
@@ -2813,14 +2851,14 @@ struct ChatDetailView: View {
             }
 
             // ── User message version arrows (always visible when edit history exists) ──
-            if message.role == .user && !message.versions.isEmpty && !viewModel.isStreaming {
+            if message.role == .user && !message.versions.isEmpty && !isAnyMessageVisuallyStreaming {
                 userVersionSwitcher(for: message)
                     .padding(.horizontal, Spacing.screenPadding)
                     .padding(.top, 2)
             }
 
             // ── Follow-up suggestions (last assistant message only) ──
-            if isLastAssistant && !message.isStreaming {
+            if isLastAssistant && !isMessageVisuallyStreaming(message) {
                 let vIdx = activeVersionIndex[message.id] ?? -1
                 let displayFollowUps: [String] = {
                     if vIdx >= 0 && vIdx < message.versions.count {
@@ -2888,14 +2926,14 @@ struct ChatDetailView: View {
                 ) {
                     AssistantMessageContent(
                         content: fallbackContent,
-                        isStreaming: message.isStreaming,
+                        isStreaming: isMessageVisuallyStreaming(message),
                         messageEmbeds: message.embeds,
                         authToken: viewModel.serverAuthToken,
                         serverBaseURL: viewModel.serverBaseURL,
                         apiClient: dependencies.apiClient
                     )
                 }
-            } else if message.isStreaming {
+            } else if isMessageVisuallyStreaming(message) {
                 ChatMessageBubble(
                     role: .assistant,
                     showTimestamp: activeActionMessageId == message.id,
@@ -2965,18 +3003,18 @@ struct ChatDetailView: View {
         Button { copyMessage(message) } label: {
             Label("Copy", systemImage: "doc.on.doc")
         }
-        if message.role == .user && !viewModel.isStreaming {
+        if message.role == .user && !isAnyMessageVisuallyStreaming {
             Button { beginInlineEdit(message: message) } label: {
                 Label("Edit", systemImage: "pencil")
             }
         }
-        if message.role == .assistant && !viewModel.isStreaming {
+        if message.role == .assistant && !isAnyMessageVisuallyStreaming {
             Button { Task { await viewModel.regenerateResponse(messageId: message.id) } } label: {
                 Label("Regenerate", systemImage: "arrow.clockwise")
             }
         }
         Divider()
-        if !viewModel.isStreaming {
+        if !isAnyMessageVisuallyStreaming {
             Button(role: .destructive) {
                 let userVIdx = activeUserVersionIndex[message.id] ?? -1
                 Task { await viewModel.deleteMessage(id: message.id, activeVersionIndex: message.role == .user ? userVIdx : nil) }
@@ -3490,7 +3528,7 @@ struct ChatDetailView: View {
             .accessibilityLabel("Share")
 
             // Version switcher (only when siblings exist and not overriding with a user edit version)
-            if totalVersions > 1 && !viewModel.isStreaming && assistantContentOverride[message.id] == nil {
+            if totalVersions > 1 && !isAnyMessageVisuallyStreaming && assistantContentOverride[message.id] == nil {
                 HStack(spacing: 2) {
                     Button {
                         // Navigate to the sibling BEFORE the current one in sorted order.
@@ -3535,7 +3573,7 @@ struct ChatDetailView: View {
             }
 
             // Regenerate
-            if !viewModel.isStreaming {
+            if !isAnyMessageVisuallyStreaming {
                 Button {
                     Task { await viewModel.regenerateResponse(messageId: message.id) }
                     Haptics.play(.light)
@@ -3547,7 +3585,7 @@ struct ChatDetailView: View {
             }
 
             // Delete (only shown when there are multiple versions / regeneration history)
-            if !viewModel.isStreaming && totalVersions > 1 {
+            if !isAnyMessageVisuallyStreaming && totalVersions > 1 {
                 Button {
                     Task { await viewModel.deleteMessage(id: message.id) }
                     // After deletion, rederiveMessages() replaces the message list —
@@ -3581,7 +3619,7 @@ struct ChatDetailView: View {
             }
 
             // Action buttons (from model's configured actions — e.g. Generate Image)
-            if !viewModel.isStreaming {
+            if !isAnyMessageVisuallyStreaming {
                 let model = resolveModel(for: message)
                 if let actions = model?.actions, !actions.isEmpty {
                     ForEach(actions) { action in
@@ -3705,7 +3743,7 @@ struct ChatDetailView: View {
                 }
                 .buttonStyle(.plain)
 
-                if !viewModel.isStreaming {
+                if !isAnyMessageVisuallyStreaming {
                     Button { beginInlineEdit(message: message) } label: {
                         Image(systemName: "pencil")
                             .scaledFont(size: 13, weight: .medium)
@@ -3944,7 +3982,7 @@ struct ChatDetailView: View {
             if message.role == .user {
                 let imageFiles = activeUserDisplayFiles(for: message).filter { isImageFile($0) }
                 appendImageFiles(Array(imageFiles.prefix(9)), messageId: message.id)
-            } else if message.role == .assistant && !message.isStreaming {
+            } else if message.role == .assistant && !isMessageVisuallyStreaming(message) {
                 let versionIndex = activeVersionIndex[message.id] ?? -1
                 let displayFiles: [ChatMessageFile]
                 if versionIndex >= 0 && versionIndex < message.versions.count {
@@ -4673,7 +4711,7 @@ struct ChatDetailView: View {
                 .scaledFont(size: 12, weight: .medium)
                 .foregroundStyle(theme.error)
             Spacer()
-            if !viewModel.isStreaming {
+            if !isAnyMessageVisuallyStreaming {
                 Button { Task { await viewModel.regenerateResponse(messageId: retryMessageId) } } label: {
                     Text("重试").scaledFont(size: 12, weight: .medium).foregroundStyle(theme.brandPrimary)
                 }
@@ -6452,26 +6490,38 @@ private struct IsolatedAssistantMessage: View {
                     ? streamingStore.frozenProseBoundaryOffset
                     : 0
 
-                if proseFreezeOffset > 0,
-                   displayContent.count >= proseFreezeOffset,
-                   !Self.requiresFullAssistantRouting(displayContent),
-                   !Self.containsCodeFence(displayContent) {
-                    let dc = displayContent
-                    let splitIdx = dc.index(dc.startIndex, offsetBy: proseFreezeOffset)
-                    let frozenProse = String(dc[..<splitIdx])
-                    let liveProse   = String(dc[splitIdx...])
+                let canUseProseStreamingRenderer = isActivelyStreaming
+                    && !Self.requiresFullAssistantRouting(displayContent)
+                    && !Self.containsCodeFence(displayContent)
+
+                if canUseProseStreamingRenderer {
+                    let hasFrozenProse = proseFreezeOffset > 0
+                        && displayContent.count >= proseFreezeOffset
                     VStack(alignment: .leading, spacing: 0) {
-                        // Frozen paragraphs: hash changes only when boundary advances (~every 400 chars).
-                        StreamingMarkdownView(
-                            content: frozenProse,
-                            isStreaming: false,
-                            authToken: authToken,
-                            serverBaseURL: serverBaseURL
-                        )
-                        // Live tail: current paragraph only, changes every tick.
-                        if !liveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        if hasFrozenProse {
+                            let dc = displayContent
+                            let splitIdx = dc.index(dc.startIndex, offsetBy: proseFreezeOffset)
+                            let frozenProse = String(dc[..<splitIdx])
+                            let liveProse = String(dc[splitIdx...])
+                            // Frozen paragraphs: hash changes only when boundary advances (~every 400 chars).
                             StreamingMarkdownView(
-                                content: liveProse,
+                                content: frozenProse,
+                                isStreaming: false,
+                                authToken: authToken,
+                                serverBaseURL: serverBaseURL
+                            )
+                            // Live tail: current paragraph only, changes every tick.
+                            if !liveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                StreamingMarkdownView(
+                                    content: liveProse,
+                                    isStreaming: true,
+                                    authToken: authToken,
+                                    serverBaseURL: serverBaseURL
+                                )
+                            }
+                        } else {
+                            StreamingMarkdownView(
+                                content: displayContent,
                                 isStreaming: true,
                                 authToken: authToken,
                                 serverBaseURL: serverBaseURL
