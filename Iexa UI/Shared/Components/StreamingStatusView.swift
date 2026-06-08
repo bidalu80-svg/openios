@@ -136,19 +136,10 @@ struct StreamingStatusView: View {
             || action.contains("readable")
     }
 
-    private func isLocalAlpineWebSearch(_ status: ChatStatusUpdate?) -> Bool {
-        status?.action?.lowercased() == "local_alpine_web_search"
-    }
-
-    private func isBrowserWebSearch(_ status: ChatStatusUpdate?) -> Bool {
-        status?.action?.lowercased() == "browser_web_search"
-    }
-
     private var webSearchCard: some View {
         let latest = latestWebSearchStatus ?? latestStatus
         let isDone = latest?.done == true
-        let title = webSearchTitle(for: latest)
-        let subtitle = webSearchSubtitle(for: latest)
+        let query = primaryWebSearchQuery(for: latest)
         let queries = webSearchQueries(for: latest)
         let items = webSearchItems(for: latest)
         let visibleSourceCount = max(max(items.count, latest?.urls.count ?? 0), latest?.count ?? 0)
@@ -159,9 +150,10 @@ struct StreamingStatusView: View {
                     isExpanded.toggle()
                 }
             } label: {
-                webSearchDefaultHeader(
-                    title: sourceLabel(count: visibleSourceCount, fallback: title),
-                    subtitle: subtitle,
+                webSearchHeaderTimeline(
+                    status: latest,
+                    query: query,
+                    resultCount: visibleSourceCount,
                     isDone: isDone,
                     items: items,
                     fallbackURLs: latest?.urls ?? []
@@ -183,42 +175,366 @@ struct StreamingStatusView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func webSearchTitle(for status: ChatStatusUpdate?) -> String {
-        guard let status else { return "正在联网搜索" }
-        let localAlpine = isLocalAlpineWebSearch(status)
-        let browser = isBrowserWebSearch(status)
-        if status.done == true {
-            if let count = status.count, count > 0 {
-                if browser { return "内置浏览器已读取 \(count) 个网页" }
-                return localAlpine ? "本地已读取 \(count) 个网页" : "已搜索 \(count) 个网页"
+    @ViewBuilder
+    private func webSearchHeaderTimeline(
+        status: ChatStatusUpdate?,
+        query: String?,
+        resultCount: Int,
+        isDone: Bool,
+        items: [ChatStatusItem],
+        fallbackURLs: [String]
+    ) -> some View {
+        if isDone {
+            webSearchRotatingHeader(
+                status: status,
+                query: query,
+                resultCount: resultCount,
+                isDone: isDone,
+                items: items,
+                fallbackURLs: fallbackURLs,
+                timelineDate: Date()
+            )
+        } else {
+            TimelineView(.periodic(from: .now, by: 1.25)) { timeline in
+                webSearchRotatingHeader(
+                    status: status,
+                    query: query,
+                    resultCount: resultCount,
+                    isDone: isDone,
+                    items: items,
+                    fallbackURLs: fallbackURLs,
+                    timelineDate: timeline.date
+                )
             }
-            if !status.items.isEmpty {
-                if browser { return "内置浏览器已搜索 \(status.items.count) 个来源" }
-                return localAlpine ? "本地已搜索 \(status.items.count) 个来源" : "已搜索 \(status.items.count) 个来源"
-            }
-            return status.description ?? (browser ? "内置浏览器搜索完成" : (localAlpine ? "本地搜索完成" : "已完成联网搜索"))
         }
-        if let query = status.query, !query.isEmpty {
-            return browser ? "内置浏览器搜索中" : (localAlpine ? "本地搜索中" : "正在搜索")
-        }
-        return status.description ?? (browser ? "内置浏览器搜索中" : (localAlpine ? "本地搜索中" : "正在联网搜索"))
     }
 
-    private func webSearchSubtitle(for status: ChatStatusUpdate?) -> String {
-        guard let status else { return "准备搜索" }
-        let localAlpine = isLocalAlpineWebSearch(status)
-        let browser = isBrowserWebSearch(status)
-        if status.done == true {
-            let sourceCount = max(status.items.count, status.urls.count)
-            if sourceCount > 0 {
-                return browser ? "浏览器读取 \(sourceCount) 个来源" : (localAlpine ? "本地读取 \(sourceCount) 个来源" : "获取了 \(sourceCount) 个来源")
+    private func webSearchRotatingHeader(
+        status: ChatStatusUpdate?,
+        query: String?,
+        resultCount: Int,
+        isDone: Bool,
+        items: [ChatStatusItem],
+        fallbackURLs: [String],
+        timelineDate: Date
+    ) -> some View {
+        let steps = webSearchRotationSteps(for: status, query: query, resultCount: resultCount, isDone: isDone)
+        let activeIndex = webSearchPhaseIndex(for: timelineDate, stepCount: steps.count, isDone: isDone)
+        let active = steps[activeIndex]
+        let elapsedText = webSearchElapsedText(for: status, at: timelineDate)
+
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 10) {
+                webSearchHeaderGlyph(isDone: isDone, phase: activeIndex)
+                    .padding(.top, 1)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(active.title)
+                            .scaledFont(size: 14, weight: .semibold)
+                            .foregroundStyle(isDone ? theme.textSecondary : theme.textPrimary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .id(active.id)
+                            .transition(.opacity)
+
+                        Spacer(minLength: 0)
+
+                        if resultCount > 0 {
+                            Text("\(resultCount) 个结果")
+                                .scaledFont(size: 13, weight: .semibold)
+                                .foregroundStyle(theme.textTertiary)
+                                .lineLimit(1)
+                        } else if let elapsedText, !isDone {
+                            Text(elapsedText)
+                                .scaledFont(size: 12, weight: .semibold)
+                                .foregroundStyle(theme.textTertiary)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    HStack(spacing: 7) {
+                        Image(systemName: active.symbol)
+                            .scaledFont(size: 11, weight: .semibold)
+                            .foregroundStyle(isDone ? theme.success : theme.textTertiary)
+                            .frame(width: 14)
+
+                        Text(active.detail)
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .id("detail-\(active.id)")
+                            .transition(.opacity)
+                    }
+
+                    webSearchSourceChipRow(items: items, fallbackURLs: fallbackURLs)
+                }
+
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .scaledFont(size: 11, weight: .semibold)
+                    .foregroundStyle(theme.textTertiary)
+                    .padding(.top, 5)
             }
-            return browser ? "浏览器搜索完成" : (localAlpine ? "本地搜索完成" : "搜索完成")
         }
-        if let query = status.query, !query.isEmpty {
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(.easeInOut(duration: 0.18), value: active.id)
+        .animation(.easeInOut(duration: 0.18), value: resultCount)
+    }
+
+    private func webSearchRotationSteps(
+        for status: ChatStatusUpdate?,
+        query: String?,
+        resultCount: Int,
+        isDone: Bool
+    ) -> [(id: String, title: String, detail: String, symbol: String)] {
+        let quotedQuery = query.map { "\"\($0)\"" }
+        if isDone {
+            let title: String
+            if resultCount > 0 {
+                title = "已找到 \(resultCount) 个结果"
+            } else {
+                title = webSearchNeutralDescription(status?.description) ?? "搜索完成"
+            }
+            return [
+                (
+                    id: "done",
+                    title: title,
+                    detail: quotedQuery.map { "已整理 \($0) 的来源" } ?? "来源已整理",
+                    symbol: "checkmark.circle.fill"
+                )
+            ]
+        }
+
+        if let quotedQuery {
+            return [
+                (
+                    id: "query",
+                    title: "正在搜索 \(quotedQuery)",
+                    detail: resultCount > 0 ? "发现可用来源" : "查找可靠来源",
+                    symbol: "magnifyingglass"
+                ),
+                (
+                    id: "network",
+                    title: "正在搜索网络",
+                    detail: resultCount > 0 ? "继续补充结果" : "扩大检索范围",
+                    symbol: "globe"
+                ),
+                (
+                    id: "sources",
+                    title: "正在整理来源",
+                    detail: resultCount > 0 ? "读取页面摘要" : "等待结果返回",
+                    symbol: "doc.text.magnifyingglass"
+                )
+            ]
+        }
+
+        return [
+            (
+                id: "network",
+                title: webSearchNeutralDescription(status?.description) ?? "正在搜索网络",
+                detail: "查找相关来源",
+                symbol: "magnifyingglass"
+            ),
+            (
+                id: "sources",
+                title: "正在整理来源",
+                detail: "读取页面摘要",
+                symbol: "doc.text.magnifyingglass"
+            ),
+            (
+                id: "answer",
+                title: "正在准备回答",
+                detail: "筛选可用信息",
+                symbol: "text.alignleft"
+            )
+        ]
+    }
+
+    private func webSearchPhaseIndex(for date: Date, stepCount: Int, isDone: Bool) -> Int {
+        guard !isDone, stepCount > 1 else { return 0 }
+        let tick = Int(date.timeIntervalSinceReferenceDate / 1.25)
+        return abs(tick) % stepCount
+    }
+
+    private func webSearchElapsedText(for status: ChatStatusUpdate?, at date: Date) -> String? {
+        guard let startedAt = visibleStatuses.first(where: { visibleStatus in
+            guard let action = visibleStatus.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+                return false
+            }
+            return Self.isWebSearchAction(action)
+        })?.occurredAt ?? status?.occurredAt else {
+            return nil
+        }
+
+        let seconds = max(0, Int(date.timeIntervalSince(startedAt)))
+        if seconds < 60 { return "\(seconds)秒" }
+        return "\(seconds / 60)分\(seconds % 60)秒"
+    }
+
+    private func webSearchHeaderGlyph(isDone: Bool, phase: Int) -> some View {
+        let color: Color = isDone ? theme.success : theme.brandPrimary
+
+        return ZStack {
+            Circle()
+                .fill(color.opacity(theme.isDark ? 0.16 : 0.10))
+                .frame(width: 28, height: 28)
+
+            Circle()
+                .strokeBorder(color.opacity(theme.isDark ? 0.30 : 0.22), lineWidth: 1)
+                .frame(width: 28, height: 28)
+
+            Image(systemName: isDone ? "checkmark" : "magnifyingglass")
+                .scaledFont(size: 12, weight: .bold)
+                .foregroundStyle(color)
+
+            if !isDone {
+                ForEach(0..<3, id: \.self) { dotIndex in
+                    let offset = webSearchOrbitDotOffset(for: dotIndex)
+                    Circle()
+                        .fill(dotIndex == phase % 3 ? color : theme.textTertiary.opacity(0.38))
+                        .frame(width: 3.5, height: 3.5)
+                        .offset(x: offset.width, y: offset.height)
+                        .scaleEffect(dotIndex == phase % 3 ? 1.25 : 0.86)
+                        .animation(.easeInOut(duration: 0.18), value: phase)
+                }
+            }
+        }
+        .frame(width: 30, height: 30)
+    }
+
+    private func webSearchOrbitDotOffset(for index: Int) -> CGSize {
+        switch index {
+        case 0: return CGSize(width: 9, height: -8)
+        case 1: return CGSize(width: 7, height: 9)
+        default: return CGSize(width: -9, height: 4)
+        }
+    }
+
+    @ViewBuilder
+    private func webSearchSourceChipRow(items: [ChatStatusItem], fallbackURLs: [String]) -> some View {
+        let chips = webSearchSourceChips(items: items, fallbackURLs: fallbackURLs)
+        if !chips.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(Array(chips.enumerated()), id: \.offset) { index, chip in
+                    webSearchSourceChip(title: chip.title, url: chip.url, index: index)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func webSearchSourceChips(items: [ChatStatusItem], fallbackURLs: [String]) -> [(title: String, url: String?)] {
+        var chips: [(title: String, url: String?)] = []
+        for item in items {
+            let title = item.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let link = item.link?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fallback = link.flatMap(hostLabel(from:))
+            let label = title?.isEmpty == false ? title! : fallback
+            if let label, !label.isEmpty {
+                chips.append((label, link?.isEmpty == false ? link : nil))
+            }
+        }
+
+        if chips.isEmpty {
+            for url in fallbackURLs {
+                let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let host = hostLabel(from: trimmed) {
+                    chips.append((host, trimmed))
+                }
+            }
+        }
+
+        return Array(chips.prefix(2))
+    }
+
+    private func webSearchSourceChip(title: String, url: String?, index: Int) -> some View {
+        let color = webSearchSourceChipColor(index: index)
+        return HStack(spacing: 5) {
+            webSearchSourceBadge(urlString: url, fallbackColor: color, index: index)
+
+            Text(title)
+                .scaledFont(size: 11, weight: .semibold)
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .frame(minWidth: 0, maxWidth: 132, alignment: .leading)
+        .background(
+            Capsule()
+                .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.68))
+        )
+        .overlay(
+            Capsule()
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.34 : 0.48), lineWidth: 0.5)
+        )
+    }
+
+    @ViewBuilder
+    private func webSearchSourceBadge(urlString: String?, fallbackColor: Color, index: Int) -> some View {
+        let size: CGFloat = 16
+        let targetPixelSize = Int(size * UIScreen.main.scale)
+        let faviconURLs = urlString
+            .map { WebsiteFaviconResolver.candidateURLs(for: $0, size: max(64, targetPixelSize)) }
+            ?? []
+
+        FallbackCachedAsyncImage(urls: faviconURLs, targetPixelSize: targetPixelSize) { image in
+            image
+                .resizable()
+                .scaledToFill()
+        } placeholder: {
+            webSearchSourceBadgeFallback(color: fallbackColor, index: index)
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .overlay(Circle().strokeBorder(theme.background.opacity(theme.isDark ? 0.70 : 0.92), lineWidth: 0.7))
+    }
+
+    private func webSearchSourceBadgeFallback(color: Color, index: Int) -> some View {
+        Circle()
+            .fill(color.opacity(theme.isDark ? 0.90 : 0.82))
+            .overlay(
+                Image(systemName: index == 0 ? "magnifyingglass" : "globe")
+                    .scaledFont(size: 8, weight: .bold)
+                    .foregroundStyle(.white.opacity(0.92))
+            )
+    }
+
+    private func webSearchSourceChipColor(index: Int) -> Color {
+        let colors: [Color] = [
+            Color(red: 0.08, green: 0.67, blue: 0.82),
+            Color(red: 0.95, green: 0.67, blue: 0.19),
+            Color(red: 0.18, green: 0.72, blue: 0.46)
+        ]
+        return colors[index % colors.count]
+    }
+
+    private func primaryWebSearchQuery(for status: ChatStatusUpdate?) -> String? {
+        guard let status else { return nil }
+        if let query = status.query?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty {
             return query
         }
-        return status.queries.first ?? "正在获取网页"
+        return status.queries
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+    }
+
+    private func webSearchNeutralDescription(_ description: String?) -> String? {
+        guard let description else { return nil }
+        let trimmed = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowered = trimmed.lowercased()
+        if trimmed.contains("本地浏览器")
+            || trimmed.contains("内置浏览器")
+            || trimmed.contains("本地搜索")
+            || trimmed.contains("正在获取网页")
+            || lowered.contains("local browser")
+            || lowered.contains("wkwebview") {
+            return nil
+        }
+        return trimmed
     }
 
     private func webSearchQueries(for status: ChatStatusUpdate?) -> [String] {
@@ -236,123 +552,6 @@ struct StreamingStatusView: View {
         return status.urls.prefix(6).map { url in
             ChatStatusItem(title: hostLabel(from: url) ?? url, link: url)
         }
-    }
-
-    private func sourceLabel(count: Int, fallback: String) -> String {
-        guard count > 0 else { return fallback }
-        return "\(count) 个来源"
-    }
-
-    private func webSearchDefaultHeader(
-        title: String,
-        subtitle: String,
-        isDone: Bool,
-        items: [ChatStatusItem],
-        fallbackURLs: [String]
-    ) -> some View {
-        HStack(alignment: .center, spacing: 10) {
-            webSearchStateBadge(isDone: isDone)
-
-            webSearchSourceIcons(items: items, fallbackURLs: fallbackURLs)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .scaledFont(size: 14, weight: .semibold)
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(1)
-
-                if !isDone {
-                    Text(subtitle)
-                        .scaledFont(size: 12, weight: .medium)
-                        .foregroundStyle(theme.textTertiary)
-                        .lineLimit(1)
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                .scaledFont(size: 11, weight: .semibold)
-                .foregroundStyle(theme.textTertiary)
-        }
-    }
-
-    private func webSearchStateBadge(isDone: Bool) -> some View {
-        ZStack {
-            Circle()
-                .fill((isDone ? theme.success : theme.brandPrimary).opacity(theme.isDark ? 0.15 : 0.09))
-                .frame(width: 28, height: 28)
-
-            if isDone {
-                Image(systemName: "checkmark")
-                    .scaledFont(size: 12, weight: .bold)
-                    .foregroundStyle(theme.success)
-            } else {
-                ProgressView()
-                    .controlSize(.mini)
-                    .tint(theme.brandPrimary)
-            }
-        }
-    }
-
-    private func webSearchSourceIcons(items: [ChatStatusItem], fallbackURLs: [String]) -> some View {
-        let urls = sourceIconURLs(items: items, fallbackURLs: fallbackURLs)
-
-        return ZStack(alignment: .leading) {
-            ForEach(0..<3, id: \.self) { index in
-                sourceIcon(urlString: urls.indices.contains(index) ? urls[index] : nil, index: index)
-                    .offset(x: CGFloat(index * 13))
-            }
-        }
-        .frame(width: 48, height: 22, alignment: .leading)
-    }
-
-    private func sourceIconURLs(items: [ChatStatusItem], fallbackURLs: [String]) -> [String] {
-        var result: [String] = []
-        for item in items {
-            if let link = item.link?.trimmingCharacters(in: .whitespacesAndNewlines), !link.isEmpty {
-                result.append(link)
-            }
-        }
-        if result.isEmpty {
-            result.append(contentsOf: fallbackURLs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
-        }
-        return Array(result.prefix(3))
-    }
-
-    @ViewBuilder
-    private func sourceIcon(urlString: String?, index: Int) -> some View {
-        let size: CGFloat = 22
-        let targetPixelSize = Int(size * UIScreen.main.scale)
-        let faviconURLs = urlString
-            .map { WebsiteFaviconResolver.candidateURLs(for: $0, size: max(64, targetPixelSize)) }
-            ?? []
-
-        FallbackCachedAsyncImage(urls: faviconURLs, targetPixelSize: targetPixelSize) { image in
-            image
-                .resizable()
-                .scaledToFill()
-        } placeholder: {
-            sourceIconFallback(index: index)
-        }
-        .frame(width: size, height: size)
-        .clipShape(Circle())
-        .overlay(Circle().strokeBorder(theme.background.opacity(0.88), lineWidth: 1))
-    }
-
-    private func sourceIconFallback(index: Int) -> some View {
-        let colors: [Color] = [
-            Color(red: 0.30, green: 0.38, blue: 1.0),
-            Color(red: 0.06, green: 0.74, blue: 0.62),
-            Color(red: 0.98, green: 0.52, blue: 0.16)
-        ]
-        return Circle()
-            .fill(colors[min(index, colors.count - 1)])
-            .overlay(
-                Image(systemName: "globe")
-                    .scaledFont(size: 10, weight: .bold)
-                    .foregroundStyle(.white.opacity(0.82))
-            )
     }
 
     private func webSearchLightweightDetails(
@@ -958,22 +1157,19 @@ struct StreamingStatusView: View {
 
         switch action.lowercased() {
         case "web_search", "websearch", "web search", "local_alpine_web_search", "browser_web_search":
-            let localAlpine = action.lowercased() == "local_alpine_web_search"
-            let browser = action.lowercased() == "browser_web_search"
             if isDone {
                 if let count = status.count, count > 0 {
-                    if browser { return "内置浏览器已读取 \(count) 个网页" }
-                    return localAlpine ? "本地已读取 \(count) 个网页" : "已搜索 \(count) 个网页"
+                    return "已找到 \(count) 个结果"
                 }
-                return desc ?? (browser ? "内置浏览器搜索完成" : (localAlpine ? "本地搜索完成" : "已完成联网搜索"))
+                return webSearchNeutralDescription(desc) ?? "搜索完成"
             }
             if let query = status.query, !query.isEmpty {
-                return browser ? "内置浏览器搜索：\(query)" : (localAlpine ? "本地搜索：\(query)" : "正在搜索：\(query)")
+                return "正在搜索：\(query)"
             }
             if !status.queries.isEmpty {
-                return browser ? "内置浏览器搜索中" : (localAlpine ? "本地搜索中" : "正在搜索")
+                return "正在搜索"
             }
-            return desc ?? (browser ? "内置浏览器搜索中" : (localAlpine ? "本地搜索中" : "正在联网搜索"))
+            return webSearchNeutralDescription(desc) ?? "正在搜索网络"
 
         case "generate_image", "image_generation", "generateimage":
             if isDone { return desc ?? "Image generated" }
