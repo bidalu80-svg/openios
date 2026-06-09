@@ -1117,25 +1117,51 @@ final class APIClient: @unchecked Sendable {
         var variants: [[String: Any]] = []
         if imageURLs.isEmpty {
             variants.append(base)
-            variants.append(base.merging(["n": 1]) { _, new in new })
+            var body = base
+            body["n"] = 1
+            variants.append(body)
         } else {
             if imageObjects.count > 1 {
-                variants.append(base.merging(["images": imageObjects]) { _, new in new })
-                variants.append(base.merging(["images": compactImageObjects]) { _, new in new })
+                var officialImagesBody = base
+                officialImagesBody["images"] = imageObjects
+                variants.append(officialImagesBody)
+
+                var compactImagesBody = base
+                compactImagesBody["images"] = compactImageObjects
+                variants.append(compactImagesBody)
             }
-            variants.append(base.merging(["image": imageObjects[0]]) { _, new in new })
-            variants.append(base.merging(["image": compactImageObjects[0]]) { _, new in new })
-            variants.append(base.merging(["image_urls": imageURLs]) { _, new in new })
-            variants.append(base.merging(["image": imageURLs[0]]) { _, new in new })
-            variants.append(base.merging(["image_url": imageURLs[0]]) { _, new in new })
-            variants.append(base.merging(["images": imageURLs]) { _, new in new })
+            var officialImageBody = base
+            officialImageBody["image"] = imageObjects[0]
+            variants.append(officialImageBody)
+
+            var compactImageBody = base
+            compactImageBody["image"] = compactImageObjects[0]
+            variants.append(compactImageBody)
+
+            var imageURLsBody = base
+            imageURLsBody["image_urls"] = imageURLs
+            variants.append(imageURLsBody)
+
+            var imageStringBody = base
+            imageStringBody["image"] = imageURLs[0]
+            variants.append(imageStringBody)
+
+            var imageURLBody = base
+            imageURLBody["image_url"] = imageURLs[0]
+            variants.append(imageURLBody)
+
+            var legacyImagesBody = base
+            legacyImagesBody["images"] = imageURLs
+            variants.append(legacyImagesBody)
         }
 
         guard !trimmedSize.isEmpty, trimmedSize != "auto" else {
             return variants
         }
         return variants + variants.map { body in
-            body.merging(["size": trimmedSize]) { _, new in new }
+            var bodyWithSize = body
+            bodyWithSize["size"] = trimmedSize
+            return bodyWithSize
         }
     }
 
@@ -1401,6 +1427,7 @@ final class APIClient: @unchecked Sendable {
         imageData: Data?,
         imageFileName: String
     ) -> [[String: Any]] {
+        let usesXAIVideoShape = isXAIVideoModel(model)
         let normalizedSize = normalizedVideoSize(for: size)
         var sizeValues = [normalizedSize]
         if normalizedSize != size {
@@ -1426,7 +1453,9 @@ final class APIClient: @unchecked Sendable {
             if let duration {
                 let seconds = min(max(duration, 1), 60)
                 if usesXAIVideoShape {
-                    baseVariants.append(officialBase.merging(["duration": seconds]) { _, new in new })
+                    var officialBody = officialBase
+                    officialBody["duration"] = seconds
+                    baseVariants.append(officialBody)
                 }
                 baseVariants.append(base.merging(["duration": seconds]) { _, new in new })
                 baseVariants.append(base.merging(["seconds": "\(seconds)"]) { _, new in new })
@@ -1473,8 +1502,13 @@ final class APIClient: @unchecked Sendable {
         var variants: [[String: Any]] = []
         for body in baseVariants {
             if usesXAIVideoShape {
-                variants.append(body.merging(["image": imageObject]) { _, new in new })
-                variants.append(body.merging(["image": compactImageObject]) { _, new in new })
+                var officialImageBody = body
+                officialImageBody["image"] = imageObject
+                variants.append(officialImageBody)
+
+                var compactImageBody = body
+                compactImageBody["image"] = compactImageObject
+                variants.append(compactImageBody)
             }
             variants.append(body.merging(["image": dataURL]) { _, new in new })
             variants.append(body.merging(["image_url": dataURL]) { _, new in new })
