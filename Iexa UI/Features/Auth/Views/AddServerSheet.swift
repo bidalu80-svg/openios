@@ -18,7 +18,6 @@ struct AddServerSheet: View {
     /// Local copy of the URL so we can reset viewModel.serverURL on cancel.
     @State private var url: String = ""
     @State private var apiKey: String = ""
-    @State private var userName: String = ""
     @State private var allowSelfSigned: Bool = false
     @State private var showAdvanced = false
 
@@ -51,14 +50,6 @@ struct AddServerSheet: View {
 
                     // Connection form — delegates entirely to the same ServerConnectionView UI
                     VStack(spacing: Spacing.lg) {
-                        ModernTextField(
-                            label: "用户名（可选）",
-                            placeholder: "用于本地显示，例如：Blank",
-                            text: $userName,
-                            textContentType: .name,
-                            onSubmit: { startConnect() }
-                        )
-
                         ModernTextField(
                             label: "站点 URL",
                             placeholder: "原生站点 URL，或兼容 API Base URL",
@@ -204,7 +195,7 @@ struct AddServerSheet: View {
         guard !url.isEmpty else { return }
         viewModel.serverURL = url
         viewModel.apiKey = apiKey
-        viewModel.localUserName = userName
+        viewModel.localUserName = appLoginID
         viewModel.allowSelfSignedCerts = allowSelfSigned
         viewModel.errorMessage = nil
         Task {
@@ -240,5 +231,11 @@ struct AddServerSheet: View {
         viewModel.localUserName = previousUserName
         viewModel.allowSelfSignedCerts = previousAllowSelfSigned
         onDismiss()
+    }
+
+    private var appLoginID: String {
+        let loginID = dependencies.appAccountAuthViewModel.currentLoginID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return loginID.isEmpty ? viewModel.localUserName.trimmingCharacters(in: .whitespacesAndNewlines) : loginID
     }
 }

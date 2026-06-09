@@ -195,6 +195,7 @@ struct AuthPrimaryButton: View {
 struct ServerConnectionView: View {
     @Bindable var viewModel: AuthViewModel
     @Environment(\.theme) private var theme
+    @Environment(AppDependencyContainer.self) private var dependencies
     @State private var showAdvancedOptions = false
     @State private var appeared = false
     @State private var logoScale: CGFloat = 0.5
@@ -243,18 +244,6 @@ struct ServerConnectionView: View {
                     // Connection form card
                     VStack(spacing: Spacing.lg) {
                         ModernTextField(
-                            label: "用户名（可选）",
-                            placeholder: "例如：Blank",
-                            text: $viewModel.localUserName,
-                            textContentType: .name,
-                            onSubmit: {
-                                if !viewModel.serverURL.isEmpty {
-                                    Task { await viewModel.connect() }
-                                }
-                            }
-                        )
-
-                        ModernTextField(
                             label: "BASEURL",
                             placeholder: "https://api.example.com",
                             text: $viewModel.serverURL,
@@ -262,7 +251,7 @@ struct ServerConnectionView: View {
                             textContentType: .URL,
                             onSubmit: {
                                 if !viewModel.serverURL.isEmpty {
-                                    Task { await viewModel.connect() }
+                                    Task { await connectUsingAppLoginID() }
                                 }
                             }
                         )
@@ -275,7 +264,7 @@ struct ServerConnectionView: View {
                             textContentType: .password,
                             onSubmit: {
                                 if !viewModel.serverURL.isEmpty {
-                                    Task { await viewModel.connect() }
+                                    Task { await connectUsingAppLoginID() }
                                 }
                             }
                         )
@@ -341,7 +330,7 @@ struct ServerConnectionView: View {
                             isLoading: viewModel.isConnecting,
                             isDisabled: viewModel.serverURL.isEmpty
                         ) {
-                            Task { await viewModel.connect() }
+                            Task { await connectUsingAppLoginID() }
                         }
                     }
                     .padding(Spacing.lg)
@@ -427,5 +416,17 @@ struct ServerConnectionView: View {
                 }
             )
         }
+    }
+
+    private var appLoginID: String {
+        dependencies.appAccountAuthViewModel.currentLoginID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func connectUsingAppLoginID() async {
+        if !appLoginID.isEmpty {
+            viewModel.localUserName = appLoginID
+        }
+        await viewModel.connect()
     }
 }

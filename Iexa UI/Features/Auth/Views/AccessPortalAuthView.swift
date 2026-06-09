@@ -12,7 +12,7 @@ struct AccessPortalAuthView: View {
     @State private var panelPulse = false
     @State private var shakeCount = 0
 
-    private enum Field {
+    private enum Field: Hashable {
         case account
         case password
     }
@@ -33,21 +33,31 @@ struct AccessPortalAuthView: View {
             ZStack {
                 accessPortalBackground
                     .ignoresSafeArea()
+
+                ScrollViewReader { scrollProxy in
+                    ScrollView(showsIndicators: false) {
+                        VStack(spacing: 0) {
+                            Spacer(minLength: 42)
+                            hero
+                            Spacer(minLength: 22)
+                            authPanel
+                            bottomPolicyText
+                            Spacer(minLength: 12)
+                        }
+                        .padding(.horizontal, 22)
+                        .padding(.top, safeTop + 8)
+                        .padding(.bottom, max(24, safeBottom + 18))
+                        .frame(minHeight: proxy.size.height, alignment: .center)
+                    }
+                    .scrollDismissesKeyboard(.interactively)
                     .contentShape(Rectangle())
                     .onTapGesture {
                         focusedField = nil
                     }
-
-                VStack(spacing: 0) {
-                    Spacer(minLength: 42)
-                    hero
-                    Spacer(minLength: 22)
-                    authPanel
-                    bottomPolicyText
+                    .onChange(of: focusedField) { _, field in
+                        scrollFocusedField(field, using: scrollProxy)
+                    }
                 }
-                .padding(.horizontal, 22)
-                .padding(.top, safeTop + 8)
-                .padding(.bottom, max(10, safeBottom + 4))
             }
         }
         .navigationBarBackButtonHidden(true)
@@ -89,11 +99,11 @@ struct AccessPortalAuthView: View {
                     .minimumScaleFactor(0.7)
                     .lineLimit(1)
 
-                AccessPortalTypewriterText(
-                    fullText: "目前的你，尚未发掘_",
-                    typingSpeed: 7.8,
-                    holdAtEnd: 1.0,
-                    holdAtStart: 0.35
+                AccessPortalSweepRevealText(
+                    text: "目前的你 尚未发掘",
+                    sweepDuration: 1.05,
+                    holdAtEnd: 1.25,
+                    holdAtStart: 0.22
                 )
                 .font(.system(size: 22, weight: .regular, design: .monospaced))
                 .minimumScaleFactor(0.7)
@@ -180,6 +190,7 @@ struct AccessPortalAuthView: View {
                     isFocused: focusedField == .account
                 )
                 .focused($focusedField, equals: .account)
+                .id(Field.account)
 
                 secureCredentialField(
                     icon: "lock.fill",
@@ -188,6 +199,7 @@ struct AccessPortalAuthView: View {
                     isFocused: focusedField == .password
                 )
                 .focused($focusedField, equals: .password)
+                .id(Field.password)
             }
 
             VStack(spacing: 12) {
@@ -289,6 +301,15 @@ struct AccessPortalAuthView: View {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.5)) {
                     shakeCount += 1
                 }
+            }
+        }
+    }
+
+    private func scrollFocusedField(_ field: Field?, using proxy: ScrollViewProxy) {
+        guard let field else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                proxy.scrollTo(field, anchor: .center)
             }
         }
     }
@@ -638,41 +659,83 @@ private struct AccessPortalSignalParticles: View {
     }
 }
 
-private struct AccessPortalTypewriterText: View {
-    let fullText: String
-    let typingSpeed: Double
-    let holdAtEnd: TimeInterval
-    let holdAtStart: TimeInterval
+private struct AccessPortalSweepRevealText: View {
+    let text: String
+    let sweepDuration: Double
+    let holdAtEnd: Double
+    let holdAtStart: Double
 
-    @State private var displayed = ""
-    @State private var task: Task<Void, Never>?
+    private let fadeDuration = 0.34
 
     var body: some View {
-        Text(displayed)
-            .onAppear {
-                start()
-            }
-            .onDisappear {
-                task?.cancel()
-                task = nil
-            }
-    }
+        let cycle = holdAtStart + sweepDuration + holdAtEnd + fadeDuration
 
-    private func start() {
-        guard task == nil else { return }
-        task = Task { @MainActor in
-            let characters = Array(fullText)
-            while !Task.isCancelled {
-                displayed = ""
-                try? await Task.sleep(nanoseconds: UInt64(holdAtStart * 1_000_000_000))
-                for index in characters.indices {
-                    displayed = String(characters[...index])
-                    try? await Task.sleep(nanoseconds: UInt64((1.0 / typingSpeed) * 1_000_000_000))
-                    if Task.isCancelled { return }
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { timeline in
+            let time = timeline.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: cycle)
+            let phase = revealPhase(at: time, cycle: cycle)
+
+            ZStack(alignment: .leading) {
+                Text(text)
+                    .hidden()
+
+                Text(text)
+                    .mask(alignment: .leading) {
+                        GeometryReader { proxy in
+                            Rectangle()
+                                .frame(width: max(0, proxy.size.width * phase.progress))
+                        }
+                    }
+                    .opacity(phase.opacity)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .overlay(alignment: .leading) {
+                if phase.showScanner {
+                    GeometryReader { proxy in
+                        scanBar
+                            .frame(width: 10, height: 24)
+                            .offset(x: max(0, proxy.size.width * phase.progress - 5))
+                    }
+                    .allowsHitTesting(false)
                 }
-                try? await Task.sleep(nanoseconds: UInt64(holdAtEnd * 1_000_000_000))
             }
         }
+    }
+
+    private var scanBar: some View {
+        RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+            .fill(Color.black.opacity(0.92))
+            .shadow(color: Color.black.opacity(0.10), radius: 2, x: 0, y: 0)
+    }
+
+    private func revealPhase(
+        at time: Double,
+        cycle: Double
+    ) -> (progress: CGFloat, opacity: Double, showScanner: Bool) {
+        if time < holdAtStart {
+            return (0, 0.06, false)
+        }
+
+        let sweepEnd = holdAtStart + sweepDuration
+        if time < sweepEnd {
+            let progress = eased((time - holdAtStart) / max(sweepDuration, 0.001))
+            return (progress, 1, true)
+        }
+
+        let holdEnd = sweepEnd + holdAtEnd
+        if time < holdEnd {
+            return (1, 1, false)
+        }
+
+        let fadeProgress = min(max((time - holdEnd) / max(fadeDuration, 0.001), 0), 1)
+        let fade = Double(eased(fadeProgress))
+        return (1, 1 - fade, false)
+    }
+
+    private func eased(_ raw: Double) -> CGFloat {
+        let clamped = min(max(raw, 0), 1)
+        let eased = clamped * clamped * (3 - 2 * clamped)
+        return CGFloat(eased)
     }
 }
 
