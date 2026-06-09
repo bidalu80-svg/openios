@@ -170,6 +170,18 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
         resolvedCapabilities.supportsReasoning == true
     }
 
+    var supportsVideoGeneration: Bool {
+        resolvedCapabilities.supportsVideoGeneration
+    }
+
+    var supportsAudioOutput: Bool {
+        resolvedCapabilities.supportsAudioOutput
+    }
+
+    var isCodeSpecialized: Bool {
+        LocalModelCapabilityRegistry.isCodeModel(self)
+    }
+
     var supportsToolCalling: Bool {
         resolvedCapabilities.supportsToolCalling == true || functionCallingMode == "native"
     }
@@ -202,6 +214,28 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
         "wan", "kling", "hailuo", "runway", "luma", "pika", "vidu",
         "seedance", "text-to-video", "image-to-video", "i2v", "t2v",
         "生视频", "视频生成"
+    ]
+
+    fileprivate static let videoGenerationHintTokens: [String] = [
+        "video", "videos", "text-to-video", "image-to-video", "t2v", "i2v",
+        "veo", "sora", "kling", "hailuo", "runway", "luma", "pika", "vidu",
+        "seedance", "wan-", "wan_", "wan2", "minimax-video", "grok-imagine-video",
+        "视频", "生视频", "视频生成"
+    ]
+
+    fileprivate static let reasoningHintTokens: [String] = [
+        "reasoning", "reasoner", "thinking", "think", "deepseek-r1",
+        "r1", "qwq", "o1", "o3", "o4", "grok-4", "grok-5"
+    ]
+
+    fileprivate static let audioHintTokens: [String] = [
+        "audio", "voice", "speech", "tts", "stt", "whisper", "transcribe",
+        "语音", "音频"
+    ]
+
+    fileprivate static let codeModelHintTokens: [String] = [
+        "coder", "code", "coding", "codestral", "devstral", "qwen-coder",
+        "deepseek-coder", "claude-code", "代码", "编程"
     ]
 
     // MARK: - Hashable & Equatable (rawModelItem excluded — [String: Any] is not Hashable)
@@ -304,6 +338,22 @@ struct LocalModelCapability: Hashable, Sendable {
             || endpointTypes.contains("image")
             || endpointTypes.contains("image_generations")
     }
+
+    var supportsVideoGeneration: Bool {
+        outputModalities.contains("video")
+            || endpointTypes.contains("video")
+            || endpointTypes.contains("videos")
+            || endpointTypes.contains("video_generation")
+            || endpointTypes.contains("video_generations")
+    }
+
+    var supportsAudioOutput: Bool {
+        outputModalities.contains("audio")
+            || outputModalities.contains("speech")
+            || endpointTypes.contains("audio")
+            || endpointTypes.contains("audio_generation")
+            || endpointTypes.contains("tts")
+    }
 }
 
 enum LocalModelCapabilityRegistry {
@@ -334,23 +384,28 @@ enum LocalModelCapabilityRegistry {
         applyCapabilities(model.capabilities, to: &capability)
         scanRawModelItem(model.rawModelItem, into: &capability)
 
-        var haystackParts = [model.id, model.name, model.description ?? "", model.connectionType ?? ""]
-        haystackParts.append(contentsOf: model.tags)
-        haystackParts.append(contentsOf: model.toolIds)
-        haystackParts.append(contentsOf: model.defaultFeatureIds)
-        haystackParts.append(contentsOf: model.actionIds)
-        haystackParts.append(contentsOf: model.actions.map(\.id))
-        haystackParts.append(contentsOf: model.actions.map(\.name))
-        let haystack = haystackParts.joined(separator: " ").lowercased()
+        let haystack = searchableText(for: model)
         if AIModel.imageGenerationHintTokens.contains(where: { haystack.contains($0) })
             && !AIModel.imageGenerationNegativeTokens.contains(where: { haystack.contains($0) }) {
             capability.outputModalities.insert("image")
             capability.endpointTypes.insert("image_generation")
         }
-        if haystack.contains("reasoning") || haystack.contains("think") || haystack.contains("o3") || haystack.contains("o4") {
+        if AIModel.videoGenerationHintTokens.contains(where: { haystack.contains($0) }) {
+            capability.outputModalities.insert("video")
+            capability.endpointTypes.insert("video_generation")
+        }
+        if AIModel.audioHintTokens.contains(where: { haystack.contains($0) }) {
+            capability.outputModalities.insert("audio")
+        }
+        if AIModel.reasoningHintTokens.contains(where: { haystack.contains($0) }) {
             capability.supportsReasoning = true
         }
         return capability
+    }
+
+    static func isCodeModel(_ model: AIModel) -> Bool {
+        let haystack = searchableText(for: model)
+        return AIModel.codeModelHintTokens.contains { haystack.contains($0) }
     }
 
     static func contextLength(for model: AIModel?, modelId: String?) -> Int? {
@@ -467,10 +522,16 @@ enum LocalModelCapabilityRegistry {
                !field.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 capability.supportsReasoning = true
             }
-        case "audio_output", "audiooutput":
-            if truth != false { capability.outputModalities.insert("audio") }
-        case "video_output", "videooutput":
-            if truth != false { capability.outputModalities.insert("video") }
+        case "audio_output", "audiooutput", "audio_generation", "audiogeneration", "tts", "speech":
+            if truth != false {
+                capability.outputModalities.insert("audio")
+                capability.endpointTypes.insert("audio_generation")
+            }
+        case "video_output", "videooutput", "video_generation", "videogeneration", "video_generations", "videogenerations", "videos", "text_to_video", "texttovideo", "image_to_video", "imagetovideo":
+            if truth != false {
+                capability.outputModalities.insert("video")
+                capability.endpointTypes.insert("video_generation")
+            }
         default:
             break
         }
@@ -587,5 +648,20 @@ enum LocalModelCapabilityRegistry {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "-", with: "_")
             .lowercased()
+    }
+
+    private static func searchableText(for model: AIModel) -> String {
+        var parts = [model.id, model.name, model.description ?? "", model.connectionType ?? ""]
+        parts.append(contentsOf: model.tags)
+        parts.append(contentsOf: model.toolIds)
+        parts.append(contentsOf: model.defaultFeatureIds)
+        parts.append(contentsOf: model.actionIds)
+        parts.append(contentsOf: model.actions.map(\.id))
+        parts.append(contentsOf: model.actions.map(\.name))
+        if let capabilities = model.capabilities {
+            parts.append(contentsOf: capabilities.keys)
+            parts.append(contentsOf: capabilities.values)
+        }
+        return parts.joined(separator: " ").lowercased()
     }
 }

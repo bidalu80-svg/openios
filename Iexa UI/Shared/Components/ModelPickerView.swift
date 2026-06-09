@@ -1,40 +1,5 @@
 import SwiftUI
 
-private struct ModelPickerCapabilityBadge: Hashable {
-    let icon: String
-    let text: String
-}
-
-private func modelPickerCapabilityBadges(for model: AIModel) -> [ModelPickerCapabilityBadge] {
-    var badges: [ModelPickerCapabilityBadge] = []
-    if let context = model.declaredContextLength, context > 0 {
-        let text: String
-        if context >= 1_000_000 {
-            text = "\(context / 1_000_000)M"
-        } else if context >= 1_000 {
-            text = "\(context / 1_000)K"
-        } else {
-            text = "\(context)"
-        }
-        badges.append(ModelPickerCapabilityBadge(icon: "rectangle.expand.vertical", text: text))
-    }
-    if model.supportsImageGeneration {
-        badges.append(ModelPickerCapabilityBadge(icon: "photo.on.rectangle.angled", text: "生图"))
-    } else if model.supportsImageInput {
-        badges.append(ModelPickerCapabilityBadge(icon: "eye", text: "视觉"))
-    }
-    if model.supportsReasoning {
-        badges.append(ModelPickerCapabilityBadge(icon: "brain.head.profile", text: "推理"))
-    }
-    if model.supportsToolCalling {
-        badges.append(ModelPickerCapabilityBadge(icon: "wrench.and.screwdriver", text: "工具"))
-    }
-    if model.supportsStructuredOutput {
-        badges.append(ModelPickerCapabilityBadge(icon: "curlybraces.square", text: "JSON"))
-    }
-    return badges
-}
-
 // MARK: - Model Picker View
 
 /// A floating popup that appears above the chat input when the user types `@`.
@@ -227,7 +192,7 @@ struct ModelPickerView: View {
 
     @ViewBuilder
     private func modelCapabilityRow(_ model: AIModel) -> some View {
-        let badges = modelPickerCapabilityBadges(for: model)
+        let badges = modelCapabilityBadges(for: model)
         if !badges.isEmpty {
             HStack(spacing: 8) {
                 ForEach(badges, id: \.self) { badge in

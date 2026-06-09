@@ -1,40 +1,5 @@
 import SwiftUI
 
-private struct ModelCapabilityBadge: Hashable {
-    let icon: String
-    let text: String
-}
-
-private func modelCapabilityBadges(for model: AIModel) -> [ModelCapabilityBadge] {
-    var badges: [ModelCapabilityBadge] = []
-    if let context = model.declaredContextLength, context > 0 {
-        let text: String
-        if context >= 1_000_000 {
-            text = "\(context / 1_000_000)M"
-        } else if context >= 1_000 {
-            text = "\(context / 1_000)K"
-        } else {
-            text = "\(context)"
-        }
-        badges.append(ModelCapabilityBadge(icon: "rectangle.expand.vertical", text: text))
-    }
-    if model.supportsImageGeneration {
-        badges.append(ModelCapabilityBadge(icon: "photo.on.rectangle.angled", text: "生图"))
-    } else if model.supportsImageInput {
-        badges.append(ModelCapabilityBadge(icon: "eye", text: "视觉"))
-    }
-    if model.supportsReasoning {
-        badges.append(ModelCapabilityBadge(icon: "brain.head.profile", text: "推理"))
-    }
-    if model.supportsToolCalling {
-        badges.append(ModelCapabilityBadge(icon: "wrench.and.screwdriver", text: "工具"))
-    }
-    if model.supportsStructuredOutput {
-        badges.append(ModelCapabilityBadge(icon: "curlybraces.square", text: "JSON"))
-    }
-    return badges
-}
-
 // MARK: - Model Selector Sheet
 
 /// A clean, native-feel bottom-sheet model picker.
