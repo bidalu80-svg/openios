@@ -1091,8 +1091,19 @@ final class APIClient: @unchecked Sendable {
     ) -> [[String: Any]] {
         let trimmedSize = size.trimmingCharacters(in: .whitespacesAndNewlines)
         let aspectRatio = xaiAspectRatio(for: trimmedSize)
-        let imageURLs = images.prefix(16).map {
+        let imageURLs = images.prefix(3).map {
             "data:\(mimeType(for: $0.fileName));base64,\($0.data.base64EncodedString())"
+        }
+        let imageObjects = imageURLs.map { url in
+            [
+                "type": "image_url",
+                "url": url
+            ] as [String: Any]
+        }
+        let compactImageObjects = imageURLs.map { url in
+            [
+                "url": url
+            ] as [String: Any]
         }
 
         var base: [String: Any] = [
@@ -1108,6 +1119,12 @@ final class APIClient: @unchecked Sendable {
             variants.append(base)
             variants.append(base.merging(["n": 1]) { _, new in new })
         } else {
+            if imageObjects.count > 1 {
+                variants.append(base.merging(["images": imageObjects]) { _, new in new })
+                variants.append(base.merging(["images": compactImageObjects]) { _, new in new })
+            }
+            variants.append(base.merging(["image": imageObjects[0]]) { _, new in new })
+            variants.append(base.merging(["image": compactImageObjects[0]]) { _, new in new })
             variants.append(base.merging(["image_urls": imageURLs]) { _, new in new })
             variants.append(base.merging(["image": imageURLs[0]]) { _, new in new })
             variants.append(base.merging(["image_url": imageURLs[0]]) { _, new in new })
@@ -1298,7 +1315,14 @@ final class APIClient: @unchecked Sendable {
             imageFileName: imageFileName
         )
 
-        let paths = [
+        let usesXAIVideoShape = isXAIVideoModel(model)
+        let paths = usesXAIVideoShape ? [
+            "/videos/generations",
+            "/videos",
+            "/video/generations",
+            "/videos/generate",
+            "/video/generate"
+        ] : [
             "/videos",
             "/videos/generations",
             "/video/generations",
@@ -1385,6 +1409,14 @@ final class APIClient: @unchecked Sendable {
 
         var baseVariants: [[String: Any]] = []
         for sizeValue in sizeValues {
+            var officialBase: [String: Any] = [
+                "model": model,
+                "prompt": prompt
+            ]
+            if let aspectRatio = xaiAspectRatio(for: sizeValue) {
+                officialBase["aspect_ratio"] = aspectRatio
+            }
+
             var base: [String: Any] = [
                 "model": model,
                 "prompt": prompt,
@@ -1393,9 +1425,12 @@ final class APIClient: @unchecked Sendable {
             ]
             if let duration {
                 let seconds = min(max(duration, 1), 60)
+                if usesXAIVideoShape {
+                    baseVariants.append(officialBase.merging(["duration": seconds]) { _, new in new })
+                }
+                baseVariants.append(base.merging(["duration": seconds]) { _, new in new })
                 baseVariants.append(base.merging(["seconds": "\(seconds)"]) { _, new in new })
                 baseVariants.append(base.merging(["duration_seconds": seconds]) { _, new in new })
-                baseVariants.append(base.merging(["duration": seconds]) { _, new in new })
                 if let dimensions = videoDimensions(from: sizeValue) {
                     baseVariants.append(base.merging([
                         "width": dimensions.width,
@@ -1406,6 +1441,9 @@ final class APIClient: @unchecked Sendable {
                     ]) { _, new in new })
                 }
             } else {
+                if usesXAIVideoShape {
+                    baseVariants.append(officialBase)
+                }
                 baseVariants.append(base)
                 if let dimensions = videoDimensions(from: sizeValue) {
                     baseVariants.append(base.merging([
@@ -1425,8 +1463,19 @@ final class APIClient: @unchecked Sendable {
         }
 
         let dataURL = "data:\(mimeType(for: imageFileName));base64,\(imageData.base64EncodedString())"
+        let imageObject: [String: Any] = [
+            "url": dataURL,
+            "type": "image_url"
+        ]
+        let compactImageObject: [String: Any] = [
+            "url": dataURL
+        ]
         var variants: [[String: Any]] = []
         for body in baseVariants {
+            if usesXAIVideoShape {
+                variants.append(body.merging(["image": imageObject]) { _, new in new })
+                variants.append(body.merging(["image": compactImageObject]) { _, new in new })
+            }
             variants.append(body.merging(["image": dataURL]) { _, new in new })
             variants.append(body.merging(["image_url": dataURL]) { _, new in new })
             variants.append(body.merging(["input_image": dataURL]) { _, new in new })
@@ -1436,6 +1485,13 @@ final class APIClient: @unchecked Sendable {
             variants.append(body)
         }
         return deduplicatedJSONDictionaries(variants)
+    }
+
+    private func isXAIVideoModel(_ model: String) -> Bool {
+        let raw = model.lowercased()
+        return raw.contains("grok-imagine-video")
+            || (raw.contains("grok") && raw.contains("video"))
+            || (raw.contains("grok") && raw.contains("imagine"))
     }
 
     private func normalizedVideoSize(for size: String) -> String {
@@ -2066,7 +2122,7 @@ final class APIClient: @unchecked Sendable {
         guard let value else { return nil }
 
         if let dict = value as? [String: Any] {
-            for key in ["task_id", "taskId", "taskID"] {
+            for key in ["request_id", "requestId", "requestID", "video_request_id", "videoRequestId", "task_id", "taskId", "taskID"] {
                 if let id = trimmedNonEmptyString(dict[key]) {
                     return id
                 }
@@ -2082,7 +2138,7 @@ final class APIClient: @unchecked Sendable {
                 }
             }
 
-            for key in ["data", "output", "task", "job", "result", "results"] {
+            for key in ["data", "output", "task", "job", "request", "result", "results"] {
                 if let id = firstVideoTaskId(in: dict[key]) {
                     return id
                 }
