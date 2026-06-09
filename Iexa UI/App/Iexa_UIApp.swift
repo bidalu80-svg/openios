@@ -422,7 +422,7 @@ struct RootView: View {
 
             case .credentialLogin:
                 NavigationStack {
-                    AuthMethodSelectionView(viewModel: viewModel)
+                    LoginView(viewModel: viewModel)
                 }
 
             case .signUp:

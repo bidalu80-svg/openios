@@ -97,17 +97,9 @@ struct SignUpView: View {
 
                 // Form card
                 VStack(spacing: Spacing.lg) {
-                    // Name field
-                    ModernTextField(
-                        label: "Full Name",
-                        placeholder: "What should we call you?",
-                        text: $viewModel.signUpName,
-                        textContentType: .name
-                    )
-
                     // Email field
                     ModernTextField(
-                        label: "Email",
+                        label: "登录 ID / 邮箱",
                         placeholder: "you@example.com",
                         text: $viewModel.signUpEmail,
                         keyboardType: .emailAddress,
@@ -119,7 +111,7 @@ struct SignUpView: View {
                         HStack(spacing: Spacing.xs) {
                             Image(systemName: "exclamationmark.circle")
                                 .scaledFont(size: 12)
-                            Text("Please enter a valid email address")
+                            Text("请输入有效的登录 ID / 邮箱")
                                 .scaledFont(size: 12, weight: .medium)
                         }
                         .foregroundStyle(theme.warning)
@@ -313,13 +305,13 @@ struct SignUpView: View {
             }
             .animation(.spring(response: 0.5, dampingFraction: 0.7).delay(0.1), value: formAppeared)
 
-            Text("Create Account")
+            Text("创建账号")
                 .scaledFont(size: 28, weight: .bold, design: .rounded)
                 .foregroundStyle(theme.textPrimary)
                 .opacity(formAppeared ? 1 : 0)
                 .offset(y: formAppeared ? 0 : 8)
 
-            Text("Join \(viewModel.serverName)")
+            Text("登录 ID 会自动作为用户名保存")
                 .scaledFont(size: 14)
                 .foregroundStyle(theme.textSecondary)
                 .opacity(formAppeared ? 1 : 0)

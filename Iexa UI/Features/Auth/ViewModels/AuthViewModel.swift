@@ -97,7 +97,7 @@ final class AuthViewModel {
     }
 
     var isLoginEnabled: Bool {
-        false
+        backendConfig?.isLoginFormEnabled ?? true
     }
 
     var isTrustedHeaderAuth: Bool {
@@ -246,7 +246,7 @@ final class AuthViewModel {
 
     /// Whether the entire sign-up form is valid.
     var isSignUpFormValid: Bool {
-        isSignUpNameValid && isSignUpEmailValid && isSignUpPasswordValid && doPasswordsMatch
+        isSignUpEmailValid && isSignUpPasswordValid && doPasswordsMatch
     }
 
     // MARK: - Private
@@ -738,7 +738,7 @@ final class AuthViewModel {
 
     // MARK: - Sign Up
 
-    /// Creates a new account with name, email, and password.
+    /// Creates a new account with login ID/email and password.
     func signUp() async {
         guard let client = dependencies?.apiClient else {
             errorMessage = "No server configured."
@@ -746,9 +746,7 @@ final class AuthViewModel {
         }
 
         guard isSignUpFormValid else {
-            if !isSignUpNameValid {
-                errorMessage = "Please enter your name."
-            } else if !isSignUpEmailValid {
+            if !isSignUpEmailValid {
                 errorMessage = "Please enter a valid email address."
             } else if !isSignUpPasswordValid {
                 errorMessage = "Password must be at least 8 characters."
@@ -762,11 +760,10 @@ final class AuthViewModel {
         errorMessage = nil
 
         do {
-            let trimmedName = signUpName.trimmingCharacters(in: .whitespaces)
             let trimmedEmail = signUpEmail.trimmingCharacters(in: .whitespaces).lowercased()
 
             let user = try await client.signup(
-                name: trimmedName,
+                name: trimmedEmail,
                 email: trimmedEmail,
                 password: signUpPassword
             )

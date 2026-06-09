@@ -88,14 +88,14 @@ struct LoginView: View {
 
                 AuthScreenHeader(
                     icon: "person.badge.key",
-                    title: "邮箱密码登录已移除",
-                    subtitle: "请返回并使用 API Key、SSO 或 LDAP 登录"
+                    title: "账号密码登录",
+                    subtitle: "使用你的 Iexa 登录 ID 进入工作区"
                 )
 
                 // Form card
                 VStack(spacing: Spacing.lg) {
                     ModernTextField(
-                        label: "邮箱",
+                        label: "登录 ID / 邮箱",
                         placeholder: "you@example.com",
                         text: $viewModel.email,
                         keyboardType: .emailAddress,
@@ -122,12 +122,20 @@ struct LoginView: View {
                     }
 
                     AuthPrimaryButton(
-                        title: "已禁用",
-                        icon: "lock.slash",
+                        title: "登录",
+                        icon: viewModel.isLoggingIn ? nil : "arrow.right.circle.fill",
                         isLoading: viewModel.isLoggingIn,
-                        isDisabled: true
+                        isDisabled: viewModel.email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || viewModel.password.isEmpty
                     ) {
-                        viewModel.goBack()
+                        Task {
+                            await viewModel.login()
+                            if viewModel.errorMessage != nil {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.5)) {
+                                    shakeCount += 1
+                                }
+                            }
+                        }
                     }
 
                     // Sign up link (when enabled)
@@ -359,6 +367,17 @@ struct AuthMethodSelectionView: View {
 
                 // Auth methods
                 VStack(spacing: Spacing.md) {
+                    if viewModel.isLoginEnabled {
+                        authMethodButton(
+                            icon: "person.badge.key",
+                            title: "账号密码登录",
+                            subtitle: "使用 Iexa 登录 ID 和密码",
+                            index: 0
+                        ) {
+                            viewModel.goToPhase(.credentialLogin)
+                        }
+                    }
+
                     // OAuth provider buttons
                     if !enabledOAuthProviders.isEmpty {
                         VStack(spacing: Spacing.sm) {
@@ -374,7 +393,7 @@ struct AuthMethodSelectionView: View {
                         }
 
                         // Divider
-                        if viewModel.isLDAPEnabled {
+                        if viewModel.isLDAPEnabled || viewModel.isLoginEnabled {
                             dividerWithText("或")
                                 .opacity(appeared ? 1 : 0)
                                 .animation(.easeOut(duration: 0.3).delay(0.5), value: appeared)
@@ -392,7 +411,7 @@ struct AuthMethodSelectionView: View {
                         }
                     }
 
-                    if enabledOAuthProviders.isEmpty && !viewModel.isLDAPEnabled && !viewModel.isTrustedHeaderAuth {
+                    if enabledOAuthProviders.isEmpty && !viewModel.isLoginEnabled && !viewModel.isLDAPEnabled && !viewModel.isTrustedHeaderAuth {
                         noPasswordLoginNotice
                             .opacity(appeared ? 1 : 0)
                             .offset(y: appeared ? 0 : 15)
@@ -486,11 +505,11 @@ struct AuthMethodSelectionView: View {
                 .background(theme.surfaceContainer)
                 .clipShape(Circle())
 
-            Text("邮箱密码登录已移除")
+            Text("没有可用的登录方式")
                 .scaledFont(size: 16, weight: .semibold)
                 .foregroundStyle(theme.textPrimary)
 
-            Text("请在站点配置里使用 API Key，或切换到已保存的站点。")
+            Text("当前站点没有开放账号密码、SSO 或 LDAP 登录。")
                 .scaledFont(size: 13)
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
