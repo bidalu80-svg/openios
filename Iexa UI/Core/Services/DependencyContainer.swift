@@ -213,6 +213,9 @@ final class AppDependencyContainer: ServiceContainer {
     /// The shared auth view model.
     private(set) var authViewModel: AuthViewModel
 
+    /// App-level account gate shown before the server/site configuration flow.
+    private(set) var appAccountAuthViewModel: AppAccountAuthViewModel
+
     /// Weak reference to the app router so services can reset navigation on server switch.
     weak var router: AppRouter?
 
@@ -312,6 +315,7 @@ final class AppDependencyContainer: ServiceContainer {
         self.serverConfigStore = ServerConfigStore()
         self.appearanceManager = AppearanceManager()
         self.accessibilityManager = AccessibilityManager()
+        self.appAccountAuthViewModel = AppAccountAuthViewModel()
         // Create AuthViewModel once with all dependencies to avoid
         // wasted work from double-initialization.
         self.authViewModel = AuthViewModel(

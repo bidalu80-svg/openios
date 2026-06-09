@@ -405,62 +405,80 @@ struct RootView: View {
         dependencies.authViewModel
     }
 
+    private var appAccountViewModel: AppAccountAuthViewModel {
+        dependencies.appAccountAuthViewModel
+    }
+
     var body: some View {
         Group {
-            switch viewModel.phase {
-            case .serverConnection:
-                ServerConnectionView(viewModel: viewModel)
-
-            case .restoringSession:
-                // Show a lightweight loading/retry screen while validating the saved token
-                sessionRestoringView
-
-            case .authMethodSelection:
+            if !appAccountViewModel.isAuthenticated {
                 NavigationStack {
-                    AuthMethodSelectionView(viewModel: viewModel)
+                    AccessPortalAuthView(viewModel: appAccountViewModel)
                 }
+            } else {
+                switch viewModel.phase {
+                case .serverConnection:
+                    ServerConnectionView(viewModel: viewModel)
 
-            case .credentialLogin:
-                NavigationStack {
-                    LoginView(viewModel: viewModel)
-                }
+                case .restoringSession:
+                    // Show a lightweight loading/retry screen while validating the saved token
+                    sessionRestoringView
 
-            case .signUp:
-                NavigationStack {
-                    SignUpView(viewModel: viewModel)
-                }
-
-            case .pendingApproval:
-                PendingApprovalView(viewModel: viewModel)
-
-            case .ldapLogin:
-                NavigationStack {
-                    LDAPLoginView(viewModel: viewModel)
-                }
-
-            case .ssoLogin:
-                NavigationStack {
-                    SSOAuthView(viewModel: viewModel)
-                }
-
-            case .authenticated:
-                authenticatedContent
-
-            case .serverSwitcher:
-                NavigationStack {
-                    ScrollView {
-                        SavedServersView(viewModel: viewModel, showAddServerButton: true)
+                case .authMethodSelection:
+                    NavigationStack {
+                        AuthMethodSelectionView(viewModel: viewModel)
                     }
-                    .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-                    .navigationTitle("Switch Server")
-                    .navigationBarTitleDisplayMode(.inline)
+
+                case .credentialLogin:
+                    NavigationStack {
+                        LoginView(viewModel: viewModel)
+                    }
+
+                case .signUp:
+                    NavigationStack {
+                        SignUpView(viewModel: viewModel)
+                    }
+
+                case .pendingApproval:
+                    PendingApprovalView(viewModel: viewModel)
+
+                case .ldapLogin:
+                    NavigationStack {
+                        LDAPLoginView(viewModel: viewModel)
+                    }
+
+                case .ssoLogin:
+                    NavigationStack {
+                        SSOAuthView(viewModel: viewModel)
+                    }
+
+                case .authenticated:
+                    authenticatedContent
+
+                case .serverSwitcher:
+                    NavigationStack {
+                        ScrollView {
+                            SavedServersView(viewModel: viewModel, showAddServerButton: true)
+                        }
+                        .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+                        .navigationTitle("Switch Server")
+                        .navigationBarTitleDisplayMode(.inline)
+                    }
                 }
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: viewModel.phase)
-        .task {
+        .task(id: appAccountViewModel.isAuthenticated) {
+            guard appAccountViewModel.isAuthenticated else {
+                hasAttemptedRestore = false
+                return
+            }
+
             // Migrate single-token-per-server to multi-account structure (one-time).
             viewModel.runLegacyMigrationIfNeeded()
+            if viewModel.localUserName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                viewModel.localUserName = appAccountViewModel.currentLoginID
+            }
 
             guard !hasAttemptedRestore else { return }
             hasAttemptedRestore = true

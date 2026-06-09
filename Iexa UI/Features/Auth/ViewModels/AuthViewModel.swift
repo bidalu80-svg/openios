@@ -1015,6 +1015,11 @@ final class AuthViewModel {
         // Clear cached profile images so the next user gets fresh avatars
         Task { await ImageCacheService.shared.evictProfileImages() }
 
+        // Keep the server profile, but do not keep the signed-out account
+        // selected; otherwise account switching can silently restore it.
+        serverConfigStore.clearActiveAccountOnActiveServer()
+        await dependencies?.appAccountAuthViewModel.signOut()
+
         currentUser = nil
         email = ""
         password = ""
