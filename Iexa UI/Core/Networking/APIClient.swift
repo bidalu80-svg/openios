@@ -1577,7 +1577,7 @@ final class APIClient: @unchecked Sendable {
 
     private func pollVideoGenerationTask(
         taskId: String,
-        timeout: TimeInterval = 600
+        timeout: TimeInterval = 1_800
     ) async throws -> String {
         let startedAt = Date()
         let statusPaths = videoTaskStatusPaths(taskId: taskId)
