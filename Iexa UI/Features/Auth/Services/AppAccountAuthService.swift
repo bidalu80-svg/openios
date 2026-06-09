@@ -4,6 +4,7 @@ enum AppAccountAuthServiceError: LocalizedError {
     case invalidBaseURL
     case invalidAccount
     case weakPassword
+    case invalidActivationCode
     case invalidResponse
     case http(status: Int, message: String)
     case server(String)
@@ -16,6 +17,8 @@ enum AppAccountAuthServiceError: LocalizedError {
             return "账号格式无效。"
         case .weakPassword:
             return "密码至少需要 6 位。"
+        case .invalidActivationCode:
+            return "请填写有效激活码。"
         case .invalidResponse:
             return "认证服务返回了无法识别的响应。"
         case .http(let status, let message):
@@ -74,13 +77,17 @@ final class AppAccountAuthService {
         return session
     }
 
-    func register(baseURL: String, account: String, password: String) async throws -> AppAccountAuthSession {
+    func register(baseURL: String, account: String, password: String, activationCode: String) async throws -> AppAccountAuthSession {
         let normalizedAccount = Self.normalizedAccount(account)
+        let normalizedActivationCode = Self.normalizedActivationCode(activationCode)
         guard Self.isAccountValid(normalizedAccount) else {
             throw AppAccountAuthServiceError.invalidAccount
         }
         guard Self.isPasswordValid(password) else {
             throw AppAccountAuthServiceError.weakPassword
+        }
+        guard Self.isActivationCodeValid(normalizedActivationCode) else {
+            throw AppAccountAuthServiceError.invalidActivationCode
         }
 
         let object = try await sendRequest(
@@ -92,7 +99,10 @@ final class AppAccountAuthService {
                 "account": normalizedAccount,
                 "name": normalizedAccount,
                 "username": normalizedAccount,
-                "password": password
+                "password": password,
+                "activationCode": normalizedActivationCode,
+                "activation_code": normalizedActivationCode,
+                "inviteCode": normalizedActivationCode
             ],
             bearerToken: nil
         )
@@ -116,8 +126,19 @@ final class AppAccountAuthService {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    static func normalizedActivationCode(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+            .replacingOccurrences(of: " ", with: "")
+    }
+
     static func isAccountValid(_ raw: String) -> Bool {
         let pattern = #"^[A-Za-z0-9_.+\-@]{2,64}$"#
+        return raw.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    static func isActivationCodeValid(_ raw: String) -> Bool {
+        let pattern = #"^[A-Z0-9][A-Z0-9\-]{3,63}$"#
         return raw.range(of: pattern, options: .regularExpression) != nil
     }
 

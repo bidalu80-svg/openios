@@ -15,14 +15,19 @@ struct AccessPortalAuthView: View {
     private enum Field: Hashable {
         case account
         case password
+        case activation
     }
 
     private var normalizedAccount: String {
         AppAccountAuthService.normalizedAccount(viewModel.account)
     }
 
-    private var canSubmit: Bool {
-        viewModel.canSubmit
+    private var canLogin: Bool {
+        viewModel.canLogin
+    }
+
+    private var canRegister: Bool {
+        viewModel.canRegister
     }
 
     var body: some View {
@@ -200,6 +205,19 @@ struct AccessPortalAuthView: View {
                 )
                 .focused($focusedField, equals: .password)
                 .id(Field.password)
+
+                credentialField(
+                    icon: "key.fill",
+                    placeholder: "激活码（注册必填）",
+                    text: $viewModel.activationCode,
+                    keyboardType: .asciiCapable,
+                    textContentType: nil,
+                    submitLabel: .go,
+                    nextField: nil,
+                    isFocused: focusedField == .activation
+                )
+                .focused($focusedField, equals: .activation)
+                .id(Field.activation)
             }
 
             VStack(spacing: 12) {
@@ -207,7 +225,7 @@ struct AccessPortalAuthView: View {
                     title: buttonTitle(for: .login),
                     systemIcon: "person.fill",
                     highlighted: true,
-                    disabled: !canSubmit
+                    disabled: !canLogin
                 ) {
                     submit(.login)
                 }
@@ -216,7 +234,7 @@ struct AccessPortalAuthView: View {
                     title: buttonTitle(for: .register),
                     systemIcon: "person.badge.plus.fill",
                     highlighted: false,
-                    disabled: !canSubmit
+                    disabled: !canRegister
                 ) {
                     submit(.register)
                 }
@@ -292,9 +310,10 @@ struct AccessPortalAuthView: View {
     }
 
     private func submit(_ mode: AppAccountAuthMode) {
-        guard canSubmit else { return }
+        guard mode == .login ? canLogin : canRegister else { return }
         focusedField = nil
         viewModel.account = normalizedAccount
+        viewModel.activationCode = AppAccountAuthService.normalizedActivationCode(viewModel.activationCode)
         Task {
             await viewModel.submit(as: mode)
             if viewModel.errorMessage != nil {
@@ -318,6 +337,10 @@ struct AccessPortalAuthView: View {
         icon: String,
         placeholder: String,
         text: Binding<String>,
+        keyboardType: UIKeyboardType = .emailAddress,
+        textContentType: UITextContentType? = .username,
+        submitLabel: SubmitLabel = .next,
+        nextField: Field? = .password,
         isFocused: Bool
     ) -> some View {
         HStack(spacing: 10) {
@@ -327,15 +350,19 @@ struct AccessPortalAuthView: View {
                 .frame(width: 24)
 
             TextField(placeholder, text: text)
-                .keyboardType(.emailAddress)
-                .textContentType(.username)
+                .keyboardType(keyboardType)
+                .textContentType(textContentType)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(Color.black.opacity(0.92))
-                .submitLabel(.next)
+                .submitLabel(submitLabel)
                 .onSubmit {
-                    focusedField = .password
+                    if let nextField {
+                        focusedField = nextField
+                    } else {
+                        submit(.register)
+                    }
                 }
         }
         .padding(.horizontal, 14)
@@ -362,9 +389,9 @@ struct AccessPortalAuthView: View {
                 .autocorrectionDisabled()
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(Color.black.opacity(0.92))
-                .submitLabel(.go)
+                .submitLabel(.next)
                 .onSubmit {
-                    submit(.login)
+                    focusedField = .activation
                 }
         }
         .padding(.horizontal, 14)

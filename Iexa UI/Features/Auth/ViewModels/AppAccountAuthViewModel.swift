@@ -6,6 +6,7 @@ final class AppAccountAuthViewModel {
     var baseURL: String
     var account: String = ""
     var password: String = ""
+    var activationCode: String = ""
     var isSubmitting: Bool = false
     var statusMessage: String = ""
     var errorMessage: String?
@@ -38,13 +39,23 @@ final class AppAccountAuthViewModel {
         !AppAccountAuthSessionStore.normalizedBaseURL(baseURL).isEmpty
     }
 
-    var canSubmit: Bool {
+    var canLogin: Bool {
         guard !isSubmitting else { return false }
         let endpoint = AppAccountAuthSessionStore.normalizedBaseURL(baseURL)
         let normalizedAccount = AppAccountAuthService.normalizedAccount(account)
         return !endpoint.isEmpty
             && AppAccountAuthService.isAccountValid(normalizedAccount)
             && AppAccountAuthService.isPasswordValid(password)
+    }
+
+    var canRegister: Bool {
+        guard canLogin else { return false }
+        let normalizedActivationCode = AppAccountAuthService.normalizedActivationCode(activationCode)
+        return AppAccountAuthService.isActivationCodeValid(normalizedActivationCode)
+    }
+
+    var canSubmit: Bool {
+        mode == .register ? canRegister : canLogin
     }
 
     func submit(as mode: AppAccountAuthMode) async {
@@ -67,6 +78,11 @@ final class AppAccountAuthViewModel {
             errorMessage = "密码至少 6 位。"
             return
         }
+        let normalizedActivationCode = AppAccountAuthService.normalizedActivationCode(activationCode)
+        if mode == .register && !AppAccountAuthService.isActivationCodeValid(normalizedActivationCode) {
+            errorMessage = "请填写有效激活码。"
+            return
+        }
 
         errorMessage = nil
         statusMessage = ""
@@ -79,7 +95,12 @@ final class AppAccountAuthViewModel {
             case .login:
                 result = try await service.login(baseURL: endpoint, account: normalizedAccount, password: password)
             case .register:
-                result = try await service.register(baseURL: endpoint, account: normalizedAccount, password: password)
+                result = try await service.register(
+                    baseURL: endpoint,
+                    account: normalizedAccount,
+                    password: password,
+                    activationCode: normalizedActivationCode
+                )
             }
             AppAccountAuthSessionStore.saveBaseURL(endpoint)
             AppAccountAuthSessionStore.saveSession(result)
@@ -87,6 +108,7 @@ final class AppAccountAuthViewModel {
             session = result
             account = result.user.loginID
             password = ""
+            activationCode = ""
             statusMessage = mode == .login ? "登录成功" : "注册并登录成功"
         } catch {
             errorMessage = friendlyMessage(for: error)
@@ -108,6 +130,7 @@ final class AppAccountAuthViewModel {
         AppAccountAuthSessionStore.clearSession()
         session = nil
         password = ""
+        activationCode = ""
         statusMessage = "已退出登录"
         errorMessage = nil
     }
