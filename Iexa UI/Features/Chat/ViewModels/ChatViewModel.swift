@@ -6082,7 +6082,10 @@ final class ChatViewModel {
                             let imagePrompt = modelPromptText.trimmingCharacters(in: .whitespacesAndNewlines)
                             let requestedImageCount = Self.requestedImageCount(from: imagePrompt)
                             let requestedCanvasSize = Self.requestedImageCanvasSize(from: imagePrompt)
-                            let requestedImageSize = Self.imageEndpointSize(for: requestedCanvasSize)
+                            let requestedImageSize = self.imageRequestSize(
+                                for: requestedCanvasSize,
+                                modelId: modelId
+                            )
                             let editImages = self.editableImages(from: currentAttachments)
                             let imagePromptForAPI = Self.promptWithImageSizeInstruction(
                                 imagePrompt.isEmpty
@@ -8573,7 +8576,11 @@ final class ChatViewModel {
                 )
                 let requestedImageCount = Self.requestedImageCount(from: imagePrompt)
                 let requestedCanvasSize = Self.requestedImageCanvasSize(from: imagePrompt)
-                let requestedImageSize = Self.imageEndpointSize(for: requestedCanvasSize)
+                let requestedImageSize = self.imageRequestSize(
+                    for: requestedCanvasSize,
+                    modelId: modelId,
+                    preferServerDefaultModel: preferServerDefaultImageModel
+                )
                 let editImages = self.editableImages(from: currentAttachments)
                 let imagePromptForAPI = Self.promptWithImageSizeInstruction(
                     imagePrompt.isEmpty
@@ -10915,7 +10922,11 @@ final class ChatViewModel {
         let requestedCanvasSize = (arguments["size"] as? String)
             .flatMap { Self.requestedImageCanvasSize(from: $0) }
             ?? Self.requestedImageCanvasSize(from: imagePrompt)
-        let requestedImageSize = Self.imageEndpointSize(for: requestedCanvasSize)
+        let requestedImageSize = imageRequestSize(
+            for: requestedCanvasSize,
+            modelId: selectedModelId ?? conversation?.model ?? call.name,
+            preferServerDefaultModel: true
+        )
         let promptForAPI = Self.promptWithImageSizeInstruction(
             imagePrompt,
             canvasSize: requestedCanvasSize,
@@ -13471,6 +13482,22 @@ final class ChatViewModel {
             && !shouldPreferChatNativeImageGeneration(modelId: modelId))
     }
 
+    private func imageRequestSize(
+        for canvasSize: String,
+        modelId: String,
+        preferServerDefaultModel: Bool = false
+    ) -> String {
+        Self.imageRequestSize(for: canvasSize)
+    }
+
+    private static func imageRequestSize(for canvasSize: String) -> String {
+        let trimmed = canvasSize.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard imagePixelSize(from: trimmed) != nil else {
+            return imageEndpointSize(for: trimmed)
+        }
+        return trimmed
+    }
+
     private func shouldUseDirectImageGeneration(modelId: String) -> Bool {
         let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
             .lowercased()
@@ -13656,10 +13683,6 @@ final class ChatViewModel {
             return exactSize
         }
 
-        if let aspectSize = firstAspectRatioSize(in: text) {
-            return aspectSize
-        }
-
         let lowercased = text.lowercased()
         let squareScore = keywordScore(
             in: lowercased,
@@ -13673,6 +13696,19 @@ final class ChatViewModel {
             in: lowercased,
             keywords: ["横屏", "宽屏", "全景", "风景", "场景", "城市", "建筑", "汽车", "跑车", "车辆", "小米 su7", "su7", "山脉", "海边", "湖边", "街景", "电影感", "剧照", "桌面壁纸", "电脑壁纸", "landscape", "wide", "widescreen", "panorama", "cinematic", "banner", "vehicle", "automotive", "desktop wallpaper"]
         )
+
+        if let kSize = firstKImageSize(
+            in: text,
+            squareScore: squareScore,
+            portraitScore: portraitScore,
+            landscapeScore: landscapeScore
+        ) {
+            return kSize
+        }
+
+        if let aspectSize = firstAspectRatioSize(in: text) {
+            return aspectSize
+        }
 
         if squareScore > 0 && portraitScore == 0 && landscapeScore == 0 {
             return defaultSize
@@ -13729,13 +13765,73 @@ final class ChatViewModel {
               let heightRange = Range(match.range(at: 2), in: text),
               let width = Int(String(text[widthRange])),
               let height = Int(String(text[heightRange])),
-              (64...4096).contains(width),
-              (64...4096).contains(height)
+              (64...8192).contains(width),
+              (64...8192).contains(height)
         else { return nil }
         return "\(width)x\(height)"
     }
 
-    private static func firstAspectRatioSize(in text: String) -> String? {
+    private static func firstKImageSize(
+        in text: String,
+        squareScore: Int,
+        portraitScore: Int,
+        landscapeScore: Int
+    ) -> String? {
+        let pattern = #"(?<![A-Za-z0-9])(\d{1,2})\s*[kK](?![A-Za-z0-9])"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: nsRange),
+              match.numberOfRanges >= 2,
+              let range = Range(match.range(at: 1), in: text),
+              let kValue = Int(String(text[range])),
+              (1...16).contains(kValue)
+        else { return nil }
+
+        let longEdge = imageLongEdgePixels(forK: kValue)
+        if let ratio = firstAspectRatioValues(in: text) {
+            return imageSize(longEdge: longEdge, ratioWidth: ratio.width, ratioHeight: ratio.height)
+        }
+        if squareScore > 0 && portraitScore == 0 && landscapeScore == 0 {
+            return "\(longEdge)x\(longEdge)"
+        }
+        if portraitScore > landscapeScore {
+            return imageSize(longEdge: longEdge, ratioWidth: 9, ratioHeight: 16)
+        }
+        return imageSize(longEdge: longEdge, ratioWidth: 16, ratioHeight: 9)
+    }
+
+    private static func imageLongEdgePixels(forK value: Int) -> Int {
+        switch value {
+        case 1: return 1024
+        case 2: return 2560
+        case 4: return 3840
+        case 5: return 5120
+        case 8: return 7680
+        default:
+            return min(max(value * 1024, 1024), 8192)
+        }
+    }
+
+    private static func imageSize(longEdge: Int, ratioWidth: Double, ratioHeight: Double) -> String {
+        guard ratioWidth > 0, ratioHeight > 0 else {
+            return "\(longEdge)x\(longEdge)"
+        }
+        if abs(ratioWidth - ratioHeight) < 0.08 {
+            return "\(longEdge)x\(longEdge)"
+        }
+        if ratioWidth > ratioHeight {
+            let height = clampImageDimension(Int((Double(longEdge) * ratioHeight / ratioWidth).rounded()))
+            return "\(longEdge)x\(height)"
+        }
+        let width = clampImageDimension(Int((Double(longEdge) * ratioWidth / ratioHeight).rounded()))
+        return "\(width)x\(longEdge)"
+    }
+
+    private static func clampImageDimension(_ value: Int) -> Int {
+        min(max(value, 64), 8192)
+    }
+
+    private static func firstAspectRatioValues(in text: String) -> (width: Double, height: Double)? {
         let pattern = #"(?<!\d)(\d{1,3})\s*[:：]\s*(\d{1,3})(?!\d)"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
@@ -13748,12 +13844,17 @@ final class ChatViewModel {
               width > 0,
               height > 0
         else { return nil }
+        return (width, height)
+    }
 
-        let ratio = width / height
-        if abs(ratio - 1.0) < 0.08 {
+    private static func firstAspectRatioSize(in text: String) -> String? {
+        guard let ratio = firstAspectRatioValues(in: text) else { return nil }
+
+        let value = ratio.width / ratio.height
+        if abs(value - 1.0) < 0.08 {
             return "1024x1024"
         }
-        return ratio > 1.0 ? "1792x1024" : "1024x1792"
+        return value > 1.0 ? "1792x1024" : "1024x1792"
     }
 
     private static func promptWithImageSizeInstruction(_ prompt: String, canvasSize: String, endpointSize: String) -> String {
@@ -14231,8 +14332,8 @@ final class ChatViewModel {
     private static func imagePixelSize(from size: String) -> CGSize? {
         let parts = size.split(separator: "x", maxSplits: 1).compactMap { Double(String($0)) }
         guard parts.count == 2,
-              (64...4096).contains(parts[0]),
-              (64...4096).contains(parts[1])
+              (64...8192).contains(parts[0]),
+              (64...8192).contains(parts[1])
         else { return nil }
         return CGSize(width: CGFloat(parts[0]), height: CGFloat(parts[1]))
     }
@@ -15864,7 +15965,7 @@ final class ChatViewModel {
            !trimmedContent.isEmpty,
            Self.looksLikeImageGenerationRequest(trimmedContent) {
             let canvasSize = Self.requestedImageCanvasSize(from: trimmedContent)
-            let endpointSize = Self.imageEndpointSize(for: canvasSize)
+            let endpointSize = Self.imageRequestSize(for: canvasSize)
             content = Self.promptWithImageSizeInstruction(trimmedContent, canvasSize: canvasSize, endpointSize: endpointSize)
         }
 

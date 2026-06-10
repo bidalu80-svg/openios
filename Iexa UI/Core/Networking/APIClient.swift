@@ -839,6 +839,177 @@ final class APIClient: @unchecked Sendable {
         )
     }
 
+    private func imageResolutionBodyVariants(
+        for bodies: [[String: Any]],
+        size: String,
+        includeBaseVariant: Bool = false
+    ) -> [[String: Any]] {
+        let fragments = imageResolutionJSONFragments(for: size)
+        var variants: [[String: Any]] = []
+        for body in bodies {
+            for fragment in fragments {
+                variants.append(body.merging(fragment) { _, new in new })
+            }
+            if includeBaseVariant {
+                variants.append(body)
+            }
+        }
+        return deduplicatedJSONDictionaries(variants)
+    }
+
+    private func imageResolutionStringFieldVariants(
+        for fields: [String: String],
+        size: String,
+        includeBaseVariant: Bool = false
+    ) -> [[String: String]] {
+        let fragments = imageResolutionStringFragments(for: size)
+        var variants: [[String: String]] = []
+        for fragment in fragments {
+            variants.append(fields.merging(fragment) { _, new in new })
+        }
+        if includeBaseVariant {
+            variants.append(fields)
+        }
+        return deduplicatedStringDictionaries(variants)
+    }
+
+    private func imageResolutionJSONFragments(for size: String) -> [[String: Any]] {
+        let trimmed = size.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [[:]] }
+        if trimmed.lowercased() == "auto" {
+            return [["size": "auto"]]
+        }
+
+        var fragments: [[String: Any]] = [["size": trimmed]]
+        guard let dimensions = imageDimensions(from: trimmed) else {
+            return deduplicatedJSONDictionaries(fragments)
+        }
+
+        let width = dimensions.width
+        let height = dimensions.height
+        let aspectRatio = imageAspectRatio(width: width, height: height)
+        fragments.append(["size": trimmed, "width": width, "height": height])
+        fragments.append(["width": width, "height": height])
+        fragments.append(["size": trimmed, "aspect_ratio": aspectRatio])
+        fragments.append(["aspect_ratio": aspectRatio])
+        fragments.append(["aspectRatio": aspectRatio])
+        fragments.append(["image_size": trimmed])
+        fragments.append(["imageSize": trimmed])
+        fragments.append(["resolution": trimmed])
+        fragments.append(["dimensions": ["width": width, "height": height]])
+
+        let legacySize = legacyImageEndpointSize(width: width, height: height)
+        if legacySize != trimmed {
+            fragments.append(["size": legacySize, "width": width, "height": height])
+            fragments.append(["size": legacySize, "aspect_ratio": aspectRatio])
+            fragments.append(["size": legacySize])
+        }
+
+        return deduplicatedJSONDictionaries(fragments)
+    }
+
+    private func imageResolutionStringFragments(for size: String) -> [[String: String]] {
+        let trimmed = size.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [[:]] }
+        if trimmed.lowercased() == "auto" {
+            return [["size": "auto"]]
+        }
+
+        var fragments: [[String: String]] = [["size": trimmed]]
+        guard let dimensions = imageDimensions(from: trimmed) else {
+            return deduplicatedStringDictionaries(fragments)
+        }
+
+        let width = "\(dimensions.width)"
+        let height = "\(dimensions.height)"
+        let aspectRatio = imageAspectRatio(width: dimensions.width, height: dimensions.height)
+        fragments.append(["size": trimmed, "width": width, "height": height])
+        fragments.append(["width": width, "height": height])
+        fragments.append(["size": trimmed, "aspect_ratio": aspectRatio])
+        fragments.append(["aspect_ratio": aspectRatio])
+        fragments.append(["aspectRatio": aspectRatio])
+        fragments.append(["image_size": trimmed])
+        fragments.append(["imageSize": trimmed])
+        fragments.append(["resolution": trimmed])
+        fragments.append(["dimensions": trimmed])
+
+        let legacySize = legacyImageEndpointSize(width: dimensions.width, height: dimensions.height)
+        if legacySize != trimmed {
+            fragments.append(["size": legacySize, "width": width, "height": height])
+            fragments.append(["size": legacySize, "aspect_ratio": aspectRatio])
+            fragments.append(["size": legacySize])
+        }
+
+        return deduplicatedStringDictionaries(fragments)
+    }
+
+    private func imageDimensions(from size: String) -> (width: Int, height: Int)? {
+        let normalized = size.lowercased()
+            .replacingOccurrences(of: "×", with: "x")
+            .replacingOccurrences(of: "＊", with: "x")
+            .replacingOccurrences(of: "*", with: "x")
+        let parts = normalized
+            .split(separator: "x", maxSplits: 1)
+            .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard parts.count == 2,
+              (64...8192).contains(parts[0]),
+              (64...8192).contains(parts[1]) else {
+            return nil
+        }
+        return (parts[0], parts[1])
+    }
+
+    private func legacyImageEndpointSize(width: Int, height: Int) -> String {
+        let ratio = Double(width) / Double(height)
+        if abs(ratio - 1.0) < 0.08 {
+            return "1024x1024"
+        }
+        return ratio > 1.0 ? "1792x1024" : "1024x1792"
+    }
+
+    private func imageAspectRatio(width: Int, height: Int) -> String {
+        let ratio = Double(width) / Double(height)
+        let commonRatios: [(String, Double)] = [
+            ("1:1", 1.0),
+            ("16:9", 16.0 / 9.0),
+            ("9:16", 9.0 / 16.0),
+            ("4:3", 4.0 / 3.0),
+            ("3:4", 3.0 / 4.0),
+            ("3:2", 3.0 / 2.0),
+            ("2:3", 2.0 / 3.0)
+        ]
+        if let match = commonRatios.first(where: { abs(ratio - $0.1) < 0.08 }) {
+            return match.0
+        }
+
+        let divisor = greatestCommonDivisor(width, height)
+        return "\(width / divisor):\(height / divisor)"
+    }
+
+    private func greatestCommonDivisor(_ lhs: Int, _ rhs: Int) -> Int {
+        var a = abs(lhs)
+        var b = abs(rhs)
+        while b != 0 {
+            let remainder = a % b
+            a = b
+            b = remainder
+        }
+        return max(a, 1)
+    }
+
+    private func deduplicatedStringDictionaries(_ values: [[String: String]]) -> [[String: String]] {
+        var seen = Set<String>()
+        var result: [[String: String]] = []
+        for value in values {
+            let key = value.keys.sorted().map { key in
+                "\(key)=\(value[key] ?? "")"
+            }.joined(separator: "|")
+            guard seen.insert(key).inserted else { continue }
+            result.append(value)
+        }
+        return result
+    }
+
     func generateImage(
         prompt: String,
         model: String,
@@ -887,15 +1058,14 @@ final class APIClient: @unchecked Sendable {
             let baseBody: [String: Any] = [
                 "model": requestModel,
                 "prompt": prompt,
-                "n": 1,
-                "size": size
+                "n": 1
             ]
             let countBody = baseBody.merging([
                 "count": 1,
                 "stream": false,
                 "moderation": "auto"
             ]) { _, new in new }
-            return [
+            return imageResolutionBodyVariants(for: [
                 baseBody,
                 countBody,
                 baseBody.merging(["response_format": "url"]) { _, new in new },
@@ -904,36 +1074,33 @@ final class APIClient: @unchecked Sendable {
                 [
                     "model": requestModel,
                     "input": prompt,
-                    "n": 1,
-                    "size": size
+                    "n": 1
                 ]
-            ]
+            ], size: size)
         }()
         let promptOnlyBody: [String: Any] = [
             "prompt": prompt,
-            "n": 1,
-            "size": size
+            "n": 1
         ]
         let promptOnlyCountBody = promptOnlyBody.merging([
             "count": 1,
             "stream": false,
             "moderation": "auto"
         ]) { _, new in new }
-        let promptOnlyImageBodyVariants: [[String: Any]] = [
+        let promptOnlyImageBodyVariants: [[String: Any]] = imageResolutionBodyVariants(for: [
             promptOnlyBody,
             promptOnlyCountBody,
             promptOnlyBody.merging(["response_format": "url"]) { _, new in new },
             promptOnlyBody.merging(["response_format": "b64_json"]) { _, new in new },
             [
                 "input": prompt,
-                "n": 1,
-                "size": size
+                "n": 1
             ]
-        ]
+        ], size: size)
         let imageBodyVariants = shouldUseServerDefaultModel
             ? (promptOnlyImageBodyVariants + modelImageBodyVariants)
             : (modelImageBodyVariants + promptOnlyImageBodyVariants)
-        let chatBodyVariants: [[String: Any]] = requestModel.isEmpty ? [] : [
+        let chatBodyVariants: [[String: Any]] = requestModel.isEmpty ? [] : imageResolutionBodyVariants(for: [
             [
                 "model": requestModel,
                 "stream": false,
@@ -951,7 +1118,7 @@ final class APIClient: @unchecked Sendable {
                 "stream": false,
                 "input": prompt
             ]
-        ]
+        ], size: size, includeBaseVariant: true)
         let responsesPath = "/responses"
         let responsesBodyVariants = requestModel.isEmpty ? [] : responsesImageGenerationBodyVariants(
             prompt: prompt,
@@ -1078,47 +1245,47 @@ final class APIClient: @unchecked Sendable {
         let imageDataURIs = images.prefix(16).map { image in
             "data:\(mimeType(for: image.fileName));base64,\(image.data.base64EncodedString())"
         }
-        var base: [String: Any] = [
+        let base: [String: Any] = [
             "model": model,
             "prompt": prompt
         ]
-        let trimmedSize = size.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedSize.isEmpty, trimmedSize != "auto" {
-            base["size"] = trimmedSize
-        }
+        let baseVariants = imageResolutionBodyVariants(for: [base], size: size)
 
         var urlExtraBody: [String: Any] = ["response_format": "url"]
         if !imageDataURIs.isEmpty {
             urlExtraBody["image"] = imageDataURIs
         }
 
-        var officialBody = base
-        officialBody["extra_body"] = urlExtraBody
-        var variants = [officialBody]
+        var variants: [[String: Any]] = []
+        for baseVariant in baseVariants {
+            var officialBody = baseVariant
+            officialBody["extra_body"] = urlExtraBody
+            variants.append(officialBody)
 
-        if imageDataURIs.isEmpty {
-            var base64Body = base
-            base64Body["return_base64"] = true
-            variants.append(base64Body)
-        } else {
-            var topLevelImageBody = base
-            topLevelImageBody["image"] = imageDataURIs
-            topLevelImageBody["extra_body"] = ["response_format": "url"]
-            variants.append(topLevelImageBody)
+            if imageDataURIs.isEmpty {
+                var base64Body = baseVariant
+                base64Body["return_base64"] = true
+                variants.append(base64Body)
+            } else {
+                var topLevelImageBody = baseVariant
+                topLevelImageBody["image"] = imageDataURIs
+                topLevelImageBody["extra_body"] = ["response_format": "url"]
+                variants.append(topLevelImageBody)
 
-            var base64ExtraBody: [String: Any] = [
-                "image": imageDataURIs,
-                "response_format": "b64_json"
-            ]
-            var base64Body = base
-            base64Body["extra_body"] = base64ExtraBody
-            variants.append(base64Body)
+                var base64ExtraBody: [String: Any] = [
+                    "image": imageDataURIs,
+                    "response_format": "b64_json"
+                ]
+                var base64Body = baseVariant
+                base64Body["extra_body"] = base64ExtraBody
+                variants.append(base64Body)
 
-            base64ExtraBody.removeValue(forKey: "image")
-            var topLevelBase64Body = base
-            topLevelBase64Body["image"] = imageDataURIs
-            topLevelBase64Body["extra_body"] = base64ExtraBody
-            variants.append(topLevelBase64Body)
+                base64ExtraBody.removeValue(forKey: "image")
+                var topLevelBase64Body = baseVariant
+                topLevelBase64Body["image"] = imageDataURIs
+                topLevelBase64Body["extra_body"] = base64ExtraBody
+                variants.append(topLevelBase64Body)
+            }
         }
 
         return deduplicatedJSONDictionaries(variants)
@@ -1238,44 +1405,40 @@ final class APIClient: @unchecked Sendable {
                     )
                 ]
             ]
-            var fields: [String: String] = [
+            let baseFields: [String: String] = [
                 "model": model,
                 "prompt": prompt,
                 "n": "1"
             ]
-            let trimmedSize = size.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let aspectRatio = xaiAspectRatio(for: trimmedSize) {
-                fields["aspect_ratio"] = aspectRatio
-            }
-            if !trimmedSize.isEmpty, trimmedSize != "auto" {
-                fields["size"] = trimmedSize
-            }
+            let fieldVariants = imageResolutionStringFieldVariants(for: baseFields, size: size)
 
             for path in imageEditPaths {
                 for files in multipartVariants {
-                    do {
-                        let payload = try await network.uploadMultipart(
-                            path: path,
-                            files: files,
-                            additionalFields: fields,
-                            timeout: 300
-                        )
-                        if let imageReference = firstImageReference(in: payload) {
-                            return imageReference
+                    for fields in fieldVariants {
+                        do {
+                            let payload = try await network.uploadMultipart(
+                                path: path,
+                                files: files,
+                                additionalFields: fields,
+                                timeout: 300
+                            )
+                            if let imageReference = firstImageReference(in: payload) {
+                                return imageReference
+                            }
+                            lastError = APIError.responseDecoding(
+                                underlying: NSError(
+                                    domain: "APIClient",
+                                    code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: "Grok multipart 图片接口没有返回图片地址。"]
+                                ),
+                                data: nil
+                            )
+                        } catch {
+                            guard shouldTryNextImageEndpoint(after: error) else {
+                                throw error
+                            }
+                            lastError = error
                         }
-                        lastError = APIError.responseDecoding(
-                            underlying: NSError(
-                                domain: "APIClient",
-                                code: -1,
-                                userInfo: [NSLocalizedDescriptionKey: "Grok multipart 图片接口没有返回图片地址。"]
-                            ),
-                            data: nil
-                        )
-                    } catch {
-                        guard shouldTryNextImageEndpoint(after: error) else {
-                            throw error
-                        }
-                        lastError = error
                     }
                 }
             }
@@ -1297,8 +1460,6 @@ final class APIClient: @unchecked Sendable {
         size: String,
         images: [ImageEditSource]
     ) -> [[String: Any]] {
-        let trimmedSize = size.trimmingCharacters(in: .whitespacesAndNewlines)
-        let aspectRatio = xaiAspectRatio(for: trimmedSize)
         let imageURLs = images.prefix(3).map {
             "data:\(mimeType(for: $0.fileName));base64,\($0.data.base64EncodedString())"
         }
@@ -1314,13 +1475,10 @@ final class APIClient: @unchecked Sendable {
             ] as [String: Any]
         }
 
-        var base: [String: Any] = [
+        let base: [String: Any] = [
             "model": model,
             "prompt": prompt
         ]
-        if let aspectRatio {
-            base["aspect_ratio"] = aspectRatio
-        }
 
         var variants: [[String: Any]] = []
         if imageURLs.isEmpty {
@@ -1363,14 +1521,7 @@ final class APIClient: @unchecked Sendable {
             variants.append(legacyImagesBody)
         }
 
-        guard !trimmedSize.isEmpty, trimmedSize != "auto" else {
-            return variants
-        }
-        return variants + variants.map { body in
-            var bodyWithSize = body
-            bodyWithSize["size"] = trimmedSize
-            return bodyWithSize
-        }
+        return imageResolutionBodyVariants(for: variants, size: size)
     }
 
     private func xaiAspectRatio(for size: String) -> String? {
@@ -1637,14 +1788,15 @@ final class APIClient: @unchecked Sendable {
         size: String,
         images: [ImageEditSource]
     ) -> [[String: Any]] {
-        var tool: [String: Any] = [
+        let baseTool: [String: Any] = [
             "type": "image_generation",
             "action": "auto"
         ]
-        if !size.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           size != "auto" {
-            tool["size"] = size
-        }
+        let toolVariants = imageResolutionBodyVariants(
+            for: [baseTool],
+            size: size,
+            includeBaseVariant: true
+        )
 
         var content: [[String: Any]] = [
             ["type": "input_text", "text": prompt]
@@ -1654,23 +1806,24 @@ final class APIClient: @unchecked Sendable {
             content.append(["type": "input_image", "image_url": dataURL])
         }
 
-        var variants: [[String: Any]] = [
-            [
+        var variants: [[String: Any]] = []
+        for tool in toolVariants {
+            variants.append([
                 "model": model,
                 "input": [["role": "user", "content": content]],
                 "tools": [tool]
-            ]
-        ]
-
-        if images.isEmpty {
-            variants.append([
-                "model": model,
-                "input": prompt,
-                "tools": [tool]
             ])
+
+            if images.isEmpty {
+                variants.append([
+                    "model": model,
+                    "input": prompt,
+                    "tools": [tool]
+                ])
+            }
         }
 
-        return variants
+        return deduplicatedJSONDictionaries(variants)
     }
 
     private func generateImageViaResponses(
@@ -2248,38 +2401,39 @@ final class APIClient: @unchecked Sendable {
 
         for path in imageEditPaths {
             for files in multipartVariants {
-                do {
-                    var fields: [String: String] = [
-                        "prompt": prompt,
-                        "n": "1",
-                        "size": size
-                    ]
-                    if !requestModel.isEmpty {
-                        fields["model"] = requestModel
-                    }
-                    let json = try await network.uploadMultipart(
-                        path: path,
-                        files: files,
-                        additionalFields: fields,
-                        timeout: 300
-                    )
+                var baseFields: [String: String] = [
+                    "prompt": prompt,
+                    "n": "1"
+                ]
+                if !requestModel.isEmpty {
+                    baseFields["model"] = requestModel
+                }
+                for fields in imageResolutionStringFieldVariants(for: baseFields, size: size) {
+                    do {
+                        let json = try await network.uploadMultipart(
+                            path: path,
+                            files: files,
+                            additionalFields: fields,
+                            timeout: 300
+                        )
 
-                    if let imageReference = firstImageReference(in: json) {
-                        return imageReference
+                        if let imageReference = firstImageReference(in: json) {
+                            return imageReference
+                        }
+                        lastError = APIError.responseDecoding(
+                            underlying: NSError(
+                                domain: "APIClient",
+                                code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
+                            ),
+                            data: nil
+                        )
+                    } catch {
+                        guard shouldTryNextImageEndpoint(after: error) else {
+                            throw error
+                        }
+                        lastError = error
                     }
-                    lastError = APIError.responseDecoding(
-                        underlying: NSError(
-                            domain: "APIClient",
-                            code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
-                        ),
-                        data: nil
-                    )
-                } catch {
-                    guard shouldTryNextImageEndpoint(after: error) else {
-                        throw error
-                    }
-                    lastError = error
                 }
             }
         }
@@ -2374,14 +2528,7 @@ final class APIClient: @unchecked Sendable {
             ]) { _, new in new }
         ])
 
-        let trimmedSize = size.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedSize.isEmpty, trimmedSize != "auto" else {
-            return variants
-        }
-
-        return variants + variants.map { body in
-            body.merging(["size": trimmedSize]) { _, new in new }
-        }
+        return imageResolutionBodyVariants(for: variants, size: size, includeBaseVariant: true)
     }
 
     private func firstImageReference(in value: Any?) -> String? {
