@@ -21194,11 +21194,12 @@ final class ChatViewModel {
 
 // MARK: - Content Accumulator
 
-/// Thread-safe token accumulator with immediate main-actor dispatch.
+/// Thread-safe token accumulator with stable main-actor dispatch.
 ///
 /// Accumulates token deltas from background socket/SSE callbacks into a
-/// single string and dispatches every token to the main actor immediately,
-/// giving smooth character-by-character streaming in the UI.
+/// single string and dispatches at a fixed cadence. This keeps streaming smooth
+/// while preventing token bursts from flooding SwiftUI with hundreds of updates
+/// per second.
 final class ContentAccumulator: @unchecked Sendable {
     private let lock = NSLock()
     private nonisolated(unsafe) var _content: String = ""
@@ -21210,6 +21211,8 @@ final class ContentAccumulator: @unchecked Sendable {
     /// When true, a Task is already queued and will read the latest content
     /// when it executes — no need to create another one.
     private nonisolated(unsafe) var _pendingUpdate: Bool = false
+
+    private static let updateIntervalNanos: UInt64 = 33_000_000
 
     /// Callback invoked on the main actor with the latest accumulated
     /// content. Set by the view model when socket handlers are registered.
@@ -21240,13 +21243,16 @@ final class ContentAccumulator: @unchecked Sendable {
         return value
     }
 
-    /// Clears the pending-update flag after the queued Task executes.
-    /// Extracted as a synchronous nonisolated helper so NSLock is never
-    /// acquired from an async context (avoids Swift 6 strict-concurrency warnings).
-    nonisolated private func clearPendingFlag() {
+    /// Marks one scheduled update as complete. If new content arrived while the
+    /// main actor was applying this update, keep `_pendingUpdate` true and let
+    /// the caller schedule the next tick so no tail content gets stranded.
+    nonisolated private func completeScheduledDispatch(sentContent: String) -> Bool {
         lock.lock()
-        _pendingUpdate = false
+        let latest = renderedContentLocked()
+        let shouldScheduleNext = latest != sentContent
+        _pendingUpdate = shouldScheduleNext
         lock.unlock()
+        return shouldScheduleNext
     }
 
     nonisolated func append(_ text: String) {
@@ -21328,11 +21334,17 @@ final class ContentAccumulator: @unchecked Sendable {
         callback: (@MainActor @Sendable (_ content: String) -> Void)?
     ) {
         guard needsDispatch else { return }
-        Task { @MainActor [weak self] in
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.updateIntervalNanos)
             guard let self else { return }
-            let latest = self.content
-            callback?(latest)
-            self.clearPendingFlag()
+            let shouldScheduleNext = await MainActor.run {
+                let latest = self.content
+                callback?(latest)
+                return self.completeScheduledDispatch(sentContent: latest)
+            }
+            if shouldScheduleNext {
+                self.dispatchIfNeeded(true, callback: self.onUpdate)
+            }
         }
     }
 

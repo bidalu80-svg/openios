@@ -71,7 +71,7 @@ final class AppAccountAuthService {
             ],
             bearerToken: nil
         )
-        guard let session = parseSession(from: object, fallbackLoginID: normalizedAccount) else {
+        guard let session = try parseSession(from: object, fallbackLoginID: normalizedAccount) else {
             throw AppAccountAuthServiceError.invalidResponse
         }
         return session
@@ -106,10 +106,29 @@ final class AppAccountAuthService {
             ],
             bearerToken: nil
         )
-        guard let session = parseSession(from: object, fallbackLoginID: normalizedAccount) else {
+        guard let session = try parseSession(from: object, fallbackLoginID: normalizedAccount) else {
             throw AppAccountAuthServiceError.invalidResponse
         }
         return session
+    }
+
+    func validateSession(baseURL: String, session: AppAccountAuthSession) async throws -> AppAccountAuthSession {
+        let object = try await sendRequest(
+            baseURL: baseURL,
+            path: "/auth/me",
+            method: "GET",
+            body: nil,
+            bearerToken: session.token
+        )
+        guard let validated = try parseSession(
+            from: object,
+            fallbackLoginID: session.user.loginID,
+            fallbackToken: session.token,
+            fallbackExpiresAt: session.expiresAt
+        ) else {
+            throw AppAccountAuthServiceError.invalidResponse
+        }
+        return validated
     }
 
     func logout(baseURL: String, token: String) async {
@@ -150,7 +169,7 @@ final class AppAccountAuthService {
         baseURL: String,
         path: String,
         method: String,
-        body: [String: Any],
+        body: [String: Any]?,
         bearerToken: String?
     ) async throws -> [String: Any] {
         let normalized = AppAccountAuthSessionStore.normalizedBaseURL(baseURL)
@@ -160,14 +179,16 @@ final class AppAccountAuthService {
 
         var request = URLRequest(url: url, timeoutInterval: 30)
         request.httpMethod = method
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(Self.appUserAgent, forHTTPHeaderField: "User-Agent")
         if let bearerToken, !bearerToken.isEmpty {
             request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
         }
         request.setValue(AppDeviceInstallIdentity.currentID(), forHTTPHeaderField: "X-Device-Install-ID")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        if let body {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -190,14 +211,22 @@ final class AppAccountAuthService {
         throw AppAccountAuthServiceError.http(status: http.statusCode, message: message)
     }
 
-    private func parseSession(from object: [String: Any], fallbackLoginID: String) -> AppAccountAuthSession? {
+    private func parseSession(
+        from object: [String: Any],
+        fallbackLoginID: String,
+        fallbackToken: String? = nil,
+        fallbackExpiresAt: Date? = nil
+    ) throws -> AppAccountAuthSession? {
         let payload = (object["data"] as? [String: Any]) ?? object
-        let token = Self.firstString(in: payload, keys: ["token", "accessToken", "access_token", "jwt"])
+        try Self.ensureAccountIsAllowed(payload)
+
+        let token = Self.firstString(in: payload, keys: ["token", "accessToken", "access_token", "jwt"]) ?? fallbackToken
         guard let token, !token.isEmpty else { return nil }
 
-        let expiresAt = Self.parseDate(payload["expiresAt"]) ?? Self.parseDate(payload["expires_at"])
+        let expiresAt = Self.parseDate(payload["expiresAt"]) ?? Self.parseDate(payload["expires_at"]) ?? fallbackExpiresAt
         if let userObject = payload["user"] as? [String: Any],
            let user = parseUser(from: userObject, fallbackLoginID: fallbackLoginID) {
+            try Self.ensureAccountIsAllowed(userObject)
             return AppAccountAuthSession(token: token, expiresAt: expiresAt, user: user)
         }
         guard let user = parseUser(from: payload, fallbackLoginID: fallbackLoginID) else { return nil }
@@ -229,6 +258,51 @@ final class AppAccountAuthService {
             if let value = object[key] as? String {
                 let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty { return trimmed }
+            }
+        }
+        return nil
+    }
+
+    private static func ensureAccountIsAllowed(_ payload: [String: Any]) throws {
+        if truthy(payload["banned"]) || truthy(payload["isBanned"]) || truthy(payload["is_banned"]) {
+            throw AppAccountAuthServiceError.server("账号已被封禁，请联系管理员。")
+        }
+        if truthy(payload["disabled"]) || truthy(payload["isDisabled"]) || truthy(payload["is_disabled"]) {
+            throw AppAccountAuthServiceError.server("账号已被停用，请联系管理员。")
+        }
+        if let active = boolValue(payload["active"] ?? payload["isActive"] ?? payload["is_active"]),
+           active == false {
+            throw AppAccountAuthServiceError.server("账号状态已失效，请重新登录。")
+        }
+        let bannedAt = firstString(in: payload, keys: ["bannedAt", "banned_at"])
+        if bannedAt != nil {
+            throw AppAccountAuthServiceError.server("账号已被封禁，请联系管理员。")
+        }
+        let deletedAt = firstString(in: payload, keys: ["deletedAt", "deleted_at"])
+        if deletedAt != nil {
+            throw AppAccountAuthServiceError.server("账号已被删除，请重新注册。")
+        }
+        if let status = firstString(in: payload, keys: ["status", "state"])?.lowercased(),
+           ["banned", "blocked", "disabled", "deleted", "inactive", "suspended"].contains(status) {
+            throw AppAccountAuthServiceError.server("账号状态已失效，请重新登录。")
+        }
+    }
+
+    private static func truthy(_ raw: Any?) -> Bool {
+        boolValue(raw) == true
+    }
+
+    private static func boolValue(_ raw: Any?) -> Bool? {
+        if let value = raw as? Bool { return value }
+        if let value = raw as? NSNumber { return value.boolValue }
+        if let text = raw as? String {
+            switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "1", "true", "yes", "y", "on":
+                return true
+            case "0", "false", "no", "n", "off":
+                return false
+            default:
+                return nil
             }
         }
         return nil

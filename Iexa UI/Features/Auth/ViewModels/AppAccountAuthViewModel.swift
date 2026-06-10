@@ -8,11 +8,14 @@ final class AppAccountAuthViewModel {
     var password: String = ""
     var activationCode: String = ""
     var isSubmitting: Bool = false
+    var isValidatingSession: Bool = false
     var statusMessage: String = ""
     var errorMessage: String?
     private(set) var session: AppAccountAuthSession?
 
     private let service: AppAccountAuthService
+    private var lastSessionValidationAt: Date?
+    private let sessionValidationCooldown: TimeInterval = 5
 
     init(service: AppAccountAuthService = AppAccountAuthService()) {
         self.service = service
@@ -126,13 +129,71 @@ final class AppAccountAuthViewModel {
         }
     }
 
-    func signOutLocal() {
+    func signOutLocal(statusMessage: String = "已退出登录", errorMessage: String? = nil) {
         AppAccountAuthSessionStore.clearSession()
         session = nil
         password = ""
         activationCode = ""
-        statusMessage = "已退出登录"
-        errorMessage = nil
+        self.statusMessage = statusMessage
+        self.errorMessage = errorMessage
+        lastSessionValidationAt = nil
+    }
+
+    func validateCurrentSession(force: Bool = false) async {
+        guard let currentSession = session else { return }
+        let endpoint = AppAccountAuthSessionStore.normalizedBaseURL(baseURL)
+        guard !endpoint.isEmpty else { return }
+        guard !isValidatingSession else { return }
+        if !force,
+           let lastSessionValidationAt,
+           Date().timeIntervalSince(lastSessionValidationAt) < sessionValidationCooldown {
+            return
+        }
+
+        isValidatingSession = true
+        defer { isValidatingSession = false }
+
+        do {
+            let validated = try await service.validateSession(baseURL: endpoint, session: currentSession)
+            guard session?.token == currentSession.token else { return }
+            AppAccountAuthSessionStore.saveBaseURL(endpoint)
+            AppAccountAuthSessionStore.saveSession(validated)
+            baseURL = endpoint
+            session = validated
+            account = validated.user.loginID
+            lastSessionValidationAt = Date()
+        } catch {
+            lastSessionValidationAt = Date()
+            guard session?.token == currentSession.token else { return }
+            guard shouldInvalidateSession(for: error) else { return }
+            signOutLocal(
+                statusMessage: "账号状态已失效",
+                errorMessage: sessionInvalidationMessage(for: error)
+            )
+        }
+    }
+
+    private func sessionInvalidationMessage(for error: Error) -> String {
+        if let serviceError = error as? AppAccountAuthServiceError,
+           case .http(_, let message) = serviceError,
+           !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return message
+        }
+        return friendlyMessage(for: error)
+    }
+
+    private func shouldInvalidateSession(for error: Error) -> Bool {
+        if let serviceError = error as? AppAccountAuthServiceError {
+            switch serviceError {
+            case .http(let status, _):
+                return status == 401 || status == 403
+            case .server:
+                return true
+            default:
+                return false
+            }
+        }
+        return false
     }
 
     private func friendlyMessage(for error: Error) -> String {

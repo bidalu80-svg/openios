@@ -7705,6 +7705,8 @@ private struct AgentActivityStepPill: View {
     let step: AgentActivityStep
 
     @Environment(\.theme) private var theme
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var tint: Color {
         if step.failed { return .orange }
@@ -7727,48 +7729,85 @@ private struct AgentActivityStepPill: View {
     }
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: 7) {
             ZStack {
                 Circle()
                     .fill(tint.opacity(theme.isDark ? 0.20 : 0.13))
-                    .frame(width: 25, height: 25)
+                    .frame(width: 21, height: 21)
                 Image(systemName: iconName)
-                    .scaledFont(size: 13, weight: .semibold)
+                    .scaledFont(size: 11.5, weight: .semibold)
                     .foregroundStyle(tint)
             }
 
             VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     Text(step.title)
-                        .scaledFont(size: 14, weight: .semibold)
+                        .scaledFont(size: 12.5, weight: .semibold)
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
                         .truncationMode(.tail)
                     if step.isRunning {
                         AgentStepWaitingDots(tint: tint)
-                            .frame(width: 22, height: 10)
+                            .frame(width: 18, height: 8)
                     }
                 }
                 if !step.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text(step.detail)
-                        .scaledFont(size: 10, weight: .medium)
+                        .scaledFont(size: 9.5, weight: .medium)
                         .foregroundStyle(theme.textTertiary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
             }
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 14)
-        .frame(height: 45)
+        .padding(.leading, 8)
+        .padding(.trailing, 12)
+        .frame(height: 38)
         .background(
             Capsule(style: .continuous)
                 .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.78))
         )
+        .overlay {
+            if step.isRunning && !reduceMotion && scenePhase == .active {
+                AgentStepRunningSweep(tint: tint)
+                    .clipShape(Capsule(style: .continuous))
+                    .allowsHitTesting(false)
+            }
+        }
         .overlay(
             Capsule(style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.24 : 0.42), lineWidth: 0.7)
         )
+    }
+}
+
+private struct AgentStepRunningSweep: View {
+    let tint: Color
+    @State private var phase: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { geometry in
+            let sweepWidth = max(geometry.size.width * 0.34, 56)
+            LinearGradient(
+                colors: [
+                    .clear,
+                    tint.opacity(0.06),
+                    .white.opacity(0.18),
+                    tint.opacity(0.07),
+                    .clear,
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: sweepWidth, height: geometry.size.height)
+            .offset(x: -sweepWidth + phase * (geometry.size.width + sweepWidth))
+        }
+        .onAppear {
+            phase = 0
+            withAnimation(.linear(duration: 1.65).repeatForever(autoreverses: false)) {
+                phase = 1
+            }
+        }
     }
 }
 

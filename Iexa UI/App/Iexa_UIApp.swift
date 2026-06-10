@@ -397,6 +397,7 @@ struct Iexa_UIApp: App {
 struct RootView: View {
     @Environment(AppDependencyContainer.self) private var dependencies
     @Environment(AppRouter.self) private var router
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showOnboarding = false
     @State private var showSettings = false
     @State private var hasAttemptedRestore = false
@@ -474,6 +475,12 @@ struct RootView: View {
                 return
             }
 
+            await appAccountViewModel.validateCurrentSession(force: true)
+            guard appAccountViewModel.isAuthenticated else {
+                hasAttemptedRestore = false
+                return
+            }
+
             // Migrate single-token-per-server to multi-account structure (one-time).
             viewModel.runLegacyMigrationIfNeeded()
             if viewModel.localUserName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -499,6 +506,12 @@ struct RootView: View {
                 await viewModel.fetchBackendConfigIfNeeded()
             default:
                 break
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .active, appAccountViewModel.isAuthenticated else { return }
+            Task {
+                await appAccountViewModel.validateCurrentSession()
             }
         }
     }
