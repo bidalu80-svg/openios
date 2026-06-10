@@ -652,6 +652,17 @@ final class APIClient: @unchecked Sendable {
             || (raw.contains("grok") && raw.contains("imagine"))
     }
 
+    private func isGeminiNativeImageModel(_ model: String) -> Bool {
+        let raw = model.lowercased()
+        return raw.contains("banana")
+            || raw.contains("gemini-2.5-flash-image")
+            || (raw.contains("gemini") && raw.contains("image"))
+    }
+
+    private func isAgnesImageModel(_ model: String) -> Bool {
+        model.lowercased().contains("agnes-image")
+    }
+
     private static func imageGenerationProbeBody() -> [String: Any] {
         [
             "prompt": "",
@@ -849,6 +860,28 @@ final class APIClient: @unchecked Sendable {
                 images: []
             )
         }
+        if isAgnesImageModel(requestModel) {
+            return try await generateAgnesImage(
+                prompt: prompt,
+                model: requestModel,
+                size: size,
+                images: []
+            )
+        }
+        let geminiNativeError: Error?
+        if providerType == .gemini, isGeminiNativeImageModel(requestModel) {
+            do {
+                return try await generateGeminiNativeImage(
+                    prompt: prompt,
+                    model: requestModel,
+                    images: []
+                )
+            } catch {
+                geminiNativeError = error
+            }
+        } else {
+            geminiNativeError = nil
+        }
 
         let modelImageBodyVariants: [[String: Any]] = requestModel.isEmpty ? [] : {
             let baseBody: [String: Any] = [
@@ -928,7 +961,7 @@ final class APIClient: @unchecked Sendable {
         let toolFallbackPaths = shouldUseServerDefaultModel ? [] : [responsesPath, chatCompletionsPath]
         let paths = imageGenerationPaths + toolFallbackPaths
 
-        var lastError: Error?
+        var lastError: Error? = geminiNativeError
         for path in paths {
             let variants: [[String: Any]]
             if path == chatCompletionsPath {
@@ -975,6 +1008,129 @@ final class APIClient: @unchecked Sendable {
             ),
             data: nil
         )
+    }
+
+    private func generateAgnesImage(
+        prompt: String,
+        model: String,
+        size: String,
+        images: [ImageEditSource]
+    ) async throws -> String {
+        var lastError: Error?
+        for path in agnesImageGenerationPaths {
+            for requestBody in agnesImageBodyVariants(
+                prompt: prompt,
+                model: model,
+                size: size,
+                images: images
+            ) {
+                do {
+                    let payload = try await requestAnyJSON(
+                        path: path,
+                        method: .post,
+                        body: requestBody,
+                        timeout: 300
+                    )
+                    if let imageReference = firstImageReference(in: payload) {
+                        return imageReference
+                    }
+                    lastError = APIError.responseDecoding(
+                        underlying: NSError(
+                            domain: "APIClient",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Agnes 图片接口没有返回图片地址。"]
+                        ),
+                        data: nil
+                    )
+                } catch {
+                    guard shouldTryNextImageEndpoint(after: error) else {
+                        throw error
+                    }
+                    lastError = error
+                }
+            }
+        }
+
+        throw APIError.responseDecoding(
+            underlying: NSError(
+                domain: "APIClient",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: lastError?.localizedDescription ?? "Agnes 图片接口没有返回图片地址。"]
+            ),
+            data: nil
+        )
+    }
+
+    private var agnesImageGenerationPaths: [String] {
+        let rawPath = network.baseURL?.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased() ?? ""
+        let preferred = rawPath == "v1" || rawPath.hasSuffix("/v1")
+            ? ["/images/generations"]
+            : ["/v1/images/generations", "/images/generations"]
+        return deduplicatedStrings(preferred + imageGenerationPaths + ["/api/v1/images/generations"])
+    }
+
+    private func agnesImageBodyVariants(
+        prompt: String,
+        model: String,
+        size: String,
+        images: [ImageEditSource]
+    ) -> [[String: Any]] {
+        let imageDataURIs = images.prefix(16).map { image in
+            "data:\(mimeType(for: image.fileName));base64,\(image.data.base64EncodedString())"
+        }
+        var base: [String: Any] = [
+            "model": model,
+            "prompt": prompt
+        ]
+        let trimmedSize = size.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedSize.isEmpty, trimmedSize != "auto" {
+            base["size"] = trimmedSize
+        }
+
+        var urlExtraBody: [String: Any] = ["response_format": "url"]
+        if !imageDataURIs.isEmpty {
+            urlExtraBody["image"] = imageDataURIs
+        }
+
+        var officialBody = base
+        officialBody["extra_body"] = urlExtraBody
+        var variants = [officialBody]
+
+        if imageDataURIs.isEmpty {
+            var base64Body = base
+            base64Body["return_base64"] = true
+            variants.append(base64Body)
+        } else {
+            var topLevelImageBody = base
+            topLevelImageBody["image"] = imageDataURIs
+            topLevelImageBody["extra_body"] = ["response_format": "url"]
+            variants.append(topLevelImageBody)
+
+            var base64ExtraBody: [String: Any] = [
+                "image": imageDataURIs,
+                "response_format": "b64_json"
+            ]
+            var base64Body = base
+            base64Body["extra_body"] = base64ExtraBody
+            variants.append(base64Body)
+
+            base64ExtraBody.removeValue(forKey: "image")
+            var topLevelBase64Body = base
+            topLevelBase64Body["image"] = imageDataURIs
+            topLevelBase64Body["extra_body"] = base64ExtraBody
+            variants.append(topLevelBase64Body)
+        }
+
+        return deduplicatedJSONDictionaries(variants)
+    }
+
+    private func deduplicatedStrings(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for value in values where seen.insert(value).inserted {
+            result.append(value)
+        }
+        return result
     }
 
     private func generateXAIImage(
@@ -1238,6 +1394,225 @@ final class APIClient: @unchecked Sendable {
         if abs(ratio - (4.0 / 3.0)) < 0.08 { return "4:3" }
         if abs(ratio - (3.0 / 4.0)) < 0.08 { return "3:4" }
         return "auto"
+    }
+
+    private func generateGeminiNativeImage(
+        prompt: String,
+        model: String,
+        images: [ImageEditSource]
+    ) async throws -> String {
+        guard let modelPath = geminiNativeModelPath(model) else {
+            throw APIError.invalidURL(network.serverConfig.url)
+        }
+        let urls = geminiNativeGenerateContentURLs(modelPath: modelPath)
+        guard !urls.isEmpty else { throw APIError.invalidURL(network.serverConfig.url) }
+
+        var parts: [[String: Any]] = [
+            ["text": prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Generate an image." : prompt]
+        ]
+        for image in images.prefix(16) {
+            parts.append([
+                "inlineData": [
+                    "mimeType": mimeType(for: image.fileName),
+                    "data": image.data.base64EncodedString()
+                ]
+            ])
+        }
+
+        let body: [String: Any] = [
+            "contents": [
+                [
+                    "role": "user",
+                    "parts": parts
+                ]
+            ],
+            "generationConfig": [
+                "responseModalities": ["TEXT", "IMAGE"]
+            ]
+        ]
+
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        var lastError: Error?
+        for url in urls {
+            do {
+                var request = URLRequest(url: url)
+                request.httpMethod = HTTPMethod.post.rawValue
+                request.httpBody = bodyData
+                request.timeoutInterval = 300
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
+                if let token = network.authToken, !token.isEmpty {
+                    request.setValue(token, forHTTPHeaderField: "x-goog-api-key")
+                }
+                for (key, value) in network.serverConfig.customHeaders {
+                    let lower = key.lowercased()
+                    if lower != "authorization" && lower != "content-type" && lower != "accept" && lower != "x-goog-api-key" {
+                        request.setValue(value, forHTTPHeaderField: key)
+                    }
+                }
+
+                let (data, response) = try await network.session.data(for: request)
+                if let httpResponse = response as? HTTPURLResponse,
+                   !(200..<400).contains(httpResponse.statusCode) {
+                    let error = APIError.httpError(
+                        statusCode: httpResponse.statusCode,
+                        message: providerErrorMessage(from: data),
+                        data: data
+                    )
+                    lastError = error
+                    guard shouldTryNextImageEndpoint(after: error) else { throw error }
+                    continue
+                }
+
+                guard let payload = try? JSONSerialization.jsonObject(with: data) else {
+                    throw APIError.responseDecoding(
+                        underlying: NSError(
+                            domain: "APIClient",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Gemini 图片接口返回了无法识别的响应。"]
+                        ),
+                        data: data
+                    )
+                }
+                if let imageReference = firstImageReference(in: payload) {
+                    return imageReference
+                }
+                throw APIError.responseDecoding(
+                    underlying: NSError(
+                        domain: "APIClient",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "Gemini 图片接口没有返回图片。"]
+                    ),
+                    data: data
+                )
+            } catch {
+                lastError = error
+                guard shouldTryNextImageEndpoint(after: error) else { throw error }
+            }
+        }
+
+        throw lastError ?? APIError.responseDecoding(
+            underlying: NSError(
+                domain: "APIClient",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Gemini 图片接口没有返回图片。"]
+            ),
+            data: nil
+        )
+    }
+
+    private func geminiNativeGenerateContentURLs(modelPath: String) -> [URL] {
+        geminiNativeGenerativeLanguageBaseURLs().compactMap {
+            URL(string: "\(modelPath):generateContent", relativeTo: $0)?.absoluteURL
+        }
+    }
+
+    private func geminiNativeGenerativeLanguageBaseURLs() -> [URL] {
+        guard var components = URLComponents(string: network.serverConfig.url) else { return [] }
+        var path = components.path.hasSuffix("/")
+            ? String(components.path.dropLast())
+            : components.path
+        let lowerPath = path.lowercased()
+        let rootPath: String
+        let firstVersion: String?
+        if lowerPath.hasSuffix("/v1beta/openai") {
+            rootPath = String(path.dropLast("/v1beta/openai".count))
+            firstVersion = "/v1beta"
+        } else if lowerPath.hasSuffix("/v1/openai") {
+            rootPath = String(path.dropLast("/v1/openai".count))
+            firstVersion = "/v1"
+        } else if lowerPath.hasSuffix("/openai") {
+            let withoutOpenAI = String(path.dropLast("/openai".count))
+            let lowerWithoutOpenAI = withoutOpenAI.lowercased()
+            if lowerWithoutOpenAI.hasSuffix("/v1beta") {
+                rootPath = String(withoutOpenAI.dropLast("/v1beta".count))
+                firstVersion = "/v1beta"
+            } else if lowerWithoutOpenAI.hasSuffix("/v1") {
+                rootPath = String(withoutOpenAI.dropLast("/v1".count))
+                firstVersion = "/v1"
+            } else {
+                rootPath = withoutOpenAI
+                firstVersion = nil
+            }
+        } else if lowerPath.hasSuffix("/v1beta") {
+            rootPath = String(path.dropLast("/v1beta".count))
+            firstVersion = "/v1beta"
+        } else if lowerPath.hasSuffix("/v1") {
+            rootPath = String(path.dropLast("/v1".count))
+            firstVersion = "/v1"
+        } else {
+            rootPath = path
+            firstVersion = nil
+        }
+
+        var versions: [String] = []
+        if let firstVersion {
+            versions.append(firstVersion)
+        }
+        for version in ["/v1", "/v1beta"] where !versions.contains(version) {
+            versions.append(version)
+        }
+
+        var urls: [URL] = []
+        var seen = Set<String>()
+        for version in versions {
+            var candidate = components
+            let base = rootPath.hasSuffix("/") ? String(rootPath.dropLast()) : rootPath
+            let fullPath = base.isEmpty ? version : base + version
+            candidate.path = fullPath.hasSuffix("/") ? fullPath : fullPath + "/"
+            candidate.query = nil
+            candidate.fragment = nil
+            if let url = candidate.url, seen.insert(url.absoluteString).inserted {
+                urls.append(url)
+            }
+        }
+        return urls
+    }
+
+    private func geminiNativeModelPath(_ model: String) -> String? {
+        var normalized = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.hasPrefix("models/") {
+            normalized = String(normalized.dropFirst("models/".count))
+        }
+        guard !normalized.isEmpty else { return nil }
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#:")
+        guard let encoded = normalized.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            return nil
+        }
+        return "models/\(encoded)"
+    }
+
+    private func providerErrorMessage(from data: Data) -> String? {
+        if let json = try? JSONSerialization.jsonObject(with: data) {
+            return providerErrorMessage(from: json)
+        }
+        let text = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let text, !text.isEmpty else { return nil }
+        return text.count > 1_000 ? String(text.prefix(1_000)) : text
+    }
+
+    private func providerErrorMessage(from value: Any) -> String? {
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let dict = value as? [String: Any] {
+            for key in ["message", "detail", "error_description", "error", "reason", "code"] {
+                if let nested = dict[key],
+                   let message = providerErrorMessage(from: nested) {
+                    return message
+                }
+            }
+            if let details = dict["details"] as? [Any] {
+                return details.compactMap { providerErrorMessage(from: $0) }.first
+            }
+        }
+        if let array = value as? [Any] {
+            return array.compactMap { providerErrorMessage(from: $0) }.first
+        }
+        return nil
     }
 
     private func responsesImageGenerationBodyVariants(
@@ -1786,8 +2161,30 @@ final class APIClient: @unchecked Sendable {
                 images: editImages
             )
         }
+        if isAgnesImageModel(requestModel) {
+            return try await generateAgnesImage(
+                prompt: prompt,
+                model: requestModel,
+                size: size,
+                images: editImages
+            )
+        }
+        let geminiNativeError: Error?
+        if providerType == .gemini, isGeminiNativeImageModel(requestModel) {
+            do {
+                return try await generateGeminiNativeImage(
+                    prompt: prompt,
+                    model: requestModel,
+                    images: editImages
+                )
+            } catch {
+                geminiNativeError = error
+            }
+        } else {
+            geminiNativeError = nil
+        }
 
-        var lastError: Error?
+        var lastError: Error? = geminiNativeError
         for path in imageEditPaths {
             for requestBody in imageEditJSONBodyVariants(
                 prompt: prompt,

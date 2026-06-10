@@ -13479,6 +13479,7 @@ final class ChatViewModel {
             "stable-diffusion", "midjourney", "mj-", "minimax-image",
             "qwen-image", "imagen", "seedream", "jimeng", "kolors",
             "grok-imagine", "imagine-image", "image-lite", "plus-image",
+            "banana", "gemini-2.5-flash-image",
             "image-01", "image-02", "image-03", "image-generation"
         ]
         let chatModelTokens = [
@@ -13512,7 +13513,8 @@ final class ChatViewModel {
             "gpt-image", "dall-e", "dalle", "flux", "sdxl",
             "stable-diffusion", "midjourney", "mj-",
             "minimax-image", "qwen-image", "seedream", "jimeng",
-            "kolors", "grok-imagine", "imagine-image", "image-lite", "plus-image"
+            "kolors", "grok-imagine", "imagine-image", "image-lite", "plus-image",
+            "banana", "gemini-2.5-flash-image"
         ]
         let endpointStyleImageName = haystack
             .split(whereSeparator: \.isWhitespace)
