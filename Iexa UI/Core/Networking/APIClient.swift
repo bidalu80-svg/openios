@@ -1019,6 +1019,42 @@ final class APIClient: @unchecked Sendable {
             }
         }
 
+        if !images.isEmpty {
+            for path in imageGenerationPaths {
+                for requestBody in xaiImageBodyVariants(
+                    prompt: prompt,
+                    model: model,
+                    size: size,
+                    images: images
+                ) {
+                    do {
+                        let payload = try await requestAnyJSON(
+                            path: path,
+                            method: .post,
+                            body: requestBody,
+                            timeout: 300
+                        )
+                        if let imageReference = firstImageReference(in: payload) {
+                            return imageReference
+                        }
+                        lastError = APIError.responseDecoding(
+                            underlying: NSError(
+                                domain: "APIClient",
+                                code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: "Grok 图生图接口没有返回图片地址。"]
+                            ),
+                            data: nil
+                        )
+                    } catch {
+                        guard shouldTryNextImageEndpoint(after: error) else {
+                            throw error
+                        }
+                        lastError = error
+                    }
+                }
+            }
+        }
+
         if !images.isEmpty, let firstImage = images.first {
             let multipartVariants: [[NetworkManager.MultipartUploadFile]] = [
                 images.prefix(16).map {
