@@ -2817,11 +2817,23 @@ final class ChatViewModel {
 
         let command = localAlpineCommandString(from: dict)
         let writeFilePaths = Self.localAlpineWriteFilePaths(from: dict)
-        guard command?.isEmpty == false || !writeFilePaths.isEmpty else { return nestedCommands }
         let cwd = localAlpineCWDString(from: dict)
+        let effectiveCWD = cwd?.isEmpty == false ? cwd! : "/mnt/iexa"
+        let readFileCommands = Self.localAlpineReadFileCommandStrings(from: dict, cwd: effectiveCWD)
+        if command?.isEmpty != false, writeFilePaths.isEmpty, !readFileCommands.isEmpty {
+            return readFileCommands.map {
+                ParsedLocalAlpineCommand(
+                    command: $0,
+                    cwd: effectiveCWD,
+                    hasWriteFiles: false,
+                    writeFilePaths: []
+                )
+            } + nestedCommands
+        }
+        guard command?.isEmpty == false || !writeFilePaths.isEmpty else { return nestedCommands }
         return [ParsedLocalAlpineCommand(
             command: command ?? "",
-            cwd: cwd?.isEmpty == false ? cwd! : "/mnt/iexa",
+            cwd: effectiveCWD,
             hasWriteFiles: !writeFilePaths.isEmpty,
             writeFilePaths: writeFilePaths
         )] + nestedCommands
@@ -2944,6 +2956,129 @@ final class ChatViewModel {
             || dict["content_base64"] != nil
             || dict["base64"] != nil
         return hasContent ? [path] : []
+    }
+
+    private static func localAlpineReadFileCommandStrings(from dict: [String: Any], cwd: String) -> [String] {
+        if let object = localAlpineReadFilesObject(from: dict) {
+            let commands = localAlpineReadFileCommandStrings(from: object, cwd: cwd)
+            if !commands.isEmpty { return commands }
+        }
+
+        if let tool = localAlpineStringValue(dict["tool"] ?? dict["function"] ?? dict["action"] ?? dict["name"])?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+           ["read", "read_file", "read_files", "cat", "open_file", "file_read"].contains(tool) {
+            for key in ["arguments", "args", "input", "parameters", "params"] {
+                let commands = localAlpineReadFileCommandStrings(from: dict[key], cwd: cwd)
+                if !commands.isEmpty { return commands }
+            }
+            return localAlpineReadFileCommandStrings(fromReadObject: dict, cwd: cwd)
+        }
+
+        return []
+    }
+
+    private static func localAlpineReadFilesObject(from dict: [String: Any]) -> Any? {
+        dict["read_file"] ?? dict["read_files"] ?? dict["read"] ?? dict["open_file"] ?? dict["cat"] ?? dict["file_read"]
+    }
+
+    private static func localAlpineReadFileCommandStrings(from object: Any?, cwd: String) -> [String] {
+        guard let object else { return [] }
+        if let array = object as? [Any] {
+            return array.flatMap { localAlpineReadFileCommandStrings(from: $0, cwd: cwd) }
+        }
+        if let path = object as? String {
+            return [localAlpineReadFileCommand(path: path, cwd: cwd)]
+        }
+        guard let dict = object as? [String: Any] else { return [] }
+        if let nested = localAlpineReadFilesObject(from: dict) {
+            let commands = localAlpineReadFileCommandStrings(from: nested, cwd: cwd)
+            if !commands.isEmpty { return commands }
+        }
+        if let paths = (dict["paths"] ?? dict["files"]) as? [Any] {
+            return paths.compactMap { localAlpinePathString(from: $0) }.map {
+                localAlpineReadFileCommand(path: $0, cwd: cwd, options: dict)
+            }
+        }
+        return localAlpineReadFileCommandStrings(fromReadObject: dict, cwd: cwd)
+    }
+
+    private static func localAlpineReadFileCommandStrings(fromReadObject dict: [String: Any], cwd: String) -> [String] {
+        guard let path = localAlpinePathString(from: dict) else { return [] }
+        return [localAlpineReadFileCommand(path: path, cwd: cwd, options: dict)]
+    }
+
+    private static func localAlpineReadFileCommand(path: String, cwd: String, options: [String: Any] = [:]) -> String {
+        var parts = [
+            "read_file",
+            localAlpineStructuredReadPath(path, cwd: cwd)
+        ]
+        if let startLine = localAlpineIntValue(options["start_line"] ?? options["line_start"] ?? options["from_line"]) {
+            parts.append("--start-line \(startLine)")
+        }
+        if let lineCount = localAlpineIntValue(options["line_count"] ?? options["max_lines"] ?? options["lines"]) {
+            parts.append("--line-count \(lineCount)")
+        }
+        if let maxBytes = localAlpineIntValue(options["max_bytes"]) {
+            parts.append("--max-bytes \(maxBytes)")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private static func localAlpineStructuredReadPath(_ path: String, cwd: String) -> String {
+        let raw = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        guard !raw.isEmpty else { return "/untitled.txt" }
+        if raw.hasPrefix("/mnt/iexa/") {
+            return "/" + raw.dropFirst("/mnt/iexa/".count)
+        }
+        if raw == "/mnt/iexa" {
+            return "/"
+        }
+        if raw.hasPrefix("/") {
+            return raw
+        }
+
+        let normalizedCWD = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        let base: String
+        if normalizedCWD == "/mnt/iexa" || normalizedCWD.isEmpty {
+            base = "/"
+        } else if normalizedCWD.hasPrefix("/mnt/iexa/") {
+            base = "/" + normalizedCWD.dropFirst("/mnt/iexa/".count)
+        } else if normalizedCWD.hasPrefix("/") {
+            base = normalizedCWD
+        } else {
+            base = "/" + normalizedCWD
+        }
+        return (base == "/" ? "/" : base + "/") + raw
+    }
+
+    private static func localAlpinePathString(from object: Any?) -> String? {
+        if let string = object as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        guard let dict = object as? [String: Any] else { return nil }
+        for key in ["path", "file_path", "file", "filename", "name", "target"] {
+            if let value = localAlpineStringValue(dict[key]) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func localAlpineIntValue(_ value: Any?) -> Int? {
+        switch value {
+        case let int as Int:
+            return int
+        case let number as NSNumber:
+            return number.intValue
+        case let string as String:
+            return Int(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        default:
+            return nil
+        }
     }
 
     private static func localAlpineRuntimePath(for path: String, cwd: String) -> String {
@@ -18400,9 +18535,9 @@ final class ChatViewModel {
         let content = """
         Local Alpine 执行结果
 
-        已拦截重复命令，避免把同一个脚本再次运行。
+        已拦截重复本地工具步骤，避免同一个读取/检查/运行动作反复执行。
 
-        已完成的命令：
+        已完成的步骤：
 
         ```bash
         \(completed.command)
@@ -18417,7 +18552,7 @@ final class ChatViewModel {
         \(completed.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : completed.outputPreview)
         ```
 
-        这条命令已经执行过；后续只需要总结结果或换一个不同的检查步骤。
+        这一步已经执行过；后续只需要总结结果，或换一个不同的检查步骤。
         """
         appendLocalAlpineSystemResult(parentId: parentId, content: content)
     }

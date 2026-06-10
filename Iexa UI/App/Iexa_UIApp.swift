@@ -471,15 +471,20 @@ struct RootView: View {
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: viewModel.phase)
         .task(id: appAccountViewModel.isAuthenticated) {
             guard appAccountViewModel.isAuthenticated else {
+                appAccountViewModel.stopSessionValidationTimer()
+                viewModel.suspendForAppAccountGate()
                 hasAttemptedRestore = false
                 return
             }
 
             await appAccountViewModel.validateCurrentSession(force: true)
             guard appAccountViewModel.isAuthenticated else {
+                appAccountViewModel.stopSessionValidationTimer()
+                viewModel.suspendForAppAccountGate()
                 hasAttemptedRestore = false
                 return
             }
+            appAccountViewModel.startSessionValidationTimer()
 
             // Migrate single-token-per-server to multi-account structure (one-time).
             viewModel.runLegacyMigrationIfNeeded()
@@ -509,9 +514,26 @@ struct RootView: View {
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
-            guard newPhase == .active, appAccountViewModel.isAuthenticated else { return }
             Task {
-                await appAccountViewModel.validateCurrentSession()
+                switch newPhase {
+                case .active:
+                    guard appAccountViewModel.isAuthenticated else {
+                        appAccountViewModel.stopSessionValidationTimer()
+                        viewModel.suspendForAppAccountGate()
+                        return
+                    }
+                    await appAccountViewModel.validateCurrentSession(force: true)
+                    guard appAccountViewModel.isAuthenticated else {
+                        appAccountViewModel.stopSessionValidationTimer()
+                        viewModel.suspendForAppAccountGate()
+                        return
+                    }
+                    appAccountViewModel.startSessionValidationTimer()
+                case .inactive, .background:
+                    appAccountViewModel.stopSessionValidationTimer()
+                @unknown default:
+                    break
+                }
             }
         }
     }

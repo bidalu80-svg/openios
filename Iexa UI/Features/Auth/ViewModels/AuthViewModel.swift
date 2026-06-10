@@ -272,6 +272,8 @@ final class AuthViewModel {
     weak var dependencies: AppDependencyContainer?
     private let logger = Logger(subsystem: "com.openui", category: "Auth")
     private var tokenRefreshTask: Task<Void, Never>?
+    private var sessionValidationTask: Task<Void, Never>?
+    private let sessionValidationInterval: TimeInterval = 30
     private var hasRunLegacyMigration = false
 
     private static let onboardingKey = "openui.has_shown_onboarding"
@@ -526,7 +528,10 @@ final class AuthViewModel {
                         )
                     }
                     let user = try await activeClient.getCurrentUser()
-                    currentUser = user
+                    guard await updateCurrentServerUserIfActive(user, context: "API key auth") else {
+                        isConnecting = false
+                        return
+                    }
                     dependencies?.activeChatStore.clear()
                     connectSocketWithToken()
                     cacheCurrentUser()
@@ -698,7 +703,10 @@ final class AuthViewModel {
 
         do {
             let user = try await client.login(email: email, password: password)
-            currentUser = user
+            guard await updateCurrentServerUserIfActive(user, context: "Login") else {
+                isLoggingIn = false
+                return
+            }
             // Check if user is in pending state — needs admin approval
             if user.role == .pending {
                 logger.info("Login: user is pending approval for \(self.email)")
@@ -767,7 +775,10 @@ final class AuthViewModel {
                 email: trimmedEmail,
                 password: signUpPassword
             )
-            currentUser = user
+            guard await updateCurrentServerUserIfActive(user, context: "Sign up") else {
+                isSigningUp = false
+                return
+            }
             // Check if user is pending admin approval
             if user.role == .pending {
                 logger.info("Sign up: user is pending approval for \(trimmedEmail)")
@@ -823,10 +834,14 @@ final class AuthViewModel {
         errorMessage = nil
 
         do {
-            currentUser = try await client.ldapLogin(
+            let user = try await client.ldapLogin(
                 username: ldapUsername,
                 password: ldapPassword
             )
+            guard await updateCurrentServerUserIfActive(user, context: "LDAP login") else {
+                isLoggingIn = false
+                return
+            }
             // SECURITY FIX: Clear LDAP password from memory immediately after successful auth
             ldapPassword = ""
             // Clear cached chat VMs so models are re-fetched for the new account
@@ -866,7 +881,11 @@ final class AuthViewModel {
         client.updateAuthToken(token)
 
         do {
-            currentUser = try await client.getCurrentUser()
+            let user = try await client.getCurrentUser()
+            guard await updateCurrentServerUserIfActive(user, context: "SSO login") else {
+                isLoggingIn = false
+                return
+            }
             // Clear cached chat VMs so models are re-fetched for the new account
             dependencies?.activeChatStore.clear()
             connectSocketWithToken()
@@ -920,7 +939,10 @@ final class AuthViewModel {
 
         for attempt in 1...maxRetries {
             do {
-                currentUser = try await client.getCurrentUser()
+                let user = try await client.getCurrentUser()
+                guard await updateCurrentServerUserIfActive(user, context: "Session restore") else {
+                    return
+                }
                 backendConfig = try? await client.getBackendConfig()
                 connectSocketWithToken()
                 cacheCurrentUser()
@@ -1056,6 +1078,18 @@ final class AuthViewModel {
         disconnect()
     }
 
+    /// Stops live server access while the app-account gate is signed out.
+    /// Saved server/account data is kept so a valid app-account session can
+    /// restore normally later.
+    func suspendForAppAccountGate() {
+        stopTokenRefreshTimer()
+        dependencies?.stopServerConnectionMonitor()
+        dependencies?.socketService?.disconnect()
+        dependencies?.activeChatStore.clear()
+        SharedDataService.shared.clearAuthState()
+        dependencies?.router?.resetAll()
+    }
+
     // MARK: - Token Refresh
 
     /// Starts a background timer that refreshes the auth token periodically.
@@ -1070,12 +1104,107 @@ final class AuthViewModel {
                 await self?.refreshToken()
             }
         }
+        startSessionValidationTimer()
     }
 
     /// Stops the token refresh timer.
     func stopTokenRefreshTimer() {
         tokenRefreshTask?.cancel()
         tokenRefreshTask = nil
+        stopSessionValidationTimer()
+    }
+
+    /// Starts a lightweight background checker that revalidates the current
+    /// authenticated user while the app stays in the foreground.
+    func startSessionValidationTimer() {
+        stopSessionValidationTimer()
+        sessionValidationTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(sessionValidationInterval * 1_000_000_000))
+                guard !Task.isCancelled else { break }
+                await self.validateCurrentServerUserStatus()
+            }
+        }
+    }
+
+    /// Stops the lightweight session validation timer.
+    func stopSessionValidationTimer() {
+        sessionValidationTask?.cancel()
+        sessionValidationTask = nil
+    }
+
+    @discardableResult
+    private func updateCurrentServerUserIfActive(_ user: User, context: String) async -> Bool {
+        guard user.isActive else {
+            logger.warning("\(context): user is inactive, clearing server session")
+            await invalidateCurrentServerSession(
+                message: "Your account has been disabled. Please sign in again."
+            )
+            return false
+        }
+        currentUser = user
+        return true
+    }
+
+    private func validateCurrentServerUserStatus() async {
+        guard let client = dependencies?.apiClient,
+              client.network.authToken != nil,
+              serverConfigStore.activeServer?.providerType == .iexa else {
+            return
+        }
+
+        do {
+            let freshUser = try await client.getCurrentUser()
+            guard await updateCurrentServerUserIfActive(freshUser, context: "Server session validation") else {
+                return
+            }
+            cacheCurrentUser()
+            logger.debug("Server session validation: user is still active")
+        } catch {
+            let apiError = APIError.from(error)
+            if apiError.isHTTPAuthFailure {
+                logger.warning("Server session validation: token invalid, clearing server session")
+                await invalidateCurrentServerSession(
+                    message: "Your session has expired. Please sign in again."
+                )
+            } else {
+                logger.debug("Server session validation skipped after transient error: \(apiError.localizedDescription)")
+            }
+        }
+    }
+
+    /// Clears the active server session without touching the app-account login.
+    private func invalidateCurrentServerSession(message: String) async {
+        stopTokenRefreshTimer()
+        dependencies?.stopServerConnectionMonitor()
+        dependencies?.socketService?.disconnect()
+        dependencies?.activeChatStore.clear()
+        dependencies?.apiClient?.updateAuthToken(nil)
+        serverConfigStore.clearActiveAccountOnActiveServer()
+        clearCachedUser()
+        clearSSOCookies()
+        Task { await ImageCacheService.shared.evictProfileImages() }
+
+        currentUser = nil
+        email = ""
+        password = ""
+        ldapUsername = ""
+        ldapPassword = ""
+        signUpName = ""
+        signUpEmail = ""
+        signUpPassword = ""
+        signUpConfirmPassword = ""
+        backendConfig = nil
+        errorMessage = message
+        dependencies?.router?.resetAll()
+
+        if serverConfigStore.activeServer != nil {
+            await ensureBackendConfig()
+            phase = .authMethodSelection
+        } else {
+            phase = .serverConnection
+        }
     }
 
     /// Refreshes the authentication by re-fetching the current user.
@@ -1084,17 +1213,18 @@ final class AuthViewModel {
         guard let client = dependencies?.apiClient else { return }
 
         do {
-            currentUser = try await client.getCurrentUser()
+            let freshUser = try await client.getCurrentUser()
+            guard await updateCurrentServerUserIfActive(freshUser, context: "Token refresh") else {
+                return
+            }
             logger.debug("Token refresh: session still valid")
         } catch {
             let apiError = APIError.from(error)
             if apiError.isHTTPAuthFailure {
                 logger.warning("Token expired during refresh; user must re-authenticate")
-                await MainActor.run {
-                    self.currentUser = nil
-                    self.phase = .authMethodSelection
-                    self.errorMessage = "Your session has expired. Please sign in again."
-                }
+                await invalidateCurrentServerSession(
+                    message: "Your session has expired. Please sign in again."
+                )
             }
         }
     }
@@ -1152,7 +1282,9 @@ final class AuthViewModel {
 
         do {
             let user = try await client.getCurrentUser()
-            currentUser = user
+            guard await updateCurrentServerUserIfActive(user, context: "Approval check") else {
+                return
+            }
             logger.info("Approval check: role=\(user.role.rawValue) for \(user.email)")
 
             if user.role != .pending {
@@ -1287,7 +1419,11 @@ final class AuthViewModel {
         if !apiKey.isEmpty {
             let previousToken = KeychainService.shared.getToken(forServer: normalizedURL)
             do {
-                currentUser = try await client.getCurrentUser()
+                let user = try await client.getCurrentUser()
+                guard await updateCurrentServerUserIfActive(user, context: "Cloudflare API key auth") else {
+                    isConnecting = false
+                    return
+                }
                 cacheCurrentUser()
                 phase = .authenticated
                 startTokenRefreshTimer()
@@ -1499,7 +1635,11 @@ final class AuthViewModel {
         if !apiKey.isEmpty {
             let previousToken = KeychainService.shared.getToken(forServer: normalizedURL)
             do {
-                currentUser = try await client.getCurrentUser()
+                let user = try await client.getCurrentUser()
+                guard await updateCurrentServerUserIfActive(user, context: "Proxy API key auth") else {
+                    isConnecting = false
+                    return
+                }
                 cacheCurrentUser()
                 phase = .authenticated
                 startTokenRefreshTimer()
@@ -2021,8 +2161,9 @@ final class AuthViewModel {
 
         do {
             let freshUser = try await client.getCurrentUser()
-            // Update with fresh data from server
-            currentUser = freshUser
+            guard await updateCurrentServerUserIfActive(freshUser, context: "Background validation") else {
+                return
+            }
             cacheCurrentUser()
             backendConfig = try? await client.getBackendConfig()
             logger.info("✅ Background session validation succeeded for '\(freshUser.displayName)'")

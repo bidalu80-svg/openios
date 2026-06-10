@@ -1077,7 +1077,15 @@ actor LocalAlpineAgentService {
             }
             .joined(separator: "|")
         let reads = command.readFiles
-            .map { $0.path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .map { request in
+                let path = request.path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                return [
+                    path,
+                    request.startLine.map { "start:\($0)" } ?? "start:nil",
+                    request.lineCount.map { "lines:\($0)" } ?? "lines:nil",
+                    request.maxBytes.map { "bytes:\($0)" } ?? "bytes:nil"
+                ].joined(separator: ":")
+            }
             .joined(separator: "|")
         let edits = command.editFiles
             .map { edit in
@@ -2582,18 +2590,18 @@ actor LocalAlpineAgentService {
                 return paths.compactMap { Self.pathString(from: $0) }.map {
                     LocalAlpineReadFileRequest(
                         path: $0,
-                        startLine: Self.intValue(dict["start_line"] ?? dict["line_start"] ?? dict["from_line"]),
-                        lineCount: Self.intValue(dict["line_count"] ?? dict["max_lines"] ?? dict["lines"]),
-                        maxBytes: Self.intValue(dict["max_bytes"])
+                        startLine: Self.intValue(dict["start_line"] ?? dict["startLine"] ?? dict["line_start"] ?? dict["from_line"]),
+                        lineCount: Self.intValue(dict["line_count"] ?? dict["lineCount"] ?? dict["max_lines"] ?? dict["maxLines"] ?? dict["lines"]),
+                        maxBytes: Self.intValue(dict["max_bytes"] ?? dict["maxBytes"])
                     )
                 }
             }
             guard let path = Self.pathString(from: dict) else { return [] }
             return [LocalAlpineReadFileRequest(
                 path: path,
-                startLine: Self.intValue(dict["start_line"] ?? dict["line_start"] ?? dict["from_line"]),
-                lineCount: Self.intValue(dict["line_count"] ?? dict["max_lines"] ?? dict["lines"]),
-                maxBytes: Self.intValue(dict["max_bytes"])
+                startLine: Self.intValue(dict["start_line"] ?? dict["startLine"] ?? dict["line_start"] ?? dict["from_line"]),
+                lineCount: Self.intValue(dict["line_count"] ?? dict["lineCount"] ?? dict["max_lines"] ?? dict["maxLines"] ?? dict["lines"]),
+                maxBytes: Self.intValue(dict["max_bytes"] ?? dict["maxBytes"])
             )]
         }
         return []
@@ -3251,7 +3259,8 @@ actor LocalAlpineAgentService {
 
         for request in requests.prefix(maxCommandsPerResponse) {
             let target = resolvedFilePath(request.path, cwd: cwd)
-            let maxBytes = max(1, min(request.maxBytes ?? 32_000, 256_000))
+            let maxBytes = max(1, min(request.maxBytes ?? 96_000, 256_000))
+            let commandDescription = Self.readFileCommandDescription(target: target, request: request)
             do {
                 let data = try await LocalAlpineTerminalService.shared.readFile(path: target)
                 let output: String
@@ -3269,22 +3278,22 @@ actor LocalAlpineAgentService {
                 }
                 lines.append(output)
                 let result = LocalAlpineCommandResult(
-                    command: "read_file \(target)",
+                    command: commandDescription,
                     output: output,
                     exitCode: 0,
                     interactiveRequest: nil
                 )
-                commandResults.append(Self.commandResult(command: "read_file \(target)", cwd: cwd, result: result))
+                commandResults.append(Self.commandResult(command: commandDescription, cwd: cwd, result: result))
             } catch {
                 let output = "read_file failed for `\(target)`: \(error.localizedDescription)"
                 lines.append("- \(output)")
                 let result = LocalAlpineCommandResult(
-                    command: "read_file \(target)",
+                    command: commandDescription,
                     output: output,
                     exitCode: 1,
                     interactiveRequest: nil
                 )
-                commandResults.append(Self.commandResult(command: "read_file \(target)", cwd: cwd, result: result))
+                commandResults.append(Self.commandResult(command: commandDescription, cwd: cwd, result: result))
                 hadFailure = true
             }
         }
@@ -3304,6 +3313,23 @@ actor LocalAlpineAgentService {
         )
     }
 
+    private nonisolated static func readFileCommandDescription(
+        target: String,
+        request: LocalAlpineReadFileRequest
+    ) -> String {
+        var parts = ["read_file", target]
+        if let startLine = request.startLine {
+            parts.append("--start-line \(startLine)")
+        }
+        if let lineCount = request.lineCount {
+            parts.append("--line-count \(lineCount)")
+        }
+        if let maxBytes = request.maxBytes {
+            parts.append("--max-bytes \(maxBytes)")
+        }
+        return parts.joined(separator: " ")
+    }
+
     private nonisolated static func numberedText(
         _ content: String,
         path: String,
@@ -3318,14 +3344,19 @@ actor LocalAlpineAgentService {
         let allLines = normalized.components(separatedBy: "\n")
         let totalLines = normalized.isEmpty ? 0 : (normalized.hasSuffix("\n") ? allLines.count - 1 : allLines.count)
         let firstLine = max(1, startLine ?? 1)
-        let count = max(1, min(lineCount ?? 240, 1_000))
+        let count = max(1, min(lineCount ?? 20_000, 20_000))
         let startIndex = min(max(0, firstLine - 1), max(0, totalLines))
         let endIndex = min(totalLines, startIndex + count)
         var body = (startIndex..<endIndex)
             .map { index in "\(index + 1)\t\(allLines[index])" }
             .joined(separator: "\n")
+        var readStatus = "complete"
         if (body.data(using: .utf8)?.count ?? 0) > maxBytes {
             body = String(body.prefix(maxBytes)) + "\n...（read_file 输出过长，已截断）"
+            readStatus = "partial"
+        } else if endIndex < totalLines {
+            body += "\n...（read_file 仍有 \(totalLines - endIndex) 行未显示，下一段从 \(endIndex + 1) 开始）"
+            readStatus = "partial"
         }
         if body.isEmpty {
             body = "（空文件或请求范围无内容）"
@@ -3336,6 +3367,7 @@ actor LocalAlpineAgentService {
         bytes: \(byteCount)
         lines: \(totalLines)
         range: \(startIndex + 1)-\(endIndex)
+        status: \(readStatus)
 
         == content ==
         \(body)

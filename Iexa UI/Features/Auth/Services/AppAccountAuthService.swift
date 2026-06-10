@@ -264,28 +264,167 @@ final class AppAccountAuthService {
     }
 
     private static func ensureAccountIsAllowed(_ payload: [String: Any]) throws {
+        try ensureObjectIsAllowed(payload, context: .account)
+
+        for key in ["user", "account", "profile"] {
+            if let object = payload[key] as? [String: Any] {
+                try ensureObjectIsAllowed(object, context: .account)
+            }
+        }
+
+        for key in [
+            "device",
+            "deviceBinding",
+            "device_binding",
+            "binding",
+            "userBinding",
+            "user_binding",
+            "boundDevice",
+            "bound_device",
+            "session",
+            "currentSession",
+            "current_session"
+        ] {
+            if let object = payload[key] as? [String: Any] {
+                try ensureObjectIsAllowed(object, context: .device)
+            }
+        }
+
+        let currentDeviceID = AppDeviceInstallIdentity.currentID()
+        for key in [
+            "devices",
+            "deviceBindings",
+            "device_bindings",
+            "bindings",
+            "userBindings",
+            "user_bindings",
+            "boundDevices",
+            "bound_devices",
+            "sessions"
+        ] {
+            if let objects = payload[key] as? [[String: Any]] {
+                for object in objects where objects.count == 1 || isCurrentDeviceObject(object, currentDeviceID: currentDeviceID) {
+                    try ensureObjectIsAllowed(object, context: .device)
+                }
+            }
+        }
+    }
+
+    private enum AccountStatusContext {
+        case account
+        case device
+
+        var bannedMessage: String {
+            switch self {
+            case .account:
+                return "账号已被封禁，请联系管理员。"
+            case .device:
+                return "当前设备已被封禁，请联系管理员。"
+            }
+        }
+
+        var disabledMessage: String {
+            switch self {
+            case .account:
+                return "账号已被停用，请联系管理员。"
+            case .device:
+                return "当前设备已被停用，请联系管理员。"
+            }
+        }
+
+        var inactiveMessage: String {
+            switch self {
+            case .account:
+                return "账号状态已失效，请重新登录。"
+            case .device:
+                return "当前设备绑定已失效，请重新登录。"
+            }
+        }
+    }
+
+    private static func ensureObjectIsAllowed(_ payload: [String: Any], context: AccountStatusContext) throws {
         if truthy(payload["banned"]) || truthy(payload["isBanned"]) || truthy(payload["is_banned"]) {
-            throw AppAccountAuthServiceError.server("账号已被封禁，请联系管理员。")
+            throw AppAccountAuthServiceError.server(context.bannedMessage)
         }
-        if truthy(payload["disabled"]) || truthy(payload["isDisabled"]) || truthy(payload["is_disabled"]) {
-            throw AppAccountAuthServiceError.server("账号已被停用，请联系管理员。")
+        if truthy(payload["deviceBanned"])
+            || truthy(payload["device_banned"])
+            || truthy(payload["isDeviceBanned"])
+            || truthy(payload["is_device_banned"]) {
+            throw AppAccountAuthServiceError.server(AccountStatusContext.device.bannedMessage)
         }
-        if let active = boolValue(payload["active"] ?? payload["isActive"] ?? payload["is_active"]),
+        if truthy(payload["disabled"])
+            || truthy(payload["isDisabled"])
+            || truthy(payload["is_disabled"])
+            || truthy(payload["blocked"])
+            || truthy(payload["isBlocked"])
+            || truthy(payload["is_blocked"]) {
+            throw AppAccountAuthServiceError.server(context.disabledMessage)
+        }
+        if let active = boolValue(payload["active"] ?? payload["isActive"] ?? payload["is_active"] ?? payload["enabled"] ?? payload["isEnabled"] ?? payload["is_enabled"]),
            active == false {
-            throw AppAccountAuthServiceError.server("账号状态已失效，请重新登录。")
+            throw AppAccountAuthServiceError.server(context.inactiveMessage)
+        }
+        if let deviceActive = boolValue(payload["deviceActive"] ?? payload["device_active"] ?? payload["isDeviceActive"] ?? payload["is_device_active"]),
+           deviceActive == false {
+            throw AppAccountAuthServiceError.server(AccountStatusContext.device.inactiveMessage)
         }
         let bannedAt = firstString(in: payload, keys: ["bannedAt", "banned_at"])
         if bannedAt != nil {
-            throw AppAccountAuthServiceError.server("账号已被封禁，请联系管理员。")
+            throw AppAccountAuthServiceError.server(context.bannedMessage)
+        }
+        let deviceBannedAt = firstString(in: payload, keys: ["deviceBannedAt", "device_banned_at"])
+        if deviceBannedAt != nil {
+            throw AppAccountAuthServiceError.server(AccountStatusContext.device.bannedMessage)
         }
         let deletedAt = firstString(in: payload, keys: ["deletedAt", "deleted_at"])
         if deletedAt != nil {
-            throw AppAccountAuthServiceError.server("账号已被删除，请重新注册。")
+            switch context {
+            case .account:
+                throw AppAccountAuthServiceError.server("账号已被删除，请重新注册。")
+            case .device:
+                throw AppAccountAuthServiceError.server(context.inactiveMessage)
+            }
         }
-        if let status = firstString(in: payload, keys: ["status", "state"])?.lowercased(),
-           ["banned", "blocked", "disabled", "deleted", "inactive", "suspended"].contains(status) {
-            throw AppAccountAuthServiceError.server("账号状态已失效，请重新登录。")
+        if let status = firstString(
+            in: payload,
+            keys: ["status", "state", "bindingStatus", "binding_status", "deviceStatus", "device_status"]
+        )?.lowercased(),
+           ["ban", "banned", "blocked", "disabled", "deleted", "inactive", "removed", "revoked", "suspended", "unbound", "unlinked"].contains(status) {
+            if status == "banned" || status == "ban" {
+                throw AppAccountAuthServiceError.server(context.bannedMessage)
+            }
+            throw AppAccountAuthServiceError.server(context.inactiveMessage)
         }
+    }
+
+    private static func isCurrentDeviceObject(_ payload: [String: Any], currentDeviceID: String) -> Bool {
+        if truthy(payload["current"])
+            || truthy(payload["isCurrent"])
+            || truthy(payload["is_current"])
+            || truthy(payload["currentDevice"])
+            || truthy(payload["current_device"]) {
+            return true
+        }
+
+        let normalizedCurrentID = currentDeviceID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedCurrentID.isEmpty else { return false }
+
+        let objectDeviceID = firstString(
+            in: payload,
+            keys: [
+                "deviceInstallID",
+                "deviceInstallId",
+                "device_install_id",
+                "installID",
+                "installId",
+                "install_id",
+                "deviceID",
+                "deviceId",
+                "device_id"
+            ]
+        )?.lowercased()
+
+        return objectDeviceID == normalizedCurrentID
     }
 
     private static func truthy(_ raw: Any?) -> Bool {

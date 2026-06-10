@@ -14,8 +14,10 @@ final class AppAccountAuthViewModel {
     private(set) var session: AppAccountAuthSession?
 
     private let service: AppAccountAuthService
+    private var sessionValidationTask: Task<Void, Never>?
     private var lastSessionValidationAt: Date?
     private let sessionValidationCooldown: TimeInterval = 5
+    private let sessionValidationInterval: TimeInterval = 30
 
     init(service: AppAccountAuthService = AppAccountAuthService()) {
         self.service = service
@@ -113,6 +115,7 @@ final class AppAccountAuthViewModel {
             password = ""
             activationCode = ""
             statusMessage = mode == .login ? "登录成功" : "注册并登录成功"
+            startSessionValidationTimer()
         } catch {
             errorMessage = friendlyMessage(for: error)
         }
@@ -130,6 +133,7 @@ final class AppAccountAuthViewModel {
     }
 
     func signOutLocal(statusMessage: String = "已退出登录", errorMessage: String? = nil) {
+        stopSessionValidationTimer()
         AppAccountAuthSessionStore.clearSession()
         session = nil
         password = ""
@@ -137,6 +141,24 @@ final class AppAccountAuthViewModel {
         self.statusMessage = statusMessage
         self.errorMessage = errorMessage
         lastSessionValidationAt = nil
+    }
+
+    func startSessionValidationTimer() {
+        guard session != nil else { return }
+        stopSessionValidationTimer()
+        let interval = sessionValidationInterval
+        sessionValidationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled else { break }
+                await self?.validateCurrentSession(force: true)
+            }
+        }
+    }
+
+    func stopSessionValidationTimer() {
+        sessionValidationTask?.cancel()
+        sessionValidationTask = nil
     }
 
     func validateCurrentSession(force: Bool = false) async {

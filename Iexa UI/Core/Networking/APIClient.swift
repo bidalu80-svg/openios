@@ -391,15 +391,29 @@ final class APIClient: @unchecked Sendable {
 
         // Fetch full user from /api/v1/auths/ to capture permissions field.
         // AuthResponse doesn't include permissions — only the GET /api/v1/auths/ response does.
-        if let fullUser = try? await getCurrentUser() { return fullUser }
-        return User(
-            id: response.id ?? "",
-            username: response.name ?? email,
-            email: response.email ?? email,
-            name: response.name,
-            profileImageURL: response.profileImageUrl,
-            role: User.UserRole(rawValue: response.role ?? "user") ?? .user
+        return try await fullUserAfterAuth(
+            fallback: User(
+                id: response.id ?? "",
+                username: response.name ?? email,
+                email: response.email ?? email,
+                name: response.name,
+                profileImageURL: response.profileImageUrl,
+                role: User.UserRole(rawValue: response.role ?? "user") ?? .user
+            )
         )
+    }
+
+    private func fullUserAfterAuth(fallback: User) async throws -> User {
+        do {
+            return try await getCurrentUser()
+        } catch {
+            let apiError = APIError.from(error)
+            if apiError.isHTTPAuthFailure {
+                updateAuthToken(nil)
+                throw error
+            }
+            return fallback
+        }
     }
 
     func ldapLogin(username: String, password: String) async throws -> User {
@@ -414,14 +428,15 @@ final class APIClient: @unchecked Sendable {
         network.saveAuthToken(response.token)
 
         // Fetch full user from /api/v1/auths/ to capture permissions field.
-        if let fullUser = try? await getCurrentUser() { return fullUser }
-        return User(
-            id: response.id ?? "",
-            username: response.name ?? username,
-            email: response.email ?? "",
-            name: response.name,
-            profileImageURL: response.profileImageUrl,
-            role: User.UserRole(rawValue: response.role ?? "user") ?? .user
+        return try await fullUserAfterAuth(
+            fallback: User(
+                id: response.id ?? "",
+                username: response.name ?? username,
+                email: response.email ?? "",
+                name: response.name,
+                profileImageURL: response.profileImageUrl,
+                role: User.UserRole(rawValue: response.role ?? "user") ?? .user
+            )
         )
     }
 
@@ -437,14 +452,15 @@ final class APIClient: @unchecked Sendable {
         network.saveAuthToken(response.token)
 
         // Fetch full user from /api/v1/auths/ to capture permissions field.
-        if let fullUser = try? await getCurrentUser() { return fullUser }
-        return User(
-            id: response.id ?? "",
-            username: response.name ?? name,
-            email: response.email ?? email,
-            name: response.name,
-            profileImageURL: response.profileImageUrl,
-            role: User.UserRole(rawValue: response.role ?? "user") ?? .user
+        return try await fullUserAfterAuth(
+            fallback: User(
+                id: response.id ?? "",
+                username: response.name ?? name,
+                email: response.email ?? email,
+                name: response.name,
+                profileImageURL: response.profileImageUrl,
+                role: User.UserRole(rawValue: response.role ?? "user") ?? .user
+            )
         )
     }
 
