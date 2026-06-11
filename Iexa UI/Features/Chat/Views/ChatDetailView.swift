@@ -5,6 +5,7 @@ import AVFoundation
 import AVKit
 import QuickLook
 import PDFKit
+import ImageIO
 import MarkdownView
 import Translation
 import os.log
@@ -4060,23 +4061,66 @@ struct ChatDetailView: View {
         if reference.hasPrefix("data:image/"),
            let comma = reference.firstIndex(of: ",") {
             let encoded = String(reference[reference.index(after: comma)...])
-            guard let data = Data(base64Encoded: encoded),
-                  let image = UIImage(data: data),
-                  image.size.width > 0,
-                  image.size.height > 0 else {
+            guard encoded.utf8.count <= 2_000_000,
+                  let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters) else {
                 return nil
             }
-            return image.size
+            return imagePixelSize(fromImageData: data)
         }
 
         if reference.hasPrefix("file://"),
-           let url = URL(string: reference),
-           let image = UIImage(contentsOfFile: url.path),
-           image.size.width > 0,
-           image.size.height > 0 {
-            return image.size
+           let url = URL(string: reference) {
+            return imagePixelSize(fromImageURL: url)
         }
 
+        return nil
+    }
+
+    private func imagePixelSize(fromImageData data: Data) -> CGSize? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, [
+            kCGImageSourceShouldCache: false
+        ] as CFDictionary) else {
+            return nil
+        }
+        return imagePixelSize(fromImageSource: source)
+    }
+
+    private func imagePixelSize(fromImageURL url: URL) -> CGSize? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [
+            kCGImageSourceShouldCache: false
+        ] as CFDictionary) else {
+            return nil
+        }
+        return imagePixelSize(fromImageSource: source)
+    }
+
+    private func imagePixelSize(fromImageSource source: CGImageSource) -> CGSize? {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, [
+            kCGImageSourceShouldCache: false
+        ] as CFDictionary) as? [CFString: Any] else {
+            return nil
+        }
+        let width = imagePixelDimension(properties[kCGImagePropertyPixelWidth])
+        let height = imagePixelDimension(properties[kCGImagePropertyPixelHeight])
+        guard let width,
+              let height,
+              width > 0,
+              height > 0 else {
+            return nil
+        }
+        return CGSize(width: width, height: height)
+    }
+
+    private func imagePixelDimension(_ value: Any?) -> CGFloat? {
+        if let number = value as? NSNumber {
+            return CGFloat(truncating: number)
+        }
+        if let int = value as? Int {
+            return CGFloat(int)
+        }
+        if let double = value as? Double {
+            return CGFloat(double)
+        }
         return nil
     }
 
