@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import ImageIO
 
 /// Loads and displays an image from the server using authenticated API calls.
 /// Supports:
@@ -35,6 +36,12 @@ struct AuthenticatedImageView: View {
     private struct LoadedLocalImage: @unchecked Sendable {
         let image: UIImage
         let cost: Int
+        let originalData: Data?
+    }
+
+    private struct LoadedImageData: @unchecked Sendable {
+        let displayImage: UIImage
+        let displayCost: Int
     }
 
     init(
@@ -53,9 +60,15 @@ struct AuthenticatedImageView: View {
     /// scrolling back through the chat, which causes layout shifts and
     /// scroll position jumps in the LazyVStack.
     private static let imageCache = NSCache<NSString, UIImage>()
+    private static let originalImageDataCache = NSCache<NSString, NSData>()
+    private static let originalImageURLCache = NSCache<NSString, NSURL>()
+    private static let displayMaxPixelSize = 2200
     static func configureCache() {
         imageCache.countLimit = 80
         imageCache.totalCostLimit = 60 * 1024 * 1024 // 60 MB
+        originalImageDataCache.countLimit = 24
+        originalImageDataCache.totalCostLimit = 180 * 1024 * 1024
+        originalImageURLCache.countLimit = 120
     }
 
     var body: some View {
@@ -76,8 +89,13 @@ struct AuthenticatedImageView: View {
                         }
                         .contextMenu {
                             Button {
-                                UIPasteboard.general.image = image
-                                Haptics.notify(.success)
+                                Task {
+                                    let imageForAction = await loadOriginalImageForAction() ?? image
+                                    await MainActor.run {
+                                        UIPasteboard.general.image = imageForAction
+                                        Haptics.notify(.success)
+                                    }
+                                }
                             } label: {
                                 Label("复制图片", systemImage: "doc.on.doc")
                             }
@@ -89,14 +107,21 @@ struct AuthenticatedImageView: View {
                             }
 
                             Button {
-                                shareImage(image)
+                                Task {
+                                    await shareImage(await loadOriginalImageForAction() ?? image)
+                                }
                             } label: {
                                 Label("分享", systemImage: "square.and.arrow.up")
                             }
 
                             if let onEdit {
                                 Button {
-                                    onEdit(image)
+                                    Task {
+                                        let imageForAction = await loadOriginalImageForAction() ?? image
+                                        await MainActor.run {
+                                            onEdit(imageForAction)
+                                        }
+                                    }
                                 } label: {
                                     Label("编辑", systemImage: "wand.and.stars")
                                 }
@@ -135,8 +160,13 @@ struct AuthenticatedImageView: View {
                 HStack(spacing: 4) {
                     if let onEdit {
                         Button {
-                            onEdit(image)
-                            Haptics.play(.light)
+                            Task {
+                                let imageForAction = await loadOriginalImageForAction() ?? image
+                                await MainActor.run {
+                                    onEdit(imageForAction)
+                                    Haptics.play(.light)
+                                }
+                            }
                         } label: {
                             imageActionLabel(icon: "wand.and.stars", accessibilityLabel: "编辑图片")
                         }
@@ -173,8 +203,8 @@ struct AuthenticatedImageView: View {
             }
         }
         .fullScreenCover(isPresented: $showFullScreen) {
-            if let image = loadedImage {
-                FullScreenImageView(image: image)
+            if loadedImage != nil {
+                FullScreenImageView(fileId: fileId, apiClient: apiClient)
             }
         }
     }
@@ -269,6 +299,7 @@ struct AuthenticatedImageView: View {
 
         if let inlineImage = await Self.inlineDataImage(from: fileId) {
             Self.imageCache.setObject(inlineImage.image, forKey: fileId as NSString, cost: inlineImage.cost)
+            Self.cacheOriginalData(inlineImage.originalData, for: fileId)
             setLoadedImage(inlineImage.image)
             return
         }
@@ -282,6 +313,7 @@ struct AuthenticatedImageView: View {
                 let loaded = try await Self.loadLocalImage(from: localURL)
                 guard !Task.isCancelled else { return }
                 Self.imageCache.setObject(loaded.image, forKey: fileId as NSString, cost: loaded.cost)
+                Self.cacheOriginalData(loaded.originalData, for: fileId)
                 setLoadedImage(loaded.image)
                 return
             } catch {
@@ -297,7 +329,8 @@ struct AuthenticatedImageView: View {
             }
             let image = await ImageCacheService.shared.loadImage(
                 from: remoteURL,
-                authToken: authTokenForRemoteURL(remoteURL)
+                authToken: authTokenForRemoteURL(remoteURL),
+                targetPixelSize: Self.displayMaxPixelSize
             )
             if let image {
                 setLoadedImage(image)
@@ -344,9 +377,10 @@ struct AuthenticatedImageView: View {
 
             do {
                 let (data, _) = try await apiClient.getFileContent(id: fileId)
-                let loaded = try await Self.decodeImageData(data)
+                let loaded = try await Self.decodeImageData(data, cacheKey: fileId)
                 guard !Task.isCancelled else { return }
                 Self.imageCache.setObject(loaded.image, forKey: fileId as NSString, cost: loaded.cost)
+                Self.cacheOriginalData(loaded.originalData, for: fileId)
                 setLoadedImage(loaded.image)
                 return
             } catch {
@@ -372,13 +406,23 @@ struct AuthenticatedImageView: View {
         }
     }
 
-    static func loadImageValue(fileId: String, apiClient: APIClient?) async -> UIImage? {
+    static func loadImageValue(
+        fileId: String,
+        apiClient: APIClient?,
+        preferOriginal: Bool = false
+    ) async -> UIImage? {
+        if preferOriginal,
+           let original = await originalImageValue(fileId: fileId, apiClient: apiClient) {
+            return original
+        }
+
         if let cached = imageCache.object(forKey: fileId as NSString) {
             return cached
         }
 
         if let inlineImage = await inlineDataImage(from: fileId) {
             imageCache.setObject(inlineImage.image, forKey: fileId as NSString, cost: inlineImage.cost)
+            cacheOriginalData(inlineImage.originalData, for: fileId)
             return inlineImage.image
         }
 
@@ -386,6 +430,7 @@ struct AuthenticatedImageView: View {
             do {
                 let loaded = try await loadLocalImage(from: localURL)
                 imageCache.setObject(loaded.image, forKey: fileId as NSString, cost: loaded.cost)
+                cacheOriginalData(loaded.originalData, for: fileId)
                 return loaded.image
             } catch {
                 return nil
@@ -395,7 +440,8 @@ struct AuthenticatedImageView: View {
         if let remoteURL = remoteImageURL(from: fileId) {
             let image = await ImageCacheService.shared.loadImage(
                 from: remoteURL,
-                authToken: authTokenForRemoteURL(remoteURL, apiClient: apiClient)
+                authToken: authTokenForRemoteURL(remoteURL, apiClient: apiClient),
+                targetPixelSize: preferOriginal ? 0 : displayMaxPixelSize
             )
             if let image {
                 imageCache.setObject(image, forKey: fileId as NSString)
@@ -408,9 +454,10 @@ struct AuthenticatedImageView: View {
             guard !Task.isCancelled else { return nil }
             do {
                 let (data, _) = try await apiClient.getFileContent(id: fileId)
-                let loaded = try await decodeImageData(data)
+                let loaded = try await decodeImageData(data, cacheKey: fileId)
                 guard !Task.isCancelled else { return nil }
                 imageCache.setObject(loaded.image, forKey: fileId as NSString, cost: loaded.cost)
+                cacheOriginalData(loaded.originalData, for: fileId)
                 return loaded.image
             } catch {
                 if attempt < maxAutoRetries - 1 {
@@ -439,38 +486,169 @@ struct AuthenticatedImageView: View {
         }
     }
 
+    private func loadOriginalImageForAction() async -> UIImage? {
+        await Self.originalImageValue(fileId: fileId, apiClient: apiClient)
+    }
+
     private static func inlineDataImage(from dataURL: String) async -> LoadedLocalImage? {
         guard dataURL.hasPrefix("data:image/"),
-              dataURL.count <= 7_000_000,
+              dataURL.count <= 80_000_000,
               let comma = dataURL.firstIndex(of: ",") else { return nil }
         let base64 = String(dataURL[dataURL.index(after: comma)...])
         return await Task.detached(priority: .userInitiated) {
             guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters),
-                  data.count <= 5_000_000,
-                  let image = UIImage(data: data) else {
+                  data.count <= 60_000_000,
+                  let decoded = decodeDisplayImage(from: data, cacheKey: dataURL) else {
                 return nil
             }
-            return LoadedLocalImage(image: image, cost: data.count)
+            return LoadedLocalImage(image: decoded.displayImage, cost: decoded.displayCost, originalData: data)
         }.value
     }
 
     private static func loadLocalImage(from url: URL) async throws -> LoadedLocalImage {
         try await Task.detached(priority: .userInitiated) {
             let data = try Data(contentsOf: url)
-            guard let image = UIImage(data: data) else {
+            guard let decoded = decodeDisplayImage(from: data, cacheKey: url.absoluteString) else {
                 throw URLError(.cannotDecodeContentData)
             }
-            return LoadedLocalImage(image: image, cost: data.count)
+            return LoadedLocalImage(image: decoded.displayImage, cost: decoded.displayCost, originalData: data)
         }.value
     }
 
-    private static func decodeImageData(_ data: Data) async throws -> LoadedLocalImage {
+    private static func decodeImageData(_ data: Data, cacheKey: String) async throws -> LoadedLocalImage {
         try await Task.detached(priority: .userInitiated) {
-            guard let image = UIImage(data: data) else {
+            guard let decoded = decodeDisplayImage(from: data, cacheKey: cacheKey) else {
                 throw URLError(.cannotDecodeContentData)
             }
-            return LoadedLocalImage(image: image, cost: data.count)
+            return LoadedLocalImage(image: decoded.displayImage, cost: decoded.displayCost, originalData: data)
         }.value
+    }
+
+    private static func decodeDisplayImage(from data: Data, cacheKey: String) -> LoadedImageData? {
+        let image = downsampledImage(data: data, maxPixelSize: displayMaxPixelSize)
+            ?? UIImage(data: data)
+        guard let image, image.size.width > 0, image.size.height > 0 else {
+            return nil
+        }
+        return LoadedImageData(
+            displayImage: image,
+            displayCost: bitmapCost(for: image, fallbackDataCount: data.count)
+        )
+    }
+
+    private static func downsampledImage(data: Data, maxPixelSize: Int) -> UIImage? {
+        guard maxPixelSize > 0 else { return UIImage(data: data) }
+        let sourceOptions: [CFString: Any] = [
+            kCGImageSourceShouldCache: false
+        ]
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary) else {
+            return nil
+        }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage)
+    }
+
+    private static func bitmapCost(for image: UIImage, fallbackDataCount: Int = 0) -> Int {
+        if let cgImage = image.cgImage {
+            return cgImage.bytesPerRow * cgImage.height
+        }
+        let pixelCount = Int(image.size.width * image.scale) * Int(image.size.height * image.scale)
+        return max(fallbackDataCount, pixelCount * 4)
+    }
+
+    private static func cacheOriginalData(_ data: Data?, for key: String) {
+        guard let data else { return }
+        let nsData = data as NSData
+        originalImageDataCache.setObject(nsData, forKey: key as NSString, cost: data.count)
+        if let url = try? writeOriginalImageDataToTemporaryCache(data, key: key) {
+            originalImageURLCache.setObject(url as NSURL, forKey: key as NSString)
+        }
+    }
+
+    private static func originalImageValue(fileId: String, apiClient: APIClient?) async -> UIImage? {
+        if let cachedData = originalImageDataCache.object(forKey: fileId as NSString) {
+            return await decodeOriginalImageData(cachedData as Data)
+        }
+        if let cachedURL = originalImageURLCache.object(forKey: fileId as NSString),
+           let data = try? await loadOriginalData(from: cachedURL as URL) {
+            originalImageDataCache.setObject(data as NSData, forKey: fileId as NSString, cost: data.count)
+            return await decodeOriginalImageData(data)
+        }
+        if let localURL = localImageURL(from: fileId),
+           let data = try? await loadOriginalData(from: localURL) {
+            cacheOriginalData(data, for: fileId)
+            return await decodeOriginalImageData(data)
+        }
+        if let remoteURL = remoteImageURL(from: fileId) {
+            if let data = try? await loadRemoteOriginalData(
+                from: remoteURL,
+                authToken: authTokenForRemoteURL(remoteURL, apiClient: apiClient)
+            ) {
+                cacheOriginalData(data, for: fileId)
+                return await decodeOriginalImageData(data)
+            }
+            return await loadImageValue(fileId: fileId, apiClient: apiClient, preferOriginal: false)
+        }
+        guard let apiClient else { return nil }
+        do {
+            let (data, _) = try await apiClient.getFileContent(id: fileId)
+            cacheOriginalData(data, for: fileId)
+            return await decodeOriginalImageData(data)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func loadOriginalData(from url: URL) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) {
+            try Data(contentsOf: url)
+        }.value
+    }
+
+    private static func loadRemoteOriginalData(from url: URL, authToken: String?) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("image/avif,image/webp,image/apng,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        if let authToken, !authToken.isEmpty {
+            request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...399).contains(httpResponse.statusCode),
+              !data.isEmpty else {
+            throw URLError(.badServerResponse)
+        }
+        return data
+    }
+
+    private static func decodeOriginalImageData(_ data: Data) async -> UIImage? {
+        await Task.detached(priority: .userInitiated) {
+            UIImage(data: data)
+        }.value
+    }
+
+    private static func writeOriginalImageDataToTemporaryCache(_ data: Data, key: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iexa-original-image-cache", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let safeScalars = key.unicodeScalars.map { scalar -> UnicodeScalar in
+            CharacterSet.alphanumerics.contains(scalar) ? scalar : "-"
+        }
+        let fileName = String(String.UnicodeScalarView(safeScalars)).prefix(96)
+        let url = directory.appendingPathComponent("\(fileName)-\(abs(key.hashValue)).img")
+        try data.write(to: url, options: .atomic)
+        return url
     }
 
     private static func localImageURL(from value: String) -> URL? {
@@ -500,7 +678,7 @@ struct AuthenticatedImageView: View {
     @MainActor
     private func saveImageToPhotos() async {
         guard saveState != .saving else { return }
-        guard let image = loadedImage else {
+        guard let image = await loadOriginalImageForAction() ?? loadedImage else {
             saveState = .failed
             return
         }
@@ -521,6 +699,7 @@ struct AuthenticatedImageView: View {
         }
     }
 
+    @MainActor
     private func shareImage(_ image: UIImage) {
         let activityVC = UIActivityViewController(
             activityItems: [image],
@@ -659,7 +838,11 @@ struct FullScreenImageGalleryView: View {
         if let cached = loadedImages[item.id] {
             image = cached
         } else {
-            image = await AuthenticatedImageView.loadImageValue(fileId: item.fileId, apiClient: apiClient)
+            image = await AuthenticatedImageView.loadImageValue(
+                fileId: item.fileId,
+                apiClient: apiClient,
+                preferOriginal: true
+            )
             if let image {
                 loadedImages[item.id] = image
             }
@@ -731,7 +914,8 @@ private struct FullScreenImageGalleryPage: View {
             guard image == nil else { return }
             if let loaded = await AuthenticatedImageView.loadImageValue(
                 fileId: item.fileId,
-                apiClient: apiClient
+                apiClient: apiClient,
+                preferOriginal: true
             ) {
                 image = loaded
                 onLoaded(loaded)
@@ -745,16 +929,29 @@ private struct FullScreenImageGalleryPage: View {
 /// A full-screen image viewer with pinch-to-zoom, double-tap-to-zoom,
 /// dismiss gesture, and share button.
 struct FullScreenImageView: View {
-    let image: UIImage
+    let fileId: String
+    let apiClient: APIClient?
     @Environment(\.dismiss) private var dismiss
+    @State private var image: UIImage?
+    @State private var didFail = false
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            // Zoomable image using UIScrollView for proper pinch-to-zoom
-            ZoomableImageView(image: image)
-                .ignoresSafeArea()
+            if let image {
+                // Zoomable image using UIScrollView for proper pinch-to-zoom
+                ZoomableImageView(image: image)
+                    .ignoresSafeArea()
+            } else if didFail {
+                Image(systemName: "photo")
+                    .scaledFont(size: 34, weight: .medium)
+                    .foregroundStyle(.white.opacity(0.55))
+            } else {
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(.white)
+            }
 
             // Top bar with close and share buttons
             VStack {
@@ -792,9 +989,13 @@ struct FullScreenImageView: View {
             }
         }
         .statusBarHidden()
+        .task(id: fileId) {
+            await loadImage()
+        }
     }
 
     private func shareImage() {
+        guard let image else { return }
         let activityVC = UIActivityViewController(
             activityItems: [image],
             applicationActivities: nil
@@ -807,6 +1008,19 @@ struct FullScreenImageView: View {
             }
             activityVC.popoverPresentationController?.sourceView = topVC.view
             topVC.present(activityVC, animated: true)
+        }
+    }
+
+    private func loadImage() async {
+        guard image == nil else { return }
+        if let loaded = await AuthenticatedImageView.loadImageValue(
+            fileId: fileId,
+            apiClient: apiClient,
+            preferOriginal: true
+        ) {
+            image = loaded
+        } else {
+            didFail = true
         }
     }
 }

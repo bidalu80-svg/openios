@@ -1388,6 +1388,8 @@ struct ChatDetailView: View {
 
     // MARK: Keyboard
     @State private var keyboard = KeyboardTracker()
+    @State private var isPostSendWaitingUIDelayed = false
+    @State private var postSendWaitingUIDelayGeneration = 0
 
     // MARK: Attachment pickers
     @State private var selectedPhotos: [PhotosPickerItem] = []
@@ -1565,6 +1567,16 @@ struct ChatDetailView: View {
                 modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
                 count: promptCardCount
             )
+        }
+        .onChange(of: keyboard.isVisible) { _, isVisible in
+            if !isVisible {
+                releasePostSendWaitingUIDelayAfterKeyboardSettles()
+            }
+        }
+        .onChange(of: keyboard.height) { _, height in
+            if height <= 1 {
+                releasePostSendWaitingUIDelayAfterKeyboardSettles()
+            }
         }
         .onAppear {
             viewModel.syncOnEntry()
@@ -2134,7 +2146,10 @@ struct ChatDetailView: View {
                 attachments: $vm.attachments,
                 placeholder: placeholderText,
                 isEnabled: !vm.isStreaming || vm.canSendWhileStreaming,
-                onSend: { Task { await viewModel.sendMessage() } },
+                onSend: {
+                    beginPostSendWaitingUIDelayIfNeeded()
+                    Task { await viewModel.sendMessage() }
+                },
                 onStopGenerating: vm.isStreaming ? { viewModel.stopStreaming() } : nil,
                 contextBudgetStatus: vm.contextBudgetStatus,
                 onContextBudgetPreviewUpdate: { viewModel.updateLiveContextBudgetPreview() },
@@ -2711,6 +2726,54 @@ struct ChatDetailView: View {
                 && viewModel.streamingStore.isActive)
     }
 
+    private func beginPostSendWaitingUIDelayIfNeeded() {
+        postSendWaitingUIDelayGeneration += 1
+        let generation = postSendWaitingUIDelayGeneration
+        guard keyboard.isVisible || keyboard.height > 1 else {
+            isPostSendWaitingUIDelayed = false
+            return
+        }
+
+        isPostSendWaitingUIDelayed = true
+        let fallbackDelay = max(0.24, min(keyboard.animationDuration + 0.18, 0.72))
+        DispatchQueue.main.asyncAfter(deadline: .now() + fallbackDelay) {
+            guard postSendWaitingUIDelayGeneration == generation else { return }
+            isPostSendWaitingUIDelayed = false
+        }
+    }
+
+    private func releasePostSendWaitingUIDelayAfterKeyboardSettles() {
+        guard isPostSendWaitingUIDelayed else { return }
+        postSendWaitingUIDelayGeneration += 1
+        let generation = postSendWaitingUIDelayGeneration
+        let delay = max(0.08, min(keyboard.animationDuration + 0.04, 0.45))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard postSendWaitingUIDelayGeneration == generation else { return }
+            withAnimation(.easeOut(duration: 0.18)) {
+                isPostSendWaitingUIDelayed = false
+            }
+        }
+    }
+
+    private func shouldDelayWaitingUI(for message: ChatMessage) -> Bool {
+        guard isPostSendWaitingUIDelayed,
+              message.role == .assistant,
+              message.isStreaming,
+              message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              message.error == nil,
+              message.files.isEmpty,
+              message.sources.isEmpty,
+              message.statusHistory.isEmpty else {
+            return false
+        }
+        guard let messageIndex = viewModel.messages.firstIndex(where: { $0.id == message.id }),
+              messageIndex > viewModel.messages.startIndex else {
+            return false
+        }
+        let previousIndex = viewModel.messages.index(before: messageIndex)
+        return viewModel.messages[previousIndex].role == .user
+    }
+
     private func scrollToBottomWithoutAnimation() {
         var transaction = Transaction()
         transaction.disablesAnimations = true
@@ -2818,11 +2881,12 @@ struct ChatDetailView: View {
         let isLastAssistant = message.role == .assistant && message.id == lastVisibleMessageId
         let userTextIsEmpty = message.role == .user
             && activeUserDisplayContent(for: message).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let waitingUIIsDelayed = shouldDelayWaitingUI(for: message)
 
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 0) {
 
             // ── Assistant header (avatar + model name) ──
-            if message.role == .assistant {
+            if message.role == .assistant && !waitingUIIsDelayed {
                 assistantHeader(for: message)
             }
 
@@ -2839,6 +2903,7 @@ struct ChatDetailView: View {
 
             // ── Streaming status indicators ──
             if message.role == .assistant
+                && !waitingUIIsDelayed
                 && !isLocalAlpineResultMessage(message)
                 && !hasAgentToolPreview(for: message)
                 && !messageHasProcessOnlyStatus(message) {
@@ -2849,8 +2914,9 @@ struct ChatDetailView: View {
             }
 
             // ── Message bubble / content ──
-            if !userTextIsEmpty {
+            if !userTextIsEmpty && !waitingUIIsDelayed {
                 messageBubble(for: message, isLastAssistant: isLastAssistant)
+                    .transition(.opacity)
             }
 
             // ── Tool-generated images ──

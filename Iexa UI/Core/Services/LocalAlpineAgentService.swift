@@ -202,6 +202,9 @@ struct LocalAlpineLineDelta: Codable, Hashable, Sendable {
 }
 
 struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
+    private static let defaultOutputPreviewLimit = 8_000
+    private static let readFileOutputPreviewLimit = 240_000
+
     let command: String
     let cwd: String
     let exitCode: Int?
@@ -218,7 +221,7 @@ struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
                 command: result.command,
                 cwd: result.cwd,
                 exitCode: result.exitCode,
-                outputPreview: String(result.outputPreview.prefix(8_000))
+                outputPreview: String(result.outputPreview.prefix(previewLimit(for: result.command)))
             )
         }
         guard !limitedResults.isEmpty,
@@ -235,6 +238,20 @@ struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
             return []
         }
         return results
+    }
+
+    static func isReadFileCommand(_ command: String) -> Bool {
+        let normalized = command
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalized == "read_file"
+            || normalized == "file_read"
+            || normalized.hasPrefix("read_file ")
+            || normalized.hasPrefix("file_read ")
+    }
+
+    static func previewLimit(for command: String) -> Int {
+        isReadFileCommand(command) ? readFileOutputPreviewLimit : defaultOutputPreviewLimit
     }
 }
 
@@ -292,6 +309,9 @@ enum LocalAlpineToolDisplayRegistry {
 }
 
 struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
+    private static let defaultOutputPreviewLimit = 4_000
+    private static let readFileOutputPreviewLimit = 220_000
+
     let id: String
     let runId: String
     let name: String
@@ -406,7 +426,9 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
                 cwd: call.cwd,
                 command: call.command.map { String($0.prefix(1_000)) },
                 exitCode: call.exitCode,
-                outputPreview: call.outputPreview.map { String($0.prefix(4_000)) },
+                outputPreview: call.outputPreview.map {
+                    String($0.prefix(outputPreviewLimit(for: call.name)))
+                },
                 filePaths: Array(call.filePaths.prefix(12)),
                 lineDelta: call.lineDelta,
                 startedAtMs: call.startedAtMs,
@@ -429,6 +451,16 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
         }
         return calls
     }
+
+    static func outputPreviewLimit(for name: String) -> Int {
+        let normalized = name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+        return ["read", "read_file", "read_files", "file_read", "cat", "open_file"].contains(normalized)
+            ? readFileOutputPreviewLimit
+            : defaultOutputPreviewLimit
+    }
 }
 
 struct LocalAlpineToolEvent: Sendable {
@@ -443,6 +475,8 @@ actor LocalAlpineAgentService {
 
     private let maxCommandsPerResponse = 12
     private let maxOutputCharactersPerCommand = 20_000
+    private let defaultReadFileMaxBytes = 192_000
+    private let maxReadFileMaxBytes = 512_000
     private let defaultCWD = "/mnt/iexa"
 
     private init() {}
@@ -1116,11 +1150,12 @@ actor LocalAlpineAgentService {
         cwd: String,
         result: LocalAlpineCommandResult
     ) -> LocalAlpineAgentCommandResult {
+        let normalizedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
         LocalAlpineAgentCommandResult(
-            command: command.trimmingCharacters(in: .whitespacesAndNewlines),
+            command: normalizedCommand,
             cwd: cwd.trimmingCharacters(in: .whitespacesAndNewlines),
             exitCode: result.exitCode,
-            outputPreview: String(result.output.prefix(8_000))
+            outputPreview: String(result.output.prefix(LocalAlpineAgentCommandResult.previewLimit(for: normalizedCommand)))
         )
     }
 
@@ -1183,7 +1218,9 @@ actor LocalAlpineAgentService {
             cwd: context.cwd,
             command: context.command,
             exitCode: exitCode,
-            outputPreview: outputPreview.map { String($0.prefix(4_000)) },
+            outputPreview: outputPreview.map {
+                String($0.prefix(LocalAlpineToolCall.outputPreviewLimit(for: context.name)))
+            },
             filePaths: context.filePaths,
             lineDelta: lineDelta?.isEmpty == true ? nil : lineDelta,
             startedAtMs: context.startedAtMs,
@@ -2080,17 +2117,19 @@ actor LocalAlpineAgentService {
         }
 
         let tool = words[0].lowercased()
-        let path = words[1]
         switch tool {
         case "read_file", "read_files", "open_file":
+            guard let request = readFileRequest(fromShellWords: words) else { return nil }
             return [LocalAlpineAgentCommand(command: nil, cwd: cwd, readFiles: [
-                LocalAlpineReadFileRequest(path: path)
+                request
             ])]
         case "delete_file", "delete_files", "remove_file", "remove_files":
+            let path = words[1]
             return [LocalAlpineAgentCommand(command: nil, cwd: cwd, deleteFiles: [
                 LocalAlpineDeleteFileRequest(path: path, recursive: false, missingOK: true)
             ])]
         case "verify_absent", "verify_missing", "ensure_absent":
+            let path = words[1]
             return [LocalAlpineAgentCommand(
                 command: "test ! -e \(shellSingleQuotedStatic(path)) && printf '%s absent\\n' \(shellSingleQuotedStatic(path))",
                 cwd: cwd,
@@ -2099,6 +2138,7 @@ actor LocalAlpineAgentService {
                 shellToolFilePaths: [path]
             )]
         case "list_dir", "list_directory":
+            let path = words[1]
             return [LocalAlpineAgentCommand(
                 command: "pwd && find \(shellSingleQuotedStatic(path)) -maxdepth 2 -mindepth 1 -print | sed -n '1,200p'",
                 cwd: cwd,
@@ -2109,6 +2149,60 @@ actor LocalAlpineAgentService {
         default:
             return nil
         }
+    }
+
+    private nonisolated static func readFileRequest(fromShellWords words: [String]) -> LocalAlpineReadFileRequest? {
+        var path: String?
+        var startLine: Int?
+        var lineCount: Int?
+        var maxBytes: Int?
+        var index = 1
+
+        func optionValue(from word: String) -> (key: String, value: String?) {
+            let raw = String(word.dropFirst(2))
+            guard let equal = raw.firstIndex(of: "=") else {
+                return (raw, nil)
+            }
+            return (String(raw[..<equal]), String(raw[raw.index(after: equal)...]))
+        }
+
+        while index < words.count {
+            let word = words[index]
+            if word.hasPrefix("--") {
+                var option = optionValue(from: word)
+                if option.value == nil, index + 1 < words.count, !words[index + 1].hasPrefix("--") {
+                    index += 1
+                    option.value = words[index]
+                }
+                let key = option.key.replacingOccurrences(of: "-", with: "_").lowercased()
+                let value = option.value.flatMap(Int.init)
+                switch key {
+                case "start_line", "line_start", "from_line":
+                    startLine = value
+                case "offset", "line_offset":
+                    startLine = value.map { max(1, $0 + 1) }
+                case "line_count", "max_lines", "lines", "limit":
+                    lineCount = value
+                case "max_bytes", "max_length", "max_chars":
+                    maxBytes = value
+                default:
+                    break
+                }
+            } else if path == nil {
+                path = word
+            }
+            index += 1
+        }
+
+        guard let path, !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return LocalAlpineReadFileRequest(
+            path: path,
+            startLine: startLine,
+            lineCount: lineCount,
+            maxBytes: maxBytes
+        )
     }
 
     private nonisolated static func shellLikeWords(from command: String) -> [String]? {
@@ -2590,21 +2684,46 @@ actor LocalAlpineAgentService {
                 return paths.compactMap { Self.pathString(from: $0) }.map {
                     LocalAlpineReadFileRequest(
                         path: $0,
-                        startLine: Self.intValue(dict["start_line"] ?? dict["startLine"] ?? dict["line_start"] ?? dict["from_line"]),
-                        lineCount: Self.intValue(dict["line_count"] ?? dict["lineCount"] ?? dict["max_lines"] ?? dict["maxLines"] ?? dict["lines"]),
-                        maxBytes: Self.intValue(dict["max_bytes"] ?? dict["maxBytes"])
+                        startLine: Self.readStartLine(from: dict),
+                        lineCount: Self.readLineCount(from: dict),
+                        maxBytes: Self.readMaxBytes(from: dict)
                     )
                 }
             }
             guard let path = Self.pathString(from: dict) else { return [] }
             return [LocalAlpineReadFileRequest(
                 path: path,
-                startLine: Self.intValue(dict["start_line"] ?? dict["startLine"] ?? dict["line_start"] ?? dict["from_line"]),
-                lineCount: Self.intValue(dict["line_count"] ?? dict["lineCount"] ?? dict["max_lines"] ?? dict["maxLines"] ?? dict["lines"]),
-                maxBytes: Self.intValue(dict["max_bytes"] ?? dict["maxBytes"])
+                startLine: Self.readStartLine(from: dict),
+                lineCount: Self.readLineCount(from: dict),
+                maxBytes: Self.readMaxBytes(from: dict)
             )]
         }
         return []
+    }
+
+    private nonisolated static func readStartLine(from dict: [String: Any]) -> Int? {
+        if let startLine = intValue(dict["start_line"] ?? dict["startLine"] ?? dict["line_start"] ?? dict["from_line"]) {
+            return startLine
+        }
+        guard let offset = intValue(dict["offset"] ?? dict["line_offset"] ?? dict["lineOffset"]) else {
+            return nil
+        }
+        return max(1, offset + 1)
+    }
+
+    private nonisolated static func readLineCount(from dict: [String: Any]) -> Int? {
+        intValue(dict["line_count"] ?? dict["lineCount"] ?? dict["max_lines"] ?? dict["maxLines"] ?? dict["lines"] ?? dict["limit"])
+    }
+
+    private nonisolated static func readMaxBytes(from dict: [String: Any]) -> Int? {
+        intValue(
+            dict["max_bytes"]
+                ?? dict["maxBytes"]
+                ?? dict["max_length"]
+                ?? dict["maxLength"]
+                ?? dict["max_chars"]
+                ?? dict["maxChars"]
+        )
     }
 
     private func parseEditFilesForCommand(from dict: [String: Any]) -> [LocalAlpineEditFileRequest] {
@@ -3259,7 +3378,7 @@ actor LocalAlpineAgentService {
 
         for request in requests.prefix(maxCommandsPerResponse) {
             let target = resolvedFilePath(request.path, cwd: cwd)
-            let maxBytes = max(1, min(request.maxBytes ?? 96_000, 256_000))
+            let maxBytes = max(1, min(request.maxBytes ?? defaultReadFileMaxBytes, maxReadFileMaxBytes))
             let commandDescription = Self.readFileCommandDescription(target: target, request: request)
             do {
                 let data = try await LocalAlpineTerminalService.shared.readFile(path: target)
@@ -3271,7 +3390,8 @@ actor LocalAlpineAgentService {
                         byteCount: data.count,
                         startLine: request.startLine,
                         lineCount: request.lineCount,
-                        maxBytes: maxBytes
+                        maxBytes: maxBytes,
+                        explicitRange: request.hasExplicitRange
                     )
                 } else {
                     output = "== file ==\n\(target)\n\nbinary file: \(data.count) B"
@@ -3336,7 +3456,8 @@ actor LocalAlpineAgentService {
         byteCount: Int,
         startLine: Int?,
         lineCount: Int?,
-        maxBytes: Int
+        maxBytes: Int,
+        explicitRange: Bool
     ) -> String {
         let normalized = content
             .replacingOccurrences(of: "\r\n", with: "\n")
@@ -3344,7 +3465,7 @@ actor LocalAlpineAgentService {
         let allLines = normalized.components(separatedBy: "\n")
         let totalLines = normalized.isEmpty ? 0 : (normalized.hasSuffix("\n") ? allLines.count - 1 : allLines.count)
         let firstLine = max(1, startLine ?? 1)
-        let count = max(1, min(lineCount ?? 20_000, 20_000))
+        let count = lineCount.map { max(1, min($0, 50_000)) } ?? max(totalLines, 1)
         let startIndex = min(max(0, firstLine - 1), max(0, totalLines))
         let endIndex = min(totalLines, startIndex + count)
         var body = (startIndex..<endIndex)
@@ -3354,7 +3475,7 @@ actor LocalAlpineAgentService {
         if (body.data(using: .utf8)?.count ?? 0) > maxBytes {
             body = String(body.prefix(maxBytes)) + "\n...（read_file 输出过长，已截断）"
             readStatus = "partial"
-        } else if endIndex < totalLines {
+        } else if explicitRange && endIndex < totalLines {
             body += "\n...（read_file 仍有 \(totalLines - endIndex) 行未显示，下一段从 \(endIndex + 1) 开始）"
             readStatus = "partial"
         }
@@ -6326,6 +6447,10 @@ private struct LocalAlpineReadFileRequest: Sendable {
     let startLine: Int?
     let lineCount: Int?
     let maxBytes: Int?
+
+    var hasExplicitRange: Bool {
+        startLine != nil || lineCount != nil
+    }
 
     init(path: String, startLine: Int? = nil, lineCount: Int? = nil, maxBytes: Int? = nil) {
         self.path = path

@@ -1972,8 +1972,8 @@ final class ChatViewModel {
     private static let localAlpineToolCapabilities: [LocalAlpineToolCapability] = [
         LocalAlpineToolCapability(
             name: "read_file",
-            description: "Read workspace/rootfs files without shell text parsing.",
-            arguments: ["path", "start_line?", "line_count?", "max_bytes?", "alias: file_read"]
+            description: "Read workspace/rootfs text files without shell parsing. Defaults to returning the whole file up to the app safety cap; use ranges only for very large files or targeted inspection.",
+            arguments: ["path", "start_line?/offset?", "line_count?/lines?", "max_bytes?/max_length?", "alias: file_read"]
         ),
         LocalAlpineToolCapability(
             name: "edit_file",
@@ -2062,15 +2062,15 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "file_read",
-                    "description": "Read a UTF-8 text file. For user/project files, read under /mnt/iexa; use Alpine rootfs paths only for bounded runtime/system inspection. Prefer this over shell cat/sed/nl because the app returns metadata and can detect no-progress loops.",
+                    "description": "Read a UTF-8 text file. By default the app returns the complete file up to a safety cap, so omit offset/lines for normal source files. Use offset/lines only when the result says partial/truncated or you intentionally need a small range. For user/project files, read under /mnt/iexa; use Alpine rootfs paths only for bounded runtime/system inspection. Prefer this over shell cat/sed/nl because the app returns metadata and can detect no-progress loops.",
                     "parameters": [
                         "type": "object",
                         "properties": [
                             "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
                             "path": ["type": "string", "description": "File path, relative to /mnt/iexa or absolute."],
-                            "offset": ["type": "integer", "description": "Zero-based line offset."],
-                            "lines": ["type": "integer", "description": "Maximum number of lines to read."],
-                            "max_length": ["type": "integer", "description": "Maximum characters to return."],
+                            "offset": ["type": "integer", "description": "Optional zero-based line offset. Leave unset to read from the beginning."],
+                            "lines": ["type": "integer", "description": "Optional maximum number of lines. Leave unset to read the whole file up to the host safety cap."],
+                            "max_length": ["type": "integer", "description": "Optional maximum bytes/characters to return. Leave unset for the host's larger source-file read cap."],
                             "direction": ["type": "string", "enum": ["forward", "backward"]]
                         ],
                         "required": ["path"]
@@ -2133,6 +2133,7 @@ final class ChatViewModel {
         - Create source files with `file_write`. Modify existing files with `file_read` followed by `file_edit` or a complete same-path `file_write`.
         - Treat `file_write`, `file_edit`, and deletion targets outside `/mnt/iexa` as advanced sandbox-rootfs operations. Only do them when the user explicitly names that path or when a package/runtime setup requires it.
         - Prefer `file_read` for source inspection instead of shell `cat`, `sed`, `nl`, or inline Python readers; structured reads include line metadata and help the app detect no-progress loops.
+        - For normal source files, call `file_read` once with only `path`. Do not split into offset/lines chunks unless the previous read result explicitly says `status: partial`, `truncated`, or the user asked for a range.
         - Never write source code through `shell_execute` using heredocs, redirection, `echo`, `printf`, `cat`, `tee`, or inline Python writer scripts.
         - Use `shell_execute` only for bounded list/search/run/install/build/test/verify commands.
         - Commands must be POSIX sh/BusyBox ash compatible. Avoid `find -printf`, `grep -P`, Bash `[[ ... ]]`, `source`, arrays, process substitution, and GNU/macOS-only flags.
@@ -2490,7 +2491,7 @@ final class ChatViewModel {
                     cwd: \(result.cwd)
                     exit_code: \(exit)
                     output:
-                    \(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : contextTextForModel(redactedLocalAlpineInternalPaths(in: result.outputPreview), label: "local-alpine-command-output", maxInlineCharacters: 4_000))
+                    \(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : contextTextForModel(redactedLocalAlpineInternalPaths(in: result.outputPreview), label: "local-alpine-command-output", maxInlineCharacters: localAlpineObservationOutputLimit(for: result.command)))
                     """))
                 }
             }
@@ -3011,15 +3012,17 @@ final class ChatViewModel {
     private static func localAlpineReadFileCommand(path: String, cwd: String, options: [String: Any] = [:]) -> String {
         var parts = [
             "read_file",
-            localAlpineStructuredReadPath(path, cwd: cwd)
+            localAlpineShellQuote(localAlpineStructuredReadPath(path, cwd: cwd))
         ]
         if let startLine = localAlpineIntValue(options["start_line"] ?? options["line_start"] ?? options["from_line"]) {
             parts.append("--start-line \(startLine)")
+        } else if let offset = localAlpineIntValue(options["offset"]) {
+            parts.append("--start-line \(max(1, offset + 1))")
         }
         if let lineCount = localAlpineIntValue(options["line_count"] ?? options["max_lines"] ?? options["lines"]) {
             parts.append("--line-count \(lineCount)")
         }
-        if let maxBytes = localAlpineIntValue(options["max_bytes"]) {
+        if let maxBytes = localAlpineIntValue(options["max_bytes"] ?? options["max_length"] ?? options["max_chars"]) {
             parts.append("--max-bytes \(maxBytes)")
         }
         return parts.joined(separator: " ")
@@ -11222,7 +11225,14 @@ final class ChatViewModel {
     private static func localAlpineNativeToolResultContent(_ result: LocalAlpineAgentResult) -> String {
         let body = result.summary.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallback = result.didExecute ? "Local Alpine tool completed." : "Local Alpine tool did not execute."
-        return String((body.isEmpty ? fallback : body).prefix(16_000))
+        let limit = result.commandResults.contains { LocalAlpineAgentCommandResult.isReadFileCommand($0.command) }
+            ? 240_000
+            : 16_000
+        return String((body.isEmpty ? fallback : body).prefix(limit))
+    }
+
+    private static func localAlpineObservationOutputLimit(for command: String) -> Int {
+        LocalAlpineAgentCommandResult.isReadFileCommand(command) ? 220_000 : 4_000
     }
 
     private static func localAlpineNativeLoopBlockedFallbackMessage(_ blockedMessage: String) -> String {
@@ -16233,7 +16243,7 @@ final class ChatViewModel {
                     : contextTextForModel(
                         redactedOutput,
                         label: "local-alpine-command-output",
-                        maxInlineCharacters: 8_000
+                        maxInlineCharacters: localAlpineObservationOutputLimit(for: result.command)
                     )
                 lines.append("""
                 - command: \(redactedCommand)
