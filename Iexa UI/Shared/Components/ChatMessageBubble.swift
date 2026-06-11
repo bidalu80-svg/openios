@@ -306,35 +306,42 @@ struct TypingIndicator: View {
 
     private func pentagonCrossPoint(index: Int, progress: Double) -> CGPoint {
         let t = clamped(progress)
-        let offset = pentagonTrackOffset(index)
-        let travel = 0.72
-        let trackProgress = offset + smootherstep(t) * travel
-        return pentagonTrackPoint(trackProgress)
+        let split = 0.52
+        if t < split {
+            return quadraticPoint(
+                from: pentagonEntryPoint(index),
+                control: pentagonCrossControlIn(index),
+                to: pentagonCrossMidpoint(index),
+                progress: smootherstep(t / split)
+            )
+        }
+        return quadraticPoint(
+            from: pentagonCrossMidpoint(index),
+            control: pentagonCrossControlOut(index),
+            to: pentagonExitPoint(index),
+            progress: smootherstep((t - split) / (1 - split))
+        )
     }
 
     private func orbitDropPoint(index: Int, progress: Double) -> CGPoint {
         let t = clamped(progress)
-        if t < 0.50 {
-            let u = easeInOutSine(t / 0.50)
-            let base = interpolate(pentagonExitPoint(index), raisedLinePoint(index), u)
-            let radius = 5.1 * sin(.pi * u)
-            let angle = Double(index) * (.pi * 2 / 3) + u * .pi * 1.95 + .pi / 7
-            return CGPoint(
-                x: base.x + CGFloat(cos(angle) * radius),
-                y: base.y + CGFloat(sin(angle) * radius * 0.58)
+        if t < 0.56 {
+            return upperSemicircleArcPoint(
+                index: index,
+                progress: easeInOutSine(t / 0.56)
             )
         }
 
-        if t < 0.64 {
-            let u = (t - 0.50) / 0.14
+        if t < 0.70 {
+            let u = (t - 0.56) / 0.14
             let point = raisedLinePoint(index)
             return CGPoint(
-                x: point.x + CGFloat(sin(.pi * 2 * u + Double(index) * 0.45)) * 0.18,
-                y: point.y + CGFloat(sin(.pi * u)) * 0.38
+                x: point.x,
+                y: point.y + CGFloat(sin(.pi * u)) * 0.28
             )
         }
 
-        let u = clamped((t - 0.64) / 0.36)
+        let u = clamped((t - 0.70) / 0.30)
         let delayed = clamped((u - Double(index) * 0.045) / 0.91)
         let start = raisedLinePoint(index)
         let end = linePoint(index)
@@ -358,18 +365,42 @@ struct TypingIndicator: View {
     }
 
     private func pentagonEntryPoint(_ index: Int) -> CGPoint {
-        pentagonTrackPoint(pentagonTrackOffset(index))
+        switch index {
+        case 0: return pentagonVertex(4)
+        case 1: return pentagonVertex(0)
+        default: return pentagonVertex(1)
+        }
     }
 
     private func pentagonExitPoint(_ index: Int) -> CGPoint {
-        pentagonTrackPoint(pentagonTrackOffset(index) + 0.72)
+        switch index {
+        case 0: return CGPoint(x: 5.4, y: 5.6)
+        case 1: return CGPoint(x: 0, y: 6.6)
+        default: return CGPoint(x: -5.4, y: 5.6)
+        }
     }
 
-    private func pentagonTrackOffset(_ index: Int) -> Double {
+    private func pentagonCrossMidpoint(_ index: Int) -> CGPoint {
         switch index {
-        case 0: return 0.02
-        case 1: return 0.35
-        default: return 0.68
+        case 0: return CGPoint(x: 0.2, y: -0.5)
+        case 1: return CGPoint(x: 0, y: 2.2)
+        default: return CGPoint(x: -0.2, y: -0.5)
+        }
+    }
+
+    private func pentagonCrossControlIn(_ index: Int) -> CGPoint {
+        switch index {
+        case 0: return pentagonVertex(0)
+        case 1: return CGPoint(x: -7.0, y: 1.2)
+        default: return pentagonVertex(0)
+        }
+    }
+
+    private func pentagonCrossControlOut(_ index: Int) -> CGPoint {
+        switch index {
+        case 0: return pentagonVertex(1)
+        case 1: return CGPoint(x: 7.0, y: 1.2)
+        default: return pentagonVertex(4)
         }
     }
 
@@ -381,16 +412,31 @@ struct TypingIndicator: View {
         )
     }
 
-    private func pentagonTrackPoint(_ progress: Double) -> CGPoint {
-        let starOrder = [0, 2, 4, 1, 3, 0]
-        let wrapped = progress - floor(progress)
-        let scaled = wrapped * Double(starOrder.count - 1)
-        let segment = min(starOrder.count - 2, Int(scaled))
-        let local = smootherstep(scaled - Double(segment))
-        return interpolate(
-            pentagonVertex(starOrder[segment]),
-            pentagonVertex(starOrder[segment + 1]),
-            local
+    private func upperSemicircleArcPoint(index: Int, progress: Double) -> CGPoint {
+        let u = clamped(progress)
+        let start = pentagonExitPoint(index)
+        let end = raisedLinePoint(index)
+        let base = interpolate(start, end, u)
+        let distance = hypot(Double(end.x - start.x), Double(end.y - start.y))
+        let lift = sin(.pi * u) * distance * 0.36
+        let centerSweep: CGFloat = index == 1 ? CGFloat(sin(.pi * u)) * 3.2 : 0
+        return CGPoint(
+            x: base.x + centerSweep,
+            y: base.y - CGFloat(lift)
+        )
+    }
+
+    private func quadraticPoint(
+        from start: CGPoint,
+        control: CGPoint,
+        to end: CGPoint,
+        progress: Double
+    ) -> CGPoint {
+        let t = CGFloat(clamped(progress))
+        let inv = 1 - t
+        return CGPoint(
+            x: inv * inv * start.x + 2 * inv * t * control.x + t * t * end.x,
+            y: inv * inv * start.y + 2 * inv * t * control.y + t * t * end.y
         )
     }
 
