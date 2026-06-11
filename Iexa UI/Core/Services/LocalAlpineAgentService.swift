@@ -1151,7 +1151,7 @@ actor LocalAlpineAgentService {
         result: LocalAlpineCommandResult
     ) -> LocalAlpineAgentCommandResult {
         let normalizedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        LocalAlpineAgentCommandResult(
+        return LocalAlpineAgentCommandResult(
             command: normalizedCommand,
             cwd: cwd.trimmingCharacters(in: .whitespacesAndNewlines),
             exitCode: result.exitCode,

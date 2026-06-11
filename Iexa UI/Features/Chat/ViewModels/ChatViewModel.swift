@@ -16312,7 +16312,12 @@ final class ChatViewModel {
         let message = conversation!.messages[index]
         guard Self.isLocalAlpineAgentResult(message) else { return }
 
-        let paths = Self.localAlpineGeneratedMediaPaths(from: message)
+        let explicitPaths = Self.localAlpineGeneratedMediaPaths(from: message)
+        let scannedPaths = await recentLocalAlpineGeneratedImagePaths(
+            for: message,
+            excluding: explicitPaths
+        )
+        let paths = Self.deduplicatedLocalAlpineImagePaths(explicitPaths + scannedPaths)
         guard !paths.isEmpty else { return }
 
         var appended: [ChatMessageFile] = []
@@ -16405,6 +16410,156 @@ final class ChatViewModel {
 
         var seen = Set<String>()
         return candidates.compactMap { rawPath in
+            guard let path = normalizedLocalAlpineSharedMediaPath(rawPath),
+                  localAlpinePathLooksLikeImage(path),
+                  seen.insert(path).inserted else {
+                return nil
+            }
+            return path
+        }
+    }
+
+    private func recentLocalAlpineGeneratedImagePaths(
+        for message: ChatMessage,
+        excluding explicitPaths: [String]
+    ) async -> [String] {
+        guard Self.localAlpineGeneratedMediaScanMightHelp(message) else { return [] }
+
+        let excluded = Set(explicitPaths.compactMap { Self.normalizedLocalAlpineSharedMediaPath($0) })
+        let window = Self.localAlpineGeneratedMediaScanWindow(for: message)
+        let maxDirectories = 220
+        let maxDepth = 6
+        let maxCandidates = 48
+        var queue: [(path: String, depth: Int)] = [("/", 0)]
+        var visited = Set<String>()
+        var candidates: [(path: String, modified: Date, size: Int64)] = []
+
+        while !queue.isEmpty,
+              visited.count < maxDirectories,
+              candidates.count < maxCandidates {
+            let current = queue.removeFirst()
+            guard visited.insert(current.path).inserted else { continue }
+            guard let items = try? await LocalAlpineTerminalService.shared.listFiles(
+                path: current.path,
+                includeHidden: false
+            ) else {
+                continue
+            }
+
+            for item in items {
+                guard let normalizedPath = Self.normalizedLocalAlpineSharedMediaPath(item.path) else {
+                    continue
+                }
+
+                if item.isDirectory {
+                    guard current.depth < maxDepth,
+                          !Self.shouldSkipLocalAlpineMediaScanDirectory(normalizedPath) else {
+                        continue
+                    }
+                    queue.append((normalizedPath, current.depth + 1))
+                    continue
+                }
+
+                guard Self.localAlpinePathLooksLikeImage(normalizedPath),
+                      !excluded.contains(normalizedPath),
+                      (item.size ?? 0) > 0,
+                      let modified = item.modified,
+                      Self.localAlpineGeneratedMediaScanWindow(window, contains: modified) else {
+                    continue
+                }
+                candidates.append((normalizedPath, modified, item.size ?? 0))
+            }
+        }
+
+        return candidates
+            .sorted {
+                if $0.modified != $1.modified {
+                    return $0.modified > $1.modified
+                }
+                if $0.size != $1.size {
+                    return $0.size > $1.size
+                }
+                return $0.path < $1.path
+            }
+            .prefix(8)
+            .map { $0.path }
+    }
+
+    private static func localAlpineGeneratedMediaScanMightHelp(_ message: ChatMessage) -> Bool {
+        let metadata = message.metadata ?? [:]
+        let toolCalls = LocalAlpineToolCall.decodeMetadata(metadata["iexa_local_alpine_tool_calls"])
+        if toolCalls.contains(where: { call in
+            let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return !["read_file", "read_files", "read", "file_read", "list_dir", "list", "ls", "file_list", "directory_list", "glob", "find_files", "grep", "search_files"].contains(name)
+        }) {
+            return true
+        }
+
+        let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata["iexa_local_alpine_command_results"])
+        return commandResults.contains { result in
+            let command = result.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !command.isEmpty else { return false }
+            return !LocalAlpineAgentCommandResult.isReadFileCommand(command)
+                && !command.hasPrefix("ls ")
+                && command != "ls"
+                && !command.hasPrefix("find ")
+                && !command.hasPrefix("grep ")
+                && !command.hasPrefix("rg ")
+        }
+    }
+
+    private static func localAlpineGeneratedMediaScanWindow(for message: ChatMessage) -> (start: Date, end: Date) {
+        let metadata = message.metadata ?? [:]
+        let toolCalls = LocalAlpineToolCall.decodeMetadata(metadata["iexa_local_alpine_tool_calls"])
+        let startedAtMs = toolCalls.map(\.startedAtMs).filter { $0 > 0 }
+        let completedAtMs = toolCalls.compactMap(\.completedAtMs).filter { $0 > 0 }
+
+        let start: Date
+        if let earliestStart = startedAtMs.min() {
+            start = Date(timeIntervalSince1970: Double(earliestStart) / 1_000).addingTimeInterval(-30)
+        } else {
+            start = message.timestamp.addingTimeInterval(-20 * 60)
+        }
+
+        let end: Date
+        if let latestCompletion = completedAtMs.max() {
+            end = Date(timeIntervalSince1970: Double(latestCompletion) / 1_000).addingTimeInterval(120)
+        } else {
+            end = Date().addingTimeInterval(120)
+        }
+
+        return (start, end)
+    }
+
+    private static func localAlpineGeneratedMediaScanWindow(
+        _ window: (start: Date, end: Date),
+        contains date: Date
+    ) -> Bool {
+        date >= window.start && date <= window.end
+    }
+
+    private static func shouldSkipLocalAlpineMediaScanDirectory(_ path: String) -> Bool {
+        let name = (path as NSString).lastPathComponent.lowercased()
+        return [
+            ".build",
+            ".git",
+            ".swiftpm",
+            ".venv",
+            "__pycache__",
+            "build",
+            "deriveddata",
+            "dist",
+            "node_modules",
+            "pods",
+            "site-packages",
+            "vendor",
+            "venv"
+        ].contains(name)
+    }
+
+    private static func deduplicatedLocalAlpineImagePaths(_ paths: [String]) -> [String] {
+        var seen = Set<String>()
+        return paths.compactMap { rawPath in
             guard let path = normalizedLocalAlpineSharedMediaPath(rawPath),
                   localAlpinePathLooksLikeImage(path),
                   seen.insert(path).inserted else {
