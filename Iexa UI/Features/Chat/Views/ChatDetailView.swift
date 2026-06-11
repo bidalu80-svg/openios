@@ -2892,7 +2892,7 @@ struct ChatDetailView: View {
 
             // ── Assistant header (avatar + model name) ──
             if message.role == .assistant && !waitingUIIsDelayed {
-                assistantHeader(for: message)
+                assistantHeader(for: message, animated: isLastAssistant || message.isStreaming)
             }
 
             if message.role == .user {
@@ -3038,9 +3038,10 @@ struct ChatDetailView: View {
         return viewModel.selectedModel
     }
 
-    private func assistantHeader(for message: ChatMessage) -> some View {
+    @ViewBuilder
+    private func assistantHeader(for message: ChatMessage, animated: Bool) -> some View {
         let model = resolveModel(for: message)
-        return HStack(spacing: Spacing.sm) {
+        let header = HStack(spacing: Spacing.sm) {
             if let m = model {
                 ModelAvatar(size: 22, imageURL: viewModel.resolvedImageURL(for: m),
                             label: m.shortName, authToken: viewModel.serverAuthToken)
@@ -3054,6 +3055,12 @@ struct ChatDetailView: View {
         .padding(.horizontal, Spacing.screenPadding)
         .padding(.top, Spacing.sm)
         .padding(.bottom, 4)
+
+        if animated {
+            header.assistantHeaderReveal()
+        } else {
+            header
+        }
     }
 
     // MARK: - Message Bubble
@@ -6447,6 +6454,34 @@ private struct ImageGenerationTitleShimmer: View {
         withAnimation(.linear(duration: 1.85).repeatForever(autoreverses: false)) {
             shimmerPhase = 1
         }
+    }
+}
+
+private struct AssistantHeaderRevealModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var appeared = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(appeared || reduceMotion ? 1 : 0)
+            .scaleEffect(appeared || reduceMotion ? 1 : 0.985, anchor: .leading)
+            .offset(y: appeared || reduceMotion ? 0 : 4)
+            .onAppear {
+                guard !appeared else { return }
+                if reduceMotion {
+                    appeared = true
+                } else {
+                    withAnimation(.easeOut(duration: 0.24).delay(0.03)) {
+                        appeared = true
+                    }
+                }
+            }
+    }
+}
+
+private extension View {
+    func assistantHeaderReveal() -> some View {
+        modifier(AssistantHeaderRevealModifier())
     }
 }
 
