@@ -256,27 +256,20 @@ struct TypingIndicator: View {
     }
 
     private func progress(for date: Date) -> Double {
-        let period = 4.05
+        let period = 3.20
         let value = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
         return value < 0 ? value + 1 : value
     }
 
     private func dotPoint(index: Int, progress: Double) -> CGPoint {
-        let waveEnd = 0.34
-        let crossEnd = 0.68
+        let waveEnd = 0.54
 
         if progress < waveEnd {
             return waveLinePoint(index: index, progress: progress / waveEnd)
         }
-        if progress < crossEnd {
-            return pentagonCrossPoint(
-                index: index,
-                progress: (progress - waveEnd) / (crossEnd - waveEnd)
-            )
-        }
         return orbitDropPoint(
             index: index,
-            progress: (progress - crossEnd) / (1 - crossEnd)
+            progress: (progress - waveEnd) / (1 - waveEnd)
         )
     }
 
@@ -285,7 +278,7 @@ struct TypingIndicator: View {
         let handoffStart = 0.78
         if t >= handoffStart {
             let from = waveMotionPoint(index: index, progress: handoffStart)
-            let to = pentagonEntryPoint(index)
+            let to = linePoint(index)
             return interpolate(from, to, smootherstep((t - handoffStart) / (1 - handoffStart)))
         }
         return waveMotionPoint(index: index, progress: t)
@@ -304,49 +297,27 @@ struct TypingIndicator: View {
         )
     }
 
-    private func pentagonCrossPoint(index: Int, progress: Double) -> CGPoint {
-        let t = clamped(progress)
-        let split = 0.52
-        if t < split {
-            return quadraticPoint(
-                from: pentagonEntryPoint(index),
-                control: pentagonCrossControlIn(index),
-                to: pentagonCrossMidpoint(index),
-                progress: smootherstep(t / split)
-            )
-        }
-        return quadraticPoint(
-            from: pentagonCrossMidpoint(index),
-            control: pentagonCrossControlOut(index),
-            to: pentagonExitPoint(index),
-            progress: smootherstep((t - split) / (1 - split))
-        )
-    }
-
     private func orbitDropPoint(index: Int, progress: Double) -> CGPoint {
         let t = clamped(progress)
-        if t < 0.56 {
-            return upperSemicircleArcPoint(
-                index: index,
-                progress: easeInOutSine(t / 0.56)
-            )
+        if t < 0.68 {
+            return snakeOrbitPoint(index: index, progress: t / 0.68)
         }
 
-        if t < 0.70 {
-            let u = (t - 0.56) / 0.14
+        if t < 0.76 {
+            let u = (t - 0.68) / 0.08
             let point = raisedLinePoint(index)
             return CGPoint(
                 x: point.x,
-                y: point.y + CGFloat(sin(.pi * u)) * 0.28
+                y: point.y + CGFloat(sin(.pi * u)) * 0.18
             )
         }
 
-        let u = clamped((t - 0.70) / 0.30)
-        let delayed = clamped((u - Double(index) * 0.045) / 0.91)
+        let u = clamped((t - 0.76) / 0.24)
+        let delayed = clamped((u - Double(2 - index) * 0.05) / 0.90)
         let start = raisedLinePoint(index)
         let end = linePoint(index)
         let fall = delayed * delayed * (3 - 2 * delayed)
-        let rebound = sin(.pi * delayed) * (1 - delayed) * 1.55
+        let rebound = sin(.pi * delayed) * (1 - delayed) * 1.35
         return CGPoint(
             x: start.x + (end.x - start.x) * CGFloat(smootherstep(delayed)),
             y: start.y + (end.y - start.y) * CGFloat(fall) - CGFloat(rebound)
@@ -364,79 +335,43 @@ struct TypingIndicator: View {
         return CGPoint(x: point.x, y: point.y - 5.1)
     }
 
-    private func pentagonEntryPoint(_ index: Int) -> CGPoint {
-        switch index {
-        case 0: return pentagonVertex(4)
-        case 1: return pentagonVertex(0)
-        default: return pentagonVertex(1)
-        }
-    }
+    private func snakeOrbitPoint(index: Int, progress: Double) -> CGPoint {
+        let t = clamped(progress)
+        let entryEnd = 0.16
+        let orbitEnd = 0.76
+        let entryAngle = snakeEntryAngle(index)
 
-    private func pentagonExitPoint(_ index: Int) -> CGPoint {
-        switch index {
-        case 0: return CGPoint(x: 5.4, y: 5.6)
-        case 1: return CGPoint(x: 0, y: 6.6)
-        default: return CGPoint(x: -5.4, y: 5.6)
+        if t < entryEnd {
+            let u = smootherstep(t / entryEnd)
+            return interpolate(linePoint(index), orbitCirclePoint(angle: entryAngle), u)
         }
-    }
 
-    private func pentagonCrossMidpoint(_ index: Int) -> CGPoint {
-        switch index {
-        case 0: return CGPoint(x: 0.2, y: -0.5)
-        case 1: return CGPoint(x: 0, y: 2.2)
-        default: return CGPoint(x: -0.2, y: -0.5)
+        if t < orbitEnd {
+            let u = easeInOutSine((t - entryEnd) / (orbitEnd - entryEnd))
+            return orbitCirclePoint(angle: entryAngle - .pi * 2 * u)
         }
-    }
 
-    private func pentagonCrossControlIn(_ index: Int) -> CGPoint {
-        switch index {
-        case 0: return pentagonVertex(0)
-        case 1: return CGPoint(x: -7.0, y: 1.2)
-        default: return pentagonVertex(0)
-        }
-    }
-
-    private func pentagonCrossControlOut(_ index: Int) -> CGPoint {
-        switch index {
-        case 0: return pentagonVertex(1)
-        case 1: return CGPoint(x: 7.0, y: 1.2)
-        default: return pentagonVertex(4)
-        }
-    }
-
-    private func pentagonVertex(_ position: Int) -> CGPoint {
-        let angle = -Double.pi / 2 + Double(position) * (Double.pi * 2 / 5)
+        let u = (t - orbitEnd) / (1 - orbitEnd)
+        let delayed = smootherstep(clamped((u - Double(2 - index) * 0.04) / 0.92))
+        let from = orbitCirclePoint(angle: entryAngle - .pi * 2)
+        let to = raisedLinePoint(index)
+        let point = interpolate(from, to, delayed)
         return CGPoint(
-            x: CGFloat(cos(angle) * 8.2),
-            y: CGFloat(-1.0 + sin(angle) * 7.2)
+            x: point.x,
+            y: point.y - CGFloat(sin(.pi * delayed)) * 1.15
         )
     }
 
-    private func upperSemicircleArcPoint(index: Int, progress: Double) -> CGPoint {
-        let u = clamped(progress)
-        let start = pentagonExitPoint(index)
-        let end = raisedLinePoint(index)
-        let base = interpolate(start, end, u)
-        let distance = hypot(Double(end.x - start.x), Double(end.y - start.y))
-        let lift = sin(.pi * u) * distance * 0.36
-        let centerSweep: CGFloat = index == 1 ? CGFloat(sin(.pi * u)) * 3.2 : 0
-        return CGPoint(
-            x: base.x + centerSweep,
-            y: base.y - CGFloat(lift)
-        )
+    private func snakeEntryAngle(_ index: Int) -> Double {
+        .pi / 2 + (1 - Double(index)) * 0.52
     }
 
-    private func quadraticPoint(
-        from start: CGPoint,
-        control: CGPoint,
-        to end: CGPoint,
-        progress: Double
-    ) -> CGPoint {
-        let t = CGFloat(clamped(progress))
-        let inv = 1 - t
+    private func orbitCirclePoint(angle: Double) -> CGPoint {
+        let radius: CGFloat = 6.9
+        let center = CGPoint(x: 0, y: -3.1)
         return CGPoint(
-            x: inv * inv * start.x + 2 * inv * t * control.x + t * t * end.x,
-            y: inv * inv * start.y + 2 * inv * t * control.y + t * t * end.y
+            x: center.x + CGFloat(cos(angle)) * radius,
+            y: center.y + CGFloat(sin(angle)) * radius
         )
     }
 
@@ -476,10 +411,6 @@ struct TypingIndicator: View {
         return -(cos(.pi * t) - 1) / 2
     }
 
-    private func easeOutCubic(_ value: Double) -> Double {
-        let t = 1 - clamped(value)
-        return 1 - t * t * t
-    }
 }
 
 // MARK: - Message Action Bar
