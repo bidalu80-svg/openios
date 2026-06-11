@@ -256,90 +256,101 @@ struct TypingIndicator: View {
     }
 
     private func progress(for date: Date) -> Double {
-        let period = 3.75
+        let period = 3.6
         let value = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
         return value < 0 ? value + 1 : value
     }
 
     private func dotPoint(index: Int, progress: Double) -> CGPoint {
-        switch progress {
-        case ..<0.30:
-            return waveLinePoint(index: index, progress: progress / 0.30)
-        case ..<0.54:
-            return crossingPoint(index: index, progress: (progress - 0.30) / 0.24)
-        case ..<0.78:
-            return orbitToLinePoint(index: index, progress: (progress - 0.54) / 0.24)
-        case ..<0.90:
-            return fallingLinePoint(index: index, progress: (progress - 0.78) / 0.12)
+        let phaseProgress = progress * 3
+        let phase = min(2, Int(phaseProgress))
+        let localProgress = phaseProgress - Double(phase)
+
+        switch phase {
+        case 0:
+            return waveLinePoint(index: index, progress: localProgress)
+        case 1:
+            return crossingPoint(index: index, progress: localProgress)
         default:
-            return waveLinePoint(index: index, progress: (progress - 0.90) / 0.10)
+            return orbitDropPoint(index: index, progress: localProgress)
         }
     }
 
     private func waveLinePoint(index: Int, progress: Double) -> CGPoint {
         let t = clamped(progress)
         let base = linePoint(index)
-        let rise = smoothstep(t / 0.16)
-        let settle = 1 - smoothstep((t - 0.76) / 0.24)
-        let amplitude = 3.8 * rise * settle
-        let phase = t * .pi * 3.7 - Double(index) * 0.68
-        let drift = CGFloat(cos(phase * 0.52)) * 0.28 * CGFloat(rise * settle)
+        let envelope = smootherstep(t / 0.14) * (1 - smootherstep((t - 0.86) / 0.14))
+        let phase = t * .pi * 4.15 - Double(index) * 0.72
+        let lift = sin(phase) * 3.35
+        let float = sin(.pi * t) * 0.35
         return CGPoint(
-            x: base.x + drift,
-            y: base.y - CGFloat(sin(phase)) * CGFloat(amplitude)
+            x: base.x + CGFloat(cos(phase * 0.42)) * 0.18 * CGFloat(envelope),
+            y: base.y - CGFloat((lift + float) * envelope)
         )
     }
 
     private func crossingPoint(index: Int, progress: Double) -> CGPoint {
-        let t = smoothstep(progress)
-        let start = linePoint(index)
-        let end = swappedLinePoint(index)
-        let arc: CGFloat
+        let t = clamped(progress)
+        let base = linePoint(index)
+        let pass = sin(.pi * t)
+        let weave = sin(.pi * 2 * t)
+        let xShift: CGFloat
+        let yShift: CGFloat
         switch index {
         case 0:
-            arc = -5.6
+            xShift = dotSpacing * 2 * CGFloat(pass)
+            yShift = -4.0 * CGFloat(weave)
         case 2:
-            arc = 5.6
+            xShift = -dotSpacing * 2 * CGFloat(pass)
+            yShift = 4.0 * CGFloat(weave)
         default:
-            arc = 3.2 * CGFloat(sin(.pi * 2 * t))
+            xShift = 0
+            yShift = -2.2 * CGFloat(weave)
         }
         return CGPoint(
-            x: start.x + (end.x - start.x) * CGFloat(t),
-            y: start.y + (end.y - start.y) * CGFloat(t) + CGFloat(sin(.pi * t)) * arc
+            x: base.x + xShift,
+            y: base.y + yShift
         )
     }
 
-    private func orbitToLinePoint(index: Int, progress: Double) -> CGPoint {
-        let t = smoothstep(progress)
-        let start = swappedLinePoint(index)
-        let end = raisedLinePoint(index)
-        let base = interpolate(start, end, t)
-        let radius = 6.2 * sin(.pi * t)
-        let angle = Double(index) * (.pi * 2 / 3) + t * .pi * 2.15 - .pi / 8
-        return CGPoint(
-            x: base.x + CGFloat(cos(angle) * radius),
-            y: base.y + CGFloat(sin(angle) * radius * 0.72)
-        )
-    }
-
-    private func fallingLinePoint(index: Int, progress: Double) -> CGPoint {
+    private func orbitDropPoint(index: Int, progress: Double) -> CGPoint {
         let t = clamped(progress)
+        if t < 0.58 {
+            let u = easeInOutSine(t / 0.58)
+            let base = interpolate(linePoint(index), raisedLinePoint(index), u)
+            let radius = 4.9 * sin(.pi * u)
+            let angle = Double(index) * (.pi * 2 / 3) + u * .pi * 1.72 - .pi / 9
+            return CGPoint(
+                x: base.x + CGFloat(cos(angle) * radius),
+                y: base.y + CGFloat(sin(angle) * radius * 0.64)
+            )
+        }
+
+        if t < 0.72 {
+            let u = (t - 0.58) / 0.14
+            let point = raisedLinePoint(index)
+            return CGPoint(
+                x: point.x,
+                y: point.y + CGFloat(sin(.pi * u)) * 0.65
+            )
+        }
+
+        let u = clamped((t - 0.72) / 0.28)
+        let eased = easeOutCubic(u)
         let start = raisedLinePoint(index)
         let end = linePoint(index)
-        let y = start.y + (end.y - start.y) * CGFloat(easeOutCubic(t))
-        let rebound = CGFloat(sin(.pi * t) * (1 - t)) * 2.4
+        let landingRipple = max(0, sin(.pi * clamped((u - Double(index) * 0.07) / 0.78))) * (1 - u) * 1.7
+        let rebound = sin(.pi * u) * (1 - u) * 2.1
         return CGPoint(
-            x: start.x + (end.x - start.x) * CGFloat(smoothstep(t)),
-            y: y + rebound
+            x: start.x + (end.x - start.x) * CGFloat(smootherstep(u)),
+            y: start.y + (end.y - start.y) * CGFloat(eased) + CGFloat(rebound - landingRipple)
         )
     }
 
-    private func linePoint(_ index: Int) -> CGPoint {
-        CGPoint(x: CGFloat(index - 1) * 9.2, y: 0)
-    }
+    private var dotSpacing: CGFloat { 9.2 }
 
-    private func swappedLinePoint(_ index: Int) -> CGPoint {
-        linePoint(2 - index)
+    private func linePoint(_ index: Int) -> CGPoint {
+        CGPoint(x: CGFloat(index - 1) * dotSpacing, y: 0)
     }
 
     private func raisedLinePoint(_ index: Int) -> CGPoint {
@@ -355,19 +366,13 @@ struct TypingIndicator: View {
     }
 
     private func dotScale(index: Int, progress: Double) -> CGFloat {
-        let phase = progress * .pi * 2 - Double(index) * 0.72
-        let fallPulse: Double
-        if progress >= 0.78 && progress < 0.90 {
-            fallPulse = sin(.pi * ((progress - 0.78) / 0.12)) * 0.08
-        } else {
-            fallPulse = 0
-        }
-        return CGFloat(0.92 + fallPulse + 0.12 * (0.5 + 0.5 * sin(phase)))
+        let phase = progress * .pi * 6 - Double(index) * 0.7
+        return CGFloat(0.94 + 0.08 * (0.5 + 0.5 * sin(phase)))
     }
 
     private func dotOpacity(index: Int, progress: Double) -> Double {
-        let phase = progress * .pi * 2 - Double(index) * 0.72
-        return 0.74 + 0.26 * (0.5 + 0.5 * sin(phase))
+        let phase = progress * .pi * 6 - Double(index) * 0.7
+        return 0.76 + 0.24 * (0.5 + 0.5 * sin(phase))
     }
 
     private func clamped(_ value: Double) -> Double {
@@ -377,6 +382,16 @@ struct TypingIndicator: View {
     private func smoothstep(_ value: Double) -> Double {
         let t = clamped(value)
         return t * t * (3 - 2 * t)
+    }
+
+    private func smootherstep(_ value: Double) -> Double {
+        let t = clamped(value)
+        return t * t * t * (t * (t * 6 - 15) + 10)
+    }
+
+    private func easeInOutSine(_ value: Double) -> Double {
+        let t = clamped(value)
+        return -(cos(.pi * t) - 1) / 2
     }
 
     private func easeOutCubic(_ value: Double) -> Double {
