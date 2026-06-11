@@ -489,6 +489,7 @@ final class ChatViewModel {
     private var webLinkContextsByMessageId: [String: String] = [:]
     private var webSearchContextsByMessageId: [String: String] = [:]
     private var attachmentContextsByMessageId: [String: String] = [:]
+    @ObservationIgnored private var inlineImageDataURLsByMessageId: [String: [String]] = [:]
     private var hasFinishedStreaming = false
     /// Tracks the content length at the last `extractAndApplyTasksFromContent` call.
     /// Prevents the O(n) task-extraction scan from running on every single token;
@@ -1279,12 +1280,19 @@ final class ChatViewModel {
         if isOpenAICompatibleProvider,
            canSendAttachmentInline(attachments[index]) || attachments[index].type == .file {
             if attachments[index].type == .image,
-               let data = attachments[index].data,
-               attachments[index].displayDataURL == nil {
-                attachments[index].displayDataURL = inlineImageDataURL(
-                    data: data,
-                    fileName: attachments[index].name
-                )
+               let data = attachments[index].data {
+                if attachments[index].displayDataURL == nil {
+                    attachments[index].displayDataURL = inlineImageDataURL(
+                        data: data,
+                        fileName: attachments[index].name
+                    )
+                }
+                if attachments[index].displayImageReference == nil {
+                    attachments[index].displayImageReference = FileAttachmentService.writeImagePreviewToCache(
+                        data: data,
+                        originalName: attachments[index].name
+                    )
+                }
             }
             attachments[index].uploadStatus = .completed
             attachments[index].uploadError = nil
@@ -1354,10 +1362,18 @@ final class ChatViewModel {
                     attachments[idx].uploadedFileId = fileId
                     attachments[idx].uploadedFileObject = fileObject
                     if attachments[idx].type == .image {
-                        attachments[idx].displayDataURL = self.inlineImageDataURL(
-                            data: data,
-                            fileName: fileName
-                        )
+                        if attachments[idx].displayDataURL == nil {
+                            attachments[idx].displayDataURL = self.inlineImageDataURL(
+                                data: data,
+                                fileName: fileName
+                            )
+                        }
+                        if attachments[idx].displayImageReference == nil {
+                            attachments[idx].displayImageReference = FileAttachmentService.writeImagePreviewToCache(
+                                data: data,
+                                originalName: fileName
+                            )
+                        }
                     }
                     // STORAGE FIX: Release raw file data after successful upload.
                     // The file ID is sufficient for referencing the file going forward.
@@ -1461,6 +1477,7 @@ final class ChatViewModel {
         guard let value, !value.isEmpty else { return false }
         let lower = value.lowercased()
         return lower.hasPrefix("local-inline:")
+            || lower.hasPrefix("local-inline-image:")
             || lower.hasPrefix("local-binary:")
             || lower.hasPrefix("local-alpine:")
             || lower.hasPrefix("data:")
@@ -5584,7 +5601,8 @@ final class ChatViewModel {
             category: "Chat"
         )
 
-        await persistExplicitMemoryRequestIfNeeded(from: currentText)
+        inputText = ""
+        attachments = []
 
         let normalizedLocalAlpineText = Self.normalizedLocalAlpineCommand(currentText)
         let shouldKeepMediaRoute = shouldKeepMediaGenerationRequestOffLocalAlpine(
@@ -5611,18 +5629,21 @@ final class ChatViewModel {
         // so we just collect the already-assigned file IDs here.
         // Only fall back to uploading at send time for attachments that
         // somehow don't have a file ID yet (e.g., audio transcription text files).
+        let userMessageId = UUID().uuidString
         var fileRefs: [[String: Any]] = []
         var inlineImageFiles: [ChatMessageFile] = []
+        var inlineImageDataURLsForUserMessage: [String] = []
         var inlineTextFiles: [ChatMessageFile] = []
         var inlineTextSnippets: [String] = []
         var fallbackUploadFailure: String?
         for attachment in currentAttachments {
             if isOpenAICompatibleProvider, let data = attachment.data, attachment.type == .image {
                 let dataURL = attachment.displayDataURL ?? inlineImageDataURL(data: data, fileName: attachment.name)
-                let displayURL = inlineImageDisplayReference(dataURL: dataURL)
+                let displayURL = attachment.displayImageReference ?? inlineImageDisplayReference(dataURL: dataURL)
+                inlineImageDataURLsForUserMessage.append(dataURL)
                 inlineImageFiles.append(ChatMessageFile(
                     type: "image",
-                    url: dataURL,
+                    url: "local-inline-image:\(attachment.id.uuidString)",
                     name: attachment.name,
                     contentType: "image/jpeg",
                     displayURL: displayURL
@@ -5652,7 +5673,7 @@ final class ChatViewModel {
                 if isImage,
                    let dataURL = attachment.displayDataURL
                     ?? attachment.data.map({ inlineImageDataURL(data: $0, fileName: attachment.name) }) {
-                    let displayURL = inlineImageDisplayReference(dataURL: dataURL)
+                    let displayURL = attachment.displayImageReference ?? inlineImageDisplayReference(dataURL: dataURL)
                     inlineImageFiles.append(ChatMessageFile(
                         type: "image",
                         url: fileId,
@@ -5663,10 +5684,11 @@ final class ChatViewModel {
                 }
             } else if let data = attachment.data, attachment.type == .image {
                 let dataURL = inlineImageDataURL(data: data, fileName: attachment.name)
-                let displayURL = inlineImageDisplayReference(dataURL: dataURL)
+                let displayURL = attachment.displayImageReference ?? inlineImageDisplayReference(dataURL: dataURL)
+                inlineImageDataURLsForUserMessage.append(dataURL)
                 inlineImageFiles.append(ChatMessageFile(
                     type: "image",
-                    url: dataURL,
+                    url: "local-inline-image:\(attachment.id.uuidString)",
                     name: attachment.name,
                     contentType: "image/jpeg",
                     displayURL: displayURL
@@ -5730,7 +5752,7 @@ final class ChatViewModel {
                     ])
                     if isImage {
                         let dataURL = inlineImageDataURL(data: data, fileName: attachment.name)
-                        let displayURL = inlineImageDisplayReference(dataURL: dataURL)
+                        let displayURL = attachment.displayImageReference ?? inlineImageDisplayReference(dataURL: dataURL)
                         inlineImageFiles.append(ChatMessageFile(
                             type: "image",
                             url: fileId,
@@ -5753,15 +5775,16 @@ final class ChatViewModel {
             // intentionally skipped — they failed at attach-time and must be retried or removed.
         }
         if let fallbackUploadFailure {
+            inputText = currentText
+            attachments = currentAttachments
             errorMessage = "Attachment upload failed: \(fallbackUploadFailure)"
             return
         }
 
-        inputText = ""
-        attachments = []
-
         let messageText = currentText
-        let userMessageId = UUID().uuidString
+        if !inlineImageDataURLsForUserMessage.isEmpty {
+            inlineImageDataURLsByMessageId[userMessageId] = inlineImageDataURLsForUserMessage
+        }
         let localAlpineAttachmentContext = await materializeLocalAlpineAttachmentsIfNeeded(
             currentAttachments,
             messageId: userMessageId,
@@ -5808,7 +5831,8 @@ final class ChatViewModel {
                 displayURL: displayURL
             )
         }
-        for inlineImage in inlineImageFiles where inlineImage.url?.hasPrefix("data:image/") == true {
+        for inlineImage in inlineImageFiles where inlineImage.url?.hasPrefix("data:image/") == true
+            || inlineImage.url?.hasPrefix("local-inline-image:") == true {
             messageFiles.append(inlineImage)
         }
         messageFiles.append(contentsOf: inlineTextFiles)
@@ -5925,6 +5949,8 @@ final class ChatViewModel {
         conversation?.history.currentId = assistantMessageId
         scheduleLocalConversationAutosave(immediate: true)
         // ────────────────────────────────────────────────────────────────────
+
+        await persistExplicitMemoryRequestIfNeeded(from: currentText)
 
         if !modelAttachmentContext.isEmpty {
             attachmentContextsByMessageId[userMessage.id] = modelAttachmentContext
@@ -16757,8 +16783,18 @@ final class ChatViewModel {
                 if !modelContent.isEmpty {
                     contentArray.append(["type": "text", "text": modelContent])
                 }
+                let inlineDataURLs = inlineImageDataURLsByMessageId[message.id] ?? []
+                for dataURL in inlineDataURLs {
+                    contentArray.append([
+                        "type": "image_url",
+                        "image_url": ["url": dataURL]
+                    ])
+                }
                 for imgFile in imageFiles {
                     if let fileId = imgFile.url, !fileId.isEmpty {
+                        if fileId.hasPrefix("local-inline-image:") {
+                            continue
+                        }
                         if let displayURL = imgFile.displayURL, displayURL.hasPrefix("data:image/") {
                             contentArray.append([
                                 "type": "image_url",

@@ -656,7 +656,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
         }
         return [file.displayURL, file.url]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first { !$0.isEmpty }
+            .first {
+                !$0.isEmpty && !$0.lowercased().hasPrefix("local-inline-image:")
+            }
     }
 
     static func previewSnippet(_ text: String, limit: Int = 220) -> String {
@@ -2888,6 +2890,8 @@ struct ChatDetailView: View {
         let userTextIsEmpty = message.role == .user
             && activeUserDisplayContent(for: message).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let waitingUIIsDelayed = shouldDelayWaitingUI(for: message)
+        let isLatestUserMessage = message.role == .user
+            && message.id == transcriptMessages.last(where: { $0.role == .user })?.id
 
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 0) {
 
@@ -2901,6 +2905,7 @@ struct ChatDetailView: View {
                     .padding(.horizontal, Spacing.screenPadding)
                     .padding(.top, Spacing.xs)
                     .contextMenu { messageContextMenu(for: message) }
+                    .userAttachmentReveal(enabled: isLatestUserMessage)
             }
 
             if message.role == .assistant {
@@ -4216,6 +4221,9 @@ struct ChatDetailView: View {
         }
         let candidates = [file.displayURL, file.url].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
         for candidate in candidates where !candidate.isEmpty {
+            if candidate.lowercased().hasPrefix("local-inline-image:") {
+                continue
+            }
             if candidate.hasPrefix("data:image/") {
                 guard candidate.utf8.count <= 7_000_000 else { continue }
                 return candidate
@@ -5582,17 +5590,80 @@ struct ChatDetailView: View {
 
     // MARK: - Attachment Processing
 
+    private struct PreparedImageAttachmentPayload: Sendable {
+        let uploadData: Data
+        let thumbnailData: Data?
+        let displayDataURL: String
+        let displayImageReference: String?
+    }
+
+    private struct SendableUIImage: @unchecked Sendable {
+        let image: UIImage
+    }
+
+    private static func prepareImageAttachmentPayload(
+        data: Data,
+        originalName: String
+    ) async -> PreparedImageAttachmentPayload {
+        await Task.detached(priority: .userInitiated) {
+            let uploadData = FileAttachmentService.downsampleForUpload(data: data)
+            return PreparedImageAttachmentPayload(
+                uploadData: uploadData,
+                thumbnailData: FileAttachmentService.thumbnailJPEGData(from: uploadData),
+                displayDataURL: "data:image/jpeg;base64,\(uploadData.base64EncodedString())",
+                displayImageReference: FileAttachmentService.writeImagePreviewToCache(
+                    data: uploadData,
+                    originalName: originalName
+                )
+            )
+        }.value
+    }
+
+    private static func prepareImageAttachmentPayload(
+        image: UIImage,
+        originalName: String
+    ) async -> PreparedImageAttachmentPayload {
+        let sendableImage = SendableUIImage(image: image)
+        return await Task.detached(priority: .userInitiated) {
+            let uploadData = FileAttachmentService.downsampleForUpload(image: sendableImage.image)
+            return PreparedImageAttachmentPayload(
+                uploadData: uploadData,
+                thumbnailData: FileAttachmentService.thumbnailJPEGData(from: uploadData)
+                    ?? FileAttachmentService.thumbnailJPEGData(from: sendableImage.image),
+                displayDataURL: "data:image/jpeg;base64,\(uploadData.base64EncodedString())",
+                displayImageReference: FileAttachmentService.writeImagePreviewToCache(
+                    data: uploadData,
+                    originalName: originalName
+                )
+            )
+        }.value
+    }
+
+    private static func thumbnailImage(from data: Data?) -> Image? {
+        guard let data,
+              let image = UIImage(data: data) else {
+            return nil
+        }
+        return Image(uiImage: image)
+    }
+
     private func processSelectedPhotos(_ items: [PhotosPickerItem]) async {
         for item in items {
             do {
                 if let data = try await item.loadTransferable(type: Data.self) {
-                    // Downsample to ≤ 2 MP to stay under the API's 5 MB base64 limit
-                    let resized = await Self.downsampleDataForUpload(data)
-                    let thumbnail = UIImage(data: resized).map { Image(uiImage: $0) }
-                    let attachment = ChatAttachment(
-                        type: .image, name: "Photo_\(Int(Date.now.timeIntervalSince1970)).jpg",
-                        thumbnail: thumbnail, data: resized
+                    let fileName = "Photo_\(Int(Date.now.timeIntervalSince1970)).jpg"
+                    let prepared = await Self.prepareImageAttachmentPayload(
+                        data: data,
+                        originalName: fileName
                     )
+                    var attachment = ChatAttachment(
+                        type: .image,
+                        name: fileName,
+                        thumbnail: Self.thumbnailImage(from: prepared.thumbnailData),
+                        data: prepared.uploadData
+                    )
+                    attachment.displayDataURL = prepared.displayDataURL
+                    attachment.displayImageReference = prepared.displayImageReference
                     viewModel.attachments.append(attachment)
                     // Start uploading immediately so it's ready by send time
                     viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
@@ -5614,13 +5685,17 @@ struct ChatDetailView: View {
         }
         let isImage = UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
         if isImage {
-            // Downsample to ≤ 2 MP to stay under the API's 5 MB base64 limit
-            let resized = await Self.downsampleDataForUpload(data)
-            let thumbnail: Image? = UIImage(data: resized).map { Image(uiImage: $0) }
-            let attachment = ChatAttachment(
-                type: .image, name: url.lastPathComponent,
-                thumbnail: thumbnail, data: resized
+            let prepared = await Self.prepareImageAttachmentPayload(
+                data: data,
+                originalName: url.lastPathComponent
             )
+            var attachment = ChatAttachment(
+                type: .image, name: url.lastPathComponent,
+                thumbnail: Self.thumbnailImage(from: prepared.thumbnailData),
+                data: prepared.uploadData
+            )
+            attachment.displayDataURL = prepared.displayDataURL
+            attachment.displayImageReference = prepared.displayImageReference
             viewModel.attachments.append(attachment)
             viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
         } else {
@@ -5635,42 +5710,53 @@ struct ChatDetailView: View {
 
     private func processCameraImage(_ image: UIImage?) {
         guard let image else { return }
-        // Downsample to ≤ 2 MP to stay under the API's 5 MB base64 limit
-        let data = FileAttachmentService.downsampleForUpload(image: image)
-        guard !data.isEmpty else { return }
-        let attachment = ChatAttachment(
-            type: .image, name: "Camera_\(Int(Date.now.timeIntervalSince1970)).jpg",
-            thumbnail: Image(uiImage: image), data: data
-        )
-        viewModel.attachments.append(attachment)
-        viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
+        let fileName = "Camera_\(Int(Date.now.timeIntervalSince1970)).jpg"
+        Task { @MainActor in
+            let prepared = await Self.prepareImageAttachmentPayload(
+                image: image,
+                originalName: fileName
+            )
+            guard !prepared.uploadData.isEmpty else { return }
+            var attachment = ChatAttachment(
+                type: .image,
+                name: fileName,
+                thumbnail: Self.thumbnailImage(from: prepared.thumbnailData),
+                data: prepared.uploadData
+            )
+            attachment.displayDataURL = prepared.displayDataURL
+            attachment.displayImageReference = prepared.displayImageReference
+            viewModel.attachments.append(attachment)
+            viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
+        }
     }
 
     private func prepareGeneratedImageForEditing(_ image: UIImage) {
-        let data = FileAttachmentService.downsampleForUpload(image: image)
-        guard !data.isEmpty else {
-            viewModel.errorMessage = "无法读取这张图片"
-            return
-        }
+        let fileName = "Edit_Source_\(Int(Date.now.timeIntervalSince1970)).jpg"
+        Task { @MainActor in
+            let prepared = await Self.prepareImageAttachmentPayload(
+                image: image,
+                originalName: fileName
+            )
+            guard !prepared.uploadData.isEmpty else {
+                viewModel.errorMessage = "无法读取这张图片"
+                return
+            }
 
-        let attachment = ChatAttachment(
-            type: .image,
-            name: "Edit_Source_\(Int(Date.now.timeIntervalSince1970)).jpg",
-            thumbnail: Image(uiImage: image),
-            data: data
-        )
-        viewModel.attachments.append(attachment)
-        viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
-        viewModel.imageGenerationEnabled = true
-        if viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            viewModel.inputText = "编辑这张图："
+            var attachment = ChatAttachment(
+                type: .image,
+                name: fileName,
+                thumbnail: Self.thumbnailImage(from: prepared.thumbnailData),
+                data: prepared.uploadData
+            )
+            attachment.displayDataURL = prepared.displayDataURL
+            attachment.displayImageReference = prepared.displayImageReference
+            viewModel.attachments.append(attachment)
+            viewModel.uploadAttachmentImmediately(attachmentId: attachment.id)
+            viewModel.imageGenerationEnabled = true
+            if viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                viewModel.inputText = "编辑这张图："
+            }
         }
-    }
-
-    private static func downsampleDataForUpload(_ data: Data) async -> Data {
-        await Task.detached(priority: .userInitiated) {
-            FileAttachmentService.downsampleForUpload(data: data)
-        }.value
     }
 
     private func processAudioFileURL(_ url: URL) async {
@@ -6523,9 +6609,39 @@ private struct AssistantHeaderRevealModifier: ViewModifier {
     }
 }
 
+private struct UserAttachmentRevealModifier: ViewModifier {
+    let enabled: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var appeared = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(!enabled || appeared || reduceMotion ? 1 : 0)
+            .scaleEffect(!enabled || appeared || reduceMotion ? 1 : 0.985, anchor: .trailing)
+            .offset(y: !enabled || appeared || reduceMotion ? 0 : 5)
+            .onAppear {
+                guard enabled, !appeared else {
+                    appeared = true
+                    return
+                }
+                if reduceMotion {
+                    appeared = true
+                } else {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        appeared = true
+                    }
+                }
+            }
+    }
+}
+
 private extension View {
     func assistantHeaderReveal() -> some View {
         modifier(AssistantHeaderRevealModifier())
+    }
+
+    func userAttachmentReveal(enabled: Bool) -> some View {
+        modifier(UserAttachmentRevealModifier(enabled: enabled))
     }
 }
 

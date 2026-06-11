@@ -256,94 +256,93 @@ struct TypingIndicator: View {
     }
 
     private func progress(for date: Date) -> Double {
-        let period = 3.6
+        let period = 4.05
         let value = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
         return value < 0 ? value + 1 : value
     }
 
     private func dotPoint(index: Int, progress: Double) -> CGPoint {
-        let phaseProgress = progress * 3
-        let phase = min(2, Int(phaseProgress))
-        let localProgress = phaseProgress - Double(phase)
+        let waveEnd = 0.34
+        let crossEnd = 0.68
 
-        switch phase {
-        case 0:
-            return waveLinePoint(index: index, progress: localProgress)
-        case 1:
-            return crossingPoint(index: index, progress: localProgress)
-        default:
-            return orbitDropPoint(index: index, progress: localProgress)
+        if progress < waveEnd {
+            return waveLinePoint(index: index, progress: progress / waveEnd)
         }
+        if progress < crossEnd {
+            return pentagonCrossPoint(
+                index: index,
+                progress: (progress - waveEnd) / (crossEnd - waveEnd)
+            )
+        }
+        return orbitDropPoint(
+            index: index,
+            progress: (progress - crossEnd) / (1 - crossEnd)
+        )
     }
 
     private func waveLinePoint(index: Int, progress: Double) -> CGPoint {
         let t = clamped(progress)
+        let handoffStart = 0.78
+        if t >= handoffStart {
+            let from = waveMotionPoint(index: index, progress: handoffStart)
+            let to = pentagonEntryPoint(index)
+            return interpolate(from, to, smootherstep((t - handoffStart) / (1 - handoffStart)))
+        }
+        return waveMotionPoint(index: index, progress: t)
+    }
+
+    private func waveMotionPoint(index: Int, progress: Double) -> CGPoint {
+        let t = clamped(progress)
         let base = linePoint(index)
-        let envelope = smootherstep(t / 0.14) * (1 - smootherstep((t - 0.86) / 0.14))
-        let phase = t * .pi * 4.15 - Double(index) * 0.72
-        let lift = sin(phase) * 3.35
-        let float = sin(.pi * t) * 0.35
+        let envelope = smootherstep(t / 0.10) * (1 - smootherstep((t - 0.72) / 0.16))
+        let phase = t * .pi * 3.25 - Double(index) * 0.82
+        let lift = sin(phase) * 4.7
+        let swell = sin(.pi * t) * 0.95
         return CGPoint(
-            x: base.x + CGFloat(cos(phase * 0.42)) * 0.18 * CGFloat(envelope),
-            y: base.y - CGFloat((lift + float) * envelope)
+            x: base.x + CGFloat(cos(phase * 0.56)) * 0.45 * CGFloat(envelope),
+            y: base.y - CGFloat((lift + swell) * envelope)
         )
     }
 
-    private func crossingPoint(index: Int, progress: Double) -> CGPoint {
+    private func pentagonCrossPoint(index: Int, progress: Double) -> CGPoint {
         let t = clamped(progress)
-        let base = linePoint(index)
-        let pass = sin(.pi * t)
-        let weave = sin(.pi * 2 * t)
-        let xShift: CGFloat
-        let yShift: CGFloat
-        switch index {
-        case 0:
-            xShift = dotSpacing * 2 * CGFloat(pass)
-            yShift = -4.0 * CGFloat(weave)
-        case 2:
-            xShift = -dotSpacing * 2 * CGFloat(pass)
-            yShift = 4.0 * CGFloat(weave)
-        default:
-            xShift = 0
-            yShift = -2.2 * CGFloat(weave)
-        }
-        return CGPoint(
-            x: base.x + xShift,
-            y: base.y + yShift
-        )
+        let offset = pentagonTrackOffset(index)
+        let travel = 0.72
+        let trackProgress = offset + smootherstep(t) * travel
+        return pentagonTrackPoint(trackProgress)
     }
 
     private func orbitDropPoint(index: Int, progress: Double) -> CGPoint {
         let t = clamped(progress)
-        if t < 0.58 {
-            let u = easeInOutSine(t / 0.58)
-            let base = interpolate(linePoint(index), raisedLinePoint(index), u)
-            let radius = 4.9 * sin(.pi * u)
-            let angle = Double(index) * (.pi * 2 / 3) + u * .pi * 1.72 - .pi / 9
+        if t < 0.50 {
+            let u = easeInOutSine(t / 0.50)
+            let base = interpolate(pentagonExitPoint(index), raisedLinePoint(index), u)
+            let radius = 5.1 * sin(.pi * u)
+            let angle = Double(index) * (.pi * 2 / 3) + u * .pi * 1.95 + .pi / 7
             return CGPoint(
                 x: base.x + CGFloat(cos(angle) * radius),
-                y: base.y + CGFloat(sin(angle) * radius * 0.64)
+                y: base.y + CGFloat(sin(angle) * radius * 0.58)
             )
         }
 
-        if t < 0.72 {
-            let u = (t - 0.58) / 0.14
+        if t < 0.64 {
+            let u = (t - 0.50) / 0.14
             let point = raisedLinePoint(index)
             return CGPoint(
-                x: point.x,
-                y: point.y + CGFloat(sin(.pi * u)) * 0.65
+                x: point.x + CGFloat(sin(.pi * 2 * u + Double(index) * 0.45)) * 0.18,
+                y: point.y + CGFloat(sin(.pi * u)) * 0.38
             )
         }
 
-        let u = clamped((t - 0.72) / 0.28)
-        let eased = easeOutCubic(u)
+        let u = clamped((t - 0.64) / 0.36)
+        let delayed = clamped((u - Double(index) * 0.045) / 0.91)
         let start = raisedLinePoint(index)
         let end = linePoint(index)
-        let landingRipple = max(0, sin(.pi * clamped((u - Double(index) * 0.07) / 0.78))) * (1 - u) * 1.7
-        let rebound = sin(.pi * u) * (1 - u) * 2.1
+        let fall = delayed * delayed * (3 - 2 * delayed)
+        let rebound = sin(.pi * delayed) * (1 - delayed) * 1.55
         return CGPoint(
-            x: start.x + (end.x - start.x) * CGFloat(smootherstep(u)),
-            y: start.y + (end.y - start.y) * CGFloat(eased) + CGFloat(rebound - landingRipple)
+            x: start.x + (end.x - start.x) * CGFloat(smootherstep(delayed)),
+            y: start.y + (end.y - start.y) * CGFloat(fall) - CGFloat(rebound)
         )
     }
 
@@ -355,7 +354,44 @@ struct TypingIndicator: View {
 
     private func raisedLinePoint(_ index: Int) -> CGPoint {
         let point = linePoint(index)
-        return CGPoint(x: point.x, y: point.y - 4.2)
+        return CGPoint(x: point.x, y: point.y - 5.1)
+    }
+
+    private func pentagonEntryPoint(_ index: Int) -> CGPoint {
+        pentagonTrackPoint(pentagonTrackOffset(index))
+    }
+
+    private func pentagonExitPoint(_ index: Int) -> CGPoint {
+        pentagonTrackPoint(pentagonTrackOffset(index) + 0.72)
+    }
+
+    private func pentagonTrackOffset(_ index: Int) -> Double {
+        switch index {
+        case 0: return 0.02
+        case 1: return 0.35
+        default: return 0.68
+        }
+    }
+
+    private func pentagonVertex(_ position: Int) -> CGPoint {
+        let angle = -Double.pi / 2 + Double(position) * (Double.pi * 2 / 5)
+        return CGPoint(
+            x: CGFloat(cos(angle) * 8.2),
+            y: CGFloat(-1.0 + sin(angle) * 7.2)
+        )
+    }
+
+    private func pentagonTrackPoint(_ progress: Double) -> CGPoint {
+        let starOrder = [0, 2, 4, 1, 3, 0]
+        let wrapped = progress - floor(progress)
+        let scaled = wrapped * Double(starOrder.count - 1)
+        let segment = min(starOrder.count - 2, Int(scaled))
+        let local = smootherstep(scaled - Double(segment))
+        return interpolate(
+            pentagonVertex(starOrder[segment]),
+            pentagonVertex(starOrder[segment + 1]),
+            local
+        )
     }
 
     private func interpolate(_ from: CGPoint, _ to: CGPoint, _ progress: Double) -> CGPoint {

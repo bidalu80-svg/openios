@@ -538,6 +538,56 @@ final class FileAttachmentService {
         return result
     }
 
+    nonisolated static func thumbnailJPEGData(from data: Data, maxPixelSize: Int = 224) -> Data? {
+        downsampleJPEGData(from: data, maxPixelSize: maxPixelSize, compressionQuality: 0.78)
+    }
+
+    nonisolated static func thumbnailJPEGData(from image: UIImage, maxPixelSize: CGFloat = 224) -> Data? {
+        let largestSide = max(image.size.width, image.size.height)
+        let targetSize: CGSize
+        if largestSide > maxPixelSize, largestSide > 0 {
+            let scale = maxPixelSize / largestSide
+            targetSize = CGSize(width: round(image.size.width * scale), height: round(image.size.height * scale))
+        } else {
+            targetSize = image.size
+        }
+
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        let resized = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return resized.jpegData(compressionQuality: 0.78)
+    }
+
+    nonisolated static func writeImagePreviewToCache(
+        data: Data,
+        originalName: String,
+        maxPixelSize: Int = 720
+    ) -> String? {
+        guard let previewData = downsampleJPEGData(
+            from: data,
+            maxPixelSize: maxPixelSize,
+            compressionQuality: 0.82
+        ) ?? (data.count <= 2_000_000 ? data : nil) else {
+            return nil
+        }
+
+        let baseDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let directory = baseDirectory.appendingPathComponent("iexa-attachment-previews", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let baseName = (originalName as NSString).deletingPathExtension
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let safeBase = baseName.isEmpty ? "image" : baseName
+            let fileURL = directory.appendingPathComponent("\(safeBase)-\(UUID().uuidString).jpg")
+            try previewData.write(to: fileURL, options: [.atomic])
+            return fileURL.absoluteString
+        } catch {
+            return nil
+        }
+    }
+
     private nonisolated static func downsampleJPEGData(from data: Data, logger: Logger? = nil) -> Data? {
         let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary) else {
@@ -556,6 +606,41 @@ final class FileAttachmentService {
             maxPixelSize = Int(ceil(sqrt(maxPixels)))
         }
 
+        guard let output = downsampleJPEGData(
+            from: source,
+            maxPixelSize: maxPixelSize,
+            compressionQuality: 0.85
+        ) else {
+            return nil
+        }
+
+        if let width, let height, width * height > maxPixels {
+            logger?.info("Downsampled image from \(Int(width))×\(Int(height)) to max \(maxPixelSize) px (\(output.count) bytes)")
+        }
+        return output
+    }
+
+    private nonisolated static func downsampleJPEGData(
+        from data: Data,
+        maxPixelSize: Int,
+        compressionQuality: CGFloat
+    ) -> Data? {
+        let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary) else {
+            return nil
+        }
+        return downsampleJPEGData(
+            from: source,
+            maxPixelSize: maxPixelSize,
+            compressionQuality: compressionQuality
+        )
+    }
+
+    private nonisolated static func downsampleJPEGData(
+        from source: CGImageSource,
+        maxPixelSize: Int,
+        compressionQuality: CGFloat
+    ) -> Data? {
         let thumbnailOptions: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -576,14 +661,10 @@ final class FileAttachmentService {
             return nil
         }
         let destinationOptions: [CFString: Any] = [
-            kCGImageDestinationLossyCompressionQuality: 0.85
+            kCGImageDestinationLossyCompressionQuality: compressionQuality
         ]
         CGImageDestinationAddImage(destination, thumbnail, destinationOptions as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { return nil }
-
-        if let width, let height, width * height > maxPixels {
-            logger?.info("Downsampled image from \(Int(width))×\(Int(height)) to max \(maxPixelSize) px (\(output.length) bytes)")
-        }
         return output as Data
     }
 

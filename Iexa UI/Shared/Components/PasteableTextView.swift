@@ -464,25 +464,21 @@ final class PasteInterceptingTextView: UITextView {
         // 1. Check for images (PNG, JPEG, TIFF, GIF, HEIC, WebP)
         if let images = pb.images, !images.isEmpty {
             for (index, image) in images.enumerated() {
-                let data = resizedJPEGData(for: image)
-                let attachment = ChatAttachment(
-                    type: .image,
+                if let attachment = imageAttachment(
                     name: "Pasted_Image_\(Int(Date.now.timeIntervalSince1970))_\(index).jpg",
-                    thumbnail: Image(uiImage: image),
-                    data: data
-                )
-                pastedAttachments.append(attachment)
+                    image: image
+                ) {
+                    pastedAttachments.append(attachment)
+                }
             }
         } else if pb.hasImages, let image = pb.image {
             // Single image fallback
-            let data = resizedJPEGData(for: image)
-            let attachment = ChatAttachment(
-                type: .image,
+            if let attachment = imageAttachment(
                 name: "Pasted_Image_\(Int(Date.now.timeIntervalSince1970)).jpg",
-                thumbnail: Image(uiImage: image),
-                data: data
-            )
-            pastedAttachments.append(attachment)
+                image: image
+            ) {
+                pastedAttachments.append(attachment)
+            }
         }
 
         // 2. Check for file URLs (e.g., files copied from Files.app)
@@ -493,14 +489,12 @@ final class PasteInterceptingTextView: UITextView {
                     if isImage {
                         // Only add as image if we didn't already get it from pb.images
                         if pastedAttachments.isEmpty {
-                            let thumbnail: Image? = UIImage(data: data).map { Image(uiImage: $0) }
-                            let attachment = ChatAttachment(
-                                type: .image,
+                            if let attachment = imageAttachment(
                                 name: url.lastPathComponent,
-                                thumbnail: thumbnail,
                                 data: data
-                            )
-                            pastedAttachments.append(attachment)
+                            ) {
+                                pastedAttachments.append(attachment)
+                            }
                         }
                     } else {
                         let attachment = ChatAttachment(
@@ -519,13 +513,12 @@ final class PasteInterceptingTextView: UITextView {
         if pastedAttachments.isEmpty {
             for typeId in [UTType.png.identifier, UTType.jpeg.identifier, UTType.gif.identifier, UTType.webP.identifier, UTType.tiff.identifier] {
                 if let data = pb.data(forPasteboardType: typeId), let uiImage = UIImage(data: data) {
-                    let attachment = ChatAttachment(
-                        type: .image,
+                    if let attachment = imageAttachment(
                         name: "Pasted_Image_\(Int(Date.now.timeIntervalSince1970)).jpg",
-                        thumbnail: Image(uiImage: uiImage),
-                        data: resizedJPEGData(for: uiImage)
-                    )
-                    pastedAttachments.append(attachment)
+                        image: uiImage
+                    ) {
+                        pastedAttachments.append(attachment)
+                    }
                     break // Only need one
                 }
             }
@@ -609,5 +602,34 @@ final class PasteInterceptingTextView: UITextView {
     private func resizedJPEGData(for image: UIImage) -> Data? {
         let data = FileAttachmentService.downsampleForUpload(image: image)
         return data.isEmpty ? nil : data
+    }
+
+    private func imageAttachment(name: String, image: UIImage) -> ChatAttachment? {
+        guard let data = resizedJPEGData(for: image) else { return nil }
+        return imageAttachment(name: name, data: data)
+    }
+
+    private func imageAttachment(name: String, data: Data) -> ChatAttachment? {
+        let uploadData = FileAttachmentService.downsampleForUpload(data: data)
+        guard !uploadData.isEmpty else { return nil }
+        let thumbnail: Image? = {
+            guard let thumbnailData = FileAttachmentService.thumbnailJPEGData(from: uploadData),
+                  let image = UIImage(data: thumbnailData) else {
+                return nil
+            }
+            return Image(uiImage: image)
+        }()
+        var attachment = ChatAttachment(
+            type: .image,
+            name: name,
+            thumbnail: thumbnail,
+            data: uploadData
+        )
+        attachment.displayDataURL = "data:image/jpeg;base64,\(uploadData.base64EncodedString())"
+        attachment.displayImageReference = FileAttachmentService.writeImagePreviewToCache(
+            data: uploadData,
+            originalName: name
+        )
+        return attachment
     }
 }
