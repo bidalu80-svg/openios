@@ -323,6 +323,21 @@ struct AuthenticatedImageView: View {
             }
         }
 
+        if let localAlpinePath = Self.localAlpineImagePath(from: fileId) {
+            do {
+                let loaded = try await Self.loadLocalAlpineImage(from: localAlpinePath)
+                guard !Task.isCancelled else { return }
+                Self.imageCache.setObject(loaded.image, forKey: fileId as NSString, cost: loaded.cost)
+                Self.cacheOriginalData(loaded.originalData, for: fileId)
+                setLoadedImage(loaded.image)
+                return
+            } catch {
+                hasError = true
+                isLoading = false
+                return
+            }
+        }
+
         if let remoteURL = Self.remoteImageURL(from: fileId) {
             if loadedImage == nil {
                 isLoading = true
@@ -437,6 +452,17 @@ struct AuthenticatedImageView: View {
             }
         }
 
+        if let localAlpinePath = localAlpineImagePath(from: fileId) {
+            do {
+                let loaded = try await loadLocalAlpineImage(from: localAlpinePath)
+                imageCache.setObject(loaded.image, forKey: fileId as NSString, cost: loaded.cost)
+                cacheOriginalData(loaded.originalData, for: fileId)
+                return loaded.image
+            } catch {
+                return nil
+            }
+        }
+
         if let remoteURL = remoteImageURL(from: fileId) {
             let image = await ImageCacheService.shared.loadImage(
                 from: remoteURL,
@@ -515,6 +541,11 @@ struct AuthenticatedImageView: View {
         }.value
     }
 
+    private static func loadLocalAlpineImage(from path: String) async throws -> LoadedLocalImage {
+        let data = try await LocalAlpineTerminalService.shared.readFile(path: path)
+        return try await decodeImageData(data, cacheKey: "local-alpine:\(path)")
+    }
+
     private static func decodeImageData(_ data: Data, cacheKey: String) async throws -> LoadedLocalImage {
         try await Task.detached(priority: .userInitiated) {
             guard let decoded = decodeDisplayImage(from: data, cacheKey: cacheKey) else {
@@ -587,6 +618,11 @@ struct AuthenticatedImageView: View {
             cacheOriginalData(data, for: fileId)
             return await decodeOriginalImageData(data)
         }
+        if let localAlpinePath = localAlpineImagePath(from: fileId),
+           let data = try? await LocalAlpineTerminalService.shared.readFile(path: localAlpinePath) {
+            cacheOriginalData(data, for: fileId)
+            return await decodeOriginalImageData(data)
+        }
         if let remoteURL = remoteImageURL(from: fileId) {
             if let data = try? await loadRemoteOriginalData(
                 from: remoteURL,
@@ -654,6 +690,17 @@ struct AuthenticatedImageView: View {
     private static func localImageURL(from value: String) -> URL? {
         guard value.hasPrefix("file://") else { return nil }
         return URL(string: value)
+    }
+
+    private static func localAlpineImagePath(from value: String) -> String? {
+        guard value.lowercased().hasPrefix("local-alpine:") else { return nil }
+        var path = String(value.dropFirst("local-alpine:".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if path.hasPrefix("//") {
+            path.removeFirst()
+        }
+        guard !path.isEmpty else { return nil }
+        return path.hasPrefix("/") ? path : "/mnt/iexa/\(path)"
     }
 
     private static func remoteImageURL(from value: String) -> URL? {

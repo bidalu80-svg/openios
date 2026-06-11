@@ -648,6 +648,11 @@ private struct AgentActivityItem: Identifiable, Hashable {
     }
 
     private static func imageReference(for file: ChatMessageFile) -> String? {
+        if let localAlpineReference = [file.url, file.displayURL]
+            .compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .first(where: { $0.lowercased().hasPrefix("local-alpine:") }) {
+            return localAlpineReference
+        }
         [file.displayURL, file.url]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first { !$0.isEmpty }
@@ -4153,6 +4158,11 @@ struct ChatDetailView: View {
     }
 
     private func imageReference(for file: ChatMessageFile) -> String? {
+        if let localAlpineReference = [file.url, file.displayURL]
+            .compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .first(where: { $0.lowercased().hasPrefix("local-alpine:") }) {
+            return localAlpineReference
+        }
         let candidates = [file.displayURL, file.url].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
         for candidate in candidates where !candidate.isEmpty {
             if candidate.hasPrefix("data:image/") {
@@ -4167,7 +4177,8 @@ struct ChatDetailView: View {
             }
             if candidate.hasPrefix("file://")
                 || candidate.hasPrefix("http://")
-                || candidate.hasPrefix("https://") {
+                || candidate.hasPrefix("https://")
+                || candidate.hasPrefix("local-alpine:") {
                 return candidate
             }
             if !candidate.contains("/") {
