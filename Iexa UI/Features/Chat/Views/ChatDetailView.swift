@@ -653,7 +653,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             .first(where: { $0.lowercased().hasPrefix("local-alpine:") }) {
             return localAlpineReference
         }
-        [file.displayURL, file.url]
+        return [file.displayURL, file.url]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first { !$0.isEmpty }
     }
