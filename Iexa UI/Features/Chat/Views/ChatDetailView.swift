@@ -23,6 +23,10 @@ private struct LocalQuickLookPreviewItem: Identifiable {
     let title: String
 }
 
+private func localAlpinePreviewShouldUseWebView(_ url: URL) -> Bool {
+    ["html", "htm", "xhtml", "svg"].contains(url.pathExtension.lowercased())
+}
+
 private func localAlpineContentType(for file: LocalAlpineWrittenFile) -> String {
     switch (file.fileName as NSString).pathExtension.lowercased() {
     case "py":
@@ -1270,6 +1274,34 @@ struct ChatDetailView: View {
         return true
     }
 
+    @MainActor
+    private func handleLocalAlpineOpenRequest(_ request: LocalAlpineOpenRequest?) {
+        guard let request else { return }
+        viewModel.consumeLocalAlpinePendingOpenRequest(request)
+        if let url = request.webURL {
+            previewWebURL = WebPreviewURL(url: url)
+            return
+        }
+
+        Task {
+            do {
+                let url = try await LocalAlpineTerminalService.shared.materializePreviewURL(for: request)
+                await MainActor.run {
+                    if localAlpinePreviewShouldUseWebView(url) {
+                        previewWebURL = WebPreviewURL(url: url)
+                    } else {
+                        previewFileURL = url
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    downloadErrorMessage = "预览失败：\(error.localizedDescription)"
+                    showDownloadError = true
+                }
+            }
+        }
+    }
+
     private func shouldHideFromTranscript(_ message: ChatMessage) -> Bool {
         if isLocalNativeResultMessage(message) {
             return true
@@ -1665,6 +1697,9 @@ struct ChatDetailView: View {
         }
         .onChange(of: selectedPhotos) { _, newItems in
             Task { await processSelectedPhotos(newItems); selectedPhotos = [] }
+        }
+        .onChange(of: viewModel.localAlpinePendingOpenRequest) { _, request in
+            handleLocalAlpineOpenRequest(request)
         }
         // Pick up files shared from other apps via "Open In" / document import.
         // The version counter fires this even when the view is already visible.

@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 
 struct LocalAlpineAgentResult: Sendable {
     let didExecute: Bool
@@ -6,6 +7,7 @@ struct LocalAlpineAgentResult: Sendable {
     let interactiveRequest: LocalAlpineInteractiveRequest?
     let commandResults: [LocalAlpineAgentCommandResult]
     let writtenFiles: [LocalAlpineWrittenFile]
+    let openRequests: [LocalAlpineOpenRequest]
     let toolRunId: String?
     let toolCalls: [LocalAlpineToolCall]
     let executedCommandCount: Int
@@ -18,6 +20,7 @@ struct LocalAlpineAgentResult: Sendable {
         interactiveRequest: LocalAlpineInteractiveRequest?,
         commandResults: [LocalAlpineAgentCommandResult] = [],
         writtenFiles: [LocalAlpineWrittenFile] = [],
+        openRequests: [LocalAlpineOpenRequest] = [],
         toolRunId: String? = nil,
         toolCalls: [LocalAlpineToolCall] = [],
         executedCommandCount: Int = 0,
@@ -29,6 +32,7 @@ struct LocalAlpineAgentResult: Sendable {
         self.interactiveRequest = interactiveRequest
         self.commandResults = commandResults
         self.writtenFiles = writtenFiles
+        self.openRequests = openRequests
         self.toolRunId = toolRunId
         self.toolCalls = toolCalls
         self.executedCommandCount = executedCommandCount
@@ -270,6 +274,8 @@ enum LocalAlpineToolDisplayRegistry {
         switch toolName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "read_file", "read_files", "read", "file_read":
             return LocalAlpineToolDisplay(icon: "doc.text", title: "读取文件")
+        case "read_image", "image_read", "inspect_image":
+            return LocalAlpineToolDisplay(icon: "photo", title: "读取图片")
         case "edit_file", "edit_files", "replace_file", "edit":
             return LocalAlpineToolDisplay(icon: "square.and.pencil", title: "编辑文件")
         case "patch_file", "patch_files", "apply_patch", "patch":
@@ -503,6 +509,7 @@ actor LocalAlpineAgentService {
             writeResult.summary
         ]
         var commandResults: [LocalAlpineAgentCommandResult] = []
+        var openRequests: [LocalAlpineOpenRequest] = []
         let writtenFiles = writeResult.writtenFiles
         if writeResult.hadFailure {
             let result = LocalAlpineCommandResult(
@@ -537,6 +544,7 @@ actor LocalAlpineAgentService {
             cwd: cwd,
             stdinInput: stdinInput
         )
+        openRequests.append(contentsOf: result.openRequests)
         lines.append(format(command: command, cwd: cwd, result: result))
         commandResults.append(Self.commandResult(command: command, cwd: cwd, result: result))
 
@@ -547,6 +555,7 @@ actor LocalAlpineAgentService {
                 interactiveRequest: interactiveRequest,
                 commandResults: commandResults,
                 writtenFiles: writtenFiles,
+                openRequests: openRequests,
                 executedCommandCount: Self.actualCommandCount(commandResults),
                 editedFileCount: writeResult.writtenPaths.isEmpty ? 0 : 1,
                 hadFailure: true
@@ -555,6 +564,7 @@ actor LocalAlpineAgentService {
 
         let cleanupCommand = "rm -f \(shellSingleQuoted(runtimeFile))"
         let cleanupResult = await LocalAlpineTerminalService.shared.execute(command: cleanupCommand, cwd: cwd)
+        openRequests.append(contentsOf: cleanupResult.openRequests)
         if cleanupResult.exitCode != 0 {
             lines.append(format(command: cleanupCommand, cwd: cwd, result: cleanupResult))
             commandResults.append(Self.commandResult(command: cleanupCommand, cwd: cwd, result: cleanupResult))
@@ -566,6 +576,7 @@ actor LocalAlpineAgentService {
             interactiveRequest: nil,
             commandResults: commandResults,
             writtenFiles: writtenFiles,
+            openRequests: openRequests,
             executedCommandCount: Self.actualCommandCount(commandResults),
             editedFileCount: writeResult.writtenPaths.isEmpty ? 0 : 1,
             hadFailure: commandResults.contains { $0.failed }
@@ -622,6 +633,7 @@ actor LocalAlpineAgentService {
         let toolRunId = UUID().uuidString
         var commandResults: [LocalAlpineAgentCommandResult] = []
         var writtenFiles: [LocalAlpineWrittenFile] = []
+        var openRequests: [LocalAlpineOpenRequest] = []
         var toolCalls: [LocalAlpineToolCall] = []
         var editedFilePaths = Set<String>()
         var stopRemainingCommands = false
@@ -667,6 +679,31 @@ actor LocalAlpineAgentService {
                     failed: readResult.hadFailure
                 ))
                 if readResult.hadFailure {
+                    shouldRunShellCommand = false
+                    stopRemainingCommands = true
+                }
+            }
+
+            if !command.readImages.isEmpty {
+                let context = Self.toolCallContext(
+                    runId: toolRunId,
+                    name: "read_image",
+                    detail: Self.toolDetail(forReadImages: command.readImages),
+                    cwd: effectiveCWD,
+                    filePaths: command.readImages.map(\.path)
+                )
+                await emitTool(Self.toolCallStart(context))
+                let imageResult = await readImages(command.readImages, cwd: effectiveCWD)
+                stepLines.append(imageResult.summary)
+                commandResults.append(contentsOf: imageResult.commandResults)
+                await emitTool(Self.toolCallResult(
+                    context,
+                    exitCode: imageResult.hadFailure ? 1 : 0,
+                    outputPreview: imageResult.summary,
+                    lineDelta: imageResult.lineDelta,
+                    failed: imageResult.hadFailure
+                ))
+                if imageResult.hadFailure {
                     shouldRunShellCommand = false
                     stopRemainingCommands = true
                 }
@@ -880,6 +917,7 @@ actor LocalAlpineAgentService {
                     command: commandToExecute,
                     cwd: effectiveCWD
                 )
+                openRequests.append(contentsOf: result.openRequests)
                 while let request = result.interactiveRequest {
                     if let inputProvider,
                        let stdinInput = await inputProvider(request) {
@@ -888,6 +926,7 @@ actor LocalAlpineAgentService {
                             cwd: request.cwd,
                             stdinInput: stdinInput
                         )
+                        openRequests.append(contentsOf: result.openRequests)
                     } else {
                         stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
                         commandResults.append(Self.commandResult(
@@ -908,6 +947,7 @@ actor LocalAlpineAgentService {
                             interactiveRequest: request,
                             commandResults: commandResults,
                             writtenFiles: writtenFiles,
+                            openRequests: openRequests,
                             toolRunId: toolRunId,
                             toolCalls: toolCalls,
                             executedCommandCount: Self.actualCommandCount(commandResults),
@@ -933,6 +973,7 @@ actor LocalAlpineAgentService {
                     output: result.output,
                     cwd: effectiveCWD
                 ) {
+                    openRequests.append(contentsOf: diagnostic.result.openRequests)
                     let diagnosticContext = Self.toolCallContext(
                         runId: toolRunId,
                         name: "diagnostic",
@@ -981,6 +1022,7 @@ actor LocalAlpineAgentService {
             interactiveRequest: nil,
             commandResults: commandResults,
             writtenFiles: writtenFiles,
+            openRequests: openRequests,
             toolRunId: toolRunId,
             toolCalls: toolCalls,
             executedCommandCount: Self.actualCommandCount(commandResults),
@@ -1000,7 +1042,7 @@ actor LocalAlpineAgentService {
         _ commands: [LocalAlpineAgentCommand]
     ) -> ([LocalAlpineAgentCommand], Int) {
         let hasStructuredWrite = commands.contains {
-            !$0.writeFiles.isEmpty || !$0.editFiles.isEmpty || !$0.patchFiles.isEmpty
+            !$0.writeFiles.isEmpty || !$0.readImages.isEmpty || !$0.editFiles.isEmpty || !$0.patchFiles.isEmpty
         }
         guard hasStructuredWrite else { return (commands, 0) }
 
@@ -1008,6 +1050,7 @@ actor LocalAlpineAgentService {
         let filtered = commands.filter { command in
             let hasStructuredOperation = !command.writeFiles.isEmpty
                 || !command.readFiles.isEmpty
+                || !command.readImages.isEmpty
                 || !command.editFiles.isEmpty
                 || !command.patchFiles.isEmpty
             guard !hasStructuredOperation,
@@ -1065,6 +1108,7 @@ actor LocalAlpineAgentService {
         guard !commandHasShellExecution(command),
               !command.writeFiles.isEmpty,
               command.readFiles.isEmpty,
+              command.readImages.isEmpty,
               command.editFiles.isEmpty,
               command.patchFiles.isEmpty,
               command.deleteFiles.isEmpty else {
@@ -1121,6 +1165,11 @@ actor LocalAlpineAgentService {
                 ].joined(separator: ":")
             }
             .joined(separator: "|")
+        let readImages = command.readImages
+            .map { request in
+                request.path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            }
+            .joined(separator: "|")
         let edits = command.editFiles
             .map { edit in
                 let path = edit.path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -1142,7 +1191,7 @@ actor LocalAlpineAgentService {
             command.shellToolDetail ?? "",
             command.shellToolFilePaths.joined(separator: "|")
         ].joined(separator: ":")
-        return "\(cwd)\n\(shell)\n\(files)\n\(reads)\n\(edits)\n\(patches)\n\(deletes)\n\(shellTool)"
+        return "\(cwd)\n\(shell)\n\(files)\n\(reads)\n\(readImages)\n\(edits)\n\(patches)\n\(deletes)\n\(shellTool)"
     }
 
     private nonisolated static func commandResult(
@@ -1240,6 +1289,10 @@ actor LocalAlpineAgentService {
     }
 
     private nonisolated static func toolDetail(forReadFiles requests: [LocalAlpineReadFileRequest]) -> String {
+        requests.map(\.path).prefix(3).joined(separator: ", ")
+    }
+
+    private nonisolated static func toolDetail(forReadImages requests: [LocalAlpineReadImageRequest]) -> String {
         requests.map(\.path).prefix(3).joined(separator: ", ")
     }
 
@@ -1383,12 +1436,14 @@ actor LocalAlpineAgentService {
         }
         let generatedInput = Self.dictionaryByRemovingArrayOnlyToolWrappers(from: dict)
         let commandDelaySeconds = Self.delaySeconds(from: dict)
+        var readImages = parseReadImagesForCommand(from: dict)
         if let generatedToolCommand = Self.generatedShellCommand(from: generatedInput, shellCommand: shellCommand) {
             return leadingCommands + [LocalAlpineAgentCommand(
                 command: generatedToolCommand.command,
                 cwd: generatedToolCommand.cwd ?? Self.cwdString(from: dict),
                 writeFiles: files,
                 readFiles: readFiles,
+                readImages: readImages,
                 editFiles: editFiles,
                 patchFiles: patchFiles,
                 deleteFiles: deleteFiles,
@@ -1409,6 +1464,8 @@ actor LocalAlpineAgentService {
                 switch selector {
                 case "read":
                     if readFiles.isEmpty { readFiles = parseReadFiles(from: dict) }
+                case "read_image":
+                    if readImages.isEmpty { readImages = parseReadImages(from: dict) }
                 case "edit":
                     if editFiles.isEmpty { editFiles = parseEditFiles(from: dict) }
                 case "patch":
@@ -1420,7 +1477,7 @@ actor LocalAlpineAgentService {
                 default:
                     break
                 }
-                guard !files.isEmpty || !readFiles.isEmpty || !editFiles.isEmpty || !patchFiles.isEmpty || !deleteFiles.isEmpty else {
+                guard !files.isEmpty || !readFiles.isEmpty || !readImages.isEmpty || !editFiles.isEmpty || !patchFiles.isEmpty || !deleteFiles.isEmpty else {
                     return leadingCommands + nestedCommands
                 }
                 return leadingCommands + [LocalAlpineAgentCommand(
@@ -1428,6 +1485,7 @@ actor LocalAlpineAgentService {
                     cwd: Self.cwdString(from: dict),
                     writeFiles: files,
                     readFiles: readFiles,
+                    readImages: readImages,
                     editFiles: editFiles,
                     patchFiles: patchFiles,
                     deleteFiles: deleteFiles
@@ -1438,6 +1496,7 @@ actor LocalAlpineAgentService {
                 cwd: Self.cwdString(from: dict),
                 writeFiles: files,
                 readFiles: readFiles,
+                readImages: readImages,
                 editFiles: editFiles,
                 patchFiles: patchFiles,
                 deleteFiles: deleteFiles,
@@ -1445,12 +1504,13 @@ actor LocalAlpineAgentService {
             )] + nestedCommands
         }
 
-        if !files.isEmpty || !readFiles.isEmpty || !editFiles.isEmpty || !patchFiles.isEmpty || !deleteFiles.isEmpty {
+        if !files.isEmpty || !readFiles.isEmpty || !readImages.isEmpty || !editFiles.isEmpty || !patchFiles.isEmpty || !deleteFiles.isEmpty {
             return leadingCommands + [LocalAlpineAgentCommand(
                 command: nil,
                 cwd: Self.cwdString(from: dict),
                 writeFiles: files,
                 readFiles: readFiles,
+                readImages: readImages,
                 editFiles: editFiles,
                 patchFiles: patchFiles,
                 deleteFiles: deleteFiles
@@ -1573,6 +1633,8 @@ actor LocalAlpineAgentService {
             return "command"
         case "readfile":
             return "read_file"
+        case "readimage":
+            return "read_image"
         case "writefile":
             return "write_file"
         case "editfile":
@@ -1616,6 +1678,7 @@ actor LocalAlpineAgentService {
                 ]
             ]
         case "read", "read_file", "read_files", "cat", "open_file", "file_read",
+             "read_image", "image_read", "inspect_image",
              "delete", "delete_file", "delete_files", "remove_file", "remove_files",
              "delete_dir", "remove_dir", "rm", "rmdir", "file_delete",
              "list", "list_dir", "list_directory", "ls", "file_list", "directory_list",
@@ -1736,6 +1799,8 @@ actor LocalAlpineAgentService {
             }
         case "read", "read_file", "read_files", "cat", "open_file", "file_read":
             merged["read_file"] = arguments
+        case "read_image", "image_read", "inspect_image":
+            merged["read_image"] = arguments["value"] ?? arguments
         case "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write":
             merged["write_file"] = arguments
         case "edit", "edit_file", "edit_files", "replace_file", "file_edit":
@@ -1823,6 +1888,8 @@ actor LocalAlpineAgentService {
             }
         case "read", "read_file", "read_files", "cat", "open_file", "file_read":
             merged["read_file"] = arguments["value"] ?? arguments
+        case "read_image", "image_read", "inspect_image":
+            merged["read_image"] = arguments["value"] ?? arguments
         case "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write":
             merged["write_file"] = arguments
         case "edit", "edit_file", "edit_files", "replace_file", "file_edit":
@@ -1867,6 +1934,7 @@ actor LocalAlpineAgentService {
     private static let knownStructuredToolNames: Set<String> = [
         "bash", "shell", "sh", "exec", "run", "command", "shell_execute",
         "read", "read_file", "read_files", "cat", "open_file", "file_read",
+        "read_image", "image_read", "inspect_image",
         "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write",
         "edit", "edit_file", "edit_files", "replace_file", "file_edit",
         "patch", "patch_file", "patch_files", "apply_patch",
@@ -2078,8 +2146,10 @@ actor LocalAlpineAgentService {
     private nonisolated static func structuredToolSelector(_ command: String) -> String? {
         let normalized = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch normalized {
-        case "read_file", "read_files", "read", "cat", "open_file":
+        case "read_file", "read_files", "read", "cat", "open_file", "file_read":
             return "read"
+        case "read_image", "image_read", "inspect_image":
+            return "read_image"
         case "edit_file", "edit_files", "replace_file", "edit":
             return "edit"
         case "patch_file", "patch_files", "apply_patch", "patch":
@@ -2118,10 +2188,14 @@ actor LocalAlpineAgentService {
 
         let tool = words[0].lowercased()
         switch tool {
-        case "read_file", "read_files", "open_file":
+        case "read_file", "read_files", "open_file", "file_read":
             guard let request = readFileRequest(fromShellWords: words) else { return nil }
             return [LocalAlpineAgentCommand(command: nil, cwd: cwd, readFiles: [
                 request
+            ])]
+        case "read_image", "image_read", "inspect_image":
+            return [LocalAlpineAgentCommand(command: nil, cwd: cwd, readImages: [
+                LocalAlpineReadImageRequest(path: words[1])
             ])]
         case "delete_file", "delete_files", "remove_file", "remove_files":
             let path = words[1]
@@ -2638,7 +2712,7 @@ actor LocalAlpineAgentService {
                 return value
             }
         }
-        for key in ["command", "cmd", "shell", "bash", "exec", "run", "shell_execute", "verify", "check", "browser_use"] {
+        for key in ["command", "cmd", "shell", "bash", "exec", "run", "shell_execute", "verify", "check", "browser_use", "read_image"] {
             if let nested = dict[key] as? [String: Any],
                let value = cwdString(from: nested) {
                 return value
@@ -2668,6 +2742,35 @@ actor LocalAlpineAgentService {
 
     private nonisolated static func readFilesObject(from dict: [String: Any]) -> Any? {
         dict["read_file"] ?? dict["read_files"] ?? dict["read"] ?? dict["open_file"] ?? dict["cat"] ?? dict["file_read"]
+    }
+
+    private func parseReadImagesForCommand(from dict: [String: Any]) -> [LocalAlpineReadImageRequest] {
+        parseReadImages(from: Self.readImagesObject(from: dict))
+    }
+
+    private nonisolated static func readImagesObject(from dict: [String: Any]) -> Any? {
+        dict["read_image"] ?? dict["image_read"] ?? dict["inspect_image"]
+    }
+
+    private func parseReadImages(from object: Any?) -> [LocalAlpineReadImageRequest] {
+        if let array = object as? [Any] {
+            return array.flatMap { parseReadImages(from: $0) }
+        }
+        if let path = object as? String {
+            return [LocalAlpineReadImageRequest(path: Self.localAlpineRuntimePath(fromResourceURL: path) ?? path)]
+        }
+        if let dict = object as? [String: Any] {
+            let nestedImages = parseReadImages(from: Self.readImagesObject(from: dict))
+            guard nestedImages.isEmpty else { return nestedImages }
+            if let paths = (dict["paths"] ?? dict["files"]) as? [Any] {
+                return paths.compactMap { Self.pathString(from: $0) }.map {
+                    LocalAlpineReadImageRequest(path: Self.localAlpineRuntimePath(fromResourceURL: $0) ?? $0)
+                }
+            }
+            guard let path = Self.pathString(from: dict) else { return [] }
+            return [LocalAlpineReadImageRequest(path: Self.localAlpineRuntimePath(fromResourceURL: path) ?? path)]
+        }
+        return []
     }
 
     private func parseReadFiles(from object: Any?) -> [LocalAlpineReadFileRequest] {
@@ -2966,6 +3069,26 @@ actor LocalAlpineAgentService {
             return [path]
         }
         return []
+    }
+
+    private nonisolated static func localAlpineRuntimePath(fromResourceURL rawValue: String) -> String? {
+        guard let url = URL(string: rawValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "iexa" else {
+            return nil
+        }
+        let host = (url.host ?? "").lowercased()
+        let decodedPath = url.path.removingPercentEncoding ?? url.path
+        let path = decodedPath.isEmpty ? "/" : decodedPath
+        switch host {
+        case "", "workspace", "shared", "mnt", "iexa":
+            let relative = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            return relative.isEmpty ? "/mnt/iexa" : "/mnt/iexa/\(relative)"
+        case "root", "rootfs":
+            return path.hasPrefix("/") ? path : "/\(path)"
+        default:
+            return path == "/" ? "/mnt/iexa/\(host)" : "/mnt/iexa/\(host)\(path)"
+        }
     }
 
     private nonisolated static func urlString(from object: Any) -> String? {
@@ -3433,6 +3556,54 @@ actor LocalAlpineAgentService {
         )
     }
 
+    private func readImages(_ requests: [LocalAlpineReadImageRequest], cwd: String) async -> LocalAlpineStructuredToolResult {
+        var lines = ["读取图片（read_image）"]
+        var commandResults: [LocalAlpineAgentCommandResult] = []
+        var hadFailure = false
+
+        for request in requests.prefix(maxCommandsPerResponse) {
+            let target = resolvedFilePath(request.path, cwd: cwd)
+            let commandDescription = "read_image \(target)"
+            do {
+                let data = try await LocalAlpineTerminalService.shared.readFile(path: target)
+                let output = try Self.imageMetadataText(data: data, path: target)
+                lines.append(output)
+                let result = LocalAlpineCommandResult(
+                    command: commandDescription,
+                    output: output,
+                    exitCode: 0,
+                    interactiveRequest: nil
+                )
+                commandResults.append(Self.commandResult(command: commandDescription, cwd: cwd, result: result))
+            } catch {
+                let output = "read_image failed for `\(target)`: \(error.localizedDescription)"
+                lines.append("- \(output)")
+                let result = LocalAlpineCommandResult(
+                    command: commandDescription,
+                    output: output,
+                    exitCode: 1,
+                    interactiveRequest: nil
+                )
+                commandResults.append(Self.commandResult(command: commandDescription, cwd: cwd, result: result))
+                hadFailure = true
+            }
+        }
+
+        let skipped = max(0, requests.count - maxCommandsPerResponse)
+        if skipped > 0 {
+            lines.append("- 已跳过 \(skipped) 个多余图片读取请求，避免一次读取过多。")
+        }
+
+        return LocalAlpineStructuredToolResult(
+            summary: lines.joined(separator: "\n\n"),
+            commandResults: commandResults,
+            writtenFiles: [],
+            editedPaths: [],
+            lineDelta: nil,
+            hadFailure: hadFailure
+        )
+    }
+
     private nonisolated static func readFileCommandDescription(
         target: String,
         request: LocalAlpineReadFileRequest
@@ -3448,6 +3619,42 @@ actor LocalAlpineAgentService {
             parts.append("--max-bytes \(maxBytes)")
         }
         return parts.joined(separator: " ")
+    }
+
+    private nonisolated static func imageMetadataText(data: Data, path: String) throws -> String {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            throw LocalAlpineAgentImageError.unsupportedImage(path)
+        }
+        let properties = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        let width = intImageProperty(properties[kCGImagePropertyPixelWidth])
+        let height = intImageProperty(properties[kCGImagePropertyPixelHeight])
+        let frameCount = CGImageSourceGetCount(source)
+        let type = (CGImageSourceGetType(source) as String?) ?? "unknown"
+        let dimensions = width.flatMap { w in height.map { "\(w)x\($0)" } } ?? "unknown"
+        return """
+        == image ==
+        \(path)
+        bytes: \(data.count)
+        dimensions: \(dimensions)
+        frames: \(frameCount)
+        type: \(type)
+
+        == note ==
+        Image bytes were decoded by the iOS host. Use `iexa-open` if the user should preview it in chat.
+        """
+    }
+
+    private nonisolated static func intImageProperty(_ value: Any?) -> Int? {
+        switch value {
+        case let int as Int:
+            return int
+        case let number as NSNumber:
+            return number.intValue
+        case let double as Double:
+            return Int(double)
+        default:
+            return nil
+        }
     }
 
     private nonisolated static func numberedText(
@@ -6248,6 +6455,7 @@ actor LocalAlpineAgentService {
                 || lowered.contains("\"file_read\"")
                 || lowered.contains("\"file_write\"")
                 || lowered.contains("\"file_edit\"")
+                || lowered.contains("\"read_image\"")
                 || lowered.contains("\"read_file\"")
                 || lowered.contains("\"write_files\"")
                 || lowered.contains("\"write_file\"")
@@ -6315,6 +6523,7 @@ actor LocalAlpineAgentService {
         let structuredKeys = [
             "read_file", "read_files", "write_file", "write_files", "edit_file", "patch_file",
             "file_read", "file_write", "file_edit", "shell_execute",
+            "read_image", "image_read", "inspect_image",
             "delete_file", "list_dir", "glob", "grep", "browser_use"
         ]
         if structuredKeys.contains(where: { dict[$0] != nil }) {
@@ -6371,6 +6580,7 @@ private struct LocalAlpineAgentCommand: Sendable {
     let cwd: String?
     let writeFiles: [LocalAlpineAgentFile]
     let readFiles: [LocalAlpineReadFileRequest]
+    let readImages: [LocalAlpineReadImageRequest]
     let editFiles: [LocalAlpineEditFileRequest]
     let patchFiles: [LocalAlpinePatchFileRequest]
     let deleteFiles: [LocalAlpineDeleteFileRequest]
@@ -6384,6 +6594,7 @@ private struct LocalAlpineAgentCommand: Sendable {
         cwd: String?,
         writeFiles: [LocalAlpineAgentFile] = [],
         readFiles: [LocalAlpineReadFileRequest] = [],
+        readImages: [LocalAlpineReadImageRequest] = [],
         editFiles: [LocalAlpineEditFileRequest] = [],
         patchFiles: [LocalAlpinePatchFileRequest] = [],
         deleteFiles: [LocalAlpineDeleteFileRequest] = [],
@@ -6396,6 +6607,7 @@ private struct LocalAlpineAgentCommand: Sendable {
         self.cwd = cwd
         self.writeFiles = writeFiles
         self.readFiles = readFiles
+        self.readImages = readImages
         self.editFiles = editFiles
         self.patchFiles = patchFiles
         self.deleteFiles = deleteFiles
@@ -6458,6 +6670,10 @@ private struct LocalAlpineReadFileRequest: Sendable {
         self.lineCount = lineCount
         self.maxBytes = maxBytes
     }
+}
+
+private struct LocalAlpineReadImageRequest: Sendable {
+    let path: String
 }
 
 private struct LocalAlpineEditFileRequest: Sendable {
@@ -6604,6 +6820,17 @@ private enum LocalAlpineAgentError: LocalizedError {
         switch self {
         case .noCommands:
             return "没有找到可执行的 Alpine 命令。"
+        }
+    }
+}
+
+private enum LocalAlpineAgentImageError: LocalizedError {
+    case unsupportedImage(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedImage(let path):
+            return "`\(path)` 不是可识别的图片文件。"
         }
     }
 }

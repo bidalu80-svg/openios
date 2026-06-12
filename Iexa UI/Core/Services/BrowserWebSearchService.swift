@@ -9,6 +9,11 @@ final class BrowserWebSearchService: NSObject {
 
     private let logger = Logger(subsystem: "com.openui", category: "BrowserWebSearch")
     private var webView: WKWebView?
+    private var browserTabs: [Int: WKWebView] = [:]
+    private var activeBrowserTabID = 1
+    private var nextBrowserTabID = 2
+    private var browserViewportSize = CGSize(width: 390, height: 720)
+    private var browserUserAgentProfile = "desktop_chrome"
     private var navigationContinuation: CheckedContinuation<Bool, Never>?
     private var timeoutTask: Task<Void, Never>?
 
@@ -123,6 +128,8 @@ final class BrowserWebSearchService: NSObject {
         switch action {
         case "web.search", "web_search", "search_web", "browser.search", "browser_search":
             return await executeNativeSearch(call)
+        case "browser.use", "browser_use":
+            return await executeNativeBrowserUse(call)
         case "browser.open", "browser.navigate", "browser_open", "browser.navigate_url", "navigate":
             return await executeNativeOpen(call, readable: true)
         case "browser.readable", "browser.get_readable", "browser_readable", "get_readable", "read_webpage":
@@ -135,6 +142,36 @@ final class BrowserWebSearchService: NSObject {
             return await executeNativeScreenshot(call)
         case "browser.fetch", "browser_fetch", "fetch":
             return await executeNativeFetch(call)
+        case "browser.click", "browser_click", "click":
+            return await executeNativeClick(call)
+        case "browser.type", "browser_type", "type":
+            return await executeNativeType(call)
+        case "browser.hover", "browser_hover", "hover":
+            return await executeNativeHover(call)
+        case "browser.scroll", "browser_scroll", "scroll":
+            return await executeNativeScroll(call)
+        case "browser.scroll_and_collect", "browser_scroll_and_collect", "scroll_and_collect":
+            return await executeNativeScrollAndCollect(call)
+        case "browser.find_elements", "browser_find_elements", "find_elements":
+            return await executeNativeFindElements(call)
+        case "browser.get_backbone", "browser_get_backbone", "get_backbone":
+            return await executeNativeBackbone(call)
+        case "browser.execute_js", "browser_execute_js", "execute_js", "eval_js":
+            return await executeNativeExecuteJavaScript(call)
+        case "browser.set_viewport", "browser_set_viewport", "set_viewport":
+            return await executeNativeSetViewport(call)
+        case "browser.set_user_agent", "browser_set_user_agent", "set_user_agent":
+            return executeNativeSetUserAgent(call)
+        case "browser.get_cookies", "browser_get_cookies", "get_cookies":
+            return await executeNativeCookies(call)
+        case "browser.wait_for_dom_stable", "browser_wait_for_dom_stable", "wait_for_dom_stable":
+            return await executeNativeWaitForDOMStable(call)
+        case "browser.new_tab", "browser_new_tab", "new_tab":
+            return await executeNativeNewTab(call)
+        case "browser.close_tab", "browser_close_tab", "close_tab":
+            return await executeNativeCloseTab(call)
+        case "browser.list_tabs", "browser_list_tabs", "list_tabs":
+            return await executeNativeListTabs(call)
         default:
             return [
                 "action": rawAction,
@@ -142,6 +179,29 @@ final class BrowserWebSearchService: NSObject {
                 "error": "Unsupported browser action"
             ]
         }
+    }
+
+    private func executeNativeBrowserUse(_ call: [String: Any]) async -> [String: Any] {
+        if let profile = Self.firstString(in: call, keys: ["user_agent", "userAgent"]) {
+            applyBrowserUserAgent(profile)
+        }
+        if let tabID = Self.intValue(call["tab_id"] ?? call["tabId"]) {
+            activateBrowserTab(tabID)
+        }
+
+        let requestedAction = Self.firstString(
+            in: call,
+            keys: ["browser_action", "browser_use_action", "operation", "op", "type", "action"]
+        )
+        let routedAction = Self.browserUseActionName(requestedAction, call: call)
+        var payload = await executeNativeBrowserTool(action: routedAction, call: call)
+        payload["action"] = "browser_use"
+        payload["browser_action"] = routedAction
+        payload["active_tab_id"] = activeBrowserTabID
+        if payload["summary"] == nil {
+            payload["summary"] = "浏览器动作已执行。"
+        }
+        return payload
     }
 
     private func executeNativeSearch(_ call: [String: Any]) async -> [String: Any] {
@@ -428,7 +488,7 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private func executeNativeFetch(_ call: [String: Any]) async -> [String: Any] {
-        guard let url = Self.urlValue(in: call) else {
+        guard let url = Self.urlValue(in: call, allowLocalFiles: false) else {
             return [
                 "action": "browser.fetch",
                 "ok": false,
@@ -478,10 +538,1091 @@ final class BrowserWebSearchService: NSObject {
         }
     }
 
+    private func executeNativeClick(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !(await load(url: url, timeout: 14)) {
+            return [
+                "action": "browser.click",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        let selector = Self.firstString(in: call, keys: ["selector", "css", "element"])
+        let x = Self.intValue(call["coordinate_x"] ?? call["x"] ?? call["client_x"])
+        let y = Self.intValue(call["coordinate_y"] ?? call["y"] ?? call["client_y"])
+        guard selector != nil || (x != nil && y != nil) else {
+            return [
+                "action": "browser.click",
+                "ok": false,
+                "error": "Missing selector or coordinates"
+            ]
+        }
+
+        let script = """
+        (() => {
+          const selector = \(Self.javascriptString(selector ?? ""));
+          const x = \(x.map(String.init) ?? "null");
+          const y = \(y.map(String.init) ?? "null");
+          function text(node) {
+            return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim();
+          }
+          function rect(node) {
+            if (!node || !node.getBoundingClientRect) return null;
+            const r = node.getBoundingClientRect();
+            return {
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              width: Math.round(r.width),
+              height: Math.round(r.height)
+            };
+          }
+          function findNode(raw) {
+            if (!raw) return null;
+            try {
+              if (raw.startsWith('/') || raw.startsWith('.//')) {
+                const result = document.evaluate(raw, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                return result.singleNodeValue;
+              }
+              return document.querySelector(raw);
+            } catch (_) {
+              return null;
+            }
+          }
+          const node = findNode(selector) || ((Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null);
+          if (!node) {
+            return JSON.stringify({ ok: false, error: 'Element not found' });
+          }
+          if (node.scrollIntoView) {
+            node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+          }
+          const target = node.closest && node.closest('button, a, input, textarea, select, [role="button"], [onclick]') || node;
+          const events = [
+            ['pointerdown', { bubbles: true, cancelable: true, composed: true }],
+            ['mousedown', { bubbles: true, cancelable: true, composed: true }],
+            ['mouseup', { bubbles: true, cancelable: true, composed: true }],
+            ['click', { bubbles: true, cancelable: true, composed: true }]
+          ];
+          for (const [name, init] of events) {
+            try {
+              target.dispatchEvent(new MouseEvent(name, init));
+            } catch (_) {}
+          }
+          if (typeof target.click === 'function') {
+            try { target.click(); } catch (_) {}
+          }
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            selector: selector || '',
+            tag: (target.tagName || target.nodeName || '').toLowerCase(),
+            text: text(target).slice(0, 120),
+            href: target.href || '',
+            rect: rect(target)
+          });
+        })();
+        """
+
+        guard let object = await evaluateJSONObject(script) else {
+            return [
+                "action": "browser.click",
+                "ok": false,
+                "error": "Unable to click element"
+            ]
+        }
+        var payload = object
+        payload["action"] = "browser.click"
+        payload["summary"] = "已点击网页元素。"
+        return payload
+    }
+
+    private func executeNativeType(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !(await load(url: url, timeout: 14)) {
+            return [
+                "action": "browser.type",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        let selector = Self.firstString(in: call, keys: ["selector", "css", "element"])
+        let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message"]) ?? ""
+        let clear = Self.boolValue(call["clear"] ?? call["replace"] ?? call["overwrite"]) ?? true
+        let pressEnter = Self.boolValue(call["press_enter"] ?? call["enter"] ?? call["submit"]) ?? false
+        guard let selector, !selector.isEmpty else {
+            return [
+                "action": "browser.type",
+                "ok": false,
+                "error": "Missing required field: selector"
+            ]
+        }
+
+        let script = """
+        (() => {
+          const selector = \(Self.javascriptString(selector));
+          const text = \(Self.javascriptString(text));
+          const clear = \(clear ? "true" : "false");
+          const pressEnter = \(pressEnter ? "true" : "false");
+          function textOf(node) {
+            return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim();
+          }
+          function findNode(raw) {
+            try {
+              if (raw.startsWith('/') || raw.startsWith('.//')) {
+                const result = document.evaluate(raw, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                return result.singleNodeValue;
+              }
+              return document.querySelector(raw);
+            } catch (_) {
+              return null;
+            }
+          }
+          const node = findNode(selector);
+          if (!node) {
+            return JSON.stringify({ ok: false, error: 'Element not found' });
+          }
+          if (node.focus) {
+            try { node.focus(); } catch (_) {}
+          }
+          if (node.scrollIntoView) {
+            try { node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (_) {}
+          }
+          if (node.isContentEditable) {
+            if (clear) {
+              node.innerText = '';
+            }
+            node.innerText = (clear ? '' : textOf(node)) + text;
+          } else if ('value' in node) {
+            const current = clear ? '' : (node.value || '');
+            const nextValue = current + text;
+            const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node), 'value')
+              || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+              || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+            if (descriptor && descriptor.set) {
+              descriptor.set.call(node, nextValue);
+            } else {
+              node.value = nextValue;
+            }
+          } else {
+            node.textContent = (clear ? '' : textOf(node)) + text;
+          }
+          try {
+            node.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, composed: true, data: text, inputType: clear ? 'insertText' : 'insertText' }));
+          } catch (_) {
+            try { node.dispatchEvent(new Event('input', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+          }
+          try { node.dispatchEvent(new Event('change', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+          if (pressEnter) {
+            const events = [
+              new KeyboardEvent('keydown', { bubbles: true, cancelable: true, composed: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }),
+              new KeyboardEvent('keypress', { bubbles: true, cancelable: true, composed: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }),
+              new KeyboardEvent('keyup', { bubbles: true, cancelable: true, composed: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 })
+            ];
+            for (const event of events) {
+              try { node.dispatchEvent(event); } catch (_) {}
+            }
+          }
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            selector,
+            text: textOf(node).slice(0, 160),
+            tag: (node.tagName || node.nodeName || '').toLowerCase()
+          });
+        })();
+        """
+
+        guard let object = await evaluateJSONObject(script) else {
+            return [
+                "action": "browser.type",
+                "ok": false,
+                "error": "Unable to type into element"
+            ]
+        }
+        var payload = object
+        payload["action"] = "browser.type"
+        payload["summary"] = "已向网页元素输入文本。"
+        return payload
+    }
+
+    private func executeNativeHover(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !(await load(url: url, timeout: 14)) {
+            return [
+                "action": "browser.hover",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        let selector = Self.firstString(in: call, keys: ["selector", "css", "element"])
+        let x = Self.intValue(call["coordinate_x"] ?? call["x"] ?? call["client_x"])
+        let y = Self.intValue(call["coordinate_y"] ?? call["y"] ?? call["client_y"])
+        guard selector != nil || (x != nil && y != nil) else {
+            return [
+                "action": "browser.hover",
+                "ok": false,
+                "error": "Missing selector or coordinates"
+            ]
+        }
+
+        let script = """
+        (() => {
+          const selector = \(Self.javascriptString(selector ?? ""));
+          const x = \(x.map(String.init) ?? "null");
+          const y = \(y.map(String.init) ?? "null");
+          function text(node) {
+            return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim();
+          }
+          function rect(node) {
+            if (!node || !node.getBoundingClientRect) return null;
+            const r = node.getBoundingClientRect();
+            return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
+          }
+          function findNode(raw) {
+            if (!raw) return null;
+            try {
+              if (raw.startsWith('/') || raw.startsWith('.//')) {
+                const result = document.evaluate(raw, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                return result.singleNodeValue;
+              }
+              return document.querySelector(raw);
+            } catch (_) {
+              return null;
+            }
+          }
+          const node = findNode(selector) || ((Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null);
+          if (!node) {
+            return JSON.stringify({ ok: false, error: 'Element not found' });
+          }
+          if (node.scrollIntoView) {
+            try { node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (_) {}
+          }
+          const target = node.closest && node.closest('button, a, input, textarea, select, [role="button"], [onclick]') || node;
+          for (const name of ['pointerover', 'mouseover', 'mouseenter', 'pointermove', 'mousemove']) {
+            try { target.dispatchEvent(new MouseEvent(name, { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+          }
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            selector: selector || '',
+            tag: (target.tagName || target.nodeName || '').toLowerCase(),
+            text: text(target).slice(0, 160),
+            href: target.href || '',
+            rect: rect(target)
+          });
+        })();
+        """
+
+        guard let object = await evaluateJSONObject(script) else {
+            return [
+                "action": "browser.hover",
+                "ok": false,
+                "error": "Unable to hover element"
+            ]
+        }
+        var payload = object
+        payload["action"] = "browser.hover"
+        payload["summary"] = "已悬停网页元素。"
+        return payload
+    }
+
+    private func executeNativeScroll(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !(await load(url: url, timeout: 14)) {
+            return [
+                "action": "browser.scroll",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        let selector = Self.firstString(in: call, keys: ["selector", "css"])
+        let direction = Self.firstString(in: call, keys: ["direction"])?.lowercased() ?? "down"
+        let amount = Self.intValue(call["amount"] ?? call["distance"] ?? call["pixels"]) ?? 500
+        let script = """
+        (() => {
+          const selector = \(Self.javascriptString(selector ?? ""));
+          const direction = \(Self.javascriptString(direction));
+          const amount = \(amount);
+          function findNode(raw) {
+            if (!raw) return null;
+            try {
+              if (raw.startsWith('/') || raw.startsWith('.//')) {
+                const result = document.evaluate(raw, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                return result.singleNodeValue;
+              }
+              return document.querySelector(raw);
+            } catch (_) {
+              return null;
+            }
+          }
+          function bestScrollable() {
+            const nodes = Array.from(document.querySelectorAll('*'));
+            for (const node of nodes) {
+              const style = window.getComputedStyle(node);
+              const scrollableY = /(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 20;
+              const scrollableX = /(auto|scroll)/.test(style.overflowX) && node.scrollWidth > node.clientWidth + 20;
+              if (scrollableY || scrollableX) return node;
+            }
+            return document.scrollingElement || document.documentElement;
+          }
+          const node = findNode(selector) || bestScrollable();
+          const delta = direction === 'up' ? -amount : amount;
+          if (node === document.scrollingElement || node === document.documentElement || node === document.body) {
+            window.scrollBy({ top: delta, left: 0, behavior: 'auto' });
+          } else if (node && node.scrollBy) {
+            node.scrollBy({ top: delta, left: 0, behavior: 'auto' });
+          } else {
+            window.scrollBy({ top: delta, left: 0, behavior: 'auto' });
+          }
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            selector: selector || '',
+            direction,
+            amount,
+            scrollY: Math.round(window.scrollY || 0),
+            scrollX: Math.round(window.scrollX || 0),
+            page: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
+            viewport: { width: window.innerWidth, height: window.innerHeight }
+          });
+        })();
+        """
+
+        guard let object = await evaluateJSONObject(script) else {
+            return [
+                "action": "browser.scroll",
+                "ok": false,
+                "error": "Unable to scroll page"
+            ]
+        }
+        var payload = object
+        payload["action"] = "browser.scroll"
+        payload["summary"] = "已滚动网页。"
+        return payload
+    }
+
+    private func executeNativeScrollAndCollect(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !(await load(url: url, timeout: 14)) {
+            return [
+                "action": "browser.scroll_and_collect",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        let amount = Self.intValue(call["amount"] ?? call["distance"] ?? call["pixels"]) ?? 500
+        let scrollCount = min(max(Self.intValue(call["scroll_count"] ?? call["count"]) ?? 10, 1), 20)
+        let direction = Self.firstString(in: call, keys: ["direction"])?.lowercased() ?? "down"
+        let itemSelector = Self.firstString(in: call, keys: ["item_selector", "itemSelector", "selector"])
+        let collectSelector = itemSelector ?? "article, [role='listitem'], li, .item, .card, .post, .result"
+        var collected: [[String: Any]] = []
+        var seen = Set<String>()
+
+        for _ in 0..<scrollCount {
+            let collectScript = Self.elementCollectionScript(selector: collectSelector, limit: 24)
+            if let snapshot = await evaluateJSONObject(collectScript),
+               let items = snapshot["items"] as? [[String: Any]] {
+                for item in items {
+                    let key = [
+                        item["link"] as? String ?? "",
+                        item["text"] as? String ?? "",
+                        item["title"] as? String ?? ""
+                    ]
+                    .joined(separator: "|")
+                    .lowercased()
+                    guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                          seen.insert(key).inserted else {
+                        continue
+                    }
+                    collected.append(item)
+                    if collected.count >= 50 { break }
+                }
+            }
+            if collected.count >= 50 { break }
+            _ = await executeNativeScroll([
+                "action": "browser.scroll",
+                "direction": direction,
+                "amount": amount
+            ])
+            try? await Task.sleep(nanoseconds: 450_000_000)
+        }
+
+        let title = await currentPageTitle() ?? "网页"
+        let url = await currentPageURL()?.absoluteString ?? ""
+        return [
+            "action": "browser.scroll_and_collect",
+            "ok": true,
+            "title": title,
+            "url": url,
+            "count": collected.count,
+            "items": collected,
+            "summary": collected.isEmpty ? "未收集到更多内容。" : "已滚动并收集 \(collected.count) 项内容。"
+        ]
+    }
+
+    private func executeNativeFindElements(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !(await load(url: url, timeout: 14)) {
+            return [
+                "action": "browser.find_elements",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        let selector = Self.firstString(in: call, keys: ["selector", "css"]) ?? "a, button, input, textarea, select, [role='button'], [onclick]"
+        let limit = min(max(Self.intValue(call["limit"] ?? call["max_results"]) ?? 30, 1), 100)
+        let script = Self.elementCollectionScript(selector: selector, limit: limit)
+        guard let object = await evaluateJSONObject(script) else {
+            return [
+                "action": "browser.find_elements",
+                "ok": false,
+                "error": "Unable to inspect page elements"
+            ]
+        }
+        var payload = object
+        payload["action"] = "browser.find_elements"
+        payload["summary"] = "已找到网页元素。"
+        return payload
+    }
+
+    private func executeNativeBackbone(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !(await load(url: url, timeout: 14)) {
+            return [
+                "action": "browser.get_backbone",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        let maxDepth = min(max(Self.intValue(call["max_depth"] ?? call["depth"]) ?? 5, 1), 8)
+        let script = Self.backboneScript(maxDepth: maxDepth)
+        guard let object = await evaluateJSONObject(script) else {
+            return [
+                "action": "browser.get_backbone",
+                "ok": false,
+                "error": "Unable to build page backbone"
+            ]
+        }
+        var payload = object
+        payload["action"] = "browser.get_backbone"
+        payload["summary"] = "已生成网页结构概览。"
+        return payload
+    }
+
+    private func executeNativeExecuteJavaScript(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !(await load(url: url, timeout: 14)) {
+            return [
+                "action": "browser.execute_js",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        let script = Self.firstString(in: call, keys: ["script"])
+        guard let script, !script.isEmpty else {
+            return [
+                "action": "browser.execute_js",
+                "ok": false,
+                "error": "Missing required field: script"
+            ]
+        }
+        let wrapped = """
+        (async () => {
+          try {
+            const result = await (async () => {
+              \(script)
+            })();
+            const safe = result === undefined ? null : result;
+            return JSON.stringify({
+              ok: true,
+              title: document.title || '',
+              url: location.href,
+              result: safe
+            });
+          } catch (error) {
+            return JSON.stringify({
+              ok: false,
+              title: document.title || '',
+              url: location.href,
+              error: String(error && error.message ? error.message : error)
+            });
+          }
+        })();
+        """
+        guard let object = await evaluateJSONObject(wrapped) else {
+            return [
+                "action": "browser.execute_js",
+                "ok": false,
+                "error": "Unable to execute JavaScript"
+            ]
+        }
+        var payload = object
+        payload["action"] = "browser.execute_js"
+        payload["summary"] = (payload["ok"] as? Bool) == true ? "已执行网页脚本。" : "网页脚本执行失败。"
+        return payload
+    }
+
+    private func executeNativeSetViewport(_ call: [String: Any]) async -> [String: Any] {
+        if Self.boolValue(call["reset"] ?? call["clear"]) == true {
+            browserViewportSize = CGSize(width: 390, height: 720)
+        } else if let width = Self.intValue(call["viewport_width"] ?? call["width"]),
+                  let height = Self.intValue(call["viewport_height"] ?? call["height"]) {
+            browserViewportSize = CGSize(
+                width: CGFloat(min(max(width, 240), 4096)),
+                height: CGFloat(min(max(height, 240), 4096))
+            )
+        } else {
+            return [
+                "action": "browser.set_viewport",
+                "ok": false,
+                "error": "Missing viewport_width and viewport_height"
+            ]
+        }
+
+        for tab in browserTabs.values {
+            tab.frame = CGRect(
+                x: -10_000,
+                y: -10_000,
+                width: browserViewportSize.width,
+                height: browserViewportSize.height
+            )
+            tab.setNeedsLayout()
+            tab.layoutIfNeeded()
+        }
+        webView?.frame = CGRect(
+            x: -10_000,
+            y: -10_000,
+            width: browserViewportSize.width,
+            height: browserViewportSize.height
+        )
+        return [
+            "action": "browser.set_viewport",
+            "ok": true,
+            "viewport": [
+                "width": Int(browserViewportSize.width.rounded()),
+                "height": Int(browserViewportSize.height.rounded())
+            ],
+            "summary": "已更新浏览器视口。"
+        ]
+    }
+
+    private func executeNativeCookies(_ call: [String: Any]) async -> [String: Any] {
+        let wv = webViewReady()
+        let currentURL = wv.url
+        let host = currentURL?.host?.lowercased() ?? ""
+        let siteRoot = Self.cookieSiteRoot(for: host)
+        let keywords = Self.keywordList(in: call)
+        let fuzzy = Self.boolValue(call["fuzzy"]) ?? true
+
+        let cookies = await withCheckedContinuation { (continuation: CheckedContinuation<[HTTPCookie], Never>) in
+            wv.configuration.websiteDataStore.httpCookieStore.getAllCookies { continuation.resume(returning: $0) }
+        }
+
+        let filtered = cookies.filter { cookie in
+            guard Self.cookieMatchesSite(cookie.domain, host: host, siteRoot: siteRoot) else { return false }
+            guard !keywords.isEmpty else { return true }
+            let name = cookie.name.lowercased()
+            if fuzzy {
+                return keywords.allSatisfy { name.contains($0.lowercased()) }
+            }
+            return keywords.contains { name == $0.lowercased() }
+        }
+
+        let payloadCookies = filtered.prefix(50).map { cookie -> [String: Any] in
+            var item: [String: Any] = [
+                "name": cookie.name,
+                "domain": cookie.domain,
+                "path": cookie.path,
+                "secure": cookie.isSecure
+            ]
+            if let expires = cookie.expiresDate {
+                item["expires_at"] = ISO8601DateFormatter().string(from: expires)
+            }
+            if let httpOnly = cookie.properties?[HTTPCookiePropertyKey("HttpOnly")] {
+                item["http_only"] = String(describing: httpOnly)
+            }
+            return item
+        }
+
+        return [
+            "action": "browser.get_cookies",
+            "ok": true,
+            "url": currentURL?.absoluteString ?? "",
+            "site_root": siteRoot,
+            "cookies": payloadCookies,
+            "count": payloadCookies.count,
+            "summary": payloadCookies.isEmpty ? "当前站点没有可用 cookie。" : "已读取当前站点 cookie。"
+        ]
+    }
+
+    private func executeNativeSetUserAgent(_ call: [String: Any]) -> [String: Any] {
+        let profile = Self.firstString(in: call, keys: ["user_agent", "userAgent", "profile"]) ?? "desktop_chrome"
+        applyBrowserUserAgent(profile)
+        return [
+            "action": "browser.set_user_agent",
+            "ok": true,
+            "user_agent": browserUserAgentProfile,
+            "summary": "已更新浏览器 User-Agent。"
+        ]
+    }
+
+    private func executeNativeWaitForDOMStable(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !(await load(url: url, timeout: 14)) {
+            return [
+                "action": "browser.wait_for_dom_stable",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        let timeout = TimeInterval(Self.intValue(call["timeout"] ?? call["timeout_seconds"]) ?? 10)
+        let deadline = Date().addingTimeInterval(min(max(timeout, 1), 30))
+        var history: [String] = []
+        var stableCount = 0
+
+        while Date() < deadline {
+            let script = """
+            (() => JSON.stringify({
+              title: document.title || '',
+              url: location.href,
+              readyState: document.readyState,
+              textLength: (document.body && document.body.innerText ? document.body.innerText.length : 0),
+              scrollHeight: document.documentElement.scrollHeight,
+              childCount: document.body ? document.body.children.length : 0,
+              resourceCount: performance.getEntriesByType ? performance.getEntriesByType('resource').length : 0
+            }))();
+            """
+            guard let object = await evaluateJSONObject(script) else {
+                break
+            }
+            let fingerprint = [
+                object["readyState"] as? String ?? "",
+                String(describing: object["textLength"] ?? 0),
+                String(describing: object["scrollHeight"] ?? 0),
+                String(describing: object["childCount"] ?? 0),
+                String(describing: object["resourceCount"] ?? 0)
+            ]
+            .joined(separator: "|")
+            history.append(fingerprint)
+            if history.count >= 2, history[history.count - 1] == history[history.count - 2] {
+                stableCount += 1
+            } else {
+                stableCount = 0
+            }
+            if (object["readyState"] as? String) == "complete" && stableCount >= 2 {
+                var payload = object
+                payload["action"] = "browser.wait_for_dom_stable"
+                payload["ok"] = true
+                payload["samples"] = Array(history.suffix(6))
+                payload["summary"] = "网页 DOM 已稳定。"
+                return payload
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+
+        return [
+            "action": "browser.wait_for_dom_stable",
+            "ok": false,
+            "samples": Array(history.suffix(6)),
+            "error": "Timed out waiting for DOM stability"
+        ]
+    }
+
+    private func executeNativeNewTab(_ call: [String: Any]) async -> [String: Any] {
+        guard browserTabs.count < 3 else {
+            return [
+                "action": "browser.new_tab",
+                "ok": false,
+                "error": "Maximum of 3 tabs reached"
+            ]
+        }
+        let tabID = nextBrowserTabID
+        nextBrowserTabID += 1
+        let webView = makeBrowserWebView()
+        browserTabs[tabID] = webView
+        activeBrowserTabID = tabID
+        self.webView = webView
+
+        if let url = Self.urlValue(in: call) {
+            _ = await load(url: url, timeout: 14)
+        }
+
+        let title = await currentPageTitle() ?? "新标签页"
+        return [
+            "action": "browser.new_tab",
+            "ok": true,
+            "tab_id": tabID,
+            "title": title,
+            "url": await currentPageURL()?.absoluteString ?? "about:blank",
+            "summary": "已打开新标签页。"
+        ]
+    }
+
+    private func executeNativeCloseTab(_ call: [String: Any]) async -> [String: Any] {
+        let tabID = Self.intValue(call["tab_id"] ?? call["tabId"]) ?? activeBrowserTabID
+        guard let closing = browserTabs[tabID] else {
+            return [
+                "action": "browser.close_tab",
+                "ok": false,
+                "error": "Tab not found"
+            ]
+        }
+        closing.removeFromSuperview()
+        browserTabs.removeValue(forKey: tabID)
+
+        if browserTabs.isEmpty {
+            let replacement = makeBrowserWebView()
+            browserTabs[1] = replacement
+            activeBrowserTabID = 1
+            self.webView = replacement
+        } else if activeBrowserTabID == tabID {
+            let nextTabID = browserTabs.keys.sorted().last ?? 1
+            activeBrowserTabID = nextTabID
+            self.webView = browserTabs[nextTabID]
+        }
+
+        return [
+            "action": "browser.close_tab",
+            "ok": true,
+            "tab_id": tabID,
+            "active_tab_id": activeBrowserTabID,
+            "tab_count": browserTabs.count,
+            "summary": "已关闭标签页。"
+        ]
+    }
+
+    private func executeNativeListTabs(_ call: [String: Any]) async -> [String: Any] {
+        let tabs = browserTabs
+            .sorted { $0.key < $1.key }
+            .map { tabID, tab in
+                [
+                    "tab_id": tabID,
+                    "title": tab.title ?? "",
+                    "url": tab.url?.absoluteString ?? "",
+                    "active": tabID == activeBrowserTabID
+                ] as [String: Any]
+            }
+        return [
+            "action": "browser.list_tabs",
+            "ok": true,
+            "active_tab_id": activeBrowserTabID,
+            "tab_count": tabs.count,
+            "tabs": tabs,
+            "summary": "已列出标签页。"
+        ]
+    }
+
+    private func currentPageTitle() async -> String? {
+        guard let object = await evaluateJSONObject("""
+        (() => JSON.stringify({ title: document.title || '', url: location.href }))();
+        """) else {
+            return webView?.title
+        }
+        return object["title"] as? String
+    }
+
+    private func currentPageURL() async -> URL? {
+        if let object = await evaluateJSONObject("""
+        (() => JSON.stringify({ url: location.href }))();
+        """), let raw = object["url"] as? String {
+            return URL(string: raw)
+        }
+        return webView?.url
+    }
+
+    private func evaluateJSONObject(_ script: String) async -> [String: Any]? {
+        guard let json = await evaluateString(script),
+              let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object
+    }
+
+    private func applyBrowserUserAgent(_ profile: String) {
+        let normalized = profile.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return }
+        browserUserAgentProfile = normalized
+        let userAgent = Self.browserUserAgentString(profile: normalized)
+        for tab in browserTabs.values {
+            tab.customUserAgent = userAgent
+        }
+        webView?.customUserAgent = userAgent
+    }
+
+    private func activateBrowserTab(_ tabID: Int) {
+        guard let tab = browserTabs[tabID] else { return }
+        activeBrowserTabID = tabID
+        webView = tab
+    }
+
+    private static func browserUserAgentString(profile: String) -> String {
+        switch profile.lowercased() {
+        case "mobile_chrome":
+            return "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/126.0.6478.54 Mobile/15E148 Safari/604.1"
+        default:
+            return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        }
+    }
+
+    private static func browserUseActionName(_ requestedAction: String?, call: [String: Any]) -> String {
+        let normalized = requestedAction?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        let hasURL = urlValue(in: call) != nil
+        let wantsSave = Self.firstString(in: call, keys: ["save_to", "output", "path"]) != nil
+
+        switch normalized {
+        case "", "browser_use", "browser.use":
+            if wantsSave { return "browser.fetch" }
+            if hasURL { return "browser.navigate" }
+            return "browser.info"
+        case "navigate", "open", "goto", "go", "go_to", "go_to_url", "browser.navigate", "browser.open":
+            return "browser.navigate"
+        case "readable", "get_readable", "read_webpage", "browser.readable":
+            return "browser.readable"
+        case "text", "get_text", "browser.text":
+            return "browser.text"
+        case "info", "get_page_info", "browser.info":
+            return "browser.info"
+        case "screenshot", "browser.screenshot":
+            return "browser.screenshot"
+        case "fetch", "download", "browser.fetch":
+            return "browser.fetch"
+        case "click", "browser.click":
+            return "browser.click"
+        case "type", "browser.type":
+            return "browser.type"
+        case "hover", "browser.hover":
+            return "browser.hover"
+        case "scroll", "browser.scroll":
+            return "browser.scroll"
+        case "scroll_and_collect", "browser.scroll_and_collect":
+            return "browser.scroll_and_collect"
+        case "find_elements", "browser.find_elements":
+            return "browser.find_elements"
+        case "get_backbone", "browser.get_backbone":
+            return "browser.get_backbone"
+        case "execute_js", "browser.execute_js":
+            return "browser.execute_js"
+        case "set_viewport", "browser.set_viewport":
+            return "browser.set_viewport"
+        case "set_user_agent", "browser.set_user_agent":
+            return "browser.set_user_agent"
+        case "get_cookies", "browser.get_cookies":
+            return "browser.get_cookies"
+        case "wait_for_dom_stable", "browser.wait_for_dom_stable":
+            return "browser.wait_for_dom_stable"
+        case "new_tab", "browser.new_tab":
+            return "browser.new_tab"
+        case "close_tab", "browser.close_tab":
+            return "browser.close_tab"
+        case "list_tabs", "browser.list_tabs":
+            return "browser.list_tabs"
+        default:
+            if wantsSave { return "browser.fetch" }
+            if hasURL { return "browser.navigate" }
+            return normalized.isEmpty ? "browser.info" : normalized
+        }
+    }
+
+    private static func cookieSiteRoot(for host: String) -> String {
+        guard !host.isEmpty else { return "" }
+        let parts = host.split(separator: ".").map(String.init)
+        guard parts.count >= 2 else { return host }
+        return parts.suffix(2).joined(separator: ".")
+    }
+
+    private static func cookieMatchesSite(_ cookieDomain: String, host: String, siteRoot: String) -> Bool {
+        let domain = cookieDomain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let currentHost = host.lowercased()
+        let root = siteRoot.lowercased()
+        return currentHost == domain
+            || currentHost.hasSuffix("." + domain)
+            || domain.hasSuffix(currentHost)
+            || (!root.isEmpty && (domain == root || domain.hasSuffix("." + root)))
+    }
+
+    private static func keywordList(in call: [String: Any]) -> [String] {
+        let raw = firstString(in: call, keys: ["keywords", "keyword", "query"]) ?? ""
+        return raw
+            .split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == "，" })
+            .map(String.init)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func elementCollectionScript(selector: String, limit: Int) -> String {
+        """
+        (() => {
+          const selector = \(Self.javascriptString(selector));
+          const limit = \(limit);
+          function text(node) {
+            return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim();
+          }
+          function href(node) {
+            if (!node) return '';
+            try {
+              if (node.getAttribute) {
+                const raw = node.getAttribute('href') || node.getAttribute('data-href') || node.getAttribute('data-url') || '';
+                if (raw) return new URL(raw, location.href).href;
+              }
+              return node.href || '';
+            } catch (_) {
+              return '';
+            }
+          }
+          function rect(node) {
+            if (!node || !node.getBoundingClientRect) return null;
+            const r = node.getBoundingClientRect();
+            return {
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              width: Math.round(r.width),
+              height: Math.round(r.height)
+            };
+          }
+          function findElements(raw) {
+            try {
+              return Array.from(document.querySelectorAll(raw));
+            } catch (_) {
+              return [];
+            }
+          }
+          const elements = findElements(selector).slice(0, limit);
+          const items = elements.map((node, index) => ({
+            index,
+            tag: (node.tagName || node.nodeName || '').toLowerCase(),
+            title: text(node).slice(0, 120),
+            text: text(node).slice(0, 240),
+            href: href(node),
+            id: node.id || '',
+            classes: typeof node.className === 'string' ? node.className : '',
+            placeholder: node.placeholder || '',
+            role: node.getAttribute ? (node.getAttribute('role') || '') : '',
+            type: node.getAttribute ? (node.getAttribute('type') || '') : '',
+            rect: rect(node)
+          }));
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            selector,
+            count: items.length,
+            items
+          });
+        })();
+        """
+    }
+
+    private static func backboneScript(maxDepth: Int) -> String {
+        """
+        (() => {
+          function text(node) {
+            return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim();
+          }
+          function simplify(node, depth) {
+            if (!node || depth > \(maxDepth)) return null;
+            const children = [];
+            for (const child of Array.from(node.children || []).slice(0, 6)) {
+              const item = simplify(child, depth + 1);
+              if (item) children.push(item);
+            }
+            return {
+              tag: (node.tagName || node.nodeName || '').toLowerCase(),
+              id: node.id || '',
+              role: node.getAttribute ? (node.getAttribute('role') || '') : '',
+              text: text(node).slice(0, 120),
+              children
+            };
+          }
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            backbone: simplify(document.body || document.documentElement, 0)
+          });
+        })();
+        """
+    }
+
+    private func makeBrowserWebView() -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        let prefs = WKWebpagePreferences()
+        prefs.allowsContentJavaScript = true
+        config.defaultWebpagePreferences = prefs
+        let wv = WKWebView(
+            frame: CGRect(
+                x: -10_000,
+                y: -10_000,
+                width: browserViewportSize.width,
+                height: browserViewportSize.height
+            ),
+            configuration: config
+        )
+        wv.customUserAgent = Self.browserUserAgentString(profile: browserUserAgentProfile)
+        wv.isHidden = false
+        wv.alpha = 1
+        wv.navigationDelegate = self
+        attachToWindow(wv)
+        return wv
+    }
+
+    private func resolveBrowserTab(for tabID: Int? = nil, createIfMissing: Bool = true) -> WKWebView {
+        if let tabID, let tab = browserTabs[tabID] {
+            activeBrowserTabID = tabID
+            webView = tab
+            return tab
+        }
+        if let active = browserTabs[activeBrowserTabID] {
+            webView = active
+            return active
+        }
+        if let last = browserTabs.keys.sorted().last, let tab = browserTabs[last] {
+            activeBrowserTabID = last
+            webView = tab
+            return tab
+        }
+        let tab = makeBrowserWebView()
+        let newID = tabID ?? 1
+        activeBrowserTabID = newID
+        nextBrowserTabID = max(nextBrowserTabID, newID + 1)
+        browserTabs[newID] = tab
+        webView = tab
+        return tab
+    }
+
     private func capturePageThumbnail(prefix: String) async -> URL? {
         let wv = webViewReady()
-        let width: CGFloat = 390
-        let height: CGFloat = 720
+        let width = browserViewportSize.width
+        let height = browserViewportSize.height
         wv.isHidden = false
         wv.alpha = 1
         wv.frame = CGRect(x: -10_000, y: -10_000, width: width, height: height)
@@ -547,13 +1688,19 @@ final class BrowserWebSearchService: NSObject {
         ]
     }
 
-    private static func urlValue(in call: [String: Any]) -> URL? {
+    private static func urlValue(in call: [String: Any], allowLocalFiles: Bool = true) -> URL? {
         guard let raw = firstString(in: call, keys: ["url", "link", "href", "page_url", "source", "input_url"]),
-              let url = URL(string: raw),
-              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+              let url = URL(string: raw) else {
             return nil
         }
-        return url
+        let scheme = url.scheme?.lowercased() ?? ""
+        if ["http", "https"].contains(scheme) {
+            return url
+        }
+        if allowLocalFiles, scheme == "file" {
+            return url
+        }
+        return nil
     }
 
     private static func firstString(in call: [String: Any], keys: [String]) -> String? {
@@ -1018,16 +2165,6 @@ final class BrowserWebSearchService: NSObject {
         navigationContinuation?.resume(returning: false)
         navigationContinuation = nil
 
-        var request = URLRequest(url: url, timeoutInterval: timeout)
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        request.setValue(
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
-        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
-
         return await withCheckedContinuation { continuation in
             navigationContinuation = continuation
             timeoutTask = Task { [weak self] in
@@ -1036,27 +2173,23 @@ final class BrowserWebSearchService: NSObject {
                 self.logger.warning("Browser search navigation timed out: \(url.absoluteString, privacy: .public)")
                 self.resolveNavigation(false)
             }
-            wv.load(request)
+            if url.isFileURL {
+                let readAccessURL = url.deletingLastPathComponent()
+                wv.loadFileURL(url, allowingReadAccessTo: readAccessURL)
+            } else {
+                var request = URLRequest(url: url, timeoutInterval: timeout)
+                request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                request.setValue(Self.browserUserAgentString(profile: browserUserAgentProfile), forHTTPHeaderField: "User-Agent")
+                request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+                request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+                request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+                wv.load(request)
+            }
         }
     }
 
     private func webViewReady() -> WKWebView {
-        if let webView { return webView }
-
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = .nonPersistent()
-        let prefs = WKWebpagePreferences()
-        prefs.allowsContentJavaScript = true
-        config.defaultWebpagePreferences = prefs
-
-        let wv = WKWebView(frame: CGRect(x: -10_000, y: -10_000, width: 390, height: 720), configuration: config)
-        wv.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
-        wv.isHidden = false
-        wv.alpha = 1
-        wv.navigationDelegate = self
-        webView = wv
-        attachToWindow(wv)
-        return wv
+        return resolveBrowserTab()
     }
 
     private func attachToWindow(_ webView: WKWebView) {

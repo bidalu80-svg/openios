@@ -561,6 +561,7 @@ final class ChatViewModel {
     private let localAlpineToolEventFlushInterval: TimeInterval = 0.22
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
+    var localAlpinePendingOpenRequest: LocalAlpineOpenRequest?
     @ObservationIgnored private var localAlpineInputContinuation: CheckedContinuation<String?, Never>?
     private(set) var serverBaseURL: String = ""
     @ObservationIgnored nonisolated(unsafe) private var foregroundObserver: NSObjectProtocol?
@@ -769,6 +770,17 @@ final class ChatViewModel {
 
     func localAlpineLiveToolStatus(for messageId: String) -> ChatStatusUpdate? {
         localAlpineLastLiveToolStatusByMessageId[messageId]
+    }
+
+    func consumeLocalAlpinePendingOpenRequest(_ request: LocalAlpineOpenRequest) {
+        if localAlpinePendingOpenRequest?.id == request.id {
+            localAlpinePendingOpenRequest = nil
+        }
+    }
+
+    private func enqueueLocalAlpineOpenRequests(_ requests: [LocalAlpineOpenRequest]) {
+        guard let request = requests.last else { return }
+        localAlpinePendingOpenRequest = request
     }
 
     private func clearLocalAlpineLiveToolState(for messageId: String) {
@@ -1673,8 +1685,8 @@ final class ChatViewModel {
         if has(["抖音", "douyin"]) && has(["解析", "口令", "无水印", "下载", "链接", "视频"]) {
             return has(["口令"]) ? "解析抖音口令" : "解析抖音链接"
         }
-        if has(["minis"]) && has(["源码", "兼容", "对比", "怎么做"]) {
-            return "对比 Minis 源码"
+        if has(["源码", "反编译", "参考项目"]) && has(["兼容", "对比", "怎么做", "补齐"]) {
+            return "对比参考源码"
         }
         if has(["agent", "智能体", "local alpine", "busybox", "工具调用"]) {
             if has(["兼容", "busybox"]) { return "优化 Agent 兼容" }
@@ -1993,6 +2005,11 @@ final class ChatViewModel {
             arguments: ["path", "start_line?/offset?", "line_count?/lines?", "max_bytes?/max_length?", "alias: file_read"]
         ),
         LocalAlpineToolCapability(
+            name: "read_image",
+            description: "Read a PNG/JPEG/GIF/WebP/BMP/AVIF image from the workspace/rootfs and return host-decoded metadata for inspection.",
+            arguments: ["path", "aliases: image_read/inspect_image"]
+        ),
+        LocalAlpineToolCapability(
             name: "edit_file",
             description: "Modify an existing file by exact same-path replacements.",
             arguments: ["path", "old_text/old_string", "new_text/new_string", "replacements?", "replace_all?", "expected_count?", "alias: file_edit"]
@@ -2041,7 +2058,7 @@ final class ChatViewModel {
             name: "browser_use",
             description: "Fetch an HTTP/HTTPS URL from the Alpine shell with bounded output, or save it to a workspace file for preview/offload.",
             arguments: ["url/href/link", "save_to/output/path optional", "open_preview optional", "max_lines optional", "aliases: web_fetch/fetch_url/open_url"]
-        )
+        ),
     ]
 
     private static let localAlpineBusyBoxCompatibilityNotes = """
@@ -2055,8 +2072,8 @@ final class ChatViewModel {
         - iSH/Python runtime quirk: `time.sleep()` can raise `OSError: [Errno 38] Function not implemented`; make generated Python tests deterministic and delay between tool steps through `delay`. The host also auto-repairs common Python `time.sleep(...)` file writes/runs into an iSH-compatible helper instead of asking the user to fix it.
         """
 
-    private static func localAlpineNativeToolSchemas() -> [[String: Any]] {
-        [
+    private static func localAlpineNativeToolSchemas(includeMemoryTools: Bool) -> [[String: Any]] {
+        var tools: [[String: Any]] = [
             [
                 "type": "function",
                 "function": [
@@ -2089,6 +2106,24 @@ final class ChatViewModel {
                             "lines": ["type": "integer", "description": "Optional maximum number of lines. Leave unset to read the whole file up to the host safety cap."],
                             "max_length": ["type": "integer", "description": "Optional maximum bytes/characters to return. Leave unset for the host's larger source-file read cap."],
                             "direction": ["type": "string", "enum": ["forward", "backward"]]
+                        ],
+                        "required": ["path"]
+                    ]
+                ]
+            ]
+        ]
+
+        tools.append(contentsOf: [
+            [
+                "type": "function",
+                "function": [
+                    "name": "read_image",
+                    "description": "Read an image file from /mnt/iexa or the Alpine rootfs and return host-decoded metadata such as dimensions, frame count, byte size, and type. Use for generated charts, screenshots, downloaded images, or visual artifacts that need inspection or preview.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
+                            "path": ["type": "string", "description": "Image path, relative to /mnt/iexa or absolute."]
                         ],
                         "required": ["path"]
                     ]
@@ -2129,17 +2164,78 @@ final class ChatViewModel {
                         "required": ["path", "old_string", "new_string"]
                     ]
                 ]
+            ],
+            [
+                "type": "function",
+                "function": [
+                    "name": "browser_use",
+                    "description": "Lightweight browser fetch tool for Iexa Alpine. It fetches an HTTP/HTTPS URL with curl/wget, can save the response under /mnt/iexa, and can open the saved artifact through Iexa preview. This is not a full interactive browser; use url/save_to/open_preview/max_lines/timeout.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
+                            "action": ["type": "string", "description": "Compatibility hint such as navigate, fetch, get_text, or open. Iexa uses url/save_to/open_preview."],
+                            "url": ["type": "string", "description": "HTTP or HTTPS URL to fetch."],
+                            "save_to": ["type": "string", "description": "Optional output path under /mnt/iexa."],
+                            "open_preview": ["type": "boolean", "description": "Open the saved output in Iexa preview after fetching."],
+                            "max_lines": ["type": "integer", "description": "Maximum text preview lines to return."],
+                            "timeout": ["type": "integer", "description": "Fetch timeout in seconds."]
+                        ],
+                        "required": ["url"]
+                    ]
+                ]
+            ],
+        ])
+
+        if includeMemoryTools {
+            tools.append(contentsOf: [
+            [
+                "type": "function",
+                "function": [
+                    "name": "memory_write",
+                    "description": "Persist a concise local memory for the user. Use only when the user asks to remember/save a preference, reusable fact, project convention, or durable context. Do not save secrets or credentials.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
+                            "content": ["type": "string", "description": "The concise memory content to save."]
+                        ],
+                        "required": ["content"]
+                    ]
+                ]
+            ],
+            [
+                "type": "function",
+                "function": [
+                    "name": "memory_get",
+                    "description": "Retrieve local memories saved for the user. Use when the user asks what you remember, asks to list memories, or asks to recall stored preferences/context.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
+                            "keywords": ["type": "string", "description": "Optional space-separated keywords. All keywords must match a memory."],
+                            "scope": ["type": "string", "enum": ["all"], "description": "Reserved for compatibility; Iexa local memories are stored per provider server URL."]
+                        ]
+                    ]
+                ]
             ]
-        ]
+            ])
+        }
+
+        return tools
     }
 
-    private static func localAlpineNativeAgentSystemContext() -> String {
-        """
+    private static func localAlpineNativeAgentSystemContext(includeMemoryTools: Bool) -> String {
+        let memoryToolNames = includeMemoryTools ? ", `memory_write`, `memory_get`" : ""
+        let memoryRule = includeMemoryTools
+            ? "- Use `memory_write` to save durable user preferences, recurring patterns, or project conventions, and `memory_get` to recall stored memories by keywords. Never save secrets, passwords, tokens, or one-off noise.\n        "
+            : ""
+        return """
         [Local Alpine native tools]
-        Use the provided native tools for local work: `file_read`, `file_write`, `file_edit`, and `shell_execute`. The iOS host executes each tool call in the local Alpine workspace and returns the real tool result to this same model turn. Do not fake results.
+        Use the provided native tools for local work: `file_read`, `file_write`, `file_edit`, `read_image`, `browser_use`\(memoryToolNames), and `shell_execute`. The iOS host executes each tool call in the local Alpine workspace and returns the real tool result to this same model turn. Do not fake results.
 
         Environment:
-        - Workspace: `/mnt/iexa`; relative paths resolve there. This is the bidirectional app/user workspace, similar to Minis `/var/minis/workspace`.
+        - Workspace: `/mnt/iexa`; relative paths resolve there. This is the bidirectional Iexa Alpine app/user workspace.
         - Execution boundary: every tool call runs only inside the embedded Local Alpine/iSH runtime. Do not ask for, invoke, or rely on Open Terminal, server terminals, iOS/macOS host commands, Windows commands, Debian, or Ubuntu commands for this Local Alpine task.
         - The Alpine rootfs is sandbox-internal. Paths such as `/bin`, `/etc`, `/usr`, `/lib`, `/var`, `/tmp`, `/root`, and `/home` are inside the local Alpine environment, not the iOS host filesystem.
         - For user files, projects, generated artifacts, attachments, and previewable outputs, stay under `/mnt/iexa`. Do not scan the whole rootfs to look for user files; list/search `/mnt/iexa` first unless the user explicitly asks for runtime/system inspection.
@@ -2151,7 +2247,9 @@ final class ChatViewModel {
         - Treat `file_write`, `file_edit`, and deletion targets outside `/mnt/iexa` as advanced sandbox-rootfs operations. Only do them when the user explicitly names that path or when a package/runtime setup requires it.
         - Prefer `file_read` for source inspection instead of shell `cat`, `sed`, `nl`, or inline Python readers; structured reads include line metadata and help the app detect no-progress loops.
         - For normal source files, call `file_read` once with only `path`. Do not split into offset/lines chunks unless the previous read result explicitly says `status: partial`, `truncated`, or the user asked for a range.
-        - Never write source code through `shell_execute` using heredocs, redirection, `echo`, `printf`, `cat`, `tee`, or inline Python writer scripts.
+        - Use `read_image` for generated charts, downloaded screenshots, or image artifacts that need host-decoded dimensions/type metadata. Use `iexa-open /mnt/iexa/<image>` when the user should preview the image in chat.
+        \(memoryRule)- Never write source code through `shell_execute` using heredocs, redirection, `echo`, `printf`, `cat`, `tee`, or inline Python writer scripts.
+        - Use `browser_use` for bounded HTTP/HTTPS fetches and optional save/open-preview flows. It is lightweight and non-interactive; it does not support full click/type browser automation.
         - Use `shell_execute` only for bounded list/search/run/install/build/test/verify commands.
         - Commands must be POSIX sh/BusyBox ash compatible. Avoid `find -printf`, `grep -P`, Bash `[[ ... ]]`, `source`, arrays, process substitution, and GNU/macOS-only flags.
         - If a delay is needed, use the tool `delay` argument. Avoid shell `sleep` and generated Python `time.sleep()`.
@@ -2167,9 +2265,43 @@ final class ChatViewModel {
         includeBrowserTools: Bool,
         includeImageTools: Bool,
         includeOfficeTools: Bool,
-        includeShortcutsTools: Bool
+        includeShortcutsTools: Bool,
+        includeMemoryTools: Bool
     ) -> [[String: Any]] {
         var tools: [[String: Any]] = []
+
+        if includeMemoryTools {
+            tools.append(contentsOf: [
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "memory_write",
+                        "description": "Persist a concise local memory for the user. Use only when the user asks to remember/save a preference, reusable fact, project convention, or durable context. Do not save secrets or credentials.",
+                        "parameters": [
+                            "type": "object",
+                            "properties": [
+                                "content": ["type": "string", "description": "The concise memory content to save."]
+                            ],
+                            "required": ["content"]
+                        ]
+                    ]
+                ],
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "memory_get",
+                        "description": "Retrieve local memories saved for the user. Use when the user asks what you remember, asks to list memories, or asks to recall stored preferences/context.",
+                        "parameters": [
+                            "type": "object",
+                            "properties": [
+                                "keywords": ["type": "string", "description": "Optional space-separated keywords. All keywords must match a memory."],
+                                "scope": ["type": "string", "enum": ["all"], "description": "Reserved for compatibility; Iexa local memories are stored per provider server URL."]
+                            ]
+                        ]
+                    ]
+                ]
+            ])
+        }
 
         if includeImageTools {
             tools.append([
@@ -2191,40 +2323,84 @@ final class ChatViewModel {
         }
 
         if includeBrowserTools {
-            tools.append([
-                "type": "function",
-                "function": [
-                    "name": "web_search",
-                    "description": "Search the live web with the iOS built-in browser when the answer may require current, recent, external, source-backed, or uncertain information. Infer the search query from the user's natural language; the user does not need to say search/browse explicitly.",
-                    "parameters": [
-                        "type": "object",
-                        "properties": [
-                            "query": ["type": "string", "description": "A concise search query extracted from the user's request."],
-                            "queries": [
-                                "type": "array",
-                                "items": ["type": "string"],
-                                "description": "Optional alternate search queries for better recall."
+            tools.append(contentsOf: [
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "web_search",
+                        "description": "Search the live web with the iOS built-in browser when the answer may require current, recent, external, source-backed, or uncertain information. Infer the search query from the user's natural language; the user does not need to say search/browse explicitly.",
+                        "parameters": [
+                            "type": "object",
+                            "properties": [
+                                "query": ["type": "string", "description": "A concise search query extracted from the user's request."],
+                                "queries": [
+                                    "type": "array",
+                                    "items": ["type": "string"],
+                                    "description": "Optional alternate search queries for better recall."
+                                ],
+                                "limit": ["type": "integer", "description": "Number of sources to return, 1-8."],
+                                "screenshot": ["type": "boolean", "description": "Whether to capture a page thumbnail for the source card."]
                             ],
-                            "limit": ["type": "integer", "description": "Number of sources to return, 1-8."],
-                            "screenshot": ["type": "boolean", "description": "Whether to capture a page thumbnail for the source card."]
-                        ],
-                        "required": ["query"]
+                            "required": ["query"]
+                        ]
                     ]
-                ]
-            ])
-            tools.append([
-                "type": "function",
-                "function": [
-                    "name": "browser_readable",
-                    "description": "Open and read a known URL with the iOS built-in browser. Use after web_search when a result needs verification, or when the user provides a URL.",
-                    "parameters": [
-                        "type": "object",
-                        "properties": [
-                            "url": ["type": "string", "description": "HTTP or HTTPS URL to open and read."],
-                            "screenshot": ["type": "boolean", "description": "Whether to capture a page thumbnail."],
-                            "max_length": ["type": "integer", "description": "Maximum readable text length."]
-                        ],
-                        "required": ["url"]
+                ],
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "browser_readable",
+                        "description": "Open and read a known URL with the iOS built-in browser. Use after web_search when a result needs verification, or when the user provides a URL.",
+                        "parameters": [
+                            "type": "object",
+                            "properties": [
+                                "url": ["type": "string", "description": "HTTP, HTTPS, or file URL to open and read."],
+                                "screenshot": ["type": "boolean", "description": "Whether to capture a page thumbnail."],
+                                "max_length": ["type": "integer", "description": "Maximum readable text length."]
+                            ],
+                            "required": ["url"]
+                        ]
+                    ]
+                ],
+                [
+                    "type": "function",
+                    "function": [
+                        "name": "browser_use",
+                        "description": "Interactive browser tool backed by the iOS WKWebView. Supports up to 3 tabs and actions: navigate, screenshot, click, type, hover, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, new_tab, close_tab, list_tabs, set_user_agent, set_viewport, get_cookies, wait_for_dom_stable, execute_js. Use for website preview checks, DOM inspection, clicking/typing flows, local file URLs, and source-backed web work.",
+                        "parameters": [
+                            "type": "object",
+                            "properties": [
+                                "action": [
+                                    "type": "string",
+                                    "enum": [
+                                        "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
+                                        "scroll", "scroll_and_collect", "find_elements", "get_page_info",
+                                        "get_backbone", "fetch", "new_tab", "close_tab", "list_tabs",
+                                        "set_user_agent", "set_viewport", "get_cookies", "wait_for_dom_stable", "execute_js"
+                                    ],
+                                    "description": "Browser action to perform."
+                                ],
+                                "url": ["type": "string", "description": "HTTP, HTTPS, or file URL. Required for navigate/fetch or when loading a new page before another action."],
+                                "selector": ["type": "string", "description": "CSS selector or XPath for click/type/text/scroll/find actions."],
+                                "text": ["type": "string", "description": "Text to type into the selected element."],
+                                "coordinate_x": ["type": "integer", "description": "Viewport x coordinate for click fallback."],
+                                "coordinate_y": ["type": "integer", "description": "Viewport y coordinate for click fallback."],
+                                "direction": ["type": "string", "enum": ["up", "down"], "description": "Scroll direction."],
+                                "amount": ["type": "integer", "description": "Scroll distance in pixels."],
+                                "script": ["type": "string", "description": "JavaScript body for execute_js."],
+                                "user_agent": ["type": "string", "enum": ["desktop_chrome", "mobile_chrome"], "description": "Optional user-agent profile."],
+                                "max_depth": ["type": "integer", "description": "DOM backbone depth."],
+                                "scroll_count": ["type": "integer", "description": "Number of scroll/collect iterations."],
+                                "item_selector": ["type": "string", "description": "Selector for scroll_and_collect items."],
+                                "tab_id": ["type": "integer", "description": "Target browser tab id."],
+                                "keywords": ["type": "string", "description": "Cookie name keywords."],
+                                "fuzzy": ["type": "boolean", "description": "Fuzzy cookie keyword matching."],
+                                "timeout": ["type": "integer", "description": "Timeout in seconds."],
+                                "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport."],
+                                "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport."],
+                                "reset": ["type": "boolean", "description": "Reset viewport to default."]
+                            ],
+                            "required": ["action"]
+                        ]
                     ]
                 ]
             ])
@@ -2398,7 +2574,7 @@ final class ChatViewModel {
         - Execution boundary: every command is executed by the embedded Local Alpine/iSH runtime only, not by Open Terminal, a remote server terminal, iOS/macOS shell, Windows shell, Debian, or Ubuntu. Use Alpine/BusyBox/POSIX commands.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
         - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`. Accepted delay keys are `delay`, `delay_seconds`, or `delaySeconds`; use them instead of shell/Python sleeps.
-        - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `file_edit` -> `edit_file`, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
+        - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `file_edit` -> `edit_file`, `read_image`/`image_read` -> host-decoded image metadata, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
         - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls. `browser_use` supports optional `save_to`/`output` plus `open_preview:true` so large HTML/SVG/JSON responses can be written under `/mnt/iexa` and opened through the preview bridge instead of being pasted into chat.
         - In-app preview bridge: after creating a user-viewable file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
@@ -8023,6 +8199,7 @@ final class ChatViewModel {
         )
 
         var result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
+        enqueueLocalAlpineOpenRequests(result.openRequests)
         while let request = result.interactiveRequest {
             updateAssistantMessage(
                 id: assistantMessageId,
@@ -8046,6 +8223,7 @@ final class ChatViewModel {
                 cwd: request.cwd,
                 stdinInput: stdinInput
             )
+            enqueueLocalAlpineOpenRequests(result.openRequests)
         }
         let output = formatDirectLocalAlpineOutput(command: userMessage.content, result: result)
         let doneDescription: String
@@ -10145,7 +10323,7 @@ final class ChatViewModel {
                   !target.hasPrefix("-"),
                   !target.lowercased().hasPrefix("http://"),
                   !target.lowercased().hasPrefix("https://"),
-                  !target.lowercased().hasPrefix("minis://") else {
+                  !target.lowercased().hasPrefix("iexa://") else {
                 return nil
             }
 
@@ -10719,6 +10897,14 @@ final class ChatViewModel {
         assistantMessageId: String
     ) async -> LocalNativeFunctionToolExecution {
         localNativeToolExecutedMessageIds.insert(assistantMessageId)
+        switch call.name.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "memory_write":
+            return await executeLocalMemoryWriteToolCall(call)
+        case "memory_get":
+            return await executeLocalMemoryGetToolCall(call)
+        default:
+            break
+        }
         if call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "image_generation" {
             return await executeLocalImageGenerationToolCall(
                 call,
@@ -10893,6 +11079,106 @@ final class ChatViewModel {
 
         return LocalNativeFunctionToolExecution(
             toolContent: Self.localNativeFunctionToolResultContent(result.summary),
+            completedAssistantTurn: false,
+            visibleContent: nil
+        )
+    }
+
+    private func executeLocalMemoryWriteToolCall(
+        _ call: LocalAlpineNativeToolCall
+    ) async -> LocalNativeFunctionToolExecution {
+        guard memoryEnabled, let manager else {
+            return LocalNativeFunctionToolExecution(
+                toolContent: "Local memory is disabled for this chat.",
+                completedAssistantTurn: false,
+                visibleContent: nil
+            )
+        }
+
+        var arguments: [String: Any] = [:]
+        if let data = call.arguments.data(using: .utf8),
+           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            arguments = dict
+        }
+        let rawContent = (arguments["content"] as? String)
+            ?? (arguments["text"] as? String)
+            ?? call.arguments
+        let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else {
+            return LocalNativeFunctionToolExecution(
+                toolContent: "memory_write requires a non-empty content field.",
+                completedAssistantTurn: false,
+                visibleContent: nil
+            )
+        }
+
+        let memory = await LocalMemoryStore.shared.addIfAbsent(content: content, serverURL: manager.baseURL)
+        let payload: [String: Any] = [
+            "ok": true,
+            "id": memory.id,
+            "content": memory.content,
+            "summary": "已保存 1 条记忆"
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
+        let text = String(data: data, encoding: .utf8) ?? #"{"ok":true,"summary":"已保存 1 条记忆"}"#
+        return LocalNativeFunctionToolExecution(
+            toolContent: text,
+            completedAssistantTurn: false,
+            visibleContent: nil
+        )
+    }
+
+    private func executeLocalMemoryGetToolCall(
+        _ call: LocalAlpineNativeToolCall
+    ) async -> LocalNativeFunctionToolExecution {
+        guard memoryEnabled, let manager else {
+            return LocalNativeFunctionToolExecution(
+                toolContent: "Local memory is disabled for this chat.",
+                completedAssistantTurn: false,
+                visibleContent: nil
+            )
+        }
+
+        var arguments: [String: Any] = [:]
+        if let data = call.arguments.data(using: .utf8),
+           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            arguments = dict
+        }
+        let rawKeywords = (arguments["keywords"] as? String)
+            ?? (arguments["query"] as? String)
+            ?? (arguments["value"] as? String)
+            ?? ""
+        let keywords = rawKeywords
+            .split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == "，" })
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let memories = await LocalMemoryStore.shared.list(serverURL: manager.baseURL)
+        let filtered = keywords.isEmpty
+            ? memories
+            : memories.filter { memory in
+                let content = memory.content.lowercased()
+                return keywords.allSatisfy { content.contains($0.lowercased()) }
+            }
+        let items: [[String: Any]] = Array(filtered.prefix(20)).map { memory in
+            [
+                "id": memory.id,
+                "content": memory.content,
+                "created_at": memory.createdAt.timeIntervalSince1970,
+                "updated_at": memory.updatedAt.timeIntervalSince1970
+            ]
+        }
+        let payload: [String: Any] = [
+            "ok": true,
+            "count": items.count,
+            "keywords": keywords,
+            "items": items,
+            "summary": items.isEmpty ? "没有找到匹配的记忆。" : "找到了 \(items.count) 条记忆。"
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
+        let text = String(data: data, encoding: .utf8) ?? #"{"ok":true,"count":0,"summary":"没有找到匹配的记忆。"}"#
+        return LocalNativeFunctionToolExecution(
+            toolContent: text,
             completedAssistantTurn: false,
             visibleContent: nil
         )
@@ -11148,6 +11434,63 @@ final class ChatViewModel {
         assistantMessageId: String
     ) async -> LocalAlpineAgentResult {
         localAlpineNativeToolExecutedMessageIds.insert(assistantMessageId)
+        let trimmedName = call.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch trimmedName {
+        case "memory_write":
+            let execution = await executeLocalMemoryWriteToolCall(call)
+            let output = execution.toolContent
+            let failed = output.localizedCaseInsensitiveContains("disabled")
+                || output.localizedCaseInsensitiveContains("requires")
+                || output.localizedCaseInsensitiveContains("failed")
+            return LocalAlpineAgentResult(
+                didExecute: true,
+                summary: output,
+                interactiveRequest: nil,
+                commandResults: [
+                    LocalAlpineAgentCommandResult(
+                        command: trimmedName,
+                        cwd: "/mnt/iexa",
+                        exitCode: failed ? 1 : 0,
+                        outputPreview: output
+                    )
+                ],
+                writtenFiles: [],
+                openRequests: [],
+                toolRunId: nil,
+                toolCalls: [],
+                executedCommandCount: 1,
+                editedFileCount: 0,
+                hadFailure: failed
+            )
+        case "memory_get":
+            let execution = await executeLocalMemoryGetToolCall(call)
+            let output = execution.toolContent
+            let failed = output.localizedCaseInsensitiveContains("disabled")
+                || output.localizedCaseInsensitiveContains("requires")
+                || output.localizedCaseInsensitiveContains("failed")
+            return LocalAlpineAgentResult(
+                didExecute: true,
+                summary: output,
+                interactiveRequest: nil,
+                commandResults: [
+                    LocalAlpineAgentCommandResult(
+                        command: trimmedName,
+                        cwd: "/mnt/iexa",
+                        exitCode: failed ? 1 : 0,
+                        outputPreview: output
+                    )
+                ],
+                writtenFiles: [],
+                openRequests: [],
+                toolRunId: nil,
+                toolCalls: [],
+                executedCommandCount: 1,
+                editedFileCount: 0,
+                hadFailure: failed
+            )
+        default:
+            break
+        }
         let content = Self.localAlpineNativeToolEnvelopeContent(for: call)
         let toolResult = await LocalAlpineTerminalAgentRunner.run(
             .executableContent(content),
@@ -11276,8 +11619,11 @@ final class ChatViewModel {
 
     private static let localNativeFunctionToolNames: Set<String> = [
         "image_generation",
+        "memory_write",
+        "memory_get",
         "web_search",
         "browser_readable",
+        "browser_use",
         "shortcuts_run",
         "shortcuts_open",
         "office_create_excel",
@@ -11305,6 +11651,7 @@ final class ChatViewModel {
     private enum LocalNativeBrowserToolKind: Equatable {
         case search
         case readable
+        case interactive
     }
 
     private static func isLocalNativeImageFunctionToolCall(_ call: LocalAlpineNativeToolCall) -> Bool {
@@ -11326,6 +11673,8 @@ final class ChatViewModel {
             return .search
         case "browser_readable":
             return .readable
+        case "browser_use":
+            return .interactive
         default:
             return nil
         }
@@ -11468,7 +11817,13 @@ final class ChatViewModel {
         } else if !call.arguments.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             argumentsObject["query"] = call.arguments
         }
-        if argumentsObject["action"] == nil {
+        let functionName = call.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if functionName == "browser_use" {
+            if let rawAction = argumentsObject["action"] {
+                argumentsObject["browser_use_action"] = rawAction
+            }
+            argumentsObject["action"] = "browser_use"
+        } else if argumentsObject["action"] == nil {
             argumentsObject["action"] = localNativeActionName(forFunctionName: call.name)
         }
         let data = (try? JSONSerialization.data(withJSONObject: argumentsObject, options: [.prettyPrinted, .sortedKeys]))
@@ -11485,10 +11840,16 @@ final class ChatViewModel {
         switch name.trimmingCharacters(in: .whitespacesAndNewlines) {
         case "image_generation":
             return "image.generate"
+        case "memory_write":
+            return "memory_write"
+        case "memory_get":
+            return "memory_get"
         case "web_search":
             return "web.search"
         case "browser_readable":
             return "browser.readable"
+        case "browser_use":
+            return "browser_use"
         case "shortcuts_run":
             return "shortcuts.run"
         case "shortcuts_open":
@@ -11532,6 +11893,28 @@ final class ChatViewModel {
             return false
         }
         return true
+    }
+
+    private func shouldExposeLocalMemoryNativeTools(for text: String?) -> Bool {
+        guard memoryEnabled, let text else { return false }
+        let lower = text.lowercased()
+        let keywords = [
+            "remember",
+            "memory",
+            "memories",
+            "recall",
+            "what do you remember",
+            "show memories",
+            "list memories",
+            "save this",
+            "记住",
+            "记得",
+            "记忆",
+            "回忆",
+            "查看记忆",
+            "列出记忆"
+        ]
+        return keywords.contains { lower.contains($0.lowercased()) }
     }
 
     private func shouldUseLocalAlpineNativeTools(for modelId: String?) -> Bool {
@@ -11578,7 +11961,7 @@ final class ChatViewModel {
             return false
         }
 
-        // Minis-style behavior: when web search is enabled, expose the browser
+        // When web search is enabled, expose the browser
         // tools consistently and let the model decide whether this turn needs
         // live web access.
         return true
@@ -13195,7 +13578,7 @@ final class ChatViewModel {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased() == "none"
             if shouldUseLocalAlpineNativeTools(for: request.model), request.tools == nil, !nativeToolsDisabled {
-                request.tools = Self.localAlpineNativeToolSchemas()
+                request.tools = Self.localAlpineNativeToolSchemas(includeMemoryTools: memoryEnabled)
                 request.toolChoice = "auto"
             }
             if var modelItem = request.modelItem,
@@ -13219,6 +13602,7 @@ final class ChatViewModel {
         let latestUserTextForLocalNativeTools = latestUserTextForLocalNativeToolDecision()
         let shouldExposeImageTools = shouldExposeLocalImageNativeTools(for: latestUserTextForLocalNativeTools)
         let shouldExposeBrowserTools = shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalNativeTools)
+        let shouldExposeMemoryTools = shouldExposeLocalMemoryNativeTools(for: latestUserTextForLocalNativeTools)
         let localOfficeRevisionContextForNativeTools = localOfficeEnabled
             ? latestUserTextForLocalNativeTools.flatMap { localOfficeRevisionSystemContext(for: $0) }
             : nil
@@ -13229,6 +13613,7 @@ final class ChatViewModel {
         let shouldExposeShortcutsTools = shortcutsEnabled
         let shouldExposeLocalNativeTools = shouldExposeImageTools
             || shouldExposeBrowserTools
+            || shouldExposeMemoryTools
             || shouldExposeOfficeTools
             || shouldExposeShortcutsTools
         if shouldUseLocalNativeFunctionTools(for: request.model),
@@ -13240,7 +13625,8 @@ final class ChatViewModel {
                 includeBrowserTools: shouldExposeBrowserTools,
                 includeImageTools: shouldExposeImageTools,
                 includeOfficeTools: shouldExposeOfficeTools,
-                includeShortcutsTools: shouldExposeShortcutsTools
+                includeShortcutsTools: shouldExposeShortcutsTools,
+                includeMemoryTools: shouldExposeMemoryTools
             )
             request.toolChoice = "auto"
         }
@@ -15097,7 +15483,8 @@ final class ChatViewModel {
         includeBrowserTools: Bool,
         includeImageTools: Bool,
         includeOfficeTools: Bool,
-        includeShortcutsTools: Bool
+        includeShortcutsTools: Bool,
+        includeMemoryTools: Bool
     ) -> String {
         let calendar = Calendar.current
         let now = Date()
@@ -15119,12 +15506,14 @@ final class ChatViewModel {
             : []
         let browserToolDescription = includeBrowserTools ? "local browser/web reading, " : ""
         let imageToolDescription = includeImageTools ? "app-side image generation, " : ""
+        let memoryToolDescription = includeMemoryTools ? "local memory recall/write" : ""
         let officeToolDescription = includeOfficeTools ? "local Office/PDF document generation" : ""
         let shortcutsToolDescription = includeShortcutsTools ? "iOS Shortcuts launcher" : ""
         let joinedToolDescription = (
             deviceToolDescriptions + [
             browserToolDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
             imageToolDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
+            memoryToolDescription,
             officeToolDescription,
             shortcutsToolDescription
             ]
@@ -15144,6 +15533,7 @@ final class ChatViewModel {
             : []
         let browserUseDescription = includeBrowserTools ? "search/open/read/screenshot/download webpages, " : ""
         let imageUseDescription = includeImageTools ? "generate or edit images through the app-side image endpoint, " : ""
+        let memoryUseDescription = includeMemoryTools ? "save a memory or recall stored memories, " : ""
         let officeUseDescription = includeOfficeTools ? "or directly create an Excel/PPT/Word/PDF file" : ""
         let shortcutsUseDescription = includeShortcutsTools
             ? "run an existing iOS Shortcut by exact name or open the Shortcuts app for user-confirmed editing"
@@ -15152,6 +15542,7 @@ final class ChatViewModel {
             deviceUseDescriptions + [
             browserUseDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
             imageUseDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
+            memoryUseDescription.trimmingCharacters(in: CharacterSet(charactersIn: ", ")),
             officeUseDescription,
             shortcutsUseDescription
             ]
@@ -15160,7 +15551,8 @@ final class ChatViewModel {
             .joined(separator: ", ")
         let functionToolNames = [
             includeImageTools ? "`image_generation`" : nil,
-            includeBrowserTools ? "`web_search`, `browser_readable`" : nil,
+            includeBrowserTools ? "`web_search`, `browser_readable`, `browser_use`" : nil,
+            includeMemoryTools ? "`memory_write`, `memory_get`" : nil,
             includeOfficeTools ? "`office_create_*`" : nil,
             includeShortcutsTools ? "`shortcuts_run`, `shortcuts_open`" : nil
         ]
@@ -15175,6 +15567,10 @@ final class ChatViewModel {
         let imageInstructions = includeImageTools ? """
 
         For image generation/editing requests, call `image_generation` when the real function tool is present. Use it when the user naturally asks to create, draw, design, render, or generate an image, poster, wallpaper, avatar, logo, product photo, illustration, or other visual asset. The current chat model does not need to natively support image output; Iexa will execute the app-side image endpoint and attach the generated image. Do not call it for ordinary conversation, capability questions, or image analysis.
+        """ : ""
+        let memoryInstructions = includeMemoryTools ? """
+
+        For memory actions, when real function tools are present, call `memory_write` to save a concise durable memory or `memory_get` to search stored memories. Use `memory_write` only for stable user preferences, recurring project context, reusable facts, or durable conventions. Use `memory_get` when the user asks what you remember or asks to recall prior context. Do not save secrets, passwords, tokens, or transient chat noise.
         """ : ""
         let deviceActionExamples = includeDeviceTools ? """
         ```iexa_native
@@ -15232,6 +15628,12 @@ final class ChatViewModel {
         ```iexa_native
         {"action":"browser.fetch","url":"https://example.com/file.pdf"}
         ```
+        ```iexa_native
+        {"action":"browser_use","browser_use_action":"find_elements","url":"https://example.com","selector":"a, button, input"}
+        ```
+        ```iexa_native
+        {"action":"browser_use","browser_use_action":"click","selector":"button.primary"}
+        ```
         """ : ""
         let officeActionExamples = includeOfficeTools ? """
         ```iexa_native
@@ -15247,10 +15649,18 @@ final class ChatViewModel {
         {"action":"office.create_pdf","title":"项目汇报","file_name":"项目汇报.pdf","format":"slides","theme":{"style":"warm_business","layout":"split","decoration":"diagonal","background":"FFF7ED","background_2":"FED7AA","accent":"EA580C","text":"1F2937","subtle":"78716C"},"slides":[{"layout":"cover","title":"项目汇报","subtitle":"本地生成 PDF"},{"layout":"split","title":"关键进展","bullets":["目标清晰","风险可控","下一步明确"]}]}
         ```
         """ : ""
+        let memoryActionExamples = includeMemoryTools ? """
+        ```iexa_native
+        {"action":"memory_write","content":"用户偏好用中文沟通，回答尽量简洁。"}
+        ```
+        ```iexa_native
+        {"action":"memory_get","keywords":"用户 偏好"}
+        ```
+        """ : ""
         let browserInstructions = includeBrowserTools ? """
 
-        For browser/web actions, when real function tools are present, call `web_search` or `browser_readable`; when using the Markdown fallback, emit `web.search` or `browser.readable` in the `iexa_native` JSON. Search before answering whenever the answer depends on information that may have changed after training or that you are not confident is still true: current/latest/recent facts, software/app/game versions, patch notes, releases, prices, stocks, laws/policies, schedules, sports, weather, news, rankings, product availability, official announcements, live website content, or "what is it now / has it changed / which version" style questions. If you are unsure whether your knowledge is stale, search first; do not wait for the user to literally say 搜、查、搜索, or 联网. Do not use the browser for stable writing, translation, math, coding, or brainstorming unless the user asks for current/source-backed information.
-        Use `web_search` / `web.search` when there is no exact URL. Use `browser_readable` / `browser.readable` when a URL is known or after search results need verification. Set `screenshot:true` when the user may benefit from seeing the page; Iexa will show a clickable webpage source card with thumbnail in the chat. Use `browser.screenshot` for visual page checks and `browser.fetch` for downloadable files. After Iexa appends the real browser result, answer from that result; cite page titles/URLs plainly and do not claim you cannot browse.
+        For browser/web actions, when real function tools are present, call `web_search`, `browser_readable`, or `browser_use`; when using the Markdown fallback, emit `web.search`, `browser.readable`, or `browser_use` in the `iexa_native` JSON. Search before answering whenever the answer depends on information that may have changed after training or that you are not confident is still true: current/latest/recent facts, software/app/game versions, patch notes, releases, prices, stocks, laws/policies, schedules, sports, weather, news, rankings, product availability, official announcements, live website content, or "what is it now / has it changed / which version" style questions. If you are unsure whether your knowledge is stale, search first; do not wait for the user to literally say 搜、查、搜索, or 联网. Do not use the browser for stable writing, translation, math, coding, or brainstorming unless the user asks for current/source-backed information.
+        Use `web_search` / `web.search` when there is no exact URL. Use `browser_readable` / `browser.readable` when a URL is known or after search results need verification. Use `browser_use` for interactive page work: navigate, screenshot, click, type, hover, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, new_tab, close_tab, list_tabs, set_user_agent, set_viewport, get_cookies, wait_for_dom_stable, and execute_js. In Markdown fallback, keep the outer `action` as `browser_use` and put the real action in `browser_use_action`, for example `{"action":"browser_use","browser_use_action":"click","selector":"button"}`. Set `screenshot:true` when the user may benefit from seeing the page; Iexa will show a clickable webpage source card with thumbnail in the chat. Use `browser.screenshot` for visual page checks and `browser.fetch` for downloadable files. After Iexa appends the real browser result, answer from that result; cite page titles/URLs plainly and do not claim you cannot browse.
         """ : ""
         let officeInstructions = includeOfficeTools ? """
 
@@ -15275,9 +15685,11 @@ final class ChatViewModel {
         \(deviceActionExamples)
         \(shortcutsActionExamples)
         \(browserActionExamples)
+        \(memoryActionExamples)
         \(officeActionExamples)
         \(browserInstructions)
         \(imageInstructions)
+        \(memoryInstructions)
         \(officeInstructions)
         \(shortcutsInstructions)
         """
@@ -16682,7 +17094,7 @@ final class ChatViewModel {
             ?? (shouldIncludeLocalAlpineContext && shouldUseLocalAlpineNativeTools(for: selectedModelId ?? conversation.model))
         let alpineContext = shouldIncludeLocalAlpineContext
             ? (shouldPreferNativeLocalAlpineTools
-                ? Self.localAlpineNativeAgentSystemContext()
+                ? Self.localAlpineNativeAgentSystemContext(includeMemoryTools: memoryEnabled)
                 : Self.localAlpineAgentSystemContext())
             : nil
         let alpineExecutionStateContext = shouldIncludeLocalAlpineContext
@@ -16699,6 +17111,7 @@ final class ChatViewModel {
             let shouldExposeBrowserTools = shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalAlpine)
             let shouldExposeImageTools = shouldUseLocalNativeFunctionTools(for: localAlpineModelId)
                 && shouldExposeLocalImageNativeTools(for: latestUserTextForLocalAlpine)
+            let shouldExposeMemoryTools = shouldExposeLocalMemoryNativeTools(for: latestUserTextForLocalAlpine)
             let shouldExposeOfficeTools = shouldExposeLocalOfficeNativeTools(
                 for: latestUserTextForLocalAlpine,
                 officeRevisionContext: officeRevisionContext
@@ -16708,6 +17121,7 @@ final class ChatViewModel {
             let shouldExpose = shouldExposeDeviceTools
                 || shouldExposeImageTools
                 || shouldExposeBrowserTools
+                || shouldExposeMemoryTools
                 || shouldExposeOfficeTools
                 || shouldExposeShortcutsTools
             guard shouldExpose else { return nil }
@@ -16717,7 +17131,8 @@ final class ChatViewModel {
                     includeBrowserTools: shouldExposeBrowserTools,
                     includeImageTools: shouldExposeImageTools,
                     includeOfficeTools: shouldExposeOfficeTools,
-                    includeShortcutsTools: shouldExposeShortcutsTools
+                    includeShortcutsTools: shouldExposeShortcutsTools,
+                    includeMemoryTools: shouldExposeMemoryTools
                 ),
                 officeRevisionContext
             ]
@@ -17885,9 +18300,11 @@ final class ChatViewModel {
             || action == "web_search"
             || action == "websearch"
             || action == "web search"
+            || action == "browser_use"
             || action == "local_alpine_web_search"
             || action == "get_readable"
             || action.contains("readable")
+            || action.hasPrefix("browser.")
     }
 
     private func localBrowserToolRunningTitle(for actionName: String) -> String {
@@ -17900,6 +18317,20 @@ final class ChatViewModel {
         }
         if action.contains("fetch") {
             return "正在下载网页资源..."
+        }
+        if action.contains("browser_use")
+            || action.contains("click")
+            || action.contains("type")
+            || action.contains("scroll")
+            || action.contains("find_elements")
+            || action.contains("get_backbone")
+            || action.contains("set_viewport")
+            || action.contains("get_cookies")
+            || action.contains("wait_for_dom_stable")
+            || action.contains("new_tab")
+            || action.contains("close_tab")
+            || action.contains("list_tabs") {
+            return "正在操作网页..."
         }
         return "正在读取网页..."
     }
@@ -19186,6 +19617,7 @@ final class ChatViewModel {
             NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
             return
         }
+        enqueueLocalAlpineOpenRequests(result.openRequests)
 
         let doneStatus = localAlpineStatus(
             description: result.interactiveRequest == nil

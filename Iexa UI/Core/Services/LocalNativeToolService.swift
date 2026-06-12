@@ -172,16 +172,36 @@ final class LocalNativeToolService {
         let lower = content.lowercased()
         let actions = [
             "web.search", "web_search", "search_web", "browser.search", "browser_search",
+            "browser.use", "browser_use",
             "browser.open", "browser_open", "browser.navigate", "navigate",
             "browser.readable", "browser_readable", "browser.get_readable", "get_readable",
             "browser.text", "browser_text", "browser.get_text", "get_text",
             "browser.info", "browser_info", "browser.get_page_info", "get_page_info",
             "browser.screenshot", "browser_screenshot",
-            "browser.fetch", "browser_fetch"
+            "browser.fetch", "browser_fetch",
+            "browser.click", "browser_click", "click",
+            "browser.type", "browser_type", "type",
+            "browser.hover", "browser_hover", "hover",
+            "browser.scroll", "browser_scroll", "scroll",
+            "browser.scroll_and_collect", "browser_scroll_and_collect", "scroll_and_collect",
+            "browser.find_elements", "browser_find_elements", "find_elements",
+            "browser.get_backbone", "browser_get_backbone", "get_backbone",
+            "browser.execute_js", "browser_execute_js", "execute_js", "eval_js",
+            "browser.set_viewport", "browser_set_viewport", "set_viewport",
+            "browser.set_user_agent", "browser_set_user_agent", "set_user_agent",
+            "browser.get_cookies", "browser_get_cookies", "get_cookies",
+            "browser.wait_for_dom_stable", "browser_wait_for_dom_stable", "wait_for_dom_stable",
+            "browser.new_tab", "browser_new_tab", "new_tab",
+            "browser.close_tab", "browser_close_tab", "close_tab",
+            "browser.list_tabs", "browser_list_tabs", "list_tabs"
         ]
         return actions.first { action in
-            lower.contains(action)
-                || lower.contains(action.replacingOccurrences(of: ".", with: "\\."))
+            if action.contains(".") || action.contains("_") || action.hasPrefix("browser") || action.hasPrefix("web") {
+                return lower.contains(action)
+            }
+            let escaped = NSRegularExpression.escapedPattern(for: action)
+            let pattern = #""(?:action|name|browser_action|browser_use_action|operation|op)"\s*:\s*""# + escaped + #"""#
+            return lower.range(of: pattern, options: .regularExpression) != nil
         }
     }
 
@@ -227,12 +247,28 @@ final class LocalNativeToolService {
         case "system.notify", "system_notify", "notify", "show_notification":
             return await executeSystemNotify(call)
         case "web.search", "web_search", "search_web", "browser.search", "browser_search",
+             "browser.use", "browser_use",
              "browser.open", "browser_open", "browser.navigate", "browser.navigate_url", "navigate",
              "browser.readable", "browser_readable", "browser.get_readable", "get_readable", "read_webpage",
              "browser.text", "browser_text", "browser.get_text", "get_text",
              "browser.info", "browser_info", "browser.get_page_info", "get_page_info",
              "browser.screenshot", "browser_screenshot", "screenshot",
-             "browser.fetch", "browser_fetch", "fetch":
+             "browser.fetch", "browser_fetch", "fetch",
+             "browser.click", "browser_click", "click",
+             "browser.type", "browser_type", "type",
+             "browser.hover", "browser_hover", "hover",
+             "browser.scroll", "browser_scroll", "scroll",
+             "browser.scroll_and_collect", "browser_scroll_and_collect", "scroll_and_collect",
+             "browser.find_elements", "browser_find_elements", "find_elements",
+             "browser.get_backbone", "browser_get_backbone", "get_backbone",
+             "browser.execute_js", "browser_execute_js", "execute_js", "eval_js",
+             "browser.set_viewport", "browser_set_viewport", "set_viewport",
+             "browser.set_user_agent", "browser_set_user_agent", "set_user_agent",
+             "browser.get_cookies", "browser_get_cookies", "get_cookies",
+             "browser.wait_for_dom_stable", "browser_wait_for_dom_stable", "wait_for_dom_stable",
+             "browser.new_tab", "browser_new_tab", "new_tab",
+             "browser.close_tab", "browser_close_tab", "close_tab",
+             "browser.list_tabs", "browser_list_tabs", "list_tabs":
             return await executeBrowserTool(action: action, call)
         case "shortcuts.run", "shortcut.run", "shortcuts_run", "run_shortcut",
              "shortcuts.open", "shortcut.open", "shortcuts_open", "open_shortcut",
@@ -572,8 +608,24 @@ final class LocalNativeToolService {
                     || action.contains("web_search")
                     || action.contains("search_web")
                     || action.contains("get_readable")
+                    || action == "browser_use"
                     || action == "navigate"
                     || action == "fetch"
+                    || action == "click"
+                    || action == "type"
+                    || action == "hover"
+                    || action == "scroll"
+                    || action == "scroll_and_collect"
+                    || action == "find_elements"
+                    || action == "get_backbone"
+                    || action == "execute_js"
+                    || action == "set_viewport"
+                    || action == "set_user_agent"
+                    || action == "get_cookies"
+                    || action == "wait_for_dom_stable"
+                    || action == "new_tab"
+                    || action == "close_tab"
+                    || action == "list_tabs"
                     || action == "screenshot" else {
                 continue
             }
@@ -621,6 +673,7 @@ final class LocalNativeToolService {
                 ?? (raw["name"] as? String)
             let link = (raw["link"] as? String)
                 ?? (raw["url"] as? String)
+                ?? (raw["href"] as? String)
                 ?? (raw["source"] as? String)
             let snippet = (raw["snippet"] as? String)
                 ?? (raw["description"] as? String)
