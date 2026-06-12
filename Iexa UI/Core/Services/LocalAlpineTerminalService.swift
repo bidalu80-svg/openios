@@ -927,6 +927,119 @@ actor LocalAlpineTerminalService {
         """
         try writeExecutableText(bridgeScript, to: binURL.appendingPathComponent("iexa-open"))
 
+        let serveScript = """
+        #!/bin/sh
+        set -u
+
+        ESC=$(printf '\\033')
+        BEL=$(printf '\\007')
+
+        emit_open_marker() {
+          printf '%s]1337;IexaOpenURL=%s%s\\n' "$ESC" "$1" "$BEL"
+        }
+
+        if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+          printf 'Usage: iexa-serve [directory-or-file] [port]\\n' >&2
+          exit 0
+        fi
+
+        target=${1:-.}
+        port=${2:-8080}
+        case "$port" in
+          ''|*[!0-9]*) port=8080 ;;
+        esac
+
+        if [ -f "$target" ]; then
+          target=$(dirname "$target")
+        fi
+        if [ ! -d "$target" ]; then
+          resolved=$(readlink -f "$target" 2>/dev/null || true)
+          if [ -n "$resolved" ] && [ -f "$resolved" ]; then
+            target=$(dirname "$resolved")
+          elif [ -n "$resolved" ] && [ -d "$resolved" ]; then
+            target="$resolved"
+          fi
+        fi
+        if [ ! -d "$target" ]; then
+          printf 'iexa-serve: directory not found: %s\\n' "$target" >&2
+          exit 1
+        fi
+
+        dir=$(cd "$target" 2>/dev/null && pwd)
+        if [ -z "$dir" ]; then
+          printf 'iexa-serve: cannot resolve directory: %s\\n' "$target" >&2
+          exit 1
+        fi
+
+        runtime_dir=/tmp/iexa-serve
+        mkdir -p "$runtime_dir"
+
+        port_in_use() {
+          if command -v nc >/dev/null 2>&1; then
+            nc -z 127.0.0.1 "$1" >/dev/null 2>&1
+            return $?
+          fi
+          pidfile="$runtime_dir/$1.pid"
+          if [ -f "$pidfile" ]; then
+            pid=$(cat "$pidfile" 2>/dev/null || true)
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              return 0
+            fi
+          fi
+          return 1
+        }
+
+        start_port=$port
+        while port_in_use "$port"; do
+          port=$((port + 1))
+          if [ "$port" -gt $((start_port + 50)) ]; then
+            printf 'iexa-serve: no free localhost port found near %s\\n' "$start_port" >&2
+            exit 1
+          fi
+        done
+
+        log="$runtime_dir/$port.log"
+        pidfile="$runtime_dir/$port.pid"
+
+        if command -v python3 >/dev/null 2>&1; then
+          if command -v nohup >/dev/null 2>&1; then
+            nohup python3 -m http.server "$port" --bind 127.0.0.1 --directory "$dir" >"$log" 2>&1 &
+          else
+            python3 -m http.server "$port" --bind 127.0.0.1 --directory "$dir" >"$log" 2>&1 &
+          fi
+          pid=$!
+        elif command -v busybox >/dev/null 2>&1; then
+          cd "$dir" || exit 1
+          if command -v nohup >/dev/null 2>&1; then
+            nohup busybox httpd -f -p "127.0.0.1:$port" -h "$dir" >"$log" 2>&1 &
+          else
+            busybox httpd -f -p "127.0.0.1:$port" -h "$dir" >"$log" 2>&1 &
+          fi
+          pid=$!
+        else
+          printf 'iexa-serve: python3 or busybox httpd is required\\n' >&2
+          exit 1
+        fi
+
+        printf '%s\\n' "$pid" > "$pidfile"
+        sleep 0.4
+        if ! kill -0 "$pid" 2>/dev/null; then
+          printf 'iexa-serve: server failed to start. Log: %s\\n' "$log" >&2
+          [ -f "$log" ] && tail -40 "$log" >&2
+          exit 1
+        fi
+
+        url="http://localhost:$port/"
+        printf 'Iexa local preview server started.\\n'
+        printf 'Directory: %s\\n' "$dir"
+        printf 'PID: %s\\n' "$pid"
+        printf 'Preview URL: %s\\n' "$url"
+        printf '访问地址: %s\\n' "$url"
+        emit_open_marker "$url"
+        exit 0
+        """
+        try writeExecutableText(serveScript, to: binURL.appendingPathComponent("iexa-serve"))
+
         let wrapperScript = """
         #!/bin/sh
         exec /usr/local/bin/iexa-open "$@"

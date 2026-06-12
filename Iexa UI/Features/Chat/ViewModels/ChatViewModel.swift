@@ -2248,6 +2248,7 @@ final class ChatViewModel {
         - Prefer `file_read` for source inspection instead of shell `cat`, `sed`, `nl`, or inline Python readers; structured reads include line metadata and help the app detect no-progress loops.
         - For normal source files, call `file_read` once with only `path`. Do not split into offset/lines chunks unless the previous read result explicitly says `status: partial`, `truncated`, or the user asked for a range.
         - Use `read_image` for generated charts, downloaded screenshots, or image artifacts that need host-decoded dimensions/type metadata. Use `iexa-open /mnt/iexa/<image>` when the user should preview the image in chat.
+        - Website preview is mandatory after creating or modifying a website/app page. Do not tell the user to open files manually and do not stop after listing files. For static HTML/CSS/JS/SVG output, run `iexa-serve /mnt/iexa/<project-or-directory> 8080` (or another free port) and include the returned `http://localhost:<port>/` URL in your final answer so the app renders a yellow clickable link. For npm/Vite/React/etc. projects, start the dev server bound to `127.0.0.1`/`localhost`, verify it responds, then run `iexa-open http://localhost:<port>/` and give that exact URL.
         \(memoryRule)- Never write source code through `shell_execute` using heredocs, redirection, `echo`, `printf`, `cat`, `tee`, or inline Python writer scripts.
         - Use `browser_use` for bounded HTTP/HTTPS fetches and optional save/open-preview flows. It is lightweight and non-interactive; it does not support full click/type browser automation.
         - Use `shell_execute` only for bounded list/search/run/install/build/test/verify commands.
@@ -2256,7 +2257,7 @@ final class ChatViewModel {
         - One step should finish before the next decision. A file write plus one matching verification command is allowed; unrelated follow-up work waits for the returned result.
         - Do not repeatedly read or edit the same file when a previous tool result already showed the same state. After two failed/no-op attempts, stop and explain the blocker or choose a different verification path.
         - If a tool result shows success and the user goal is complete, stop tool use and answer normally with a concise real summary.
-        - If native tools are rejected by the provider, fallback is one fenced `iexa_alpine` block using the same structured JSON shape.
+        - If native tools are rejected by the provider, fallback is one fenced `iexa_alpine` block using the same structured JSON shape. If the provider cannot emit real tool_calls but can output JSON text, output exactly one JSON tool object/block and let Iexa execute it.
         [/Local Alpine native tools]
         """
     }
@@ -2576,12 +2577,13 @@ final class ChatViewModel {
         - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`. Accepted delay keys are `delay`, `delay_seconds`, or `delaySeconds`; use them instead of shell/Python sleeps.
         - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `file_edit` -> `edit_file`, `read_image`/`image_read` -> host-decoded image metadata, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
         - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls. `browser_use` supports optional `save_to`/`output` plus `open_preview:true` so large HTML/SVG/JSON responses can be written under `/mnt/iexa` and opened through the preview bridge instead of being pasted into chat.
-        - In-app preview bridge: after creating a user-viewable file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.
+        - In-app preview bridge: after creating a user-viewable non-website file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.
+        - Website preview rule: after creating or changing any website/app page, start a localhost preview and give the user the clickable URL. For static HTML/CSS/JS/SVG, run `iexa-serve /mnt/iexa/<project-or-directory> 8080`; it starts a local HTTP server, opens Iexa preview, and prints `Preview URL: http://localhost:<port>/`. Include that exact `http://localhost:<port>/` in the final answer. For npm/Vite/React/etc., start the dev server on `127.0.0.1`/`localhost`, verify with a bounded fetch/curl/wget, run `iexa-open http://localhost:<port>/`, and give the same URL. Never answer "open index.html manually" as the final preview path for a website project.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
         \(localAlpineBusyBoxCompatibilityNotes)
         - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, or macOS-only utilities.
         - Rootfs/environment/dependency checks: if the user asks whether Python/Lua/Node/C++ or dependencies exist, inspect the running Alpine rootfs/runtime/toolchain directly with bounded `command -v`, `--version`, `apk info`, `python3 -m pip list`, `find /usr/lib /usr/local/lib`, or small module-list commands. Do not invent `/mnt/iexa/rootfs`; `/mnt/iexa` is only the workspace mount. Do not only search `/mnt/iexa` project dependency files unless the user specifically asks for project dependency files.
-        - Service/process commands: prefer foreground commands and bounded verification. Do not assume OpenRC/system services are available unless a prior command proves it.
+        - Service/process commands: prefer foreground commands and bounded verification. The exception is website preview servers: use `iexa-serve` for static sites or a framework dev server bound to localhost, then verify and share the localhost URL. Do not assume OpenRC/system services are available unless a prior command proves it.
         - `command`/`shell_execute` is shell text only. For structured tools, use top-level keys such as `read_file`, `file_read`, `write_files`, `file_write`, `edit_file`, `patch_file`, `delete_file`, `delete_files`, `list_dir`, `glob`, `grep`, `verify`, or `browser_use`.
         - Hard protocol rule: for any intermediate local-work step, pure prose means "stop and answer normally"; it will not be auto-upgraded into execution. Emit a real tool block only when you are intentionally requesting local execution.
         - JSON tool capabilities:
@@ -9922,6 +9924,8 @@ final class ChatViewModel {
         let arguments: String
     }
 
+    private static let nativeToolSilentFailureDomain = "Iexa.NativeToolSilentFailure"
+
     private enum LocalAlpineNativeLoopDecision {
         case allow
         case warn(String)
@@ -10551,6 +10555,7 @@ final class ChatViewModel {
         var apiMessages = initialRequest.messages
         var exactUsage: [String: Any]?
         var loopGuard = LocalAlpineNativeLoopGuard()
+        var executedAnyTool = false
 
         for _ in 0..<localAlpineAgentMaxSteps {
             request.messages = apiMessages
@@ -10569,7 +10574,14 @@ final class ChatViewModel {
             if Task.isCancelled { return exactUsage }
 
             let calls = toolAccumulator.completedCalls()
-            guard !calls.isEmpty else { return exactUsage }
+            guard !calls.isEmpty else {
+                if !executedAnyTool,
+                   acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    throw Self.nativeToolSilentFailureError(kind: "Local Alpine")
+                }
+                return exactUsage
+            }
+            executedAnyTool = true
 
             apiMessages.append(Self.openAIToolCallAssistantMessage(for: calls))
             var blockedLoopMessage: String?
@@ -10712,6 +10724,7 @@ final class ChatViewModel {
         var browserReadCount = 0
         var browserToolCount = 0
         var lastNativeToolFallback: String?
+        var executedAnyTool = false
 
         func streamFinalWithoutTools(reason: String, fallback: String?) async throws -> [String: Any]? {
             let resolvedFallback = fallback ?? lastNativeToolFallback
@@ -10767,7 +10780,14 @@ final class ChatViewModel {
 
             let calls = toolAccumulator.completedCalls()
                 .filter(Self.isLocalNativeFunctionToolCall)
-            guard !calls.isEmpty else { return exactUsage }
+            guard !calls.isEmpty else {
+                if !executedAnyTool,
+                   acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    throw Self.nativeToolSilentFailureError(kind: "Local Native")
+                }
+                return exactUsage
+            }
+            executedAnyTool = true
 
             if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 acc.replace("")
@@ -11618,6 +11638,16 @@ final class ChatViewModel {
         """
     }
 
+    private static func nativeToolSilentFailureError(kind: String) -> Error {
+        NSError(
+            domain: nativeToolSilentFailureDomain,
+            code: -1,
+            userInfo: [
+                NSLocalizedDescriptionKey: "Provider returned no tool_calls and no assistant content for \(kind) tools."
+            ]
+        )
+    }
+
     private static let localNativeFunctionToolNames: Set<String> = [
         "image_generation",
         "memory_write",
@@ -11837,6 +11867,64 @@ final class ChatViewModel {
         """
     }
 
+    private static func localNativeMarkdownFunctionToolCalls(from content: String) -> [LocalAlpineNativeToolCall] {
+        LocalNativeToolService.parsedToolCalls(in: content).compactMap { call in
+            let rawAction = (call["action"] as? String)
+                ?? (call["name"] as? String)
+                ?? (call["tool"] as? String)
+            guard let rawAction else { return nil }
+            let name = localNativeFunctionName(forActionName: rawAction)
+            guard localNativeFunctionToolNames.contains(name) else { return nil }
+            var arguments = call
+            for key in [
+                "action", "name", "tool", "function", "functionName", "function_name",
+                "toolName", "tool_name", "type", "id"
+            ] {
+                arguments.removeValue(forKey: key)
+            }
+            let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
+            let argumentString = String(data: data, encoding: .utf8) ?? "{}"
+            return LocalAlpineNativeToolCall(
+                id: "loose_native_\(UUID().uuidString)",
+                name: name,
+                arguments: argumentString
+            )
+        }
+    }
+
+    private static func localNativeFunctionName(forActionName action: String) -> String {
+        switch action.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased() {
+        case "image_generation", "image.generate", "image_generate", "generate_image":
+            return "image_generation"
+        case "memory.write", "memory_write":
+            return "memory_write"
+        case "memory.get", "memory_get":
+            return "memory_get"
+        case "web.search", "web_search", "search_web", "browser.search", "browser_search":
+            return "web_search"
+        case "browser.readable", "browser_readable", "browser.get_readable", "browser_get_readable", "get_readable":
+            return "browser_readable"
+        case "browser.use", "browser_use":
+            return "browser_use"
+        case "shortcuts.run", "shortcut.run", "shortcuts_run", "run_shortcut":
+            return "shortcuts_run"
+        case "shortcuts.open", "shortcut.open", "shortcuts_open", "open_shortcut":
+            return "shortcuts_open"
+        case "office.create_excel", "office_create_excel", "create_excel", "excel.create", "excel":
+            return "office_create_excel"
+        case "office.create_ppt", "office.create_powerpoint", "office_create_ppt", "create_ppt", "create_powerpoint", "ppt.create", "powerpoint.create", "ppt":
+            return "office_create_ppt"
+        case "office.create_word", "office.create_docx", "office_create_word", "create_word", "create_docx", "word.create", "docx.create", "word", "docx":
+            return "office_create_word"
+        case "office.create_pdf", "office_create_pdf", "create_pdf", "pdf.create", "pdf":
+            return "office_create_pdf"
+        default:
+            return action
+        }
+    }
+
     private static func localNativeActionName(forFunctionName name: String) -> String {
         switch name.trimmingCharacters(in: .whitespacesAndNewlines) {
         case "image_generation":
@@ -11983,6 +12071,9 @@ final class ChatViewModel {
 
     private static func errorLooksLikeUnsupportedNativeTools(_ error: Error) -> Bool {
         let nsError = error as NSError
+        if nsError.domain == nativeToolSilentFailureDomain {
+            return true
+        }
         let text = [
             String(describing: error),
             nsError.localizedDescription,
@@ -18042,6 +18133,29 @@ final class ChatViewModel {
     }
 
     private func executeLocalNativeTool(messageId: String, content: String) async {
+        let directCalls = Self.localNativeMarkdownFunctionToolCalls(from: content)
+        if let directCall = directCalls.first(where: { $0.name == "image_generation" }) {
+            _ = await executeLocalImageGenerationToolCall(
+                directCall,
+                assistantMessageId: messageId
+            )
+            return
+        }
+        if let directCall = directCalls.first(where: { $0.name == "memory_write" || $0.name == "memory_get" }) {
+            let execution: LocalNativeFunctionToolExecution
+            if directCall.name == "memory_write" {
+                execution = await executeLocalMemoryWriteToolCall(directCall)
+            } else {
+                execution = await executeLocalMemoryGetToolCall(directCall)
+            }
+            await appendLocalNativeInlineFunctionResult(
+                messageId: messageId,
+                title: directCall.name,
+                toolContent: execution.toolContent
+            )
+            return
+        }
+
         let officeKind = LocalNativeToolService.officeActionKind(in: content)
         let browserAction = LocalNativeToolService.browserActionName(in: content)
         let shortcutsAction = LocalNativeToolService.shortcutsActionName(in: content)
@@ -18192,6 +18306,42 @@ final class ChatViewModel {
             localNativeInheritedStatusByResultMessageId[resultMessage.id] = inheritedStatusHistory
         }
 
+        await persistLocalConversationIfNeeded()
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        await startLocalNativeContinuation(parentId: resultMessage.id)
+    }
+
+    private func appendLocalNativeInlineFunctionResult(
+        messageId: String,
+        title: String,
+        toolContent: String
+    ) async {
+        guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resultMessage = ChatMessage(
+            role: .system,
+            content: "本地 iOS 工具执行结果\n\n\(toolContent)",
+            timestamp: .now,
+            model: trimmedTitle.isEmpty ? "Local Native" : trimmedTitle,
+            isStreaming: false,
+            metadata: ["iexa_local_native_result": "true"]
+        )
+        let resultNode = HistoryNode(
+            id: resultMessage.id,
+            parentId: messageId,
+            childrenIds: [],
+            role: .system,
+            content: resultMessage.content,
+            timestamp: resultMessage.timestamp,
+            model: resultMessage.model,
+            done: true,
+            metadata: resultMessage.metadata
+        )
+
+        conversation?.messages.append(resultMessage)
+        conversation?.history.addNode(resultNode)
+        conversation?.history.appendChildId(resultMessage.id, to: messageId)
+        conversation?.history.currentId = resultMessage.id
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
         await startLocalNativeContinuation(parentId: resultMessage.id)

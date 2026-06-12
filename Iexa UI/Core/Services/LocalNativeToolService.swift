@@ -87,7 +87,7 @@ final class LocalNativeToolService {
         in content: String,
         officeProgress: LocalOfficeProgressHandler? = nil
     ) async -> LocalNativeToolRunResult {
-        let calls = parseToolCalls(in: content)
+        let calls = Self.parsedToolCalls(in: content)
         guard !calls.isEmpty else {
             return LocalNativeToolRunResult(
                 didExecute: false,
@@ -125,7 +125,8 @@ final class LocalNativeToolService {
     }
 
     static func containsNativeToolBlock(_ content: String) -> Bool {
-        content.range(of: #"```iexa_native\s*[\s\S]*?```"#, options: .regularExpression) != nil
+        content.range(of: #"```iexa_native\s*[\s\S]*?```"#, options: [.regularExpression, .caseInsensitive]) != nil
+            || looseNativeToolBodies(in: content).isEmpty == false
     }
 
     static func officeActionKind(in content: String) -> LocalNativeOfficeKind? {
@@ -1113,43 +1114,310 @@ final class LocalNativeToolService {
         }
     }
 
-    private func parseToolCalls(in content: String) -> [[String: Any]] {
+    static func parsedToolCalls(in content: String) -> [[String: Any]] {
         let pattern = #"```iexa_native\s*([\s\S]*?)```"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return []
+            return looseNativeToolBodies(in: content)
+                .flatMap { parseJSONCalls($0) }
+                .filter { isSupportedNativeCall($0) }
         }
         let ns = content as NSString
         let matches = regex.matches(in: content, range: NSRange(location: 0, length: ns.length))
-        return matches.flatMap { match -> [[String: Any]] in
+        var calls = matches.flatMap { match -> [[String: Any]] in
             guard match.numberOfRanges >= 2 else { return [] }
             let body = ns.substring(with: match.range(at: 1))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return parseJSONCalls(body)
         }
+        let fencedRanges = matches.map(\.range)
+        let looseBodies = Self.looseNativeToolBodies(in: content, excluding: fencedRanges)
+        calls.append(contentsOf: looseBodies.flatMap { parseJSONCalls($0) })
+        return calls.map(Self.normalizedNativeCall(_:)).filter { Self.isSupportedNativeCall($0) }
     }
 
-    private func parseJSONCalls(_ body: String) -> [[String: Any]] {
-        guard let data = body.data(using: .utf8) else { return [] }
-        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+    private static func parseJSONCalls(_ body: String) -> [[String: Any]] {
+        if let object = jsonObject(from: body) as? [String: Any] {
             if let calls = object["calls"] as? [[String: Any]] {
-                return calls
+                return calls.map(Self.normalizedNativeCall(_:))
             }
             if let single = object["iexa_native"] as? [String: Any] {
-                return [single]
+                return [Self.normalizedNativeCall(single)]
             }
-            return [object]
+            if let single = object["iexaNative"] as? [String: Any] {
+                return [Self.normalizedNativeCall(single)]
+            }
+            if let single = object["tool_call"] as? [String: Any] {
+                return [Self.normalizedNativeCall(single)]
+            }
+            if let single = object["toolCall"] as? [String: Any] {
+                return [Self.normalizedNativeCall(single)]
+            }
+            if let function = object["function"] as? [String: Any] {
+                var merged = function
+                for (key, value) in object where merged[key] == nil {
+                    merged[key] = value
+                }
+                return [Self.normalizedNativeCall(merged)]
+            }
+            return [Self.normalizedNativeCall(object)]
         }
-        if let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            return array
+        if let array = jsonObject(from: body) as? [[String: Any]] {
+            return array.map(Self.normalizedNativeCall(_:))
         }
         return []
     }
 
     private static func stripNativeToolBlocks(from content: String) -> String {
-        content.replacingOccurrences(
+        let withoutNativeFence = content.replacingOccurrences(
             of: #"```iexa_native\s*[\s\S]*?```"#,
             with: "",
             options: .regularExpression
+        )
+        let looseBodies = looseNativeToolBodies(in: withoutNativeFence)
+        guard !looseBodies.isEmpty else { return withoutNativeFence }
+        var stripped = withoutNativeFence
+        for body in looseBodies where stripped.trimmingCharacters(in: .whitespacesAndNewlines) == body {
+            stripped = ""
+        }
+        return stripped
+    }
+
+    private static func looseNativeToolBodies(
+        in content: String,
+        excluding excludedRanges: [NSRange] = []
+    ) -> [String] {
+        let ns = content as NSString
+        let fullRange = NSRange(location: 0, length: ns.length)
+        var bodies: [String] = []
+
+        if let regex = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)```"#, options: [.caseInsensitive]) {
+            for match in regex.matches(in: content, range: fullRange) where match.numberOfRanges >= 3 {
+                guard !excludedRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else {
+                    continue
+                }
+                let info = ns.substring(with: match.range(at: 1))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                guard info == "json" || info == "javascript" || info == "js" || info.isEmpty else {
+                    continue
+                }
+                let body = ns.substring(with: match.range(at: 2))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if bodyLooksLikeNativeToolJSON(body) {
+                    bodies.append(body)
+                }
+            }
+        }
+
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if bodyLooksLikeNativeToolJSON(trimmed) {
+            bodies.append(trimmed)
+        }
+
+        var seen: Set<String> = []
+        return bodies.filter { body in
+            guard !seen.contains(body) else { return false }
+            seen.insert(body)
+            return true
+        }
+    }
+
+    private static func bodyLooksLikeNativeToolJSON(_ body: String) -> Bool {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{") || trimmed.hasPrefix("[") else { return false }
+        guard let object = jsonObject(from: trimmed) else {
+            return false
+        }
+        return objectContainsSupportedNativeTool(object)
+    }
+
+    private static func objectContainsSupportedNativeTool(_ object: Any) -> Bool {
+        if let array = object as? [Any] {
+            return array.contains { objectContainsSupportedNativeTool($0) }
+        }
+        guard let dictionary = object as? [String: Any] else { return false }
+        if let calls = dictionary["calls"] as? [Any], objectContainsSupportedNativeTool(calls) {
+            return true
+        }
+        for key in ["iexa_native", "iexaNative", "tool_call", "toolCall", "function"] {
+            if let value = dictionary[key], objectContainsSupportedNativeTool(value) {
+                return true
+            }
+        }
+        return isSupportedNativeCall(normalizedNativeCall(dictionary))
+    }
+
+    private static func normalizedNativeCall(_ call: [String: Any]) -> [String: Any] {
+        var normalized = call
+        if let arguments = firstDictionary(in: normalized, keys: ["arguments", "args", "parameters", "params", "input"]) {
+            for (key, value) in arguments where normalized[key] == nil {
+                normalized[key] = value
+            }
+        }
+        let rawName = firstString(in: normalized, keys: ["action", "name", "tool", "functionName", "function_name", "toolName", "tool_name"])
+        if let rawName {
+            normalized["action"] = normalizedActionName(rawName)
+        }
+        if normalized["action"] as? String == "browser_use",
+           normalized["browser_use_action"] == nil,
+           let rawBrowserAction = firstString(in: normalized, keys: ["browser_action", "operation", "op"]) {
+            normalized["browser_use_action"] = rawBrowserAction
+        }
+        return normalized
+    }
+
+    private static func normalizedActionName(_ raw: String) -> String {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased() {
+        case "image_generation", "image.generate", "image_generate", "generate_image":
+            return "image_generation"
+        case "memory.write", "memory_write":
+            return "memory_write"
+        case "memory.get", "memory_get":
+            return "memory_get"
+        case "web.search", "web_search", "search_web", "browser.search", "browser_search":
+            return "web.search"
+        case "browser.readable", "browser_readable", "browser.get_readable", "browser_get_readable", "get_readable":
+            return "browser.readable"
+        case "browser.use", "browser_use":
+            return "browser_use"
+        case "shortcuts.run", "shortcut.run", "shortcuts_run", "run_shortcut":
+            return "shortcuts.run"
+        case "shortcuts.open", "shortcut.open", "shortcuts_open", "open_shortcut":
+            return "shortcuts.open"
+        case "shortcuts.create", "shortcut.create", "shortcuts_create", "create_shortcut":
+            return "shortcuts.create"
+        case "office.create_excel", "office_create_excel", "create_excel", "excel.create", "excel":
+            return "office.create_excel"
+        case "office.create_ppt", "office.create_powerpoint", "office_create_ppt", "create_ppt", "create_powerpoint", "ppt.create", "powerpoint.create", "ppt":
+            return "office.create_ppt"
+        case "office.create_word", "office.create_docx", "office_create_word", "create_word", "create_docx", "word.create", "docx.create", "word", "docx":
+            return "office.create_word"
+        case "office.create_pdf", "office_create_pdf", "create_pdf", "pdf.create", "pdf":
+            return "office.create_pdf"
+        default:
+            return raw
+        }
+    }
+
+    static func isSupportedNativeAction(_ raw: String) -> Bool {
+        isSupportedNativeCall(["action": normalizedActionName(raw)])
+    }
+
+    private static func isSupportedNativeCall(_ call: [String: Any]) -> Bool {
+        let action = (call["action"] as? String ?? call["name"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !action.isEmpty else { return false }
+        switch action {
+        case "image_generation", "memory_write", "memory_get",
+             "get_location", "location.get", "get_weather", "weather.get",
+             "list_calendar_events", "calendar.list_events",
+             "create_calendar_event", "calendar.create_event",
+             "delete_calendar_event", "calendar.delete_event",
+             "device.status", "device_status", "get_device_status",
+             "device.info", "device_info", "get_device_info",
+             "clipboard.read", "clipboard_read", "read_clipboard",
+             "clipboard.write", "clipboard_write", "write_clipboard",
+             "system.notify", "system_notify", "notify", "show_notification",
+             "web.search", "web_search", "search_web", "browser.search", "browser_search",
+             "browser.use", "browser_use",
+             "browser.open", "browser_open", "browser.navigate", "browser.navigate_url", "navigate",
+             "browser.readable", "browser_readable", "browser.get_readable", "get_readable", "read_webpage",
+             "browser.text", "browser_text", "browser.get_text", "get_text",
+             "browser.info", "browser_info", "browser.get_page_info", "get_page_info",
+             "browser.screenshot", "browser_screenshot", "screenshot",
+             "browser.fetch", "browser_fetch", "fetch",
+             "browser.click", "browser_click", "click",
+             "browser.type", "browser_type", "type",
+             "browser.hover", "browser_hover", "hover",
+             "browser.scroll", "browser_scroll", "scroll",
+             "browser.scroll_and_collect", "browser_scroll_and_collect", "scroll_and_collect",
+             "browser.find_elements", "browser_find_elements", "find_elements",
+             "browser.get_backbone", "browser_get_backbone", "get_backbone",
+             "browser.execute_js", "browser_execute_js", "execute_js", "eval_js",
+             "browser.set_viewport", "browser_set_viewport", "set_viewport",
+             "browser.set_user_agent", "browser_set_user_agent", "set_user_agent",
+             "browser.get_cookies", "browser_get_cookies", "get_cookies",
+             "browser.wait_for_dom_stable", "browser_wait_for_dom_stable", "wait_for_dom_stable",
+             "browser.new_tab", "browser_new_tab", "new_tab",
+             "browser.close_tab", "browser_close_tab", "close_tab",
+             "browser.list_tabs", "browser_list_tabs", "list_tabs",
+             "shortcuts.run", "shortcut.run", "shortcuts_run", "run_shortcut",
+             "shortcuts.open", "shortcut.open", "shortcuts_open", "open_shortcut",
+             "shortcuts.edit", "shortcut.edit", "shortcuts_edit", "edit_shortcut",
+             "shortcuts.create", "shortcut.create", "shortcuts_create", "create_shortcut",
+             "office.create_excel", "office_create_excel", "create_excel", "excel.create", "excel",
+             "office.create_ppt", "office.create_powerpoint", "office_create_ppt", "create_ppt", "create_powerpoint", "ppt.create", "powerpoint.create", "ppt",
+             "office.create_word", "office.create_docx", "office_create_word", "create_word", "create_docx", "word.create", "docx.create", "word", "docx",
+             "office.create_pdf", "office_create_pdf", "create_pdf", "pdf.create", "pdf":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func firstDictionary(in call: [String: Any], keys: [String]) -> [String: Any]? {
+        for key in keys {
+            if let dictionary = call[key] as? [String: Any] {
+                return dictionary
+            }
+            if let string = call[key] as? String,
+               let data = string.data(using: .utf8),
+               let dictionary = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return dictionary
+            }
+        }
+        return nil
+    }
+
+    private static func jsonObject(from body: String) -> Any? {
+        let candidates = [
+            body,
+            repairedLooseJSONString(body)
+        ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+        for candidate in candidates where !candidate.isEmpty {
+            guard let data = candidate.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) else {
+                continue
+            }
+            return object
+        }
+        return nil
+    }
+
+    private static func repairedLooseJSONString(_ body: String) -> String? {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{") || trimmed.hasPrefix("[") else { return nil }
+        var repaired = trimmed.replacingOccurrences(of: "'", with: "\"")
+        repaired = regexReplace(
+            in: repaired,
+            pattern: #"([\{\[,]\s*)([A-Za-z_][A-Za-z0-9_\.\-]*)\s*:"#,
+            replacement: #"$1"$2":"#
+        )
+        repaired = regexReplace(
+            in: repaired,
+            pattern: #"("(?:action|name|tool|browser_use_action|browser_action|operation|op|functionName|function_name|toolName|tool_name)"\s*:\s*)([A-Za-z_][A-Za-z0-9_\.\-]*)(\s*[,}])"#,
+            replacement: #"$1"$2"$3"#
+        )
+        return repaired == trimmed ? nil : repaired
+    }
+
+    private static func regexReplace(
+        in text: String,
+        pattern: String,
+        replacement: String
+    ) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return text
+        }
+        let range = NSRange(location: 0, length: (text as NSString).length)
+        return regex.stringByReplacingMatches(
+            in: text,
+            options: [],
+            range: range,
+            withTemplate: replacement
         )
     }
 
