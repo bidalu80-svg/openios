@@ -89,7 +89,8 @@ struct PasteableTextView: UIViewRepresentable {
             }
         }
 
-        textView.onReturnKey = {
+        textView.onReturnKey = { [weak textView] in
+            textView?.resignFirstResponder()
             context.coordinator.parent.onSubmit?()
         }
         textView.sendOnReturn = sendOnReturn
@@ -139,7 +140,8 @@ struct PasteableTextView: UIViewRepresentable {
                 context.coordinator.parent.text = textView.text
             }
         }
-        textView.onReturnKey = {
+        textView.onReturnKey = { [weak textView] in
+            textView?.resignFirstResponder()
             context.coordinator.parent.onSubmit?()
         }
 
@@ -396,6 +398,7 @@ final class PasteInterceptingTextView: UITextView {
     /// views, so this is the only reliable way to show the keyboard
     /// programmatically (e.g. after opening the app from a widget deep link).
     private var focusObserver: NSObjectProtocol?
+    private var dismissObserver: NSObjectProtocol?
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
@@ -415,11 +418,21 @@ final class PasteInterceptingTextView: UITextView {
         ) { [weak self] _ in
             self?.becomeFirstResponder()
         }
+        dismissObserver = NotificationCenter.default.addObserver(
+            forName: .chatInputFieldDismissKeyboard,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.resignFirstResponder()
+        }
     }
 
     deinit {
         if let focusObserver {
             NotificationCenter.default.removeObserver(focusObserver)
+        }
+        if let dismissObserver {
+            NotificationCenter.default.removeObserver(dismissObserver)
         }
     }
 

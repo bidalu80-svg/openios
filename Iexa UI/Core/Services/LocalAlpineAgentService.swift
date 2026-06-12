@@ -2386,6 +2386,10 @@ actor LocalAlpineAgentService {
             guard let url = urlString(from: object) ?? urlString(from: dict) else {
                 return nil
             }
+            if let previewTarget = localPreviewTarget(fromURLString: url) {
+                let command = "iexa-open \(shellSingleQuotedStatic(previewTarget))"
+                return (command, "browser_use", previewTarget, [previewTarget], cwd)
+            }
             let quotedURL = shellSingleQuotedStatic(url)
             let lineCount = max(20, min(intValue(value(for: ["max_lines", "line_count", "lines"], in: object))
                 ?? intValue(value(for: ["max_lines", "line_count", "lines"], in: dict))
@@ -3093,19 +3097,19 @@ actor LocalAlpineAgentService {
 
     private nonisolated static func urlString(from object: Any) -> String? {
         if let url = stringValue(object),
-           isHTTPURL(url) {
+           isFetchOrPreviewURL(url) {
             return url
         }
         guard let dict = object as? [String: Any] else { return nil }
-        for key in ["url", "href", "link", "uri", "address"] {
+        for key in ["url", "href", "link", "uri", "address", "path", "file", "target"] {
             if let url = stringValue(dict[key]),
-               isHTTPURL(url) {
+               isFetchOrPreviewURL(url) {
                 return url
             }
         }
         for key in ["urls", "links"] {
             if let array = dict[key] as? [Any],
-               let url = array.compactMap({ stringValue($0) }).first(where: { isHTTPURL($0) }) {
+               let url = array.compactMap({ stringValue($0) }).first(where: { isFetchOrPreviewURL($0) }) {
                 return url
             }
         }
@@ -3121,6 +3125,66 @@ actor LocalAlpineAgentService {
     private nonisolated static func isHTTPURL(_ value: String) -> Bool {
         let lowercased = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://")
+    }
+
+    private nonisolated static func isFetchOrPreviewURL(_ value: String) -> Bool {
+        isHTTPURL(value) || localPreviewTarget(fromURLString: value) != nil
+    }
+
+    private nonisolated static func localPreviewTarget(fromURLString rawValue: String) -> String? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowered = trimmed.lowercased()
+        if trimmed.hasPrefix("/mnt/iexa") || trimmed.hasPrefix("/tmp/") || trimmed.hasPrefix("/var/") {
+            return trimmed
+        }
+        if lowered.hasPrefix("file://") || lowered.hasPrefix("iexa://") {
+            return trimmed
+        }
+        if let relativeTarget = relativeWorkspacePreviewTarget(from: trimmed) {
+            return relativeTarget
+        }
+        guard let url = URL(string: trimmed),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              (url.host ?? "").caseInsensitiveCompare("iexa.preview") == .orderedSame else {
+            return nil
+        }
+        let decodedPath = url.path.removingPercentEncoding ?? url.path
+        let withoutLeadingSlash = decodedPath.hasPrefix("/")
+            ? String(decodedPath.dropFirst())
+            : decodedPath
+        if withoutLeadingSlash.lowercased().hasPrefix("file://") {
+            return withoutLeadingSlash
+        }
+        if decodedPath.hasPrefix("/mnt/iexa") {
+            return decodedPath
+        }
+        if decodedPath.hasPrefix("/workspace/") {
+            return "iexa://workspace/" + String(decodedPath.dropFirst("/workspace/".count))
+        }
+        if decodedPath.hasPrefix("/file/") {
+            return "/" + String(decodedPath.dropFirst("/file/".count))
+        }
+        return nil
+    }
+
+    private nonisolated static func relativeWorkspacePreviewTarget(from rawValue: String) -> String? {
+        let normalized = rawValue.replacingOccurrences(of: "\\", with: "/")
+        guard !normalized.hasPrefix("/"),
+              !normalized.hasPrefix("./"),
+              !normalized.hasPrefix("../"),
+              !normalized.contains("://"),
+              normalized.rangeOfCharacter(from: .newlines) == nil else {
+            return nil
+        }
+
+        let lowered = normalized.lowercased()
+        guard lowered.hasSuffix(".html")
+            || lowered.hasSuffix(".htm")
+            || lowered.hasSuffix(".svg") else {
+            return nil
+        }
+        return "iexa://workspace/\(normalized)"
     }
 
     private nonisolated static func pathLooksLikeRunnableOrFilesystemTarget(_ path: String) -> Bool {

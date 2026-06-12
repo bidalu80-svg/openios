@@ -496,6 +496,7 @@ struct ChatInputField: View {
     private func dismissKeyboard() {
         dismissInlinePickers()
         isFocused = false
+        NotificationCenter.default.post(name: .chatInputFieldDismissKeyboard, object: nil)
         resignFirstResponder()
     }
 
@@ -503,6 +504,7 @@ struct ChatInputField: View {
         dismissInlinePickers()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
             isFocused = false
+            NotificationCenter.default.post(name: .chatInputFieldDismissKeyboard, object: nil)
             resignFirstResponder()
         }
     }

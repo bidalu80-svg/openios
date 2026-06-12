@@ -1636,6 +1636,7 @@ struct ChatDetailView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             viewModel.persistLifecycleConversationSnapshot()
             collapseTransientAgentViewsForBackground()
+            forceDismissInputAfterSend()
             if speakingMessageId != nil || ttsGeneratingMessageId != nil {
                 dependencies.textToSpeechService.stop()
                 speakingMessageId = nil
@@ -2191,6 +2192,7 @@ struct ChatDetailView: View {
                 isEnabled: !vm.isStreaming || vm.canSendWhileStreaming,
                 onSend: {
                     beginPostSendWaitingUIDelayIfNeeded()
+                    forceDismissInputAfterSend()
                     Task { await viewModel.sendMessage() }
                 },
                 onStopGenerating: vm.isStreaming ? { viewModel.stopStreaming() } : nil,
@@ -2795,6 +2797,23 @@ struct ChatDetailView: View {
             withAnimation(.easeOut(duration: 0.18)) {
                 isPostSendWaitingUIDelayed = false
             }
+        }
+    }
+
+    private func forceDismissInputAfterSend() {
+        NotificationCenter.default.post(name: .chatInputFieldDismissKeyboard, object: nil)
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
+
+        let generation = postSendWaitingUIDelayGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            guard postSendWaitingUIDelayGeneration == generation else { return }
+            keyboard.forceHidden()
+            releasePostSendWaitingUIDelayAfterKeyboardSettles()
         }
     }
 

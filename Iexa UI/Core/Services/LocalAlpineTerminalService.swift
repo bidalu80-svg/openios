@@ -66,6 +66,9 @@ struct LocalAlpineOpenRequest: Identifiable, Hashable, Sendable {
               ["http", "https", "about"].contains(scheme) else {
             return nil
         }
+        if (url.host ?? "").caseInsensitiveCompare("iexa.preview") == .orderedSame {
+            return nil
+        }
         return url
     }
 }
@@ -376,6 +379,8 @@ actor LocalAlpineTerminalService {
         let path: String
         if let bridgedPath = openBridgeRuntimePath(from: rawTarget) {
             path = bridgedPath
+        } else if let bridgedPath = localPreviewRuntimePath(from: rawTarget) {
+            path = bridgedPath
         } else if let fileURL = URL(string: rawTarget),
            fileURL.isFileURL {
             path = fileURL.path
@@ -422,6 +427,61 @@ actor LocalAlpineTerminalService {
             let combined = path == "/" ? "/\(host)" : "/\(host)\(path)"
             return normalizedRuntimePath(combined)
         }
+    }
+
+    private func localPreviewRuntimePath(from rawTarget: String) -> String? {
+        let trimmed = rawTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let url = URL(string: trimmed),
+           ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+           (url.host ?? "").caseInsensitiveCompare("iexa.preview") == .orderedSame {
+            let decodedPath = url.path.removingPercentEncoding ?? url.path
+            let withoutLeadingSlash = decodedPath.hasPrefix("/")
+                ? String(decodedPath.dropFirst())
+                : decodedPath
+            if withoutLeadingSlash.lowercased().hasPrefix("file://"),
+               let fileURL = URL(string: withoutLeadingSlash),
+               fileURL.isFileURL {
+                return fileURL.path
+            }
+            if decodedPath.hasPrefix("/mnt/iexa") {
+                return decodedPath
+            }
+            if decodedPath.hasPrefix("/workspace/") {
+                return "/mnt/iexa/" + String(decodedPath.dropFirst("/workspace/".count))
+            }
+            if decodedPath.hasPrefix("/file/") {
+                return "/" + String(decodedPath.dropFirst("/file/".count))
+            }
+        }
+
+        if trimmed.hasPrefix("/mnt/iexa") || trimmed.hasPrefix("iexa://") {
+            return openBridgeRuntimePath(from: trimmed) ?? trimmed
+        }
+        if let workspacePath = relativeWorkspacePreviewPath(from: trimmed) {
+            return workspacePath
+        }
+        return nil
+    }
+
+    private func relativeWorkspacePreviewPath(from rawTarget: String) -> String? {
+        let normalized = rawTarget.replacingOccurrences(of: "\\", with: "/")
+        guard !normalized.hasPrefix("/"),
+              !normalized.hasPrefix("./"),
+              !normalized.hasPrefix("../"),
+              !normalized.contains("://"),
+              normalized.rangeOfCharacter(from: .newlines) == nil else {
+            return nil
+        }
+
+        let lowercased = normalized.lowercased()
+        guard lowercased.hasSuffix(".html")
+            || lowercased.hasSuffix(".htm")
+            || lowercased.hasSuffix(".svg") else {
+            return nil
+        }
+        return "/mnt/iexa/\(normalized)"
     }
 
     func writeFile(data: Data, fileName: String, destinationPath: String) async throws {

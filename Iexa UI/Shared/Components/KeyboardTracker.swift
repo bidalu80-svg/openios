@@ -58,6 +58,20 @@ final class KeyboardTracker {
         changeObserver = nil
     }
 
+    func forceHidden(animated: Bool = true) {
+        let updates = {
+            self.height = 0
+            self.isVisible = false
+        }
+        if animated {
+            withAnimation(swiftUIAnimation(duration: animationDuration, curve: animationCurve)) {
+                updates()
+            }
+        } else {
+            updates()
+        }
+    }
+
     deinit { stop() }
 
     // MARK: - Notification Handling

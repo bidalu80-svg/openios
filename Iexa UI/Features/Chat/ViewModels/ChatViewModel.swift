@@ -10955,6 +10955,7 @@ final class ChatViewModel {
                 )
             }
         )
+        enqueueLocalAlpineOpenRequests(result.openRequests)
 
         guard result.didExecute else {
             let toolContent = "Local native tool did not execute. The tool call could not be parsed."
@@ -18069,6 +18070,7 @@ final class ChatViewModel {
                 )
             }
         )
+        enqueueLocalAlpineOpenRequests(result.openRequests)
         guard result.didExecute else {
             if let officeKind {
                 await finishLocalOfficeGeneration(

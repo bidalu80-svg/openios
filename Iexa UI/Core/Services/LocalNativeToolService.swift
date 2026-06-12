@@ -8,6 +8,7 @@ struct LocalNativeToolRunResult: Sendable {
     let files: [ChatMessageFile]
     let officeDocument: LocalNativeOfficeDocument?
     let browserDocument: LocalNativeBrowserDocument?
+    let openRequests: [LocalAlpineOpenRequest]
 }
 
 enum LocalNativeOfficeKind: String, Sendable, Equatable {
@@ -93,7 +94,8 @@ final class LocalNativeToolService {
                 summary: "",
                 files: [],
                 officeDocument: nil,
-                browserDocument: nil
+                browserDocument: nil,
+                openRequests: []
             )
         }
 
@@ -112,7 +114,8 @@ final class LocalNativeToolService {
             summary: prettyJSON(payload),
             files: results.flatMap(Self.files(from:)),
             officeDocument: Self.officeDocument(from: results),
-            browserDocument: Self.browserDocument(from: results)
+            browserDocument: Self.browserDocument(from: results),
+            openRequests: Self.openRequests(from: results)
         )
     }
 
@@ -293,6 +296,16 @@ final class LocalNativeToolService {
     }
 
     private func executeBrowserTool(action: String, _ call: [String: Any]) async -> [String: Any] {
+        if let request = Self.localPreviewOpenRequest(from: call) {
+            return [
+                "action": action,
+                "ok": true,
+                "title": "本地网页预览",
+                "url": request.target,
+                "summary": "已打开本地网页预览。",
+                "open_preview_target": request.target
+            ]
+        }
         var payload = await BrowserWebSearchService.shared.executeNativeBrowserTool(action: action, call: call)
         if payload["action"] == nil {
             payload["action"] = action
@@ -691,6 +704,86 @@ final class LocalNativeToolService {
                 thumbnailURL: thumbnail
             )
         }
+    }
+
+    private static func openRequests(from results: [[String: Any]]) -> [LocalAlpineOpenRequest] {
+        results.compactMap { result in
+            firstString(in: result, keys: ["open_preview_target", "preview_target", "local_preview"])
+                .map { LocalAlpineOpenRequest(target: $0) }
+        }
+    }
+
+    private static func localPreviewOpenRequest(from call: [String: Any]) -> LocalAlpineOpenRequest? {
+        let candidates = [
+            firstString(in: call, keys: ["url", "link", "href", "page_url", "source", "input_url", "path", "file"]),
+            firstString(in: call, keys: ["open_preview_target", "preview_target", "local_preview"])
+        ].compactMap { $0 }
+
+        for candidate in candidates {
+            if let target = normalizedLocalPreviewTarget(candidate) {
+                return LocalAlpineOpenRequest(target: target)
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedLocalPreviewTarget(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowered = trimmed.lowercased()
+
+        if trimmed.hasPrefix("/mnt/iexa") || trimmed.hasPrefix("/tmp/") || trimmed.hasPrefix("/var/") {
+            return trimmed
+        }
+        if lowered.hasPrefix("file://") || lowered.hasPrefix("iexa://") {
+            return trimmed
+        }
+        if let relativeTarget = relativeWorkspacePreviewTarget(from: trimmed) {
+            return relativeTarget
+        }
+
+        guard let url = URL(string: trimmed),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              (url.host ?? "").caseInsensitiveCompare("iexa.preview") == .orderedSame else {
+            return nil
+        }
+
+        let decodedPath = url.path.removingPercentEncoding ?? url.path
+        let withoutLeadingSlash = decodedPath.hasPrefix("/")
+            ? String(decodedPath.dropFirst())
+            : decodedPath
+        if withoutLeadingSlash.lowercased().hasPrefix("file://") {
+            return withoutLeadingSlash
+        }
+        if decodedPath.hasPrefix("/mnt/iexa") {
+            return decodedPath
+        }
+        if decodedPath.hasPrefix("/workspace/") {
+            return "iexa://workspace/" + String(decodedPath.dropFirst("/workspace/".count))
+        }
+        if decodedPath.hasPrefix("/file/") {
+            return "/" + String(decodedPath.dropFirst("/file/".count))
+        }
+        return nil
+    }
+
+    private static func relativeWorkspacePreviewTarget(from rawTarget: String) -> String? {
+        let normalized = rawTarget.replacingOccurrences(of: "\\", with: "/")
+        guard !normalized.hasPrefix("/"),
+              !normalized.hasPrefix("./"),
+              !normalized.hasPrefix("../"),
+              !normalized.contains("://"),
+              normalized.rangeOfCharacter(from: .newlines) == nil else {
+            return nil
+        }
+
+        let lowercased = normalized.lowercased()
+        guard lowercased.hasSuffix(".html")
+            || lowercased.hasSuffix(".htm")
+            || lowercased.hasSuffix(".svg") else {
+            return nil
+        }
+        return "iexa://workspace/\(normalized)"
     }
 
     private static func officeDocument(from results: [[String: Any]]) -> LocalNativeOfficeDocument? {
