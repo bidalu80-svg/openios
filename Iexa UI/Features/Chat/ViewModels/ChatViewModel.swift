@@ -15372,7 +15372,6 @@ final class ChatViewModel {
             originalTokens: originalTokens,
             compressedTokens: compressedTokens
         )
-        lastContextBudgetRefreshSignature = ""
     }
 
     private static func estimatedTokens(in apiMessages: [[String: Any]]) -> Int {

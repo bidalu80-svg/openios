@@ -394,7 +394,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             case .status:
                 return step.hasInspectablePayload && !step.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case .tool:
-                return step.hasInspectablePayload || !step.isRunning
+                return true
             case .file, .command:
                 return true
             }
