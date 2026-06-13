@@ -1993,6 +1993,10 @@ final class ChatViewModel {
         message.metadata?["iexa_local_alpine_hidden_tool_parent"] == "true"
     }
 
+    private static func isLocalNativeHiddenToolParent(_ message: ChatMessage) -> Bool {
+        message.metadata?["iexa_local_native_hidden_tool_parent"] == "true"
+    }
+
     private static func isLocalNativeToolResult(_ message: ChatMessage) -> Bool {
         message.metadata?["iexa_local_native_result"] == "true"
             || message.model == "Local Native"
@@ -9926,6 +9930,78 @@ final class ChatViewModel {
 
     private static let nativeToolSilentFailureDomain = "Iexa.NativeToolSilentFailure"
 
+    private static func normalizedToolArgumentsJSONString(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "{}" }
+
+        if let object = jsonObjectFromToolArguments(trimmed),
+           let json = stableJSONString(from: object) {
+            return json
+        }
+
+        let fallback: [String: Any] = ["value": trimmed]
+        return stableJSONString(from: fallback) ?? "{}"
+    }
+
+    private static func jsonObjectFromToolArguments(_ raw: String) -> Any? {
+        let candidates = [
+            raw,
+            repairedLooseToolJSONString(raw)
+        ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+        for candidate in candidates where !candidate.isEmpty {
+            guard let data = candidate.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) else {
+                continue
+            }
+            return object
+        }
+        return nil
+    }
+
+    private static func stableJSONString(from object: Any) -> String? {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return json
+    }
+
+    private static func repairedLooseToolJSONString(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{") || trimmed.hasPrefix("[") else { return nil }
+        var repaired = trimmed.replacingOccurrences(of: "'", with: "\"")
+        repaired = regexReplace(
+            in: repaired,
+            pattern: #"([\{\[,]\s*)([A-Za-z_][A-Za-z0-9_\.\-]*)\s*:"#,
+            replacement: #"$1"$2":"#
+        )
+        repaired = regexReplace(
+            in: repaired,
+            pattern: #"("(?:action|name|tool|path|file|file_path|cwd|command|cmd|old|new|old_text|new_text|content|text|url|query|browser_use_action|browser_action|operation|op|functionName|function_name|toolName|tool_name)"\s*:\s*)([A-Za-z_][A-Za-z0-9_\.\-\/]*)(\s*[,}])"#,
+            replacement: #"$1"$2"$3"#
+        )
+        return repaired == trimmed ? nil : repaired
+    }
+
+    private static func regexReplace(
+        in text: String,
+        pattern: String,
+        replacement: String
+    ) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return text
+        }
+        let range = NSRange(location: 0, length: (text as NSString).length)
+        return regex.stringByReplacingMatches(
+            in: text,
+            options: [],
+            range: range,
+            withTemplate: replacement
+        )
+    }
+
     private enum LocalAlpineNativeLoopDecision {
         case allow
         case warn(String)
@@ -10435,7 +10511,7 @@ final class ChatViewModel {
                 return LocalAlpineNativeToolCall(
                     id: id,
                     name: partial.name,
-                    arguments: arguments.isEmpty ? "{}" : arguments
+                    arguments: ChatViewModel.normalizedToolArgumentsJSONString(arguments)
                 )
             }
         }
@@ -11455,6 +11531,7 @@ final class ChatViewModel {
         assistantMessageId: String
     ) async -> LocalAlpineAgentResult {
         localAlpineNativeToolExecutedMessageIds.insert(assistantMessageId)
+        markLocalAlpineToolParentHidden(messageId: assistantMessageId)
         let trimmedName = call.name.trimmingCharacters(in: .whitespacesAndNewlines)
         switch trimmedName {
         case "memory_write":
@@ -11582,7 +11659,7 @@ final class ChatViewModel {
                     "type": "function",
                     "function": [
                         "name": call.name,
-                        "arguments": call.arguments
+                        "arguments": Self.normalizedToolArgumentsJSONString(call.arguments)
                     ]
                 ]
             }
@@ -16493,6 +16570,11 @@ final class ChatViewModel {
         message: ChatMessage,
         includeImageCanvasInstruction: Bool = false
     ) -> String {
+        if Self.isLocalAlpineHiddenToolParent(message)
+            || Self.isLocalNativeHiddenToolParent(message)
+            || Self.isLocalAlpineHiddenCorrectionParent(message) {
+            return ""
+        }
         if Self.isLocalAlpineAgentResult(message) {
             return Self.localAlpineObservationContent(for: message)
         }
@@ -17262,7 +17344,8 @@ final class ChatViewModel {
                 continue
             }
             if Self.isLocalAlpineHiddenCorrectionParent(message)
-                || Self.isLocalAlpineHiddenToolParent(message) {
+                || Self.isLocalAlpineHiddenToolParent(message)
+                || Self.isLocalNativeHiddenToolParent(message) {
                 continue
             }
             if isLocalAlpineResult {
@@ -17839,6 +17922,20 @@ final class ChatViewModel {
         }
     }
 
+    private func markLocalAlpineToolParentHidden(messageId: String) {
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else {
+            return
+        }
+        var metadata = conversation?.messages[index].metadata ?? [:]
+        metadata["iexa_local_alpine_hidden_tool_parent"] = "true"
+        conversation?.messages[index].metadata = metadata
+        conversation?.history.updateNode(id: messageId) { node in
+            var nodeMetadata = node.metadata ?? [:]
+            nodeMetadata["iexa_local_alpine_hidden_tool_parent"] = "true"
+            node.metadata = nodeMetadata
+        }
+    }
+
     private func startLocalAlpineMissingToolCorrection(
         parentId: String,
         assistantContent: String,
@@ -18133,6 +18230,7 @@ final class ChatViewModel {
     }
 
     private func executeLocalNativeTool(messageId: String, content: String) async {
+        markLocalNativeToolParentHidden(messageId: messageId)
         let directCalls = Self.localNativeMarkdownFunctionToolCalls(from: content)
         if let directCall = directCalls.first(where: { $0.name == "image_generation" }) {
             _ = await executeLocalImageGenerationToolCall(
