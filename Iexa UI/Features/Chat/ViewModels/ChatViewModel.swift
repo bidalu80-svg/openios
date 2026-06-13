@@ -9946,9 +9946,10 @@ final class ChatViewModel {
     }
 
     private static func jsonObjectFromToolArguments(_ raw: String) -> Any? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let candidates = [
-            raw,
-            repairedLooseToolJSONString(raw)
+            trimmed,
+            repairedLooseToolJSONString(trimmed)
         ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
 
         for candidate in candidates where !candidate.isEmpty {
