@@ -1115,6 +1115,14 @@ actor LocalAlpineTerminalService {
             try writeExecutableText(wrapperScript, to: binURL.appendingPathComponent(name))
         }
 
+        let lsofShim = """
+        #!/bin/sh
+        printf 'lsof is disabled in Iexa Local Alpine because it is unreliable in the embedded iSH runtime.\\n' >&2
+        printf 'For localhost preview checks, use `nc -z 127.0.0.1 <port>` or inspect /proc/net/tcp.\\n' >&2
+        exit 127
+        """
+        try writeExecutableText(lsofShim, to: binURL.appendingPathComponent("lsof"))
+
         let profileURL = dataURL.appendingPathComponent("etc/profile.d", isDirectory: true)
         try fileManager.createDirectory(at: profileURL, withIntermediateDirectories: true)
         let profile = """

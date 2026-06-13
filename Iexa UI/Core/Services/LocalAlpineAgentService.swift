@@ -4906,6 +4906,9 @@ actor LocalAlpineAgentService {
         } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)(systemctl|service|launchctl)\b"#) {
             issue = "Service managers such as `systemctl`, `service`, and `launchctl` are outside this Local Alpine/iSH command model."
             replacement = "Use foreground commands, `command -v`, version checks, config inspection, or a bounded process check instead."
+        } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)lsof\b"#) {
+            issue = "`lsof` is disabled in this embedded iSH runtime because it can crash the app."
+            replacement = "For localhost preview checks, use `nc -z 127.0.0.1 <port>` or inspect `/proc/net/tcp`."
         } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)(open|osascript|pbcopy|pbpaste|powershell|pwsh|cmd\.exe)\b"#) {
             issue = "This is a host desktop/Windows/macOS command, not an Alpine Linux command."
             replacement = "Use Local Alpine tools only. For previews, create a file under `/mnt/iexa` and use `iexa-open /mnt/iexa/<file>` when appropriate."
