@@ -1100,6 +1100,15 @@ struct ChatDetailView: View {
             return false
         }
 
+        if isMessageVisuallyStreaming(message) {
+            return false
+        }
+
+        let visibleText = visibleAssistantTextAfterToolProtocolCleanup(for: message)
+        if !visibleText.isEmpty {
+            return false
+        }
+
         let metadata = message.metadata ?? [:]
         if metadata["iexa_local_native_hidden_tool_parent"] == "true"
             || metadata["iexa_local_alpine_hidden_tool_parent"] == "true" {
@@ -1110,6 +1119,52 @@ struct ChatDetailView: View {
         }
         return message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && messageHasProcessOnlyStatus(message)
+    }
+
+    private func visibleAssistantTextAfterToolProtocolCleanup(for message: ChatMessage) -> String {
+        let raw = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return "" }
+        let withoutAlpineProtocol = LocalAlpineAgentService.visibleContent(from: raw)
+        let withoutNativeProtocol = stripNativeToolProtocolBlocks(from: withoutAlpineProtocol)
+        let visible = withoutNativeProtocol.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard visible != "正在准备本地执行，结果会自动回来。" else {
+            return ""
+        }
+        return visible
+    }
+
+    private func assistantContentOverrideForActivityParent(_ message: ChatMessage) -> String? {
+        guard message.role == .assistant,
+              hasRenderableAgentActivity(for: message),
+              !isMessageVisuallyStreaming(message) else {
+            return nil
+        }
+        let raw = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        let visible = visibleAssistantTextAfterToolProtocolCleanup(for: message)
+        guard !visible.isEmpty, visible != raw else { return nil }
+        return visible
+    }
+
+    private func stripNativeToolProtocolBlocks(from content: String) -> String {
+        var cleaned = content.replacingOccurrences(
+            of: #"```iexa_native\s*[\s\S]*?```"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"<\s*(?:tool_call|tool_use|function_call|function|iexa_native)\b[^>]*>[\s\S]*?</\s*(?:tool_call|tool_use|function_call|function|iexa_native)\s*>"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.range(
+            of: #"(?is)^\{[\s\S]*"(?:tool|name|function|function_call|tool_calls)"[\s\S]*"(?:arguments|args|input|tool|name)"[\s\S]*\}$"#,
+            options: .regularExpression
+        ) != nil {
+            return ""
+        }
+        return trimmed
     }
 
     private func mergedLocalAlpineTurnActivity(through message: ChatMessage) -> AgentActivityItem? {
@@ -3308,7 +3363,8 @@ struct ChatDetailView: View {
                 streamingStore: viewModel.streamingStore,
                 message: message,
                 activeVersionIndex: activeVersionIndex[message.id] ?? -1,
-                contentOverride: assistantContentOverride[message.id],
+                contentOverride: assistantContentOverride[message.id]
+                    ?? assistantContentOverrideForActivityParent(message),
                 showEmptyThinkingCapsule: true,
                 serverBaseURL: viewModel.serverBaseURL,
                 authToken: viewModel.serverAuthToken,
