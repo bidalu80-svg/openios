@@ -68,6 +68,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
     let failed: Bool
     let outputPreview: String
     let file: LocalAlpineWrittenFile?
+    let filePaths: [String]
     let command: String?
     let cwd: String?
     let previewThumbnailReference: String?
@@ -96,8 +97,8 @@ private struct AgentActivityStep: Identifiable, Hashable {
 }
 
 private struct AgentActivityItem: Identifiable, Hashable {
-    private static let uiOutputPreviewLimit = 1_200
-    private static let floatingOutputPreviewLimit = 900
+    private static let uiOutputPreviewLimit = 700
+    private static let floatingOutputPreviewLimit = 480
     private static let floatingDetailLimit = 420
     private static let floatingCommandLimit = 900
 
@@ -327,6 +328,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             failed: step.failed,
             outputPreview: clippedFloatingText(step.outputPreview, limit: floatingOutputPreviewLimit),
             file: step.file,
+            filePaths: step.filePaths,
             command: step.command.map { clippedFloatingText($0, limit: floatingCommandLimit) },
             cwd: step.cwd,
             previewThumbnailReference: step.previewThumbnailReference,
@@ -381,6 +383,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 failed: call.failed,
                 outputPreview: output,
                 file: matchedFile,
+                filePaths: call.filePaths,
                 command: call.command,
                 cwd: call.cwd,
                 previewThumbnailReference: nil,
@@ -401,6 +404,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     failed: false,
                     outputPreview: file.previewLines(limit: 10).joined(separator: "\n"),
                     file: file,
+                    filePaths: [file.path],
                     command: nil,
                     cwd: nil,
                     previewThumbnailReference: nil,
@@ -430,6 +434,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     failed: result.failed,
                     outputPreview: result.outputPreview,
                     file: nil,
+                    filePaths: [],
                     command: command,
                     cwd: result.cwd,
                     previewThumbnailReference: nil,
@@ -562,6 +567,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 failed: false,
                 outputPreview: output.isEmpty ? detail : output,
                 file: nil,
+                filePaths: [],
                 command: nil,
                 cwd: nil,
                 previewThumbnailReference: previewThumbnail,
@@ -594,6 +600,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 failed: false,
                 outputPreview: detail,
                 file: nil,
+                filePaths: [],
                 command: nil,
                 cwd: nil,
                 previewThumbnailReference: nil,
@@ -1210,6 +1217,31 @@ struct ChatDetailView: View {
         transcriptMessages.map(\.id)
     }
 
+    private var agentActivityRefreshSignature: Int {
+        var signature = viewModel.messages.count
+        for message in viewModel.messages.suffix(12) {
+            guard AgentActivityItem.isActivityMessage(message) else { continue }
+            signature &+= message.id.hashValue
+            signature &+= message.isStreaming ? 31 : 7
+            signature &+= message.statusHistory.count &* 13
+            if let metadata = message.metadata {
+                for key in [
+                    "iexa_local_alpine_tool_calls",
+                    "iexa_local_alpine_command_results",
+                    "iexa_local_alpine_written_files",
+                    "iexa_local_alpine_raw_result"
+                ] {
+                    if let value = metadata[key] {
+                        signature &+= key.hashValue
+                        signature &+= value.isEmpty ? 0 : 1
+                        signature &+= value.prefix(192).hashValue
+                    }
+                }
+            }
+        }
+        return signature
+    }
+
     private func agentActivity(for message: ChatMessage) -> AgentActivityItem? {
         if message.metadata?["iexa_local_alpine_final_summary"] != nil {
             return mergedLocalAlpineTurnActivity(through: message)
@@ -1414,6 +1446,11 @@ struct ChatDetailView: View {
     }
 
     private var visibleAgentActivityWindowPreview: AgentActivityItem? {
+        if !(viewModel.isStreaming || viewModel.streamingStore.isActive),
+           let inactive = agentActivityWindowPreview(includeInactive: true)?
+                .limitingSteps(to: Self.agentFloatingPreviewStepLimit) {
+            return inactive
+        }
         if let live = agentActivityWindowPreview(includeInactive: false)?.limitingSteps(to: Self.agentFloatingPreviewStepLimit) {
             return live
         }
@@ -2686,6 +2723,9 @@ struct ChatDetailView: View {
                 refreshAgentFloatingActivitySnapshot(includeInactive: !viewModel.isStreaming && !viewModel.streamingStore.isActive)
             }
         }
+        .onChange(of: agentActivityRefreshSignature) { _, _ in
+            refreshAgentFloatingActivitySnapshot(includeInactive: true)
+        }
         // Auto-scroll only when the rendered transcript changes. This avoids
         // scrolling to blank spacer space when hidden agent/tool messages are
         // appended or removed behind the visible conversation.
@@ -3416,21 +3456,22 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func agentStepPreview(for message: ChatMessage) -> some View {
-        if isLocalAlpineResultMessage(message) {
+        let fallbackItem = agentActivity(for: message)
+        if isLocalAlpineResultMessage(message) || fallbackItem?.hasConcreteSteps == true {
             AgentInlineStepsHost(
                 conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
                 messageId: message.id,
-                fallbackItem: agentActivity(for: message),
+                fallbackItem: fallbackItem,
+                liveSnapshot: {
+                    (
+                        viewModel.localAlpineLiveToolCalls(for: message.id),
+                        viewModel.localAlpineLiveToolStatus(for: message.id)
+                    )
+                },
                 onTap: openAgentTaskPanel
             )
             .padding(.horizontal, Spacing.screenPadding)
             .padding(.top, Spacing.xs)
-        } else if let item = agentActivity(for: message),
-                  item.hasConcreteSteps,
-                  !item.hasOnlyWebSearchStatusSteps {
-            AgentInlineStepsView(item: item, onTap: openAgentTaskPanel)
-                .padding(.horizontal, Spacing.screenPadding)
-                .padding(.top, Spacing.xs)
         }
     }
 
@@ -7977,11 +8018,13 @@ private struct AgentInlineStepsHost: View {
     let conversationId: String?
     let messageId: String
     let fallbackItem: AgentActivityItem?
+    let liveSnapshot: () -> ([LocalAlpineToolCall], ChatStatusUpdate?)
     let onTap: () -> Void
 
     @State private var liveCalls: [LocalAlpineToolCall] = []
     @State private var liveStatus: ChatStatusUpdate?
     @State private var hasLiveState = false
+    @State private var cachedDisplayItem: AgentActivityItem?
 
     private var liveItem: AgentActivityItem? {
         guard hasLiveState else { return nil }
@@ -7993,20 +8036,50 @@ private struct AgentInlineStepsHost: View {
     }
 
     private var displayItem: AgentActivityItem? {
-        if let liveItem, liveItem.hasConcreteSteps {
+        if let liveItem,
+           liveItem.hasConcreteSteps {
+            if liveItem.isActive {
+                return liveItem
+            }
+            if let fallbackItem,
+               fallbackItem.hasConcreteSteps,
+               fallbackItem.totalStepCount >= liveItem.totalStepCount {
+                return fallbackItem
+            }
             return liveItem
         }
         guard fallbackItem?.hasConcreteSteps == true else { return nil }
         return fallbackItem
     }
 
+    private var renderItem: AgentActivityItem? {
+        displayItem ?? cachedDisplayItem
+    }
+
+    private var displayItemSignature: Int {
+        guard let item = displayItem else { return 0 }
+        var signature = item.id.hashValue
+        signature &+= item.steps.count &* 31
+        signature &+= item.currentStep?.id.hashValue ?? 0
+        signature &+= item.isActive ? 17 : 3
+        signature &+= item.hasFailure ? 23 : 5
+        return signature
+    }
+
     var body: some View {
         Group {
-            if let item = displayItem,
+            if let item = renderItem,
                item.hasConcreteSteps,
                !item.hasOnlyWebSearchStatusSteps {
                 AgentInlineStepsView(item: item, onTap: onTap)
             }
+        }
+        .onAppear {
+            refreshLiveStateFromSnapshot()
+            updateCachedDisplayItem()
+        }
+        .onChange(of: displayItemSignature) { _, _ in
+            updateCachedDisplayItem()
         }
         .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateUpdated)) { notification in
             applyLiveToolNotification(notification)
@@ -8017,7 +8090,25 @@ private struct AgentInlineStepsHost: View {
         }
         .onChange(of: conversationId) { _, _ in
             clearLiveState()
+            cachedDisplayItem = nil
         }
+    }
+
+    private func updateCachedDisplayItem() {
+        guard let displayItem,
+              displayItem.hasConcreteSteps,
+              !displayItem.hasOnlyWebSearchStatusSteps else {
+            return
+        }
+        cachedDisplayItem = displayItem
+    }
+
+    private func refreshLiveStateFromSnapshot() {
+        let snapshot = liveSnapshot()
+        guard !snapshot.0.isEmpty || snapshot.1 != nil else { return }
+        liveCalls = snapshot.0
+        liveStatus = snapshot.1
+        hasLiveState = true
     }
 
     private func applyLiveToolNotification(_ notification: Notification) {
@@ -8060,6 +8151,7 @@ private struct AgentStepFloatingBarHost: View {
     @State private var liveCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
     @State private var liveStatusByMessageId: [String: ChatStatusUpdate] = [:]
     @State private var liveMessageOrder: [String] = []
+    @State private var cachedDisplayItem: AgentActivityItem?
 
     private var liveItem: AgentActivityItem? {
         let items = liveMessageOrder.compactMap { messageId -> AgentActivityItem? in
@@ -8075,16 +8167,39 @@ private struct AgentStepFloatingBarHost: View {
     }
 
     private var displayItem: AgentActivityItem? {
-        if let liveItem, liveItem.hasConcreteSteps {
+        if let liveItem,
+           liveItem.hasConcreteSteps {
+            if liveItem.isActive {
+                return liveItem
+            }
+            if let fallbackItem,
+               fallbackItem.hasConcreteSteps,
+               fallbackItem.totalStepCount >= liveItem.totalStepCount {
+                return fallbackItem
+            }
             return liveItem
         }
         guard fallbackItem?.hasConcreteSteps == true else { return nil }
         return fallbackItem
     }
 
+    private var renderItem: AgentActivityItem? {
+        displayItem ?? cachedDisplayItem
+    }
+
+    private var displayItemSignature: Int {
+        guard let item = displayItem else { return 0 }
+        var signature = item.id.hashValue
+        signature &+= item.steps.count &* 31
+        signature &+= item.currentStep?.id.hashValue ?? 0
+        signature &+= item.isActive ? 17 : 3
+        signature &+= item.hasFailure ? 23 : 5
+        return signature
+    }
+
     var body: some View {
         Group {
-            if let item = displayItem {
+            if let item = renderItem {
                 AgentStepFloatingBar(
                     item: item,
                     taskCount: item.totalStepCount,
@@ -8095,6 +8210,12 @@ private struct AgentStepFloatingBarHost: View {
                 .padding(.bottom, 2)
             }
         }
+        .onAppear {
+            updateCachedDisplayItem()
+        }
+        .onChange(of: displayItemSignature) { _, _ in
+            updateCachedDisplayItem()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateUpdated)) { notification in
             applyLiveToolNotification(notification)
         }
@@ -8104,7 +8225,16 @@ private struct AgentStepFloatingBarHost: View {
         }
         .onChange(of: conversationId) { _, _ in
             clearLiveState()
+            cachedDisplayItem = nil
         }
+    }
+
+    private func updateCachedDisplayItem() {
+        guard let displayItem,
+              displayItem.hasConcreteSteps else {
+            return
+        }
+        cachedDisplayItem = displayItem
     }
 
     private func applyLiveToolNotification(_ notification: Notification) {
@@ -8775,6 +8905,157 @@ private struct LocalAlpineWrittenFilePreviewSheet: View {
     }
 }
 
+private struct LocalAlpineLazyFilePreview: View {
+    let path: String
+    let fileName: String?
+    let language: String?
+    let fallbackLines: [String]
+    let byteCount: Int?
+
+    @Environment(\.theme) private var theme
+    @State private var loadedCode: String?
+    @State private var loadedByteCount: Int?
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+
+    private var displayName: String {
+        let trimmed = fileName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty { return trimmed }
+        return (path as NSString).lastPathComponent
+    }
+
+    private var displayCode: String {
+        if let loadedCode { return loadedCode }
+        let fallback = fallbackLines
+            .map { $0.trimmingCharacters(in: .newlines) }
+        return fallback.isEmpty ? path : fallback.joined(separator: "\n")
+    }
+
+    private var displayByteCount: Int? {
+        loadedByteCount ?? byteCount
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            if isLoading && loadedCode == nil {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在读取完整文件...")
+                        .scaledFont(size: 13, weight: .semibold)
+                        .foregroundStyle(theme.textSecondary)
+                    Spacer(minLength: 0)
+                }
+                .padding(18)
+            }
+            if let errorMessage, loadedCode == nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(errorMessage)
+                        .scaledFont(size: 13, weight: .semibold)
+                        .foregroundStyle(theme.textSecondary)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 14)
+            }
+            SourceCodeTextView(
+                code: displayCode,
+                language: language,
+                maxHeight: 1_200,
+                wrapLines: true
+            )
+            Divider()
+            footer
+        }
+        .background(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.98))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.34 : 0.55), lineWidth: 0.7)
+        )
+        .task(id: path) {
+            await loadFullFileIfNeeded()
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "doc.text")
+                .foregroundStyle(theme.textSecondary)
+            Text(displayName)
+                .scaledFont(size: 16, weight: .semibold)
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let displayByteCount {
+                Text("(\(displayByteCount) B)")
+                    .scaledFont(size: 14, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+            }
+            Spacer(minLength: 0)
+            if loadedCode != nil {
+                Text("完整")
+                    .scaledFont(size: 11, weight: .bold)
+                    .foregroundStyle(theme.success)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 14)
+        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.72))
+    }
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle")
+                .foregroundStyle(theme.textTertiary)
+            Text(path)
+                .scaledFont(size: 13, weight: .semibold, design: .monospaced)
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+            if let language,
+               !language.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(language)
+                    .scaledFont(size: 12, weight: .semibold)
+                    .foregroundStyle(theme.textTertiary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(12)
+    }
+
+    private func loadFullFileIfNeeded() async {
+        let shouldLoad = await MainActor.run { () -> Bool in
+            guard !isLoading, loadedCode == nil else { return false }
+            isLoading = true
+            errorMessage = nil
+            return true
+        }
+        guard shouldLoad else { return }
+
+        do {
+            let data = try await LocalAlpineTerminalService.shared.readFile(path: path)
+            let content = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+            await MainActor.run {
+                loadedCode = content.isEmpty ? " " : content
+                loadedByteCount = data.count
+                isLoading = false
+            }
+        } catch {
+            await MainActor.run {
+                errorMessage = "无法读取完整文件，正在显示步骤预览"
+                isLoading = false
+            }
+        }
+    }
+}
+
 private struct AgentFloatingStepPreviewItem: Identifiable, Hashable {
     let id = UUID()
     let activity: AgentActivityItem
@@ -8892,6 +9173,14 @@ private struct AgentFloatingStepPreviewSheet: View {
     private func stepPreview(_ step: AgentActivityStep) -> some View {
         if let file = step.file {
             filePreview(file)
+        } else if let path = lazyPreviewPath(for: step) {
+            LocalAlpineLazyFilePreview(
+                path: path,
+                fileName: (path as NSString).lastPathComponent,
+                language: LocalCodeWriteGuard.language(forPath: path),
+                fallbackLines: step.outputPreview.components(separatedBy: .newlines),
+                byteCount: nil
+            )
         } else if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
             terminalPreview(step)
         } else {
@@ -8900,56 +9189,24 @@ private struct AgentFloatingStepPreviewSheet: View {
     }
 
     private func filePreview(_ file: LocalAlpineWrittenFile) -> some View {
-        let preview = file.previewLines(limit: 120).joined(separator: "\n")
-        return VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "doc.text")
-                    .foregroundStyle(theme.textSecondary)
-                Text(file.fileName)
-                    .scaledFont(size: 16, weight: .semibold)
-                    .foregroundStyle(theme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text("(\(file.byteCount) B)")
-                    .scaledFont(size: 14, weight: .medium)
-                    .foregroundStyle(theme.textTertiary)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
-            .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.72))
-
-            Divider()
-
-            Text(preview.isEmpty ? file.path : preview)
-                .font(.system(size: 15, weight: .regular, design: .monospaced))
-                .foregroundStyle(theme.textPrimary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(18)
-
-            Divider()
-
-            HStack(spacing: 8) {
-                Image(systemName: "info.circle")
-                    .foregroundStyle(theme.textTertiary)
-                Text(file.path)
-                    .scaledFont(size: 13, weight: .semibold, design: .monospaced)
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 0)
-                Text("\(file.byteCount) B")
-                    .scaledFont(size: 13, weight: .semibold)
-                    .foregroundStyle(theme.textTertiary)
-            }
-            .padding(12)
-        }
-        .background(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.98))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.34 : 0.55), lineWidth: 0.7)
+        LocalAlpineLazyFilePreview(
+            path: file.path,
+            fileName: file.fileName,
+            language: file.language,
+            fallbackLines: file.previewLines(limit: 120),
+            byteCount: file.byteCount
         )
+    }
+
+    private func lazyPreviewPath(for step: AgentActivityStep) -> String? {
+        let normalizedName = step.title.lowercased()
+        let toolLooksLikeFileRead = normalizedName.contains("读取")
+            || normalizedName.contains("read")
+            || normalizedName.contains("file")
+        guard toolLooksLikeFileRead else { return nil }
+        return step.filePaths
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
     }
 
     private func terminalPreview(_ step: AgentActivityStep) -> some View {

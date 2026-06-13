@@ -215,8 +215,8 @@ struct LocalAlpineLineDelta: Codable, Hashable, Sendable {
 }
 
 struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
-    private static let defaultOutputPreviewLimit = 8_000
-    private static let readFileOutputPreviewLimit = 12_000
+    private static let defaultOutputPreviewLimit = 2_000
+    private static let readFileOutputPreviewLimit = 2_400
 
     let command: String
     let cwd: String
@@ -324,8 +324,8 @@ enum LocalAlpineToolDisplayRegistry {
 }
 
 struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
-    private static let defaultOutputPreviewLimit = 4_000
-    private static let readFileOutputPreviewLimit = 6_000
+    private static let defaultOutputPreviewLimit = 1_600
+    private static let readFileOutputPreviewLimit = 1_800
 
     let id: String
     let runId: String
@@ -492,7 +492,6 @@ actor LocalAlpineAgentService {
     private let maxOutputCharactersPerCommand = 6_000
     private let defaultReadFileMaxBytes = 192_000
     private let maxReadFileMaxBytes = 512_000
-    private let toolStartRenderGraceNanoseconds: UInt64 = 90_000_000
     private let defaultCWD = "/mnt/iexa"
 
     private init() {}
@@ -665,9 +664,7 @@ actor LocalAlpineAgentService {
 
         func emitToolStart(_ context: LocalAlpineToolCallContext) async {
             await emitTool(Self.toolCallStart(context))
-            guard eventHandler != nil else { return }
             await Task.yield()
-            try? await Task.sleep(nanoseconds: toolStartRenderGraceNanoseconds)
         }
 
         for command in trimmedCommands {

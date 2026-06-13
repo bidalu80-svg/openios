@@ -269,7 +269,8 @@ struct ChatMessage: Identifiable, Hashable, Sendable {
         var signature = metadata.count
         for (key, value) in metadata {
             signature &+= key.hashValue
-            signature &+= value.utf8.count
+            signature &+= value.isEmpty ? 0 : 1
+            signature &+= value.prefix(256).hashValue
         }
         return signature
     }
@@ -513,7 +514,8 @@ struct ChatMessageVersion: Codable, Equatable, Hashable, Sendable {
         var signature = metadata.count
         for (key, value) in metadata {
             signature &+= key.hashValue
-            signature &+= value.utf8.count
+            signature &+= value.isEmpty ? 0 : 1
+            signature &+= value.prefix(256).hashValue
         }
         return signature
     }

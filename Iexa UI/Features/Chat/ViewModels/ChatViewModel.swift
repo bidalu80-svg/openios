@@ -570,10 +570,9 @@ final class ChatViewModel {
     private let localAlpineAgentMaxSteps = 10
     private let localAlpineNoProgressRepeatLimit = 2
     private let localAlpineToolEventFlushInterval: TimeInterval = 0.22
-    private let localAlpineLiveToolPreviewLimit = 900
+    private let localAlpineLiveToolPreviewLimit = 480
     private let localAlpineLiveToolDetailLimit = 360
     private let localAlpineLiveToolCommandLimit = 900
-    private let localAlpineToolStartRenderDelayNanoseconds: UInt64 = 90_000_000
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     var localAlpinePendingOpenRequest: LocalAlpineOpenRequest?
@@ -2830,6 +2829,16 @@ final class ChatViewModel {
     private static func clippedForSystemContext(_ text: String, maxCharacters: Int) -> String {
         guard text.count > maxCharacters else { return text }
         return String(text.prefix(maxCharacters)) + "\n...（内容过长，已截断）"
+    }
+
+    private static func localAlpineStoredRawResult(_ text: String, label: String = "local-alpine-raw-result") -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return LocalContextOffloadStore.modelText(
+            label: label,
+            text: trimmed,
+            maxInlineCharacters: 2_800
+        )
     }
 
     private static func redactedLocalAlpineInternalPaths(in text: String) -> String {
@@ -8208,6 +8217,7 @@ final class ChatViewModel {
             conversation?.history.appendChildId(userMessage.id, to: pid)
         }
         conversation?.history.currentId = assistantMessageId
+        await Task.yield()
 
         isStreaming = true
         hasFinishedStreaming = false
@@ -8250,7 +8260,6 @@ final class ChatViewModel {
             messageId: assistantMessageId
         )
         await Task.yield()
-        try? await Task.sleep(nanoseconds: localAlpineToolStartRenderDelayNanoseconds)
 
         var result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
         enqueueLocalAlpineOpenRequests(result.openRequests)
@@ -8298,7 +8307,7 @@ final class ChatViewModel {
             command: command,
             cwd: "/mnt/iexa",
             exitCode: result.exitCode,
-            outputPreview: String(result.output.prefix(8_000))
+            outputPreview: String(result.output.prefix(2_400))
         )
         let directCompletedAtMs = Int64((Date().timeIntervalSince1970 * 1_000).rounded())
         let directToolCall = LocalAlpineToolCall(
@@ -8311,7 +8320,7 @@ final class ChatViewModel {
             cwd: "/mnt/iexa",
             command: command,
             exitCode: result.exitCode,
-            outputPreview: String(result.output.prefix(4_000)),
+            outputPreview: String(result.output.prefix(1_600)),
             filePaths: [],
             startedAtMs: directStartedAtMs,
             completedAtMs: directCompletedAtMs,
@@ -8324,7 +8333,10 @@ final class ChatViewModel {
         if let index = conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) {
             var metadata = conversation?.messages[index].metadata ?? [:]
             conversation?.messages[index].isStreaming = false
-            metadata["iexa_local_alpine_raw_result"] = result.output
+            metadata["iexa_local_alpine_raw_result"] = Self.localAlpineStoredRawResult(
+                result.output,
+                label: "local-alpine-direct-command"
+            )
             metadata["iexa_local_alpine_tool_run_id"] = directToolRunId
             if let toolCalls = LocalAlpineToolCall.metadataString(for: [directToolCall]) {
                 metadata["iexa_local_alpine_tool_calls"] = toolCalls
@@ -8650,7 +8662,7 @@ final class ChatViewModel {
     private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
         let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "（无输出）"
-            : Self.clippedForSystemContext(result.output, maxCharacters: 6_000)
+            : Self.clippedForSystemContext(result.output, maxCharacters: 2_400)
         let exit = result.exitCode.map(String.init) ?? "unknown"
         return """
         Local Alpine 执行结果
@@ -11808,12 +11820,18 @@ final class ChatViewModel {
     private func mergeLocalAlpineNativeToolResultMetadata(messageId: String, result: LocalAlpineAgentResult) {
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
         var metadata = conversation?.messages[index].metadata ?? [:]
-        let raw = [metadata["iexa_local_alpine_raw_result"], result.modelObservation ?? result.summary]
+        let incomingRaw = Self.localAlpineStoredRawResult(
+            result.modelObservation ?? result.summary,
+            label: "local-alpine-native-tool-result"
+        )
+        let raw = [metadata["iexa_local_alpine_raw_result"], incomingRaw]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
         if !raw.isEmpty {
-            metadata["iexa_local_alpine_raw_result"] = raw
+            metadata["iexa_local_alpine_raw_result"] = raw.count > 6_000
+                ? Self.localAlpineStoredRawResult(raw, label: "local-alpine-merged-tool-result")
+                : raw
         }
         if let toolRunId = result.toolRunId {
             metadata["iexa_local_alpine_tool_run_id"] = toolRunId
@@ -20040,6 +20058,7 @@ final class ChatViewModel {
         conversation?.history.currentId = resultMessageId
         localAlpineAgentExecutedMessageIds.insert(resultMessageId)
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        await Task.yield()
 
         beginStreamingBackgroundTaskIfNeeded()
         await startLocalAlpineLiveActivity(
@@ -20114,7 +20133,10 @@ final class ChatViewModel {
         )
         if let index = conversation?.messages.firstIndex(where: { $0.id == resultMessageId }) {
             var metadata = conversation?.messages[index].metadata ?? [:]
-            metadata["iexa_local_alpine_raw_result"] = result.modelObservation ?? result.summary
+            metadata["iexa_local_alpine_raw_result"] = Self.localAlpineStoredRawResult(
+                result.modelObservation ?? result.summary,
+                label: "local-alpine-agent-result"
+            )
             if let toolRunId = result.toolRunId {
                 metadata["iexa_local_alpine_tool_run_id"] = toolRunId
             }
