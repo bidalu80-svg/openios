@@ -1095,6 +1095,31 @@ private struct AgentActivityItem: Identifiable, Hashable {
     }
 }
 
+private struct AgentActivityCacheEntry {
+    let signature: Int
+    let item: AgentActivityItem?
+}
+
+private final class AgentActivityItemCache {
+    private var entries: [String: AgentActivityCacheEntry] = [:]
+
+    func lookup(messageId: String, signature: Int) -> AgentActivityCacheEntry? {
+        guard let entry = entries[messageId],
+              entry.signature == signature else {
+            return nil
+        }
+        return entry
+    }
+
+    func store(messageId: String, signature: Int, item: AgentActivityItem?) {
+        entries[messageId] = AgentActivityCacheEntry(signature: signature, item: item)
+        if entries.count > 120 {
+            entries.removeAll(keepingCapacity: true)
+            entries[messageId] = AgentActivityCacheEntry(signature: signature, item: item)
+        }
+    }
+}
+
 struct ChatDetailView: View {
     @Environment(AppDependencyContainer.self) private var dependencies
     @Environment(AppRouter.self) private var router
@@ -1108,6 +1133,7 @@ struct ChatDetailView: View {
     private let initialConversationId: String?
     private let onNewChat: (() -> Void)?
     @State private var viewModel: ChatViewModel
+    @State private var agentActivityCache = AgentActivityItemCache()
 
     // MARK: Model selector sheet
     @State private var isShowingModelSelectorSheet = false
@@ -1266,11 +1292,55 @@ struct ChatDetailView: View {
     }
 
     private func activityItem(for message: ChatMessage) -> AgentActivityItem? {
-        AgentActivityItem(
+        let liveToolCalls = viewModel.localAlpineLiveToolCalls(for: message.id)
+        let liveStatus = viewModel.localAlpineLiveToolStatus(for: message.id)
+        if !liveToolCalls.isEmpty || liveStatus != nil {
+            return AgentActivityItem(
+                message: message,
+                liveToolCalls: liveToolCalls,
+                liveStatus: liveStatus
+            )
+        }
+
+        let signature = agentActivityCacheSignature(for: message)
+        if let cached = agentActivityCache.lookup(messageId: message.id, signature: signature) {
+            return cached.item
+        }
+
+        let item = AgentActivityItem(
             message: message,
-            liveToolCalls: viewModel.localAlpineLiveToolCalls(for: message.id),
-            liveStatus: viewModel.localAlpineLiveToolStatus(for: message.id)
+            liveToolCalls: [],
+            liveStatus: nil
         )
+        agentActivityCache.store(messageId: message.id, signature: signature, item: item)
+        return item
+    }
+
+    private func agentActivityCacheSignature(for message: ChatMessage) -> Int {
+        var signature = message.id.hashValue
+        signature &+= message.content.utf8.count &* 3
+        signature &+= message.isStreaming ? 31 : 7
+        signature &+= message.statusHistory.count &* 13
+        signature &+= message.files.count &* 17
+        signature &+= message.error?.content.utf8.count ?? 0
+        if let metadata = message.metadata {
+            signature &+= metadata.count &* 19
+            for key in [
+                "iexa_local_alpine_tool_calls",
+                "iexa_local_alpine_command_results",
+                "iexa_local_alpine_written_files",
+                "iexa_local_alpine_raw_result",
+                "iexa_local_alpine_result",
+                "iexa_local_alpine_final_summary"
+            ] {
+                if let value = metadata[key] {
+                    signature &+= key.hashValue
+                    signature &+= value.isEmpty ? 0 : 1
+                    signature &+= value.prefix(192).hashValue
+                }
+            }
+        }
+        return signature
     }
 
     private func hasRenderableAgentActivity(for message: ChatMessage) -> Bool {
