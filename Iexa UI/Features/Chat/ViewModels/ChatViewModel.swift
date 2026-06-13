@@ -273,15 +273,22 @@ final class ChatViewModel {
     var inputText: String = ""
     var attachments: [ChatAttachment] = []
     private var lastContextBudgetRefreshSignature: String = ""
-    func updateLiveContextBudgetPreview() {
+    func updateLiveContextBudgetPreview(force: Bool = false) {
+        let messageFingerprint = conversation?.messages.reduce(into: 0) { total, message in
+            total &+= message.content.utf8.count
+            total &+= message.files.count * 257
+            total &+= message.statusHistory.count * 131
+            total &+= (message.metadata?.values.reduce(0) { $0 + $1.utf8.count } ?? 0)
+        } ?? 0
         let signature = [
             selectedModelId ?? "",
             conversation?.id ?? "",
             "\(conversation?.messages.count ?? 0)",
+            "\(messageFingerprint)",
             "\(inputText.count)",
             "\(attachments.count)"
         ].joined(separator: "|")
-        guard signature != lastContextBudgetRefreshSignature else { return }
+        guard force || signature != lastContextBudgetRefreshSignature else { return }
         lastContextBudgetRefreshSignature = signature
         let modelId = selectedModelId ?? conversation?.model
         let visibleTokens = Self.estimatedTokensForVisibleConversation(conversation)
@@ -559,6 +566,9 @@ final class ChatViewModel {
     private let localAlpineAgentMaxSteps = 10
     private let localAlpineNoProgressRepeatLimit = 2
     private let localAlpineToolEventFlushInterval: TimeInterval = 0.22
+    private let localAlpineLiveToolPreviewLimit = 900
+    private let localAlpineLiveToolDetailLimit = 360
+    private let localAlpineLiveToolCommandLimit = 900
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     var localAlpinePendingOpenRequest: LocalAlpineOpenRequest?
@@ -15362,6 +15372,7 @@ final class ChatViewModel {
             originalTokens: originalTokens,
             compressedTokens: compressedTokens
         )
+        lastContextBudgetRefreshSignature = ""
     }
 
     private static func estimatedTokens(in apiMessages: [[String: Any]]) -> Int {
@@ -15603,10 +15614,15 @@ final class ChatViewModel {
         return conversation.messages.reduce(0) { total, message in
             guard !message.isStreaming,
                   !isLocalWorkspaceAgentResult(message),
-                  !isLocalAlpineAgentResult(message) else {
+                  !isLocalAlpineProtocolCorrectionMessage(message),
+                  !isLocalAlpineHiddenCorrectionParent(message),
+                  !isLocalAlpineHiddenToolParent(message) else {
                 return total
             }
-            return total + 4 + estimatedTokenCount(for: message.content)
+            let content = isLocalAlpineAgentResult(message)
+                ? localAlpineObservationContent(for: message)
+                : message.content
+            return total + 4 + estimatedTokenCount(for: content)
                 + message.files.count * 256
         }
     }
@@ -21902,33 +21918,59 @@ final class ChatViewModel {
         var calls = localAlpinePendingToolCallsByMessageId[messageId]
             ?? localAlpineLiveToolCallsByMessageId[messageId]
             ?? []
-        if let existingIndex = calls.firstIndex(where: { $0.id == event.call.id }) {
-            calls[existingIndex] = event.call
+        let uiCall = localAlpineLiveToolUICall(event.call)
+        if let existingIndex = calls.firstIndex(where: { $0.id == uiCall.id }) {
+            calls[existingIndex] = uiCall
         } else {
-            calls.append(event.call)
+            calls.append(uiCall)
         }
         localAlpinePendingToolCallsByMessageId[messageId] = calls
 
         let status = ChatStatusUpdate(
             action: "local_alpine_tool",
-            description: event.call.statusDescription,
-            done: event.call.phase == .result,
+            description: uiCall.statusDescription,
+            done: uiCall.phase == .result,
             occurredAt: .now
         )
         localAlpinePendingToolStatusByMessageId[messageId] = status
 
-        flushLocalAlpineToolEventIfNeeded(messageId: messageId, immediate: event.call.phase == .start || event.call.phase == .result)
+        flushLocalAlpineToolEventIfNeeded(messageId: messageId, immediate: uiCall.phase == .start || uiCall.phase == .result)
 
         Task {
             await RunLiveActivityService.shared.update(
                 id: messageId,
-                detail: event.call.statusDescription,
-                phase: event.call.phase == .result ? "完成" : "运行中",
-                progress: event.call.phase == .result ? 0.72 : nil,
-                isIndeterminate: event.call.phase != .result,
+                detail: uiCall.statusDescription,
+                phase: uiCall.phase == .result ? "完成" : "运行中",
+                progress: uiCall.phase == .result ? 0.72 : nil,
+                isIndeterminate: uiCall.phase != .result,
                 force: true
             )
         }
+    }
+
+    private func localAlpineLiveToolUICall(_ call: LocalAlpineToolCall) -> LocalAlpineToolCall {
+        LocalAlpineToolCall(
+            id: call.id,
+            runId: call.runId,
+            name: call.name,
+            phase: call.phase,
+            title: call.title,
+            detail: Self.prefixForLiveUI(call.detail, limit: localAlpineLiveToolDetailLimit),
+            cwd: call.cwd,
+            command: call.command.map { Self.prefixForLiveUI($0, limit: localAlpineLiveToolCommandLimit) },
+            exitCode: call.exitCode,
+            outputPreview: call.outputPreview.map { Self.prefixForLiveUI($0, limit: localAlpineLiveToolPreviewLimit) },
+            filePaths: Array(call.filePaths.prefix(8)),
+            lineDelta: call.lineDelta,
+            startedAtMs: call.startedAtMs,
+            completedAtMs: call.completedAtMs,
+            failed: call.failed
+        )
+    }
+
+    private static func prefixForLiveUI(_ value: String, limit: Int) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit)) + "\n...（前台预览已截断，完整结果保留在本地执行记录中）"
     }
 
     private func flushLocalAlpineToolEventIfNeeded(messageId: String, immediate: Bool) {
@@ -21963,12 +22005,26 @@ final class ChatViewModel {
         localAlpineToolEventFlushTasks[messageId]?.cancel()
         localAlpineToolEventFlushTasks.removeValue(forKey: messageId)
         if let pendingCalls = localAlpinePendingToolCallsByMessageId.removeValue(forKey: messageId) {
-            localAlpineLiveToolCallsByMessageId[messageId] = pendingCalls
+            if localAlpineLiveToolCallsByMessageId[messageId] != pendingCalls {
+                localAlpineLiveToolCallsByMessageId[messageId] = pendingCalls
+            }
         }
         if let pendingStatus = localAlpinePendingToolStatusByMessageId.removeValue(forKey: messageId) {
-            localAlpineLastLiveToolStatusByMessageId[messageId] = pendingStatus
+            if !Self.sameLiveToolStatus(localAlpineLastLiveToolStatusByMessageId[messageId], pendingStatus) {
+                localAlpineLastLiveToolStatusByMessageId[messageId] = pendingStatus
+            }
         }
         localAlpineLastToolEventFlushAtByMessageId[messageId] = Date()
+    }
+
+    private static func sameLiveToolStatus(_ lhs: ChatStatusUpdate?, _ rhs: ChatStatusUpdate) -> Bool {
+        lhs?.action == rhs.action
+            && lhs?.status == rhs.status
+            && lhs?.description == rhs.description
+            && lhs?.done == rhs.done
+            && lhs?.hidden == rhs.hidden
+            && lhs?.count == rhs.count
+            && lhs?.query == rhs.query
     }
 
     /// Refreshes conversation metadata (title, sources, follow-ups, files) from server.

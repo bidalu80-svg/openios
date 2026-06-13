@@ -128,10 +128,11 @@ struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
         var writeIndex = 0
 
         content.enumerateLines { line, _ in
+            let previewLine = Self.previewLine(line)
             if buffer.count < limit {
-                buffer.append(line)
+                buffer.append(previewLine)
             } else {
-                buffer[writeIndex] = line
+                buffer[writeIndex] = previewLine
                 writeIndex = (writeIndex + 1) % limit
             }
         }
@@ -147,6 +148,11 @@ struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
             ordered.append(contentsOf: buffer[..<writeIndex])
         }
         return ordered
+    }
+
+    private static func previewLine(_ line: String, limit: Int = 240) -> String {
+        guard line.count > limit else { return line }
+        return String(line.prefix(limit)) + " ..."
     }
 
     static func metadataString(for files: [LocalAlpineWrittenFile]) -> String? {

@@ -96,7 +96,10 @@ private struct AgentActivityStep: Identifiable, Hashable {
 }
 
 private struct AgentActivityItem: Identifiable, Hashable {
-    private static let uiOutputPreviewLimit = 6_000
+    private static let uiOutputPreviewLimit = 1_200
+    private static let floatingOutputPreviewLimit = 900
+    private static let floatingDetailLimit = 420
+    private static let floatingCommandLimit = 900
 
     let id: String
     let timestamp: Date
@@ -238,9 +241,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
     }
 
     func limitingSteps(to maxSteps: Int) -> AgentActivityItem {
-        guard maxSteps > 0, steps.count > maxSteps else { return self }
+        guard maxSteps > 0 else { return self }
 
-        let limitedSteps = Array(steps.suffix(maxSteps))
+        let limitedSteps = Array(steps.suffix(maxSteps)).map(Self.lightweightFloatingStep)
         let limitedFileCount = limitedSteps.filter { step in
             step.kind == .file || step.file != nil
         }.count
@@ -253,15 +256,38 @@ private struct AgentActivityItem: Identifiable, Hashable {
             id: id,
             timestamp: timestamp,
             isStreaming: isStreaming,
-            summary: "最近 \(maxSteps) 个步骤",
+            summary: steps.count > maxSteps ? "最近 \(maxSteps) 个步骤" : summary,
             fileCount: limitedFileCount,
             commandCount: limitedCommandCount,
             hasFailure: limitedSteps.contains { $0.failed },
             writtenFiles: limitedSteps.compactMap(\.file),
-            commandResults: commandResults,
-            toolCalls: toolCalls,
+            commandResults: [],
+            toolCalls: [],
             steps: limitedSteps
         )
+    }
+
+    private static func lightweightFloatingStep(_ step: AgentActivityStep) -> AgentActivityStep {
+        AgentActivityStep(
+            id: step.id,
+            kind: step.kind,
+            title: step.title,
+            detail: clippedFloatingText(step.detail, limit: floatingDetailLimit),
+            isRunning: step.isRunning,
+            failed: step.failed,
+            outputPreview: clippedFloatingText(step.outputPreview, limit: floatingOutputPreviewLimit),
+            file: step.file,
+            command: step.command.map { clippedFloatingText($0, limit: floatingCommandLimit) },
+            cwd: step.cwd,
+            previewThumbnailReference: step.previewThumbnailReference,
+            previewOpenURL: step.previewOpenURL,
+            previewFile: step.previewFile
+        )
+    }
+
+    private static func clippedFloatingText(_ text: String, limit: Int) -> String {
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit)) + "\n...（预览已截断）"
     }
 
     private static func file(for call: LocalAlpineToolCall, in files: [LocalAlpineWrittenFile]) -> LocalAlpineWrittenFile? {

@@ -122,6 +122,11 @@ final class StreamingContentStore {
     /// the character-by-character feel. The buffer simply grows and drains steadily.
     private let maxCharsPerFrame: Double = 6.0
 
+    /// Once the server has finished, keeping a multi-KB buffer on CADisplayLink
+    /// makes tool-heavy/code-heavy turns re-render for seconds after execution.
+    /// Short prose still gets the typewriter finish; large tails are flushed.
+    private let finishingFastFlushThreshold: Int = 2_400
+
     /// True from the frame that VIZ fast-forward is first completed (displayContent
     /// advanced to vizEndOffset) until the next drainTick where we start fresh.
     /// Used to trigger a single drain-state reset at the streaming→typewriter boundary.
@@ -269,7 +274,11 @@ final class StreamingContentStore {
 
         // If there are still chars to drain, enter finishing mode.
         // The display link keeps running; cleanup happens in drainTick().
-        if displayContent.count < displaySource.count {
+        let buffered = displaySource.count - displayContent.count
+        if buffered > finishingFastFlushThreshold {
+            displayContent = displaySource
+            completeCleanup()
+        } else if buffered > 0 {
             isFinishing = true
             // isActive stays true — the streaming view remains visible
         } else {
