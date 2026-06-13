@@ -2253,7 +2253,9 @@ final class ChatViewModel {
         - Prefer `file_read` for source inspection instead of shell `cat`, `sed`, `nl`, or inline Python readers; structured reads include line metadata and help the app detect no-progress loops.
         - For normal source files, call `file_read` once with only `path`. Do not split into offset/lines chunks unless the previous read result explicitly says `status: partial`, `truncated`, or the user asked for a range.
         - Use `read_image` for generated charts, downloaded screenshots, or image artifacts that need host-decoded dimensions/type metadata. Use `iexa-open /mnt/iexa/<image>` when the user should preview the image in chat.
-        - Website preview is mandatory after creating or modifying a website/app page. Do not tell the user to open files manually and do not stop after listing files. For static HTML/CSS/JS/SVG output, run `iexa-serve /mnt/iexa/<project-or-directory> 8080` (or another free port) as its own tool step; do not pipe it or combine it with curl/wget/head. Include the returned `http://localhost:<port>/` URL in your final answer so the app renders a yellow clickable link. For npm/Vite/React/etc. projects, start the dev server bound to `127.0.0.1`/`localhost`, verify it responds, then run `iexa-open http://localhost:<port>/` and give that exact URL.
+        - Website preview is mandatory after creating or modifying a website/app page. Do not tell the user to open files manually and do not stop after listing files. For static HTML/CSS/JS/SVG output, start the real Alpine Python server as its own tool step:
+          `cd /mnt/iexa/<project-or-directory> || exit 1; python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/iexa-preview-8080.log 2>&1 & printf 'Preview URL: http://localhost:8080/\\n'`
+          Use another free port if 8080 is unavailable. Include the exact `http://localhost:<port>/` URL in your final answer so the app renders a yellow clickable link. Use the Python server command above; do not invent or call custom preview helper commands. For npm/Vite/React/etc. projects, start the dev server bound to `127.0.0.1`/`localhost`, verify it responds, then run `iexa-open http://localhost:<port>/` and give that exact URL.
         \(memoryRule)- Never write source code through `shell_execute` using heredocs, redirection, `echo`, `printf`, `cat`, `tee`, or inline Python writer scripts.
         - Use `browser_use` for bounded HTTP/HTTPS fetches and optional save/open-preview flows. It is lightweight and non-interactive; it does not support full click/type browser automation.
         - Use `shell_execute` only for bounded list/search/run/install/build/test/verify commands.
@@ -2583,18 +2585,20 @@ final class ChatViewModel {
         - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `file_edit` -> `edit_file`, `read_image`/`image_read` -> host-decoded image metadata, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
         - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls. `browser_use` supports optional `save_to`/`output` plus `open_preview:true` so large HTML/SVG/JSON responses can be written under `/mnt/iexa` and opened through the preview bridge instead of being pasted into chat.
         - In-app preview bridge: after creating a user-viewable non-website file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.
-        - Website preview rule: after creating or changing any website/app page, start a localhost preview and give the user the clickable URL. For static HTML/CSS/JS/SVG, run `iexa-serve /mnt/iexa/<project-or-directory> 8080` as its own tool step; do not pipe it or combine it with curl/wget/head. It starts a local HTTP server, opens Iexa preview, and prints `Preview URL: http://localhost:<port>/`. Include that exact `http://localhost:<port>/` in the final answer. For npm/Vite/React/etc., start the dev server on `127.0.0.1`/`localhost`, verify with a bounded fetch/curl/wget, run `iexa-open http://localhost:<port>/`, and give the same URL. Never answer "open index.html manually" as the final preview path for a website project.
+        - Website preview rule: after creating or changing any website/app page, start a localhost preview and give the user the clickable URL. For static HTML/CSS/JS/SVG, run the real Alpine Python server as its own tool step:
+          `cd /mnt/iexa/<project-or-directory> || exit 1; python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/iexa-preview-8080.log 2>&1 & printf 'Preview URL: http://localhost:8080/\\n'`
+          Use another free port if 8080 is unavailable. Include the exact `http://localhost:<port>/` in the final answer. Use the Python server command above; do not invent or call custom preview helper commands. For npm/Vite/React/etc., start the dev server on `127.0.0.1`/`localhost`, verify with a bounded fetch/curl/wget, run `iexa-open http://localhost:<port>/`, and give the same URL. Never answer "open index.html manually" as the final preview path for a website project.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
         \(localAlpineBusyBoxCompatibilityNotes)
         - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, `lsof`, or macOS-only utilities.
         - Rootfs/environment/dependency checks: if the user asks whether Python/Lua/Node/C++ or dependencies exist, inspect the running Alpine rootfs/runtime/toolchain directly with bounded `command -v`, `--version`, `apk info`, `python3 -m pip list`, `find /usr/lib /usr/local/lib`, or small module-list commands. Do not invent `/mnt/iexa/rootfs`; `/mnt/iexa` is only the workspace mount. Do not only search `/mnt/iexa` project dependency files unless the user specifically asks for project dependency files.
-        - Service/process commands: prefer foreground commands and bounded verification. The exception is website preview servers: use `iexa-serve` for static sites or a framework dev server bound to localhost, then verify and share the localhost URL. Do not assume OpenRC/system services are available unless a prior command proves it.
+        - Service/process commands: prefer foreground commands and bounded verification. The exception is website preview servers: use `python3 -m http.server <port> --bind 127.0.0.1` for static sites or a framework dev server bound to localhost, then verify and share the localhost URL. Do not assume OpenRC/system services are available unless a prior command proves it.
         - `command`/`shell_execute` is shell text only. For structured tools, use top-level keys such as `read_file`, `file_read`, `write_files`, `file_write`, `edit_file`, `patch_file`, `delete_file`, `delete_files`, `list_dir`, `glob`, `grep`, `verify`, or `browser_use`.
         - Hard protocol rule: for any intermediate local-work step, pure prose means "stop and answer normally"; it will not be auto-upgraded into execution. Emit a real tool block only when you are intentionally requesting local execution.
         - JSON tool capabilities:
         \(capabilities)
         - Source file writes: all code files (`.py`, `.js`, `.ts`, `.lua`, `.sh`, `.html`, `.css`, `.swift`, `.java`, `.go`, `.rs`, etc.) are indentation/escaping-sensitive. Never write them through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files`/`file_write` with `code_lines`, `content_lines`, or `content_base64`; use same-path `edit_file`/`file_edit` or `patch_file` for targeted modifications.
-        - Website project creation: write `index.html`, CSS, JS, assets, and config files with structured JSON file tools first. After file writes and one bounded verification, run `iexa-serve /mnt/iexa/<project-or-directory> 8080` as a separate preview step and share the printed localhost URL.
+        - Website project creation: write `index.html`, CSS, JS, assets, and config files with structured JSON file tools first. After file writes and one bounded verification, start a static preview with `cd /mnt/iexa/<project-or-directory> || exit 1; python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/iexa-preview-8080.log 2>&1 & printf 'Preview URL: http://localhost:8080/\\n'` as a separate preview step and share the printed localhost URL.
         - Generated scripts must be runtime-compatible before execution: Python should avoid `time.sleep()`; shell scripts must be BusyBox ash/POSIX, not bash. If a delay is needed, set `delay` on the next command step.
         - Code write validation: source files must be written as exact UTF-8 bytes through structured tools. Python additionally gets AST/compile validation, but the structured-write rule applies to every programming language, not only `.py`.
         - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
@@ -8077,7 +8081,9 @@ final class ChatViewModel {
     }
 
     private func sendDirectLocalAlpineCommand(_ rawCommand: String, modelId: String) async {
-        let command = Self.normalizedLocalAlpineCommand(rawCommand)
+        let command = LocalAlpineAgentService.rewrittenPreviewServerCommandIfNeeded(
+            Self.normalizedLocalAlpineCommand(rawCommand)
+        )
         guard !command.isEmpty else { return }
         resetLocalAlpineAgentLoopForNewTurn()
         localAlpineAgentStopRequested = true
@@ -8623,6 +8629,30 @@ final class ChatViewModel {
         \(output)
         ```
         """
+    }
+
+    private static func lightweightLocalAlpineResultContent(for result: LocalAlpineAgentResult) -> String {
+        var details: [String] = []
+        if result.editedFileCount > 0 {
+            details.append("已编辑 \(result.editedFileCount) 个文件")
+        }
+        if result.executedCommandCount > 0 {
+            details.append("已运行 \(result.executedCommandCount) 条命令")
+        }
+        let completedTools = result.toolCalls.filter { $0.phase == .result }.count
+        if completedTools > 0 {
+            details.append("已执行 \(completedTools) 个工具步骤")
+        }
+
+        let state = result.hadFailure ? "本地任务已结束，有错误需要处理。" : "本地任务已完成。"
+        var lines = ["Local Alpine 执行结果", "", state]
+        if !details.isEmpty {
+            lines.append("")
+            lines.append("\(details.joined(separator: "，"))。")
+        }
+        lines.append("")
+        lines.append("详细输出已保留在工具步骤和本地上下文中。")
+        return lines.joined(separator: "\n")
     }
 
     private static func normalizedLocalAlpineCommand(_ rawCommand: String) -> String {
@@ -20030,9 +20060,10 @@ final class ChatViewModel {
                 : "本地输入已取消",
             done: true
         )
+        let visibleResultContent = Self.lightweightLocalAlpineResultContent(for: result)
         updateAssistantMessage(
             id: resultMessageId,
-            content: result.summary,
+            content: visibleResultContent,
             isStreaming: false,
             statusHistory: [doneStatus]
         )
@@ -20061,7 +20092,7 @@ final class ChatViewModel {
         recordLocalAlpineFailures(from: result)
         recordLocalAlpineCompletedCommands(from: result)
         conversation?.history.updateNode(id: resultMessageId) { node in
-            node.content = result.summary
+            node.content = visibleResultContent
             node.done = true
             node.statusHistory = [doneStatus]
             node.metadata = resultMetadata
@@ -20169,8 +20200,10 @@ final class ChatViewModel {
         if laterMessages.contains(where: { $0.role == .assistant && !Self.isLocalAlpineAgentResult($0) }) {
             return false
         }
+        let resultObservation = messages[resultIndex].metadata?["iexa_local_alpine_raw_result"]
+            ?? messages[resultIndex].content
         let resultText = Self.normalizedLocalAlpineResultTextForFollowUpCheck(
-            messages[resultIndex].content + "\n" + (messages[resultIndex].statusHistory.last?.description ?? "")
+            resultObservation + "\n" + (messages[resultIndex].statusHistory.last?.description ?? "")
         )
         if Self.containsLocalAlpineFailureMarker(resultText) {
             return true
@@ -21177,6 +21210,7 @@ final class ChatViewModel {
         - Never ask the user to send back local output; the host app returns Local Alpine output automatically.
         - Use BusyBox/ash-compatible commands. Prefer `list_dir`, `glob`, `grep`, `verify`, and `browser_use` wrappers; if raw shell is necessary, avoid GNU/bash-only syntax such as `find -printf`, `grep -P`, `[[ ... ]]`, `source`, `mapfile`, and process substitution.
         - Keep visible text before a tool block empty or one short progress sentence.
+        - Do not paste prior command output, file contents, code, or large tables into visible prose. Use the latest observation as context and either call the next tool or give a concise final answer when the controller says the task is complete.
         [/Local Alpine continuation]
         """
         appendSystemInstruction(instruction, marker: "[Local Alpine continuation]", to: &messages)
@@ -21222,6 +21256,7 @@ final class ChatViewModel {
         - For script/project commands, say what ran, whether it succeeded, and the key output.
         - If files were created or changed, mention their paths.
         - If the command failed, explain the immediate error and the next fix path, but do not run another command until the user asks.
+        - Do not reproduce full command output, file contents, source code, HTML/CSS/JS, markdown tables, or long directory listings. If the output is long, mention only the important filenames/counts/errors and say that the detailed tool output is available in the step card.
         Keep it short and based only on the real Local Alpine output.
         Always output at least one visible sentence. Do not output JSON, code fences, tool blocks, or protocol tags.
         [/Local Alpine final summary]

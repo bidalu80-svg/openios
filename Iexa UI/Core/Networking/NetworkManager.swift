@@ -6,7 +6,7 @@ final class NetworkManager: NSObject, Sendable {
     let serverConfig: ServerConfig
     private let keychain: KeychainService
     private let logger = Logger(subsystem: "com.openui", category: "Network")
-    private static let defaultExternalAPIUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+    private static let defaultExternalAPIUserAgent = "codex_vscode/0.140.0-alpha.2 (Windows 10.0.19045; x86_64) unknown (VS Code; 26.609.30741)"
 
     let session: URLSession
     private let certificateDelegate: CertificateTrustDelegate?

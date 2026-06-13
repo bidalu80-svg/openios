@@ -840,7 +840,15 @@ private struct AgentActivityItem: Identifiable, Hashable {
         let statusHistory = liveStatus.map { message.statusHistory + [$0] } ?? message.statusHistory
         let officePreviewReferences = Self.officePreviewReferences(from: message.files)
         let officeDocumentFiles = message.files.filter(Self.isOfficeDocumentFile)
-        let parsed = ParsedLocalAlpineResult(content: message.content, metadata: metadata)
+        let parsed = ParsedLocalAlpineResult(
+            content: Self.lightweightActivityParseContent(
+                message.content,
+                writtenFiles: writtenFiles,
+                commandResults: uiCommandResults,
+                toolCalls: toolCalls
+            ),
+            metadata: metadata
+        )
         let visibleCommands = uiCommandResults.filter {
             $0.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "write_files"
         }
@@ -914,6 +922,22 @@ private struct AgentActivityItem: Identifiable, Hashable {
     private static func clippedUIPreview(_ text: String) -> String {
         guard text.count > uiOutputPreviewLimit else { return text }
         return String(text.prefix(uiOutputPreviewLimit)) + "\n...（预览已截断，完整内容已保留在模型上下文/本地结果中）"
+    }
+
+    private static func lightweightActivityParseContent(
+        _ content: String,
+        writtenFiles: [LocalAlpineWrittenFile],
+        commandResults: [LocalAlpineAgentCommandResult],
+        toolCalls: [LocalAlpineToolCall]
+    ) -> String {
+        guard writtenFiles.isEmpty,
+              commandResults.isEmpty,
+              toolCalls.isEmpty else {
+            return ""
+        }
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= 12_000 else { return "" }
+        return trimmed
     }
 
     private static func mergedToolCalls(
@@ -6878,6 +6902,10 @@ private struct IsolatedAssistantMessage: View {
             if vIdx >= 0 && vIdx < message.versions.count { return message.versions[vIdx].content }
             return message.content
         }()
+        let renderableRawContent = Self.localAlpineFinalSummaryDisplayContent(
+            rawContent,
+            metadata: message.metadata
+        )
 
         let baseSources: [ChatSourceReference] = isActivelyStreaming
             ? streamingStore.streamingSources : message.sources
@@ -6894,9 +6922,9 @@ private struct IsolatedAssistantMessage: View {
         // \n as line breaks instead of spaces), so no convertSoftBreaksToHard needed.
         let displayContent: String = {
             if isActivelyStreaming {
-                return Self.safeAssistantRenderableContent(rawContent)
+                return Self.safeAssistantRenderableContent(renderableRawContent)
             }
-            let safeRawContent = Self.safeAssistantRenderableContent(rawContent)
+            let safeRawContent = Self.safeAssistantRenderableContent(renderableRawContent)
             let resolved = Self.resolveRelativeURLs(safeRawContent, baseURL: serverBaseURL)
             let preferDomain = UserDefaults.standard.object(forKey: "citationShowDomain") as? Bool ?? true
             return Self.preprocessCitations(resolved, sources: effectiveSources, preferDomain: preferDomain)
@@ -7095,6 +7123,19 @@ private struct IsolatedAssistantMessage: View {
         }
         let cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(content)
         return InlineDataPayloadSanitizer.removingHiddenPayloadArtifacts(from: cleaned)
+    }
+
+    private static func localAlpineFinalSummaryDisplayContent(
+        _ content: String,
+        metadata: [String: String]?
+    ) -> String {
+        guard metadata?["iexa_local_alpine_final_summary"] != nil else {
+            return content
+        }
+        let limit = 8_000
+        guard content.count > limit else { return content }
+        return String(content.prefix(limit))
+            + "\n\n...（回复过长，前台显示已截断；完整工具结果保留在本地上下文中。）"
     }
 
     private static func containsCodeFence(_ text: String) -> Bool {
@@ -7317,7 +7358,24 @@ private struct LocalAlpineResultCard: View {
     }
 
     private var parsed: ParsedLocalAlpineResult {
-        ParsedLocalAlpineResult(content: content, metadata: metadata)
+        ParsedLocalAlpineResult(content: lightweightParseContent, metadata: metadata)
+    }
+
+    private var hasFailure: Bool {
+        parsed.hasNonZeroExit
+            || commandResults.contains(where: { $0.failed })
+            || toolCalls.contains(where: { $0.failed })
+    }
+
+    private var lightweightParseContent: String {
+        guard writtenFiles.isEmpty,
+              commandResults.isEmpty,
+              toolCalls.isEmpty else {
+            return ""
+        }
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= 12_000 else { return "" }
+        return trimmed
     }
 
     private var statusText: String {
@@ -7353,7 +7411,7 @@ private struct LocalAlpineResultCard: View {
 
     private var statusColor: Color {
         if isStreaming { return theme.brandPrimary }
-        if parsed.hasNonZeroExit { return .orange }
+        if hasFailure { return .orange }
         return theme.textTertiary
     }
 
@@ -7395,7 +7453,7 @@ private struct LocalAlpineResultCard: View {
                             .fill(statusColor.opacity(theme.isDark ? 0.18 : 0.12))
                             .frame(width: 26, height: 26)
 
-                        Image(systemName: isStreaming ? "terminal" : (parsed.hasNonZeroExit ? "exclamationmark" : "checkmark"))
+                        Image(systemName: isStreaming ? "terminal" : (hasFailure ? "exclamationmark" : "checkmark"))
                             .scaledFont(size: 12, weight: .bold)
                             .foregroundStyle(statusColor)
                     }
@@ -7403,7 +7461,7 @@ private struct LocalAlpineResultCard: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(statusText)
                             .scaledFont(size: 13, weight: .semibold)
-                            .foregroundStyle(parsed.hasNonZeroExit ? .orange : theme.textPrimary)
+                            .foregroundStyle(hasFailure ? .orange : theme.textPrimary)
                             .lineLimit(1)
                             .truncationMode(.tail)
 

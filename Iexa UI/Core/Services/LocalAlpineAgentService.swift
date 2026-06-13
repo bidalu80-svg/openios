@@ -840,7 +840,7 @@ actor LocalAlpineAgentService {
             if let shellCommand = command.command?.trimmingCharacters(in: .whitespacesAndNewlines),
                !shellCommand.isEmpty,
                shouldRunShellCommand {
-                let commandToExecute = shellCommand
+                let commandToExecute = Self.rewrittenPreviewServerCommandIfNeeded(shellCommand)
 
                 guard !commandToExecute.isEmpty else {
                     if !stepLines.isEmpty {
@@ -4908,6 +4908,69 @@ actor LocalAlpineAgentService {
 
     private nonisolated static func shellSingleQuotedStatic(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    nonisolated static func rewrittenPreviewServerCommandIfNeeded(_ command: String) -> String {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = shellWordsForSimpleCommand(trimmed)
+        guard words.first == "iexa-serve" else { return command }
+
+        let directory = words.dropFirst().first ?? "/mnt/iexa"
+        let rawPort = words.dropFirst(2).first.flatMap { Int($0) } ?? 8080
+        let port = min(max(rawPort, 1024), 65_535)
+        let logPath = "/tmp/iexa-preview-\(port).log"
+        return """
+        command -v python3 >/dev/null 2>&1 || { printf 'python3 not found\\n' >&2; exit 127; }
+        cd \(shellSingleQuotedStatic(directory)) || exit 1
+        python3 -m http.server \(port) --bind 127.0.0.1 >\(shellSingleQuotedStatic(logPath)) 2>&1 &
+        printf 'Preview URL: http://localhost:\(port)/\\n'
+        """
+    }
+
+    private nonisolated static func shellWordsForSimpleCommand(_ command: String) -> [String] {
+        var words: [String] = []
+        var current = ""
+        var quote: Character?
+        var escaping = false
+
+        for character in command {
+            if escaping {
+                current.append(character)
+                escaping = false
+                continue
+            }
+            if character == "\\" {
+                escaping = true
+                continue
+            }
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                } else {
+                    current.append(character)
+                }
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character
+                continue
+            }
+            if character == " " || character == "\t" || character == "\n" {
+                if !current.isEmpty {
+                    words.append(current)
+                    current.removeAll(keepingCapacity: true)
+                }
+                continue
+            }
+            current.append(character)
+        }
+        if escaping {
+            current.append("\\")
+        }
+        if !current.isEmpty {
+            words.append(current)
+        }
+        return words
     }
 
     private func unsafeCodeFileWriteWarning(for command: String) -> String? {
