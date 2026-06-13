@@ -6303,10 +6303,29 @@ actor LocalAlpineAgentService {
                 blocks.append(nsContent.substring(with: match.range(at: 1)).trimmingCharacters(in: .newlines))
             }
         }
+        blocks.append(contentsOf: taggedToolInstructionBodies(in: content))
         for range in pseudoToolCallRangesWithPayload(in: content, includeIncomplete: false) {
             blocks.append(nsContent.substring(with: range.payload).trimmingCharacters(in: .newlines))
         }
         return blocks
+    }
+
+    nonisolated private static func taggedToolInstructionBodies(in content: String) -> [String] {
+        let pattern = #"<\s*(?:tool_call|tool_use|function_call|function)\b[^>]*>([\s\S]*?)</\s*(?:tool_call|tool_use|function_call|function)\s*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return []
+        }
+        let nsContent = content as NSString
+        let fullRange = NSRange(location: 0, length: nsContent.length)
+        var seen: Set<String> = []
+        return regex.matches(in: content, range: fullRange).compactMap { match in
+            guard match.numberOfRanges >= 2 else { return nil }
+            let body = nsContent.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard bodyContainsInstructionJSON(body), !seen.contains(body) else { return nil }
+            seen.insert(body)
+            return body
+        }
     }
 
     nonisolated private static func pseudoToolCallRanges(in content: String, includeIncomplete: Bool) -> [NSRange] {

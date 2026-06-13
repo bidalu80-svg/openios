@@ -126,6 +126,7 @@ final class LocalNativeToolService {
 
     static func containsNativeToolBlock(_ content: String) -> Bool {
         content.range(of: #"```iexa_native\s*[\s\S]*?```"#, options: [.regularExpression, .caseInsensitive]) != nil
+            || taggedNativeToolBodies(in: content).isEmpty == false
             || looseNativeToolBodies(in: content).isEmpty == false
     }
 
@@ -1172,6 +1173,10 @@ final class LocalNativeToolService {
             of: #"```iexa_native\s*[\s\S]*?```"#,
             with: "",
             options: .regularExpression
+        ).replacingOccurrences(
+            of: #"<\s*(?:tool_call|tool_use|function_call|function|iexa_native)\b[^>]*>[\s\S]*?</\s*(?:tool_call|tool_use|function_call|function|iexa_native)\s*>"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
         )
         let looseBodies = looseNativeToolBodies(in: withoutNativeFence)
         guard !looseBodies.isEmpty else { return withoutNativeFence }
@@ -1209,6 +1214,8 @@ final class LocalNativeToolService {
             }
         }
 
+        bodies.append(contentsOf: taggedNativeToolBodies(in: content))
+
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         if bodyLooksLikeNativeToolJSON(trimmed) {
             bodies.append(trimmed)
@@ -1219,6 +1226,24 @@ final class LocalNativeToolService {
             guard !seen.contains(body) else { return false }
             seen.insert(body)
             return true
+        }
+    }
+
+    private static func taggedNativeToolBodies(in content: String) -> [String] {
+        let pattern = #"<\s*(?:tool_call|tool_use|function_call|function|iexa_native)\b[^>]*>([\s\S]*?)</\s*(?:tool_call|tool_use|function_call|function|iexa_native)\s*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return []
+        }
+        let ns = content as NSString
+        let matches = regex.matches(in: content, range: NSRange(location: 0, length: ns.length))
+        var seen: Set<String> = []
+        return matches.compactMap { match in
+            guard match.numberOfRanges >= 2 else { return nil }
+            let body = ns.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard bodyLooksLikeNativeToolJSON(body), !seen.contains(body) else { return nil }
+            seen.insert(body)
+            return body
         }
     }
 
@@ -1398,7 +1423,7 @@ final class LocalNativeToolService {
         )
         repaired = regexReplace(
             in: repaired,
-            pattern: #"("(?:action|name|tool|browser_use_action|browser_action|operation|op|functionName|function_name|toolName|tool_name)"\s*:\s*)([A-Za-z_][A-Za-z0-9_\.\-]*)(\s*[,}])"#,
+            pattern: #"("(?:action|name|tool|path|file|file_path|cwd|command|cmd|old|new|old_text|new_text|content|text|url|href|link|query|keywords|selector|browser_use_action|browser_action|operation|op|functionName|function_name|toolName|tool_name)"\s*:\s*)(?!["\{\[])([^,\}\n]+)(\s*[,}])"#,
             replacement: #"$1"$2"$3"#
         )
         return repaired == trimmed ? nil : repaired

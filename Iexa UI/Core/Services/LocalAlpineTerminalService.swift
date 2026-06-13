@@ -974,24 +974,82 @@ actor LocalAlpineTerminalService {
         runtime_dir=/tmp/iexa-serve
         mkdir -p "$runtime_dir"
 
-        port_in_use() {
+        print_urls() {
+          url="http://localhost:$1/"
+          printf 'Preview URL: %s\\n' "$url"
+          printf 'Loopback URL: http://127.0.0.1:%s/\\n' "$1"
+          printf '访问地址: %s\\n' "$url"
+          emit_open_marker "$url"
+        }
+
+        pid_alive() {
+          [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
+        }
+
+        socket_port_in_use() {
           if command -v nc >/dev/null 2>&1; then
-            nc -z 127.0.0.1 "$1" >/dev/null 2>&1
-            return $?
+            nc -z 127.0.0.1 "$1" >/dev/null 2>&1 && return 0
+            return 1
+          fi
+          if [ -r /proc/net/tcp ]; then
+            port_hex=$(printf '%04X' "$1" 2>/dev/null || true)
+            if [ -n "$port_hex" ]; then
+              awk -v p=":$port_hex" 'tolower($2) ~ tolower(p) && $4 == "0A" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp 2>/dev/null && return 0
+              if [ -r /proc/net/tcp6 ]; then
+                awk -v p=":$port_hex" 'tolower($2) ~ tolower(p) && $4 == "0A" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp6 2>/dev/null && return 0
+              fi
+              return 1
+            fi
+          fi
+          return 2
+        }
+
+        existing_server_for_dir() {
+          candidate_port="$1"
+          candidate_pidfile="$runtime_dir/$candidate_port.pid"
+          candidate_dirfile="$runtime_dir/$candidate_port.dir"
+          [ -f "$candidate_pidfile" ] || return 1
+          candidate_pid=$(cat "$candidate_pidfile" 2>/dev/null || true)
+          pid_alive "$candidate_pid" || return 1
+          socket_port_in_use "$candidate_port"
+          socket_status=$?
+          if [ "$socket_status" -eq 1 ]; then
+            return 1
+          fi
+          candidate_dir=$(cat "$candidate_dirfile" 2>/dev/null || true)
+          if [ -z "$candidate_dir" ] || [ "$candidate_dir" = "$dir" ]; then
+            printf 'Iexa local preview server already running.\\n'
+            printf 'Directory: %s\\n' "$dir"
+            printf 'PID: %s\\n' "$candidate_pid"
+            print_urls "$candidate_port"
+            exit 0
+          fi
+          return 1
+        }
+
+        port_in_use() {
+          socket_port_in_use "$1"
+          socket_status=$?
+          if [ "$socket_status" -eq 0 ]; then
+            return 0
+          elif [ "$socket_status" -eq 1 ]; then
+            return 1
           fi
           pidfile="$runtime_dir/$1.pid"
           if [ -f "$pidfile" ]; then
             pid=$(cat "$pidfile" 2>/dev/null || true)
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            if pid_alive "$pid"; then
               return 0
             fi
           fi
           return 1
         }
 
+        existing_server_for_dir "$port"
         start_port=$port
         while port_in_use "$port"; do
           port=$((port + 1))
+          existing_server_for_dir "$port"
           if [ "$port" -gt $((start_port + 50)) ]; then
             printf 'iexa-serve: no free localhost port found near %s\\n' "$start_port" >&2
             exit 1
@@ -1000,6 +1058,7 @@ actor LocalAlpineTerminalService {
 
         log="$runtime_dir/$port.log"
         pidfile="$runtime_dir/$port.pid"
+        dirfile="$runtime_dir/$port.dir"
 
         if command -v python3 >/dev/null 2>&1; then
           if command -v nohup >/dev/null 2>&1; then
@@ -1022,20 +1081,28 @@ actor LocalAlpineTerminalService {
         fi
 
         printf '%s\\n' "$pid" > "$pidfile"
-        sleep 0.4
+        printf '%s\\n' "$dir" > "$dirfile"
+        sleep 1 2>/dev/null || true
         if ! kill -0 "$pid" 2>/dev/null; then
           printf 'iexa-serve: server failed to start. Log: %s\\n' "$log" >&2
           [ -f "$log" ] && tail -40 "$log" >&2
+          rm -f "$pidfile" "$dirfile"
+          exit 1
+        fi
+        socket_port_in_use "$port"
+        socket_status=$?
+        if [ "$socket_status" -eq 1 ]; then
+          printf 'iexa-serve: server did not listen on localhost:%s. Log: %s\\n' "$port" "$log" >&2
+          [ -f "$log" ] && tail -40 "$log" >&2
+          kill "$pid" 2>/dev/null || true
+          rm -f "$pidfile" "$dirfile"
           exit 1
         fi
 
-        url="http://localhost:$port/"
         printf 'Iexa local preview server started.\\n'
         printf 'Directory: %s\\n' "$dir"
         printf 'PID: %s\\n' "$pid"
-        printf 'Preview URL: %s\\n' "$url"
-        printf '访问地址: %s\\n' "$url"
-        emit_open_marker "$url"
+        print_urls "$port"
         exit 0
         """
         try writeExecutableText(serveScript, to: binURL.appendingPathComponent("iexa-serve"))

@@ -2248,11 +2248,12 @@ final class ChatViewModel {
 
         Tool rules:
         - Create source files with `file_write`. Modify existing files with `file_read` followed by `file_edit` or a complete same-path `file_write`.
+        - Website project workflow: create or update `index.html`, CSS, JS, assets, and config files through structured `file_write`/`file_edit` only. Never create website source files with shell heredocs, redirection, `cat`, `tee`, `echo`, `printf`, or inline writer scripts.
         - Treat `file_write`, `file_edit`, and deletion targets outside `/mnt/iexa` as advanced sandbox-rootfs operations. Only do them when the user explicitly names that path or when a package/runtime setup requires it.
         - Prefer `file_read` for source inspection instead of shell `cat`, `sed`, `nl`, or inline Python readers; structured reads include line metadata and help the app detect no-progress loops.
         - For normal source files, call `file_read` once with only `path`. Do not split into offset/lines chunks unless the previous read result explicitly says `status: partial`, `truncated`, or the user asked for a range.
         - Use `read_image` for generated charts, downloaded screenshots, or image artifacts that need host-decoded dimensions/type metadata. Use `iexa-open /mnt/iexa/<image>` when the user should preview the image in chat.
-        - Website preview is mandatory after creating or modifying a website/app page. Do not tell the user to open files manually and do not stop after listing files. For static HTML/CSS/JS/SVG output, run `iexa-serve /mnt/iexa/<project-or-directory> 8080` (or another free port) and include the returned `http://localhost:<port>/` URL in your final answer so the app renders a yellow clickable link. For npm/Vite/React/etc. projects, start the dev server bound to `127.0.0.1`/`localhost`, verify it responds, then run `iexa-open http://localhost:<port>/` and give that exact URL.
+        - Website preview is mandatory after creating or modifying a website/app page. Do not tell the user to open files manually and do not stop after listing files. For static HTML/CSS/JS/SVG output, run `iexa-serve /mnt/iexa/<project-or-directory> 8080` (or another free port) as its own tool step; do not pipe it or combine it with curl/wget/head. Include the returned `http://localhost:<port>/` URL in your final answer so the app renders a yellow clickable link. For npm/Vite/React/etc. projects, start the dev server bound to `127.0.0.1`/`localhost`, verify it responds, then run `iexa-open http://localhost:<port>/` and give that exact URL.
         \(memoryRule)- Never write source code through `shell_execute` using heredocs, redirection, `echo`, `printf`, `cat`, `tee`, or inline Python writer scripts.
         - Use `browser_use` for bounded HTTP/HTTPS fetches and optional save/open-preview flows. It is lightweight and non-interactive; it does not support full click/type browser automation.
         - Use `shell_execute` only for bounded list/search/run/install/build/test/verify commands.
@@ -2582,7 +2583,7 @@ final class ChatViewModel {
         - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `file_edit` -> `edit_file`, `read_image`/`image_read` -> host-decoded image metadata, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
         - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls. `browser_use` supports optional `save_to`/`output` plus `open_preview:true` so large HTML/SVG/JSON responses can be written under `/mnt/iexa` and opened through the preview bridge instead of being pasted into chat.
         - In-app preview bridge: after creating a user-viewable non-website file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.
-        - Website preview rule: after creating or changing any website/app page, start a localhost preview and give the user the clickable URL. For static HTML/CSS/JS/SVG, run `iexa-serve /mnt/iexa/<project-or-directory> 8080`; it starts a local HTTP server, opens Iexa preview, and prints `Preview URL: http://localhost:<port>/`. Include that exact `http://localhost:<port>/` in the final answer. For npm/Vite/React/etc., start the dev server on `127.0.0.1`/`localhost`, verify with a bounded fetch/curl/wget, run `iexa-open http://localhost:<port>/`, and give the same URL. Never answer "open index.html manually" as the final preview path for a website project.
+        - Website preview rule: after creating or changing any website/app page, start a localhost preview and give the user the clickable URL. For static HTML/CSS/JS/SVG, run `iexa-serve /mnt/iexa/<project-or-directory> 8080` as its own tool step; do not pipe it or combine it with curl/wget/head. It starts a local HTTP server, opens Iexa preview, and prints `Preview URL: http://localhost:<port>/`. Include that exact `http://localhost:<port>/` in the final answer. For npm/Vite/React/etc., start the dev server on `127.0.0.1`/`localhost`, verify with a bounded fetch/curl/wget, run `iexa-open http://localhost:<port>/`, and give the same URL. Never answer "open index.html manually" as the final preview path for a website project.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
         \(localAlpineBusyBoxCompatibilityNotes)
         - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, or macOS-only utilities.
@@ -2593,6 +2594,7 @@ final class ChatViewModel {
         - JSON tool capabilities:
         \(capabilities)
         - Source file writes: all code files (`.py`, `.js`, `.ts`, `.lua`, `.sh`, `.html`, `.css`, `.swift`, `.java`, `.go`, `.rs`, etc.) are indentation/escaping-sensitive. Never write them through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files`/`file_write` with `code_lines`, `content_lines`, or `content_base64`; use same-path `edit_file`/`file_edit` or `patch_file` for targeted modifications.
+        - Website project creation: write `index.html`, CSS, JS, assets, and config files with structured JSON file tools first. After file writes and one bounded verification, run `iexa-serve /mnt/iexa/<project-or-directory> 8080` as a separate preview step and share the printed localhost URL.
         - Generated scripts must be runtime-compatible before execution: Python should avoid `time.sleep()`; shell scripts must be BusyBox ash/POSIX, not bash. If a delay is needed, set `delay` on the next command step.
         - Code write validation: source files must be written as exact UTF-8 bytes through structured tools. Python additionally gets AST/compile validation, but the structured-write rule applies to every programming language, not only `.py`.
         - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
@@ -9956,6 +9958,9 @@ final class ChatViewModel {
             }
             return object
         }
+        if let looseObject = looseToolArgumentObject(trimmed) {
+            return looseObject
+        }
         return nil
     }
 
@@ -9979,10 +9984,131 @@ final class ChatViewModel {
         )
         repaired = regexReplace(
             in: repaired,
-            pattern: #"("(?:action|name|tool|path|file|file_path|cwd|command|cmd|old|new|old_text|new_text|content|text|url|query|browser_use_action|browser_action|operation|op|functionName|function_name|toolName|tool_name)"\s*:\s*)([A-Za-z_][A-Za-z0-9_\.\-\/]*)(\s*[,}])"#,
+            pattern: #"("(?:action|name|tool|path|file|file_path|cwd|command|cmd|old|new|old_text|new_text|content|text|url|href|link|query|keywords|selector|browser_use_action|browser_action|operation|op|functionName|function_name|toolName|tool_name)"\s*:\s*)(?!["\{\[])([^,\}\n]+)(\s*[,}])"#,
             replacement: #"$1"$2"$3"#
         )
         return repaired == trimmed ? nil : repaired
+    }
+
+    private static func looseToolArgumentObject(_ raw: String) -> [String: Any]? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{"), trimmed.hasSuffix("}") else { return nil }
+        let start = trimmed.index(after: trimmed.startIndex)
+        let end = trimmed.index(before: trimmed.endIndex)
+        let body = String(trimmed[start..<end])
+        var object: [String: Any] = [:]
+
+        for part in splitLooseTopLevel(body, separator: ",") {
+            guard let colonIndex = firstLooseTopLevelColon(in: part) else { continue }
+            let rawKey = String(part[..<colonIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = stripLooseStringQuotes(rawKey)
+            guard !key.isEmpty else { continue }
+            let rawValue = String(part[part.index(after: colonIndex)...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            object[key] = looseToolArgumentValue(rawValue)
+        }
+
+        return object.isEmpty ? nil : object
+    }
+
+    private static func splitLooseTopLevel(_ text: String, separator: Character) -> [String] {
+        var parts: [String] = []
+        var current = ""
+        var stringDelimiter: Character?
+        var escaped = false
+        var depth = 0
+
+        for character in text {
+            if let delimiter = stringDelimiter {
+                current.append(character)
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == delimiter {
+                    stringDelimiter = nil
+                }
+                continue
+            }
+
+            if character == "\"" || character == "'" {
+                stringDelimiter = character
+                current.append(character)
+            } else if character == "{" || character == "[" || character == "(" {
+                depth += 1
+                current.append(character)
+            } else if character == "}" || character == "]" || character == ")" {
+                depth = max(0, depth - 1)
+                current.append(character)
+            } else if character == separator, depth == 0 {
+                parts.append(current)
+                current = ""
+            } else {
+                current.append(character)
+            }
+        }
+
+        if !current.isEmpty {
+            parts.append(current)
+        }
+        return parts
+    }
+
+    private static func firstLooseTopLevelColon(in text: String) -> String.Index? {
+        var stringDelimiter: Character?
+        var escaped = false
+        var depth = 0
+
+        for index in text.indices {
+            let character = text[index]
+            if let delimiter = stringDelimiter {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == delimiter {
+                    stringDelimiter = nil
+                }
+                continue
+            }
+
+            if character == "\"" || character == "'" {
+                stringDelimiter = character
+            } else if character == "{" || character == "[" || character == "(" {
+                depth += 1
+            } else if character == "}" || character == "]" || character == ")" {
+                depth = max(0, depth - 1)
+            } else if character == ":", depth == 0 {
+                return index
+            }
+        }
+        return nil
+    }
+
+    private static func looseToolArgumentValue(_ raw: String) -> Any {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let data = trimmed.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) {
+            return object
+        }
+        let lower = trimmed.lowercased()
+        if lower == "true" { return true }
+        if lower == "false" { return false }
+        if lower == "null" { return NSNull() }
+        if let intValue = Int(trimmed) { return intValue }
+        if let doubleValue = Double(trimmed) { return doubleValue }
+        return stripLooseStringQuotes(trimmed)
+    }
+
+    private static func stripLooseStringQuotes(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2,
+              let first = trimmed.first,
+              let last = trimmed.last,
+              (first == "\"" && last == "\"" || first == "'" && last == "'") else {
+            return trimmed
+        }
+        return String(trimmed.dropFirst().dropLast())
     }
 
     private static func regexReplace(
@@ -10511,7 +10637,7 @@ final class ChatViewModel {
                 return LocalAlpineNativeToolCall(
                     id: id,
                     name: partial.name,
-                    arguments: ChatViewModel.normalizedToolArgumentsJSONString(arguments)
+                    arguments: arguments
                 )
             }
         }
@@ -11668,9 +11794,8 @@ final class ChatViewModel {
 
     private static func localAlpineNativeToolEnvelopeContent(for call: LocalAlpineNativeToolCall) -> String {
         let argumentsObject: Any
-        if let data = call.arguments.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) {
-            argumentsObject = json
+        if let dict = jsonObjectFromToolArguments(call.arguments) as? [String: Any] {
+            argumentsObject = dict
         } else {
             argumentsObject = ["value": call.arguments]
         }
@@ -11919,8 +12044,7 @@ final class ChatViewModel {
 
     private static func localNativeFunctionToolEnvelopeContent(for call: LocalAlpineNativeToolCall) -> String {
         var argumentsObject: [String: Any] = [:]
-        if let data = call.arguments.data(using: .utf8),
-           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        if let dict = jsonObjectFromToolArguments(call.arguments) as? [String: Any] {
             argumentsObject = dict
         } else if !call.arguments.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             argumentsObject["query"] = call.arguments
