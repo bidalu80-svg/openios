@@ -914,6 +914,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
         guard Self.isActivityMessage(message) else {
             return nil
         }
+        let startedAt = CFAbsoluteTimeGetCurrent()
         let metadata = message.metadata
         let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata?["iexa_local_alpine_written_files"])
         let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata?["iexa_local_alpine_command_results"])
@@ -967,6 +968,15 @@ private struct AgentActivityItem: Identifiable, Hashable {
             officePreviewReferences: officePreviewReferences,
             officeDocumentFiles: officeDocumentFiles
         )
+
+        let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1_000
+        if elapsedMs >= 8 {
+            let duration = String(format: "%.1f", elapsedMs)
+            DiagnosticLogManager.shared.warning(
+                "AgentActivity parse \(duration)ms tools=\(toolCalls.count) files=\(writtenFiles.count) commands=\(commandResults.count) steps=\(self.steps.count)",
+                category: "Performance"
+            )
+        }
     }
 
     private static func uiCommandResults(_ results: [LocalAlpineAgentCommandResult]) -> [LocalAlpineAgentCommandResult] {

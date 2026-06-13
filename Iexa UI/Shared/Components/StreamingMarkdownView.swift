@@ -2361,6 +2361,16 @@ private struct StandardCodeBlockView: View {
     }
 }
 
+private final class SourceCodeLayoutMetrics: NSObject {
+    let lineCount: Int
+    let contentWidth: CGFloat
+
+    init(lineCount: Int, contentWidth: CGFloat) {
+        self.lineCount = lineCount
+        self.contentWidth = contentWidth
+    }
+}
+
 struct SourceCodeTextView: View {
     let code: String
     var language: String? = nil
@@ -2387,14 +2397,26 @@ struct SourceCodeTextView: View {
         max(48, maxHeight - verticalPadding * 2)
     }
 
-    private var estimatedContentHeight: CGFloat {
-        let lineCount = max(1, visibleCode.components(separatedBy: "\n").count)
-        let lineHeight: CGFloat = 21
-        return min(contentMaxHeight, max(48, CGFloat(lineCount) * lineHeight + 2))
-    }
+    private static let layoutMetricsCache: NSCache<NSString, SourceCodeLayoutMetrics> = {
+        let cache = NSCache<NSString, SourceCodeLayoutMetrics>()
+        cache.countLimit = 96
+        cache.totalCostLimit = 8 * 1_024 * 1_024
+        return cache
+    }()
 
     var body: some View {
-        let contentWidth = Self.contentWidth(for: visibleCode, font: Self.codeFont)
+        let metrics = Self.layoutMetrics(
+            for: visibleCode,
+            font: Self.codeFont,
+            measureLineWidth: !wrapLines
+        )
+        let contentWidth = wrapLines
+            ? ceil(UIScreen.main.bounds.width)
+            : metrics.contentWidth
+        let estimatedContentHeight = min(
+            contentMaxHeight,
+            max(48, CGFloat(metrics.lineCount) * 21 + 2)
+        )
         let contentHeight = min(
             contentMaxHeight,
             max(48, measuredContentHeight > 0 ? measuredContentHeight : estimatedContentHeight)
@@ -2424,13 +2446,47 @@ struct SourceCodeTextView: View {
         .frame(height: contentHeight + verticalPadding * 2)
     }
 
-    private static func contentWidth(for code: String, font: UIFont) -> CGFloat {
+    private static func layoutMetrics(
+        for code: String,
+        font: UIFont,
+        measureLineWidth: Bool
+    ) -> SourceCodeLayoutMetrics {
+        let key = "\(font.pointSize)|\(measureLineWidth ? 1 : 0)|\(code.utf8.count)|\(code.hashValue)" as NSString
+        if let cached = layoutMetricsCache.object(forKey: key) {
+            return cached
+        }
+
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        var lineCount = 0
+        var maxLineWidth: CGFloat = 1
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
-        let maxLineWidth = code
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map { (String($0) as NSString).size(withAttributes: attributes).width }
-            .max() ?? 1
-        return ceil(max(UIScreen.main.bounds.width, maxLineWidth + 96))
+        code.enumerateLines { line, _ in
+            lineCount += 1
+            guard measureLineWidth else { return }
+            maxLineWidth = max(
+                maxLineWidth,
+                (line as NSString).size(withAttributes: attributes).width
+            )
+        }
+        if code.last == "\n" {
+            lineCount += 1
+        }
+
+        let metrics = SourceCodeLayoutMetrics(
+            lineCount: max(1, lineCount),
+            contentWidth: ceil(max(UIScreen.main.bounds.width, maxLineWidth + 96))
+        )
+        layoutMetricsCache.setObject(metrics, forKey: key, cost: min(code.utf8.count, 1_048_576))
+
+        let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1_000
+        if elapsedMs >= 12 {
+            let duration = String(format: "%.1f", elapsedMs)
+            DiagnosticLogManager.shared.warning(
+                "SourceCode layout \(duration)ms chars=\(code.utf8.count) lines=\(metrics.lineCount) measuredWidth=\(measureLineWidth)",
+                category: "Performance"
+            )
+        }
+        return metrics
     }
 }
 
@@ -2952,6 +3008,18 @@ private enum SourceCodeHighlighter {
         lineSpacing: CGFloat,
         lineBreakMode: NSLineBreakMode
     ) -> NSAttributedString {
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        defer {
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1_000
+            if elapsedMs >= 12 {
+                let duration = String(format: "%.1f", elapsedMs)
+                DiagnosticLogManager.shared.warning(
+                    "SourceCode highlight \(duration)ms chars=\(code.utf8.count) language=\(language)",
+                    category: "Performance"
+                )
+            }
+        }
+
         let palette = SourceSyntaxPalette.palette(isDarkMode: isDarkMode, fallback: baseColor)
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineSpacing = lineSpacing
