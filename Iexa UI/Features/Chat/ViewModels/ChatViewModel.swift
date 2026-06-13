@@ -20,6 +20,10 @@ extension Notification.Name {
     static let functionsConfigChanged = Notification.Name("functionsConfigChanged")
     /// Posted by Agent step previews when the user wants to jump into the terminal/file panel.
     static let openIexaTerminalBrowser = Notification.Name("openIexaTerminalBrowser")
+    /// Lightweight Local Alpine tool UI updates. Kept out of ChatViewModel observation so
+    /// high-frequency tool events do not invalidate the full chat transcript.
+    static let localAlpineLiveToolStateUpdated = Notification.Name("localAlpineLiveToolStateUpdated")
+    static let localAlpineLiveToolStateCleared = Notification.Name("localAlpineLiveToolStateCleared")
 }
 
 private struct LocalAlpineAgentCommandFailure {
@@ -556,9 +560,9 @@ final class ChatViewModel {
     private var localAlpineContinuationWatchdogTask: Task<Void, Never>?
     private var localAlpineNativeToolsUnsupportedModels: Set<String> = []
     private var localNativeFunctionToolsUnsupportedModels: Set<String> = []
-    private var localAlpineActiveRunIdsByMessageId: [String: String] = [:]
-    private var localAlpineLiveToolCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
-    private var localAlpineLastLiveToolStatusByMessageId: [String: ChatStatusUpdate] = [:]
+    @ObservationIgnored private var localAlpineActiveRunIdsByMessageId: [String: String] = [:]
+    @ObservationIgnored private var localAlpineLiveToolCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
+    @ObservationIgnored private var localAlpineLastLiveToolStatusByMessageId: [String: ChatStatusUpdate] = [:]
     @ObservationIgnored private var localAlpinePendingToolCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
     @ObservationIgnored private var localAlpinePendingToolStatusByMessageId: [String: ChatStatusUpdate] = [:]
     @ObservationIgnored private var localAlpineToolEventFlushTasks: [String: Task<Void, Never>] = [:]
@@ -569,6 +573,7 @@ final class ChatViewModel {
     private let localAlpineLiveToolPreviewLimit = 900
     private let localAlpineLiveToolDetailLimit = 360
     private let localAlpineLiveToolCommandLimit = 900
+    private let localAlpineToolStartRenderDelayNanoseconds: UInt64 = 90_000_000
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     var localAlpinePendingOpenRequest: LocalAlpineOpenRequest?
@@ -793,6 +798,23 @@ final class ChatViewModel {
         localAlpinePendingOpenRequest = request
     }
 
+    private func postLocalAlpineLiveToolState(messageId: String, cleared: Bool = false) {
+        var userInfo: [String: Any] = [
+            "messageId": messageId,
+            "cleared": cleared
+        ]
+        if let chatId = conversationId ?? conversation?.id {
+            userInfo["conversationId"] = chatId
+        }
+        if !cleared {
+            userInfo["calls"] = localAlpineLiveToolCallsByMessageId[messageId] ?? []
+            if let status = localAlpineLastLiveToolStatusByMessageId[messageId] {
+                userInfo["status"] = status
+            }
+        }
+        NotificationCenter.default.post(name: .localAlpineLiveToolStateUpdated, object: self, userInfo: userInfo)
+    }
+
     private func clearLocalAlpineLiveToolState(for messageId: String) {
         localAlpineToolEventFlushTasks[messageId]?.cancel()
         localAlpineToolEventFlushTasks.removeValue(forKey: messageId)
@@ -802,6 +824,7 @@ final class ChatViewModel {
         localAlpinePendingToolCallsByMessageId.removeValue(forKey: messageId)
         localAlpinePendingToolStatusByMessageId.removeValue(forKey: messageId)
         localAlpineLastToolEventFlushAtByMessageId.removeValue(forKey: messageId)
+        postLocalAlpineLiveToolState(messageId: messageId, cleared: true)
     }
 
     private func clearAllLocalAlpineLiveToolState() {
@@ -815,6 +838,11 @@ final class ChatViewModel {
         localAlpinePendingToolCallsByMessageId.removeAll()
         localAlpinePendingToolStatusByMessageId.removeAll()
         localAlpineLastToolEventFlushAtByMessageId.removeAll()
+        var userInfo: [String: Any] = [:]
+        if let chatId = conversationId ?? conversation?.id {
+            userInfo["conversationId"] = chatId
+        }
+        NotificationCenter.default.post(name: .localAlpineLiveToolStateCleared, object: self, userInfo: userInfo)
     }
 
     // MARK: - Tree Sync Helpers
@@ -8221,6 +8249,8 @@ final class ChatViewModel {
             LocalAlpineToolEvent(runId: directToolRunId, call: directStartCall),
             messageId: assistantMessageId
         )
+        await Task.yield()
+        try? await Task.sleep(nanoseconds: localAlpineToolStartRenderDelayNanoseconds)
 
         var result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
         enqueueLocalAlpineOpenRequests(result.openRequests)
@@ -22014,6 +22044,7 @@ final class ChatViewModel {
             }
         }
         localAlpineLastToolEventFlushAtByMessageId[messageId] = Date()
+        postLocalAlpineLiveToolState(messageId: messageId)
     }
 
     private static func sameLiveToolStatus(_ lhs: ChatStatusUpdate?, _ rhs: ChatStatusUpdate) -> Bool {

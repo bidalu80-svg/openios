@@ -492,6 +492,7 @@ actor LocalAlpineAgentService {
     private let maxOutputCharactersPerCommand = 6_000
     private let defaultReadFileMaxBytes = 192_000
     private let maxReadFileMaxBytes = 512_000
+    private let toolStartRenderGraceNanoseconds: UInt64 = 90_000_000
     private let defaultCWD = "/mnt/iexa"
 
     private init() {}
@@ -662,6 +663,13 @@ actor LocalAlpineAgentService {
             }
         }
 
+        func emitToolStart(_ context: LocalAlpineToolCallContext) async {
+            await emitTool(Self.toolCallStart(context))
+            guard eventHandler != nil else { return }
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: toolStartRenderGraceNanoseconds)
+        }
+
         for command in trimmedCommands {
             guard !stopRemainingCommands else { break }
 
@@ -678,7 +686,7 @@ actor LocalAlpineAgentService {
                     cwd: effectiveCWD,
                     filePaths: command.readFiles.map(\.path)
                 )
-                await emitTool(Self.toolCallStart(context))
+                await emitToolStart(context)
                 let readResult = await readFiles(command.readFiles, cwd: effectiveCWD)
                 stepLines.append(readResult.summary)
                 modelStepLines.append(readResult.summary)
@@ -704,7 +712,7 @@ actor LocalAlpineAgentService {
                     cwd: effectiveCWD,
                     filePaths: command.readImages.map(\.path)
                 )
-                await emitTool(Self.toolCallStart(context))
+                await emitToolStart(context)
                 let imageResult = await readImages(command.readImages, cwd: effectiveCWD)
                 stepLines.append(imageResult.summary)
                 modelStepLines.append(imageResult.summary)
@@ -730,7 +738,7 @@ actor LocalAlpineAgentService {
                     cwd: effectiveCWD,
                     filePaths: command.editFiles.map(\.path)
                 )
-                await emitTool(Self.toolCallStart(context))
+                await emitToolStart(context)
                 let editResult = await editFiles(command.editFiles, cwd: effectiveCWD)
                 stepLines.append(editResult.summary)
                 modelStepLines.append(editResult.summary)
@@ -758,7 +766,7 @@ actor LocalAlpineAgentService {
                     cwd: effectiveCWD,
                     filePaths: command.patchFiles.compactMap(\.path)
                 )
-                await emitTool(Self.toolCallStart(context))
+                await emitToolStart(context)
                 let patchResult = await patchFiles(command.patchFiles, cwd: effectiveCWD)
                 stepLines.append(patchResult.summary)
                 modelStepLines.append(patchResult.summary)
@@ -786,7 +794,7 @@ actor LocalAlpineAgentService {
                     cwd: effectiveCWD,
                     filePaths: command.writeFiles.map(\.path)
                 )
-                await emitTool(Self.toolCallStart(context))
+                await emitToolStart(context)
                 let writeResult = await writeFiles(command.writeFiles, cwd: effectiveCWD)
                 stepLines.append(writeResult.summary)
                 modelStepLines.append(writeResult.summary)
@@ -824,7 +832,7 @@ actor LocalAlpineAgentService {
                     cwd: effectiveCWD,
                     filePaths: command.deleteFiles.map(\.path)
                 )
-                await emitTool(Self.toolCallStart(context))
+                await emitToolStart(context)
                 let deleteResult = await deleteFiles(command.deleteFiles, cwd: effectiveCWD)
                 stepLines.append(deleteResult.summary)
                 modelStepLines.append(deleteResult.summary)
@@ -931,7 +939,7 @@ actor LocalAlpineAgentService {
                     command: commandToExecute,
                     filePaths: command.shellToolFilePaths
                 )
-                await emitTool(Self.toolCallStart(context))
+                await emitToolStart(context)
                 if let delaySeconds = command.delaySeconds, delaySeconds > 0 {
                     try? await Task.sleep(nanoseconds: UInt64(delaySeconds) * 1_000_000_000)
                 }
@@ -1008,7 +1016,7 @@ actor LocalAlpineAgentService {
                         command: diagnostic.command,
                         filePaths: []
                     )
-                    await emitTool(Self.toolCallStart(diagnosticContext))
+                    await emitToolStart(diagnosticContext)
                     stepLines.append(format(command: diagnostic.command, cwd: effectiveCWD, result: diagnostic.result))
                     modelStepLines.append(format(command: diagnostic.command, cwd: effectiveCWD, result: diagnostic.result, truncateOutput: false))
                     commandResults.append(Self.commandResult(

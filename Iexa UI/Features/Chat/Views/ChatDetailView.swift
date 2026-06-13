@@ -240,6 +240,56 @@ private struct AgentActivityItem: Identifiable, Hashable {
         return text.isEmpty ? currentStepTitle : text
     }
 
+    static func liveLocalAlpine(
+        messageId: String,
+        toolCalls: [LocalAlpineToolCall],
+        liveStatus: ChatStatusUpdate?
+    ) -> AgentActivityItem? {
+        let statusHistory = liveStatus.map { [$0] } ?? []
+        let steps = steps(
+            toolCalls: toolCalls,
+            writtenFiles: [],
+            commandResults: [],
+            statusHistory: statusHistory,
+            officePreviewReferences: [],
+            officeDocumentFiles: []
+        )
+        guard !steps.isEmpty else { return nil }
+
+        let filePaths = Set(toolCalls.flatMap(\.filePaths))
+        let commandCount = toolCalls.filter { call in
+            if call.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                return true
+            }
+            let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return name == "command" || name == "shell_execute" || name == "run_script"
+        }.count
+        let timestamp = toolCalls
+            .compactMap { call -> Date? in
+                guard call.startedAtMs > 0 else { return nil }
+                return Date(timeIntervalSince1970: TimeInterval(call.startedAtMs) / 1_000)
+            }
+            .min() ?? .now
+        let isStreaming = toolCalls.contains { $0.isRunning } || (liveStatus != nil && liveStatus?.done != true)
+        let summary = steps.last(where: { $0.isRunning })?.title
+            ?? steps.last?.title
+            ?? "本地步骤"
+
+        return AgentActivityItem(
+            id: "live-local-alpine-\(messageId)",
+            timestamp: timestamp,
+            isStreaming: isStreaming,
+            summary: summary,
+            fileCount: filePaths.count,
+            commandCount: commandCount,
+            hasFailure: toolCalls.contains { $0.failed },
+            writtenFiles: [],
+            commandResults: [],
+            toolCalls: toolCalls,
+            steps: steps
+        )
+    }
+
     func limitingSteps(to maxSteps: Int) -> AgentActivityItem {
         guard maxSteps > 0 else { return self }
 
@@ -1165,6 +1215,9 @@ struct ChatDetailView: View {
             return mergedLocalAlpineTurnActivity(through: message)
         }
         if isLocalAlpineResultMessage(message) {
+            if isMessageVisuallyStreaming(message) {
+                return activityItem(for: message)
+            }
             return mergedLocalAlpineTurnActivity(through: message) ?? activityItem(for: message)
         }
         return activityItem(for: message)
@@ -2342,22 +2395,15 @@ struct ChatDetailView: View {
                 ))
             }
 
-            if let item = visibleAgentActivityWindowPreview, item.hasConcreteSteps {
-                AgentStepFloatingBar(
-                    item: item,
-                    taskCount: item.totalStepCount,
-                    onOpenAgentLog: openAgentTaskPanel,
-                    onPreviewTap: { item, index in
-                        openAgentFloatingPreview(item: item, initialIndex: index)
-                    }
-                )
-                .padding(.horizontal, 16)
-                .padding(.bottom, 2)
-                .transition(.asymmetric(
-                    insertion: .move(edge: .bottom).combined(with: .opacity),
-                    removal: .opacity
-                ))
-            }
+            AgentStepFloatingBarHost(
+                conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
+                fallbackItem: visibleAgentActivityWindowPreview,
+                stepLimit: Self.agentFloatingPreviewStepLimit,
+                onOpenAgentLog: openAgentTaskPanel,
+                onPreviewTap: { item, index in
+                    openAgentFloatingPreview(item: item, initialIndex: index)
+                }
+            )
 
             ChatInputField(
                 text: $vm.inputText,
@@ -3370,9 +3416,18 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func agentStepPreview(for message: ChatMessage) -> some View {
-        if let item = agentActivity(for: message),
-           item.hasConcreteSteps,
-           !item.hasOnlyWebSearchStatusSteps {
+        if isLocalAlpineResultMessage(message) {
+            AgentInlineStepsHost(
+                conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
+                messageId: message.id,
+                fallbackItem: agentActivity(for: message),
+                onTap: openAgentTaskPanel
+            )
+            .padding(.horizontal, Spacing.screenPadding)
+            .padding(.top, Spacing.xs)
+        } else if let item = agentActivity(for: message),
+                  item.hasConcreteSteps,
+                  !item.hasOnlyWebSearchStatusSteps {
             AgentInlineStepsView(item: item, onTap: openAgentTaskPanel)
                 .padding(.horizontal, Spacing.screenPadding)
                 .padding(.top, Spacing.xs)
@@ -7707,7 +7762,7 @@ private struct AgentInlineStepsView: View {
     @Environment(\.theme) private var theme
 
     private var visibleSteps: [AgentActivityStep] {
-        let limit = item.isActive ? 6 : 8
+        let limit = 8
         return Array(item.steps.suffix(limit))
     }
 
@@ -7716,10 +7771,6 @@ private struct AgentInlineStepsView: View {
             VStack(alignment: .leading, spacing: 7) {
                 ForEach(visibleSteps, id: \.id) { step in
                     AgentActivityStepPill(step: step)
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .move(edge: .top)),
-                            removal: .opacity
-                        ))
                 }
 
                 if item.steps.count > visibleSteps.count {
@@ -7919,6 +7970,180 @@ private struct AgentTaskCard: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.30 : 0.45), lineWidth: 0.7)
         )
+    }
+}
+
+private struct AgentInlineStepsHost: View {
+    let conversationId: String?
+    let messageId: String
+    let fallbackItem: AgentActivityItem?
+    let onTap: () -> Void
+
+    @State private var liveCalls: [LocalAlpineToolCall] = []
+    @State private var liveStatus: ChatStatusUpdate?
+    @State private var hasLiveState = false
+
+    private var liveItem: AgentActivityItem? {
+        guard hasLiveState else { return nil }
+        return AgentActivityItem.liveLocalAlpine(
+            messageId: messageId,
+            toolCalls: liveCalls,
+            liveStatus: liveStatus
+        )
+    }
+
+    private var displayItem: AgentActivityItem? {
+        if let liveItem, liveItem.hasConcreteSteps {
+            return liveItem
+        }
+        guard fallbackItem?.hasConcreteSteps == true else { return nil }
+        return fallbackItem
+    }
+
+    var body: some View {
+        Group {
+            if let item = displayItem,
+               item.hasConcreteSteps,
+               !item.hasOnlyWebSearchStatusSteps {
+                AgentInlineStepsView(item: item, onTap: onTap)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateUpdated)) { notification in
+            applyLiveToolNotification(notification)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateCleared)) { notification in
+            guard matchesConversation(notification.userInfo?["conversationId"] as? String) else { return }
+            clearLiveState()
+        }
+        .onChange(of: conversationId) { _, _ in
+            clearLiveState()
+        }
+    }
+
+    private func applyLiveToolNotification(_ notification: Notification) {
+        guard matchesConversation(notification.userInfo?["conversationId"] as? String),
+              notification.userInfo?["messageId"] as? String == messageId else {
+            return
+        }
+
+        let cleared = notification.userInfo?["cleared"] as? Bool ?? false
+        if cleared {
+            clearLiveState()
+            return
+        }
+
+        liveCalls = notification.userInfo?["calls"] as? [LocalAlpineToolCall] ?? []
+        liveStatus = notification.userInfo?["status"] as? ChatStatusUpdate
+        hasLiveState = !liveCalls.isEmpty || liveStatus != nil
+    }
+
+    private func matchesConversation(_ incomingConversationId: String?) -> Bool {
+        let current = conversationId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let incoming = incomingConversationId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return current.isEmpty || incoming.isEmpty || current == incoming
+    }
+
+    private func clearLiveState() {
+        liveCalls.removeAll()
+        liveStatus = nil
+        hasLiveState = false
+    }
+}
+
+private struct AgentStepFloatingBarHost: View {
+    let conversationId: String?
+    let fallbackItem: AgentActivityItem?
+    let stepLimit: Int
+    let onOpenAgentLog: () -> Void
+    let onPreviewTap: (AgentActivityItem, Int) -> Void
+
+    @State private var liveCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
+    @State private var liveStatusByMessageId: [String: ChatStatusUpdate] = [:]
+    @State private var liveMessageOrder: [String] = []
+
+    private var liveItem: AgentActivityItem? {
+        let items = liveMessageOrder.compactMap { messageId -> AgentActivityItem? in
+            AgentActivityItem.liveLocalAlpine(
+                messageId: messageId,
+                toolCalls: liveCallsByMessageId[messageId] ?? [],
+                liveStatus: liveStatusByMessageId[messageId]
+            )
+        }
+        guard !items.isEmpty else { return nil }
+        return AgentActivityItem.mergedTurn(id: "live-local-alpine-floating", items: items)?
+            .limitingSteps(to: stepLimit)
+    }
+
+    private var displayItem: AgentActivityItem? {
+        if let liveItem, liveItem.hasConcreteSteps {
+            return liveItem
+        }
+        guard fallbackItem?.hasConcreteSteps == true else { return nil }
+        return fallbackItem
+    }
+
+    var body: some View {
+        Group {
+            if let item = displayItem {
+                AgentStepFloatingBar(
+                    item: item,
+                    taskCount: item.totalStepCount,
+                    onOpenAgentLog: onOpenAgentLog,
+                    onPreviewTap: onPreviewTap
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 2)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateUpdated)) { notification in
+            applyLiveToolNotification(notification)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateCleared)) { notification in
+            guard matchesConversation(notification.userInfo?["conversationId"] as? String) else { return }
+            clearLiveState()
+        }
+        .onChange(of: conversationId) { _, _ in
+            clearLiveState()
+        }
+    }
+
+    private func applyLiveToolNotification(_ notification: Notification) {
+        guard matchesConversation(notification.userInfo?["conversationId"] as? String),
+              let messageId = notification.userInfo?["messageId"] as? String else {
+            return
+        }
+
+        let cleared = notification.userInfo?["cleared"] as? Bool ?? false
+        let calls = notification.userInfo?["calls"] as? [LocalAlpineToolCall] ?? []
+        let status = notification.userInfo?["status"] as? ChatStatusUpdate
+        if cleared || (calls.isEmpty && status == nil) {
+            liveCallsByMessageId.removeValue(forKey: messageId)
+            liveStatusByMessageId.removeValue(forKey: messageId)
+            liveMessageOrder.removeAll { $0 == messageId }
+            return
+        }
+
+        liveCallsByMessageId[messageId] = calls
+        if let status {
+            liveStatusByMessageId[messageId] = status
+        } else {
+            liveStatusByMessageId.removeValue(forKey: messageId)
+        }
+        if !liveMessageOrder.contains(messageId) {
+            liveMessageOrder.append(messageId)
+        }
+    }
+
+    private func matchesConversation(_ incomingConversationId: String?) -> Bool {
+        let current = conversationId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let incoming = incomingConversationId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return current.isEmpty || incoming.isEmpty || current == incoming
+    }
+
+    private func clearLiveState() {
+        liveCallsByMessageId.removeAll()
+        liveStatusByMessageId.removeAll()
+        liveMessageOrder.removeAll()
     }
 }
 
@@ -8161,8 +8386,10 @@ private struct AgentToolPreviewPop: View {
         }
         .frame(width: previewSize.width, height: previewSize.height, alignment: .topLeading)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .compositingGroup()
-        .shadow(color: .black.opacity(0.20), radius: 6, x: 0, y: 3)
+        .overlay(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+        )
     }
 }
 
@@ -8241,8 +8468,6 @@ private struct AgentActivityStepPill: View {
     let step: AgentActivityStep
 
     @Environment(\.theme) private var theme
-    @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var tint: Color {
         if step.failed { return .orange }
@@ -8303,13 +8528,6 @@ private struct AgentActivityStepPill: View {
             Capsule(style: .continuous)
                 .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.78))
         )
-        .overlay {
-            if step.isRunning && !reduceMotion && scenePhase == .active {
-                AgentStepRunningSweep(tint: tint)
-                    .clipShape(Capsule(style: .continuous))
-                    .allowsHitTesting(false)
-            }
-        }
         .overlay(
             Capsule(style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.24 : 0.42), lineWidth: 0.7)
@@ -8317,51 +8535,11 @@ private struct AgentActivityStepPill: View {
     }
 }
 
-private struct AgentStepRunningSweep: View {
-    let tint: Color
-    @State private var phase: CGFloat = 0
-
-    var body: some View {
-        GeometryReader { geometry in
-            let sweepWidth = max(geometry.size.width * 0.34, 56)
-            LinearGradient(
-                colors: [
-                    .clear,
-                    tint.opacity(0.06),
-                    .white.opacity(0.18),
-                    tint.opacity(0.07),
-                    .clear,
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: sweepWidth, height: geometry.size.height)
-            .offset(x: -sweepWidth + phase * (geometry.size.width + sweepWidth))
-        }
-        .onAppear {
-            phase = 0
-            withAnimation(.linear(duration: 1.65).repeatForever(autoreverses: false)) {
-                phase = 1
-            }
-        }
-    }
-}
-
 private struct AgentStepWaitingDots: View {
     let tint: Color
-    @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        Group {
-            if reduceMotion || scenePhase != .active {
-                dots(progress: 0.2)
-            } else {
-                TimelineView(.animation) { timeline in
-                    dots(progress: progress(for: timeline.date))
-                }
-            }
-        }
+        dots(progress: 0.2)
     }
 
     private func dots(progress: Double) -> some View {
@@ -8373,12 +8551,6 @@ private struct AgentStepWaitingDots: View {
                     .offset(y: yOffset(index: index, progress: progress))
             }
         }
-    }
-
-    private func progress(for date: Date) -> Double {
-        let period = 1.15
-        let value = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
-        return value < 0 ? value + 1 : value
     }
 
     private func opacity(index: Int, progress: Double) -> Double {
@@ -8728,7 +8900,8 @@ private struct AgentFloatingStepPreviewSheet: View {
     }
 
     private func filePreview(_ file: LocalAlpineWrittenFile) -> some View {
-        VStack(spacing: 0) {
+        let preview = file.previewLines(limit: 120).joined(separator: "\n")
+        return VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "doc.text")
                     .foregroundStyle(theme.textSecondary)
@@ -8747,7 +8920,7 @@ private struct AgentFloatingStepPreviewSheet: View {
 
             Divider()
 
-            Text(file.previewLines(limit: 120).joined(separator: "\n").isEmpty ? file.path : file.previewLines(limit: 120).joined(separator: "\n"))
+            Text(preview.isEmpty ? file.path : preview)
                 .font(.system(size: 15, weight: .regular, design: .monospaced))
                 .foregroundStyle(theme.textPrimary)
                 .textSelection(.enabled)
