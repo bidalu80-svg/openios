@@ -8604,7 +8604,7 @@ final class ChatViewModel {
     private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
         let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "（无输出）"
-            : result.output
+            : Self.clippedForSystemContext(result.output, maxCharacters: 6_000)
         let exit = result.exitCode.map(String.init) ?? "unknown"
         return """
         Local Alpine 执行结果
@@ -11738,7 +11738,7 @@ final class ChatViewModel {
     private func mergeLocalAlpineNativeToolResultMetadata(messageId: String, result: LocalAlpineAgentResult) {
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
         var metadata = conversation?.messages[index].metadata ?? [:]
-        let raw = [metadata["iexa_local_alpine_raw_result"], result.summary]
+        let raw = [metadata["iexa_local_alpine_raw_result"], result.modelObservation ?? result.summary]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
@@ -15379,24 +15379,35 @@ final class ChatViewModel {
     }
 
     private static func offloadOversizedMessageContentIfNeeded(
-        _ messages: [[String: Any]]
+        _ messages: [[String: Any]],
+        windowTokens: Int
     ) -> [[String: Any]] {
         messages.map { message in
             var prepared = message
             let role = (prepared["role"] as? String) ?? "message"
             if let text = prepared["content"] as? String {
+                let maxInlineCharacters = maxInlineCharactersForModelMessage(
+                    text,
+                    role: role,
+                    windowTokens: windowTokens
+                )
                 prepared["content"] = contextTextForModel(
                     text,
                     label: "\(role)-message",
-                    maxInlineCharacters: 12_000
+                    maxInlineCharacters: maxInlineCharacters
                 )
             } else if var parts = prepared["content"] as? [[String: Any]] {
                 for index in parts.indices {
                     if let text = parts[index]["text"] as? String {
+                        let maxInlineCharacters = maxInlineCharactersForModelMessage(
+                            text,
+                            role: role,
+                            windowTokens: windowTokens
+                        )
                         parts[index]["text"] = contextTextForModel(
                             text,
                             label: "\(role)-message-part",
-                            maxInlineCharacters: 12_000
+                            maxInlineCharacters: maxInlineCharacters
                         )
                     }
                 }
@@ -15404,6 +15415,31 @@ final class ChatViewModel {
             }
             return prepared
         }
+    }
+
+    private static func maxInlineCharactersForModelMessage(
+        _ text: String,
+        role _: String,
+        windowTokens: Int
+    ) -> Int {
+        let defaultLimit = 12_000
+        guard text.contains("[Local Alpine observation]") else {
+            return defaultLimit
+        }
+        guard windowTokens > 0 else {
+            return max(defaultLimit, 24_000)
+        }
+
+        let estimatedTokens = estimatedTokenCount(for: text)
+        let observationTokenBudget = max(8_000, Int(Double(windowTokens) * 0.35))
+        if estimatedTokens <= observationTokenBudget {
+            return max(text.count, defaultLimit)
+        }
+
+        // Code and shell output are usually token-light ASCII, so allow a bigger
+        // inline slice for the latest tool observation before falling back to
+        // a local offload file that the agent can read explicitly.
+        return max(defaultLimit, min(48_000, observationTokenBudget * 4))
     }
 
     private static func messageTextForContextSummary(_ message: [String: Any]) -> String {
@@ -15435,7 +15471,10 @@ final class ChatViewModel {
     ) -> (messages: [[String: Any]], status: ChatContextBudgetStatus) {
         let window = contextWindowTokens(for: model, modelId: modelId)
         let originalTokens = estimatedTokens(in: messages)
-        let preparedMessages = offloadOversizedMessageContentIfNeeded(messages)
+        let preparedMessages = offloadOversizedMessageContentIfNeeded(
+            messages,
+            windowTokens: window
+        )
         let preparedTokens = estimatedTokens(in: preparedMessages)
         var status = contextStatus(
             model: model,
@@ -16011,8 +16050,8 @@ final class ChatViewModel {
         - Use the tool only for explicit operation requests that require current local state or mutation: read/list/search files, create/edit/delete/rename/move/copy files, install dependencies, run/test/build/compile/debug/fix code, inspect the Alpine environment, fetch/scrape a URL from the local shell, or verify real output.
         - Do not use the tool for ordinary conversation, explanations, design discussion, capability/feasibility questions, dependency advice, code samples the user did not ask you to write/run, or questions about what the previous error means. Answer normally in those cases.
         - For any intermediate local-work step, emit one `iexa_alpine` block only when you intentionally want the host to run it. If you answer with prose only, the host treats it as a normal final answer and will not synthesize or execute anything.
-        - Treat imperative shorthand as execution requests here: 写/创建/运行/跑/测试/检查/看下/读/改/换/删/再跑/继续 and write/create/run/test/check/read/modify/change/delete/rerun/continue should operate on `/mnt/iexa` or the latest relevant Local Alpine file/command when the context points there.
-        - For follow-ups like "this", "it", "这个", "它", "删了", "换一个", "再跑", or "继续", infer the latest written file or executed command from the Local Alpine observation instead of asking the user to restate it.
+        - Treat imperative shorthand as execution requests when the complete conversation and Local Alpine observations identify a current file, command, project, or workspace target.
+        - Use the full Local Alpine observation history supplied in the request as real tool-result context. Do not ignore prior local outputs or ask the user to restate information that is already present in those observations.
         - If a demo request omits a URL, filename, or sample input, choose safe defaults and proceed: `example.com`/`example.org` for network demos and simple names like `test.lua`, `main.cpp`, or `simple_spider.py`.
         - Do not ask for confirmation for explicit `/mnt/iexa` deletes, edits, reads, checks, runs, or reruns. Ask only when the target is outside `/mnt/iexa`, destructive across many files, or genuinely unknown.
         - If the user asks you to write/run/fix/check a project or script, operate under `/mnt/iexa`, verify with a bounded command, and then summarize the real result.
@@ -16969,8 +17008,12 @@ final class ChatViewModel {
             lines.append("request/command:")
             lines.append(clippedForSystemContext(redactedLocalAlpineInternalPaths(in: command), maxCharacters: 4_000))
         }
+        if !rawResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.append("raw_output:")
+            lines.append(redactedLocalAlpineInternalPaths(in: rawResult))
+        }
         if !commandResults.isEmpty {
-            lines.append("command_results:")
+            lines.append("command_results_summary:")
             for result in commandResults.suffix(6) {
                 let exit = result.exitCode.map(String.init) ?? "unknown"
                 let redactedCommand = redactedLocalAlpineInternalPaths(in: result.command)
@@ -16990,13 +17033,6 @@ final class ChatViewModel {
                 \(indentForSystemContext(output))
                 """)
             }
-        } else if !rawResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            lines.append("raw_output:")
-            lines.append(contextTextForModel(
-                redactedLocalAlpineInternalPaths(in: rawResult),
-                label: "local-alpine-raw-output",
-                maxInlineCharacters: 10_000
-            ))
         }
         if !writtenFiles.isEmpty {
             lines.append("written_files:")
@@ -17471,12 +17507,6 @@ final class ChatViewModel {
             if Self.isLocalAlpineHiddenCorrectionParent(message)
                 || Self.isLocalAlpineHiddenToolParent(message)
                 || Self.isLocalNativeHiddenToolParent(message) {
-                continue
-            }
-            if isLocalAlpineResult {
-                // Local Alpine results are represented once in the structured execution-state
-                // system section above. Re-sending every result as a separate system message
-                // duplicates tool output, slows agent turns, and makes continuation policy noisier.
                 continue
             }
             let modelContent = contentForModel(
@@ -20008,7 +20038,7 @@ final class ChatViewModel {
         )
         if let index = conversation?.messages.firstIndex(where: { $0.id == resultMessageId }) {
             var metadata = conversation?.messages[index].metadata ?? [:]
-            metadata["iexa_local_alpine_raw_result"] = result.summary
+            metadata["iexa_local_alpine_raw_result"] = result.modelObservation ?? result.summary
             if let toolRunId = result.toolRunId {
                 metadata["iexa_local_alpine_tool_run_id"] = toolRunId
             }
@@ -21170,7 +21200,7 @@ final class ChatViewModel {
         Correction policy:
         - Emit exactly one fenced Markdown block with language `iexa_alpine`.
         - Do not ask for confirmation when the user already used imperative wording such as read, check, delete, modify, change, replace, run, rerun, test, or execute.
-        - Resolve "this/it/这个/它/删了/换一个/再跑/继续" from the latest Local Alpine observation and recent written files.
+        - Use the full Local Alpine observation history supplied in the request as real tool-result context, including recent written files and executed commands.
         - For reads/checks, use `read_file`, `list_dir`, `grep`, `verify`, or bounded `command` as appropriate.
         - For deletes, use structured `delete_file`/`delete_files`, then verify absence in the same block.
         - For modification, read the relevant file if needed, then use `edit_file`, `patch_file`, or `write_files` and verify when the user asked to run/test.

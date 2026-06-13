@@ -4,6 +4,7 @@ import ImageIO
 struct LocalAlpineAgentResult: Sendable {
     let didExecute: Bool
     let summary: String
+    let modelObservation: String?
     let interactiveRequest: LocalAlpineInteractiveRequest?
     let commandResults: [LocalAlpineAgentCommandResult]
     let writtenFiles: [LocalAlpineWrittenFile]
@@ -17,6 +18,7 @@ struct LocalAlpineAgentResult: Sendable {
     init(
         didExecute: Bool,
         summary: String,
+        modelObservation: String? = nil,
         interactiveRequest: LocalAlpineInteractiveRequest?,
         commandResults: [LocalAlpineAgentCommandResult] = [],
         writtenFiles: [LocalAlpineWrittenFile] = [],
@@ -29,6 +31,7 @@ struct LocalAlpineAgentResult: Sendable {
     ) {
         self.didExecute = didExecute
         self.summary = summary
+        self.modelObservation = modelObservation
         self.interactiveRequest = interactiveRequest
         self.commandResults = commandResults
         self.writtenFiles = writtenFiles
@@ -207,7 +210,7 @@ struct LocalAlpineLineDelta: Codable, Hashable, Sendable {
 
 struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
     private static let defaultOutputPreviewLimit = 8_000
-    private static let readFileOutputPreviewLimit = 240_000
+    private static let readFileOutputPreviewLimit = 12_000
 
     let command: String
     let cwd: String
@@ -316,7 +319,7 @@ enum LocalAlpineToolDisplayRegistry {
 
 struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
     private static let defaultOutputPreviewLimit = 4_000
-    private static let readFileOutputPreviewLimit = 220_000
+    private static let readFileOutputPreviewLimit = 6_000
 
     let id: String
     let runId: String
@@ -480,7 +483,7 @@ actor LocalAlpineAgentService {
     static let shared = LocalAlpineAgentService()
 
     private let maxCommandsPerResponse = 12
-    private let maxOutputCharactersPerCommand = 20_000
+    private let maxOutputCharactersPerCommand = 6_000
     private let defaultReadFileMaxBytes = 192_000
     private let maxReadFileMaxBytes = 512_000
     private let defaultCWD = "/mnt/iexa"
@@ -640,6 +643,7 @@ actor LocalAlpineAgentService {
 
         lines.insert("Local Alpine 执行结果", at: 0)
         lines.append("环境：内置 Alpine Linux，工作目录默认 `/mnt/iexa`")
+        var modelLines = lines
 
         func emitTool(_ call: LocalAlpineToolCall) async {
             if let index = toolCalls.firstIndex(where: { $0.id == call.id }) {
@@ -658,6 +662,7 @@ actor LocalAlpineAgentService {
             let cwd = command.cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
             let effectiveCWD = (cwd?.isEmpty == false) ? cwd! : defaultCWD
             var stepLines: [String] = []
+            var modelStepLines: [String] = []
             var shouldRunShellCommand = true
             if !command.readFiles.isEmpty {
                 let context = Self.toolCallContext(
@@ -670,6 +675,7 @@ actor LocalAlpineAgentService {
                 await emitTool(Self.toolCallStart(context))
                 let readResult = await readFiles(command.readFiles, cwd: effectiveCWD)
                 stepLines.append(readResult.summary)
+                modelStepLines.append(readResult.summary)
                 commandResults.append(contentsOf: readResult.commandResults)
                 await emitTool(Self.toolCallResult(
                     context,
@@ -695,6 +701,7 @@ actor LocalAlpineAgentService {
                 await emitTool(Self.toolCallStart(context))
                 let imageResult = await readImages(command.readImages, cwd: effectiveCWD)
                 stepLines.append(imageResult.summary)
+                modelStepLines.append(imageResult.summary)
                 commandResults.append(contentsOf: imageResult.commandResults)
                 await emitTool(Self.toolCallResult(
                     context,
@@ -720,6 +727,7 @@ actor LocalAlpineAgentService {
                 await emitTool(Self.toolCallStart(context))
                 let editResult = await editFiles(command.editFiles, cwd: effectiveCWD)
                 stepLines.append(editResult.summary)
+                modelStepLines.append(editResult.summary)
                 commandResults.append(contentsOf: editResult.commandResults)
                 editResult.editedPaths.forEach { editedFilePaths.insert($0) }
                 writtenFiles.append(contentsOf: editResult.writtenFiles)
@@ -747,6 +755,7 @@ actor LocalAlpineAgentService {
                 await emitTool(Self.toolCallStart(context))
                 let patchResult = await patchFiles(command.patchFiles, cwd: effectiveCWD)
                 stepLines.append(patchResult.summary)
+                modelStepLines.append(patchResult.summary)
                 commandResults.append(contentsOf: patchResult.commandResults)
                 patchResult.editedPaths.forEach { editedFilePaths.insert($0) }
                 writtenFiles.append(contentsOf: patchResult.writtenFiles)
@@ -774,6 +783,7 @@ actor LocalAlpineAgentService {
                 await emitTool(Self.toolCallStart(context))
                 let writeResult = await writeFiles(command.writeFiles, cwd: effectiveCWD)
                 stepLines.append(writeResult.summary)
+                modelStepLines.append(writeResult.summary)
                 writeResult.writtenPaths.forEach { editedFilePaths.insert($0) }
                 writtenFiles.append(contentsOf: writeResult.writtenFiles)
                 let writeCommandResult = LocalAlpineCommandResult(
@@ -811,6 +821,7 @@ actor LocalAlpineAgentService {
                 await emitTool(Self.toolCallStart(context))
                 let deleteResult = await deleteFiles(command.deleteFiles, cwd: effectiveCWD)
                 stepLines.append(deleteResult.summary)
+                modelStepLines.append(deleteResult.summary)
                 commandResults.append(contentsOf: deleteResult.commandResults)
                 deleteResult.editedPaths.forEach { editedFilePaths.insert($0) }
                 await emitTool(Self.toolCallResult(
@@ -834,6 +845,7 @@ actor LocalAlpineAgentService {
                 guard !commandToExecute.isEmpty else {
                     if !stepLines.isEmpty {
                         lines.append(stepLines.joined(separator: "\n\n"))
+                        modelLines.append(modelStepLines.joined(separator: "\n\n"))
                     }
                     continue
                 }
@@ -846,6 +858,7 @@ actor LocalAlpineAgentService {
                         interactiveRequest: nil
                     )
                     stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
+                    modelStepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result, truncateOutput: false))
                     commandResults.append(Self.commandResult(
                         command: commandToExecute,
                         cwd: effectiveCWD,
@@ -863,6 +876,7 @@ actor LocalAlpineAgentService {
                         interactiveRequest: nil
                     )
                     stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
+                    modelStepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result, truncateOutput: false))
                     commandResults.append(Self.commandResult(
                         command: commandToExecute,
                         cwd: effectiveCWD,
@@ -877,6 +891,7 @@ actor LocalAlpineAgentService {
                     cwd: effectiveCWD
                 ) {
                     stepLines.append(repairNote)
+                    modelStepLines.append(repairNote)
                 }
 
                 if let warning = await runnableFileCompatibilityWarning(for: commandToExecute, cwd: effectiveCWD) {
@@ -887,6 +902,7 @@ actor LocalAlpineAgentService {
                         interactiveRequest: nil
                     )
                     stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
+                    modelStepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result, truncateOutput: false))
                     commandResults.append(Self.commandResult(
                         command: commandToExecute,
                         cwd: effectiveCWD,
@@ -929,6 +945,7 @@ actor LocalAlpineAgentService {
                         openRequests.append(contentsOf: result.openRequests)
                     } else {
                         stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
+                        modelStepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result, truncateOutput: false))
                         commandResults.append(Self.commandResult(
                             command: commandToExecute,
                             cwd: effectiveCWD,
@@ -941,9 +958,11 @@ actor LocalAlpineAgentService {
                             failed: true
                         ))
                         lines.append(stepLines.joined(separator: "\n\n"))
+                        modelLines.append(modelStepLines.joined(separator: "\n\n"))
                         return LocalAlpineAgentResult(
                             didExecute: true,
                             summary: lines.joined(separator: "\n\n"),
+                            modelObservation: modelLines.joined(separator: "\n\n"),
                             interactiveRequest: request,
                             commandResults: commandResults,
                             writtenFiles: writtenFiles,
@@ -957,6 +976,7 @@ actor LocalAlpineAgentService {
                     }
                 }
                 stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
+                modelStepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result, truncateOutput: false))
                 commandResults.append(Self.commandResult(
                     command: commandToExecute,
                     cwd: effectiveCWD,
@@ -984,6 +1004,7 @@ actor LocalAlpineAgentService {
                     )
                     await emitTool(Self.toolCallStart(diagnosticContext))
                     stepLines.append(format(command: diagnostic.command, cwd: effectiveCWD, result: diagnostic.result))
+                    modelStepLines.append(format(command: diagnostic.command, cwd: effectiveCWD, result: diagnostic.result, truncateOutput: false))
                     commandResults.append(Self.commandResult(
                         command: diagnostic.command,
                         cwd: effectiveCWD,
@@ -1000,25 +1021,31 @@ actor LocalAlpineAgentService {
 
             if !stepLines.isEmpty {
                 lines.append(stepLines.joined(separator: "\n\n"))
+                modelLines.append(modelStepLines.joined(separator: "\n\n"))
             }
         }
 
         if skippedCount > 0 {
             lines.append("- 已跳过 \(skippedCount) 条多余命令，避免一次执行过多。")
+            modelLines.append("- 已跳过 \(skippedCount) 条多余命令，避免一次执行过多。")
         }
         if deferredStepCount > 0 {
             lines.append("- 已暂缓 \(deferredStepCount) 条后续命令，按单步 agent 规则等待本轮观察结果后再继续。")
+            modelLines.append("- 已暂缓 \(deferredStepCount) 条后续命令，按单步 agent 规则等待本轮观察结果后再继续。")
         }
         if skippedUnsafeShellWriteCount > 0 {
             lines.append("- 已跳过 \(skippedUnsafeShellWriteCount) 条被结构化写入覆盖的 shell 文本写代码命令，避免 heredoc/重定向破坏源码缩进。")
+            modelLines.append("- 已跳过 \(skippedUnsafeShellWriteCount) 条被结构化写入覆盖的 shell 文本写代码命令，避免 heredoc/重定向破坏源码缩进。")
         }
         if duplicateCount > 0 {
             lines.append("- 已跳过 \(duplicateCount) 条重复命令，避免同一批工具调用重复执行。")
+            modelLines.append("- 已跳过 \(duplicateCount) 条重复命令，避免同一批工具调用重复执行。")
         }
 
         return LocalAlpineAgentResult(
             didExecute: true,
             summary: lines.joined(separator: "\n\n"),
+            modelObservation: modelLines.joined(separator: "\n\n"),
             interactiveRequest: nil,
             commandResults: commandResults,
             writtenFiles: writtenFiles,
@@ -4792,8 +4819,13 @@ actor LocalAlpineAgentService {
         return (command, result)
     }
 
-    private func format(command: String, cwd: String, result: LocalAlpineCommandResult) -> String {
-        let output = truncated(result.output)
+    private func format(
+        command: String,
+        cwd: String,
+        result: LocalAlpineCommandResult,
+        truncateOutput: Bool = true
+    ) -> String {
+        let output = truncateOutput ? truncated(result.output) : result.output
         let renderedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "（无输出）"
             : output

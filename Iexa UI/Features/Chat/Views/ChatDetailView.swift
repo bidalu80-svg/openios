@@ -96,6 +96,8 @@ private struct AgentActivityStep: Identifiable, Hashable {
 }
 
 private struct AgentActivityItem: Identifiable, Hashable {
+    private static let uiOutputPreviewLimit = 6_000
+
     let id: String
     let timestamp: Date
     let isStreaming: Bool
@@ -833,12 +835,13 @@ private struct AgentActivityItem: Identifiable, Hashable {
         let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata?["iexa_local_alpine_written_files"])
         let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata?["iexa_local_alpine_command_results"])
         let persistedToolCalls = LocalAlpineToolCall.decodeMetadata(metadata?["iexa_local_alpine_tool_calls"])
-        let toolCalls = Self.mergedToolCalls(persisted: persistedToolCalls, live: liveToolCalls)
+        let toolCalls = Self.uiToolCalls(Self.mergedToolCalls(persisted: persistedToolCalls, live: liveToolCalls))
+        let uiCommandResults = Self.uiCommandResults(commandResults)
         let statusHistory = liveStatus.map { message.statusHistory + [$0] } ?? message.statusHistory
         let officePreviewReferences = Self.officePreviewReferences(from: message.files)
         let officeDocumentFiles = message.files.filter(Self.isOfficeDocumentFile)
         let parsed = ParsedLocalAlpineResult(content: message.content, metadata: metadata)
-        let visibleCommands = commandResults.filter {
+        let visibleCommands = uiCommandResults.filter {
             $0.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "write_files"
         }
         let hasError = parsed.hasNonZeroExit || commandResults.contains { $0.failed } || toolCalls.contains { $0.failed }
@@ -863,7 +866,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
         self.commandCount = summaryCommandCount
         self.hasFailure = hasError
         self.writtenFiles = writtenFiles
-        self.commandResults = commandResults
+        self.commandResults = uiCommandResults
         self.toolCalls = toolCalls
         self.steps = Self.steps(
             toolCalls: toolCalls,
@@ -873,6 +876,44 @@ private struct AgentActivityItem: Identifiable, Hashable {
             officePreviewReferences: officePreviewReferences,
             officeDocumentFiles: officeDocumentFiles
         )
+    }
+
+    private static func uiCommandResults(_ results: [LocalAlpineAgentCommandResult]) -> [LocalAlpineAgentCommandResult] {
+        results.map { result in
+            LocalAlpineAgentCommandResult(
+                command: result.command,
+                cwd: result.cwd,
+                exitCode: result.exitCode,
+                outputPreview: clippedUIPreview(result.outputPreview)
+            )
+        }
+    }
+
+    private static func uiToolCalls(_ calls: [LocalAlpineToolCall]) -> [LocalAlpineToolCall] {
+        calls.map { call in
+            LocalAlpineToolCall(
+                id: call.id,
+                runId: call.runId,
+                name: call.name,
+                phase: call.phase,
+                title: call.title,
+                detail: call.detail,
+                cwd: call.cwd,
+                command: call.command,
+                exitCode: call.exitCode,
+                outputPreview: call.outputPreview.map { Self.clippedUIPreview($0) },
+                filePaths: call.filePaths,
+                lineDelta: call.lineDelta,
+                startedAtMs: call.startedAtMs,
+                completedAtMs: call.completedAtMs,
+                failed: call.failed
+            )
+        }
+    }
+
+    private static func clippedUIPreview(_ text: String) -> String {
+        guard text.count > uiOutputPreviewLimit else { return text }
+        return String(text.prefix(uiOutputPreviewLimit)) + "\n...（预览已截断，完整内容已保留在模型上下文/本地结果中）"
     }
 
     private static func mergedToolCalls(
