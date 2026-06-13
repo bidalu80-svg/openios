@@ -1087,6 +1087,31 @@ struct ChatDetailView: View {
         )
     }
 
+    private func hasRenderableAgentActivity(for message: ChatMessage) -> Bool {
+        guard let item = agentActivity(for: message), item.hasConcreteSteps else {
+            return false
+        }
+        return !item.hasOnlyWebSearchStatusSteps
+    }
+
+    private func shouldSuppressAssistantBubbleForActivityParent(_ message: ChatMessage) -> Bool {
+        guard message.role == .assistant,
+              hasRenderableAgentActivity(for: message) else {
+            return false
+        }
+
+        let metadata = message.metadata ?? [:]
+        if metadata["iexa_local_native_hidden_tool_parent"] == "true"
+            || metadata["iexa_local_alpine_hidden_tool_parent"] == "true" {
+            return true
+        }
+        if contentContainsLocalAlpineInstruction(message.content) {
+            return true
+        }
+        return message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && messageHasProcessOnlyStatus(message)
+    }
+
     private func mergedLocalAlpineTurnActivity(through message: ChatMessage) -> AgentActivityItem? {
         guard let endIndex = viewModel.messages.firstIndex(where: { $0.id == message.id }) else {
             return nil
@@ -1160,6 +1185,9 @@ struct ChatDetailView: View {
     }
 
     private func shouldShowAssistantActionBar(for message: ChatMessage) -> Bool {
+        if shouldSuppressAssistantBubbleForActivityParent(message) {
+            return false
+        }
         if isLocalAlpineResultMessage(message) {
             return !localAlpineFallbackContent(for: message).isEmpty
         }
@@ -1313,7 +1341,7 @@ struct ChatDetailView: View {
 
         let metadata = message.metadata ?? [:]
         if metadata["iexa_local_native_hidden_tool_parent"] == "true" {
-            return true
+            return !hasRenderableAgentActivity(for: message)
         }
         if isLocalAlpineResultMessage(message) {
             if hasVisibleLocalAlpineFinalSummary(after: message) {
@@ -1347,13 +1375,13 @@ struct ChatDetailView: View {
                 return false
             }
             if contentContainsLocalAlpineInstruction(message.content) {
-                return true
+                return !hasRenderableAgentActivity(for: message)
             }
             return message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && messageHasProcessOnlyStatus(message)
         }
         if metadata["iexa_local_alpine_hidden_tool_parent"] == "true" {
-            return true
+            return !hasRenderableAgentActivity(for: message)
         }
         if metadata["iexa_local_alpine_auto_verify"] != nil
             || metadata["iexa_local_alpine_missing_tool_correction"] != nil
@@ -1361,7 +1389,7 @@ struct ChatDetailView: View {
             return true
         }
         if contentContainsLocalAlpineInstruction(message.content) {
-            return true
+            return !hasRenderableAgentActivity(for: message)
         }
         if message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            !isMessageVisuallyStreaming(message),
@@ -2944,6 +2972,7 @@ struct ChatDetailView: View {
         let userTextIsEmpty = message.role == .user
             && activeUserDisplayContent(for: message).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let waitingUIIsDelayed = shouldDelayWaitingUI(for: message)
+        let suppressAssistantBubble = shouldSuppressAssistantBubbleForActivityParent(message)
         let isLatestUserMessage = message.role == .user
             && message.id == transcriptMessages.last(where: { $0.role == .user })?.id
 
@@ -2979,7 +3008,7 @@ struct ChatDetailView: View {
             }
 
             // ── Message bubble / content ──
-            if !userTextIsEmpty && !waitingUIIsDelayed {
+            if !userTextIsEmpty && !waitingUIIsDelayed && !suppressAssistantBubble {
                 messageBubble(for: message, isLastAssistant: isLastAssistant)
                     .transition(.opacity)
             }

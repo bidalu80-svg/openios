@@ -1672,6 +1672,186 @@ actor LocalAlpineTerminalService {
         fi
         export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
         export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
+        iexa_bootstrap_preview_helpers() {
+          _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
+          mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
+          cat > "$_iexa_bootstrap_bin/iexa-open" <<'IEXA_OPEN_FALLBACK'
+        #!/bin/sh
+        ESC=$(printf '\\033')
+        BEL=$(printf '\\007')
+        emit_open_marker() {
+          printf '%s]1337;IexaOpenURL=%s%s\\n' "$ESC" "$1" "$BEL"
+        }
+        if [ "$#" -eq 0 ]; then
+          printf 'Usage: iexa-open <url-or-path>\\n' >&2
+          exit 1
+        fi
+        for target in "$@"; do
+          case "$target" in
+            http://*|https://*|about:*|file://*|iexa://*|/*)
+              emit_open_marker "$target"
+              printf 'Opened in Iexa preview: %s\\n' "$target"
+              ;;
+            *)
+              resolved=$(readlink -f "$target" 2>/dev/null || true)
+              if [ -n "$resolved" ]; then
+                emit_open_marker "$resolved"
+                printf 'Opened in Iexa preview: %s\\n' "$resolved"
+              else
+                printf 'iexa-open: not a URL or path: %s\\n' "$target" >&2
+              fi
+              ;;
+          esac
+        done
+        IEXA_OPEN_FALLBACK
+          cat > "$_iexa_bootstrap_bin/iexa-serve" <<'IEXA_SERVE_FALLBACK'
+        #!/bin/sh
+        set -u
+        ESC=$(printf '\\033')
+        BEL=$(printf '\\007')
+        emit_open_marker() {
+          printf '%s]1337;IexaOpenURL=%s%s\\n' "$ESC" "$1" "$BEL"
+        }
+        target=${1:-.}
+        port=${2:-8080}
+        case "$port" in ''|*[!0-9]*) port=8080 ;; esac
+        if [ -f "$target" ]; then
+          target=$(dirname "$target")
+        fi
+        if [ ! -d "$target" ]; then
+          resolved=$(readlink -f "$target" 2>/dev/null || true)
+          if [ -n "$resolved" ] && [ -f "$resolved" ]; then
+            target=$(dirname "$resolved")
+          elif [ -n "$resolved" ] && [ -d "$resolved" ]; then
+            target="$resolved"
+          fi
+        fi
+        if [ ! -d "$target" ]; then
+          printf 'iexa-serve: directory not found: %s\\n' "$target" >&2
+          exit 1
+        fi
+        dir=$(cd "$target" 2>/dev/null && pwd)
+        if [ -z "$dir" ]; then
+          printf 'iexa-serve: cannot resolve directory: %s\\n' "$target" >&2
+          exit 1
+        fi
+        runtime_dir=/tmp/iexa-serve
+        mkdir -p "$runtime_dir"
+        print_urls() {
+          url="http://localhost:$1/"
+          printf 'Preview URL: %s\\n' "$url"
+          printf 'Loopback URL: http://127.0.0.1:%s/\\n' "$1"
+          printf '访问地址: %s\\n' "$url"
+          emit_open_marker "$url"
+        }
+        pid_alive() {
+          [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
+        }
+        socket_port_in_use() {
+          if command -v nc >/dev/null 2>&1; then
+            nc -z 127.0.0.1 "$1" >/dev/null 2>&1 && return 0
+            return 1
+          fi
+          if [ -r /proc/net/tcp ]; then
+            port_hex=$(printf '%04X' "$1" 2>/dev/null || true)
+            if [ -n "$port_hex" ]; then
+              awk -v p=":$port_hex" 'tolower($2) ~ tolower(p) && $4 == "0A" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp 2>/dev/null && return 0
+              [ -r /proc/net/tcp6 ] && awk -v p=":$port_hex" 'tolower($2) ~ tolower(p) && $4 == "0A" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp6 2>/dev/null && return 0
+              return 1
+            fi
+          fi
+          return 2
+        }
+        existing_server_for_dir() {
+          candidate_port="$1"
+          candidate_pidfile="$runtime_dir/$candidate_port.pid"
+          candidate_dirfile="$runtime_dir/$candidate_port.dir"
+          [ -f "$candidate_pidfile" ] || return 1
+          candidate_pid=$(cat "$candidate_pidfile" 2>/dev/null || true)
+          pid_alive "$candidate_pid" || return 1
+          socket_port_in_use "$candidate_port"
+          socket_status=$?
+          [ "$socket_status" -eq 1 ] && return 1
+          candidate_dir=$(cat "$candidate_dirfile" 2>/dev/null || true)
+          if [ -z "$candidate_dir" ] || [ "$candidate_dir" = "$dir" ]; then
+            printf 'Iexa local preview server already running.\\n'
+            printf 'Directory: %s\\n' "$dir"
+            printf 'PID: %s\\n' "$candidate_pid"
+            print_urls "$candidate_port"
+            exit 0
+          fi
+          return 1
+        }
+        port_in_use() {
+          socket_port_in_use "$1"
+          socket_status=$?
+          [ "$socket_status" -eq 0 ] && return 0
+          [ "$socket_status" -eq 1 ] && return 1
+          pidfile="$runtime_dir/$1.pid"
+          if [ -f "$pidfile" ]; then
+            pid=$(cat "$pidfile" 2>/dev/null || true)
+            pid_alive "$pid" && return 0
+          fi
+          return 1
+        }
+        existing_server_for_dir "$port"
+        start_port=$port
+        while port_in_use "$port"; do
+          port=$((port + 1))
+          existing_server_for_dir "$port"
+          if [ "$port" -gt $((start_port + 50)) ]; then
+            printf 'iexa-serve: no free localhost port found near %s\\n' "$start_port" >&2
+            exit 1
+          fi
+        done
+        log="$runtime_dir/$port.log"
+        pidfile="$runtime_dir/$port.pid"
+        dirfile="$runtime_dir/$port.dir"
+        if command -v python3 >/dev/null 2>&1; then
+          python3 -m http.server "$port" --bind 127.0.0.1 --directory "$dir" >"$log" 2>&1 &
+          pid=$!
+        elif command -v busybox >/dev/null 2>&1; then
+          busybox httpd -f -p "127.0.0.1:$port" -h "$dir" >"$log" 2>&1 &
+          pid=$!
+        else
+          printf 'iexa-serve: python3 or busybox httpd is required\\n' >&2
+          exit 1
+        fi
+        printf '%s\\n' "$pid" > "$pidfile"
+        printf '%s\\n' "$dir" > "$dirfile"
+        sleep 1 2>/dev/null || true
+        if ! kill -0 "$pid" 2>/dev/null; then
+          printf 'iexa-serve: server failed to start. Log: %s\\n' "$log" >&2
+          [ -f "$log" ] && tail -40 "$log" >&2
+          rm -f "$pidfile" "$dirfile"
+          exit 1
+        fi
+        socket_port_in_use "$port"
+        socket_status=$?
+        if [ "$socket_status" -eq 1 ]; then
+          printf 'iexa-serve: server did not listen on localhost:%s. Log: %s\\n' "$port" "$log" >&2
+          [ -f "$log" ] && tail -40 "$log" >&2
+          kill "$pid" 2>/dev/null || true
+          rm -f "$pidfile" "$dirfile"
+          exit 1
+        fi
+        printf 'Iexa local preview server started.\\n'
+        printf 'Directory: %s\\n' "$dir"
+        printf 'PID: %s\\n' "$pid"
+        print_urls "$port"
+        IEXA_SERVE_FALLBACK
+          cat > "$_iexa_bootstrap_bin/lsof" <<'IEXA_LSOF_FALLBACK'
+        #!/bin/sh
+        printf 'lsof is disabled in Iexa Local Alpine because it is unreliable in the embedded iSH runtime.\\n' >&2
+        printf 'For localhost preview checks, use `nc -z 127.0.0.1 <port>` or inspect /proc/net/tcp.\\n' >&2
+        exit 127
+        IEXA_LSOF_FALLBACK
+          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" 2>/dev/null || true
+          export PATH="$_iexa_bootstrap_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
+          export BROWSER=iexa-open
+          hash -r 2>/dev/null || true
+        }
+        iexa_bootstrap_preview_helpers
         iexa_find_executable() {
           _iexa_name="$1"
           _iexa_old_ifs="$IFS"
