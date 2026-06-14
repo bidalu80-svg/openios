@@ -3809,17 +3809,37 @@ actor LocalAlpineAgentService {
         status: \(readStatus)
         """
 
+        let displayBody = clippedReadFileDisplayBody(body)
         let observation = [header, "== content ==", body].joined(separator: "\n\n")
-        let displaySummary = [
-            header,
-            "== content ==",
-            "（内容已读取并保留给模型；前台预览省略文件正文以降低 UI 负载。）"
-        ].joined(separator: "\n\n")
+        let displaySummary = [header, "== content ==", displayBody].joined(separator: "\n\n")
 
         return LocalAlpineReadFileText(
             observation: observation,
             displaySummary: displaySummary
         )
+    }
+
+    private nonisolated static func clippedReadFileDisplayBody(_ body: String) -> String {
+        let maxCharacters = 4_000
+        let maxLines = 120
+        var preview = body
+        var didClip = false
+
+        if preview.count > maxCharacters {
+            preview = String(preview.prefix(maxCharacters))
+            didClip = true
+        }
+
+        let lines = preview.components(separatedBy: "\n")
+        if lines.count > maxLines {
+            preview = lines.prefix(maxLines).joined(separator: "\n")
+            didClip = true
+        }
+
+        if didClip {
+            preview += "\n...（前台仅显示预览；点开步骤可查看完整文件内容。）"
+        }
+        return preview
     }
 
     private func editFiles(_ requests: [LocalAlpineEditFileRequest], cwd: String) async -> LocalAlpineStructuredToolResult {
