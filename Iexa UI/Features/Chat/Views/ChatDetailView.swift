@@ -1351,8 +1351,7 @@ struct ChatDetailView: View {
     }
 
     private func shouldSuppressAssistantBubbleForActivityParent(_ message: ChatMessage) -> Bool {
-        guard message.role == .assistant,
-              hasRenderableAgentActivity(for: message) else {
+        guard message.role == .assistant else {
             return false
         }
 
@@ -1391,7 +1390,6 @@ struct ChatDetailView: View {
 
     private func assistantContentOverrideForActivityParent(_ message: ChatMessage) -> String? {
         guard message.role == .assistant,
-              hasRenderableAgentActivity(for: message),
               !isMessageVisuallyStreaming(message) else {
             return nil
         }
@@ -1486,10 +1484,30 @@ struct ChatDetailView: View {
         hasLocalAlpineFinalSummary(after: message, requireRenderableContent: true)
     }
 
+    private func localAlpineResultHasStructuredActivity(_ message: ChatMessage) -> Bool {
+        guard let metadata = message.metadata else { return false }
+        for key in [
+            "iexa_local_alpine_tool_calls",
+            "iexa_local_alpine_command_results",
+            "iexa_local_alpine_written_files",
+            "iexa_local_alpine_raw_result"
+        ] {
+            if let value = metadata[key], !value.isEmpty {
+                return true
+            }
+        }
+        return message.statusHistory.contains { status in
+            let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            return action == "local_alpine"
+                || action == "local_alpine_agent"
+                || action == "local_alpine_tool"
+        }
+    }
+
     private func localAlpineFallbackContent(for message: ChatMessage) -> String {
         guard isLocalAlpineResultMessage(message) else { return "" }
         guard !hasLocalAlpineFinalSummary(after: message, requireRenderableContent: false) else { return "" }
-        if activityItem(for: message)?.hasConcreteSteps == true {
+        if localAlpineResultHasStructuredActivity(message) {
             return ""
         }
         return message.content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1657,21 +1675,16 @@ struct ChatDetailView: View {
 
         let metadata = message.metadata ?? [:]
         if metadata["iexa_local_native_hidden_tool_parent"] == "true" {
-            return !hasRenderableAgentActivity(for: message)
+            return true
         }
         if isLocalAlpineResultMessage(message) {
-            if hasVisibleLocalAlpineFinalSummary(after: message) {
-                return true
-            }
-            if hasLaterLocalAlpineTurnMessage(after: message) {
-                return true
-            }
-            let hasVisibleActivity = activityItem(for: message)?.hasConcreteSteps == true
-            if hasVisibleActivity {
-                return false
-            }
             if isMessageVisuallyStreaming(message) {
                 return false
+            }
+            if hasVisibleLocalAlpineFinalSummary(after: message)
+                || hasLaterLocalAlpineTurnMessage(after: message)
+                || localAlpineResultHasStructuredActivity(message) {
+                return true
             }
             return message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && messageHasProcessOnlyStatus(message)
@@ -1691,13 +1704,13 @@ struct ChatDetailView: View {
                 return false
             }
             if contentContainsLocalAlpineInstruction(message.content) {
-                return !hasRenderableAgentActivity(for: message)
+                return true
             }
             return message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && messageHasProcessOnlyStatus(message)
         }
         if metadata["iexa_local_alpine_hidden_tool_parent"] == "true" {
-            return !hasRenderableAgentActivity(for: message)
+            return true
         }
         if metadata["iexa_local_alpine_auto_verify"] != nil
             || metadata["iexa_local_alpine_missing_tool_correction"] != nil
@@ -1705,7 +1718,7 @@ struct ChatDetailView: View {
             return true
         }
         if contentContainsLocalAlpineInstruction(message.content) {
-            return !hasRenderableAgentActivity(for: message)
+            return true
         }
         if message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            !isMessageVisuallyStreaming(message),
@@ -2512,15 +2525,17 @@ struct ChatDetailView: View {
                 ))
             }
 
-            AgentStepFloatingBarHost(
-                conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
-                fallbackItem: visibleAgentActivityWindowPreview,
-                stepLimit: Self.agentFloatingPreviewStepLimit,
-                onOpenAgentLog: openAgentTaskPanel,
-                onPreviewTap: { item, index in
-                    openAgentFloatingPreview(item: item, initialIndex: index)
-                }
-            )
+            if viewModel.isStreaming || viewModel.streamingStore.isActive {
+                AgentStepFloatingBarHost(
+                    conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
+                    fallbackItem: visibleAgentActivityWindowPreview,
+                    stepLimit: Self.agentFloatingPreviewStepLimit,
+                    onOpenAgentLog: openAgentTaskPanel,
+                    onPreviewTap: { item, index in
+                        openAgentFloatingPreview(item: item, initialIndex: index)
+                    }
+                )
+            }
 
             ChatInputField(
                 text: $vm.inputText,
@@ -2923,10 +2938,15 @@ struct ChatDetailView: View {
         } action: { _, newOffset in
             let distanceFromBottom = max(0,
                 viewState_contentHeight - newOffset.y - viewState_containerHeight)
-            self.distanceFromBottom = distanceFromBottom
+            if abs(distanceFromBottom - self.distanceFromBottom) > 24 {
+                self.distanceFromBottom = distanceFromBottom
+            }
             if distanceFromBottom <= 100 {
                 // User scrolled very close to the bottom — re-engage auto-scroll.
                 if isScrolledUp { isScrolledUp = false }
+                if self.distanceFromBottom != 0 {
+                    self.distanceFromBottom = 0
+                }
             } else {
                 // Suppress false "user scrolled up" detection after any programmatic
                 // scroll. The scroll animation itself causes the offset to momentarily
@@ -3303,10 +3323,6 @@ struct ChatDetailView: View {
                     .userAttachmentReveal(enabled: isLatestUserMessage)
             }
 
-            if message.role == .assistant {
-                agentStepPreview(for: message)
-            }
-
             // ── Streaming status indicators ──
             if message.role == .assistant
                 && !waitingUIIsDelayed
@@ -3528,10 +3544,7 @@ struct ChatDetailView: View {
     }
 
     private func hasAgentToolPreview(for message: ChatMessage) -> Bool {
-        guard let item = agentActivity(for: message), item.hasConcreteSteps else {
-            return false
-        }
-        return !item.hasOnlyWebSearchStatusSteps
+        false
     }
 
     @ViewBuilder
