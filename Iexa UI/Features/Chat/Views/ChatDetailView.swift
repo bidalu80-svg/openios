@@ -1322,7 +1322,7 @@ struct ChatDetailView: View {
         signature &+= message.isStreaming ? 31 : 7
         signature &+= message.statusHistory.count &* 13
         signature &+= message.files.count &* 17
-        signature &+= message.error?.content.utf8.count ?? 0
+        signature &+= message.error?.content?.utf8.count ?? 0
         if let metadata = message.metadata {
             signature &+= metadata.count &* 19
             for key in [
