@@ -2525,15 +2525,17 @@ struct ChatDetailView: View {
                 ))
             }
 
-            AgentStepFloatingBarHost(
-                conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
-                fallbackItem: visibleAgentActivityWindowPreview,
-                stepLimit: Self.agentFloatingPreviewStepLimit,
-                onOpenAgentLog: openAgentTaskPanel,
-                onPreviewTap: { item, index in
-                    openAgentFloatingPreview(item: item, initialIndex: index)
-                }
-            )
+            if viewModel.isStreaming || viewModel.streamingStore.isActive {
+                AgentStepFloatingBarHost(
+                    conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
+                    fallbackItem: visibleAgentActivityWindowPreview,
+                    stepLimit: Self.agentFloatingPreviewStepLimit,
+                    onOpenAgentLog: openAgentTaskPanel,
+                    onPreviewTap: { item, index in
+                        openAgentFloatingPreview(item: item, initialIndex: index)
+                    }
+                )
+            }
 
             ChatInputField(
                 text: $vm.inputText,
@@ -8712,10 +8714,14 @@ private struct AgentActivityStepPill: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            Image(systemName: iconName)
-                .scaledFont(size: 12, weight: .semibold)
-                .foregroundStyle(tint)
-                .frame(width: 20, height: 20)
+            ZStack {
+                Circle()
+                    .fill(tint.opacity(theme.isDark ? 0.20 : 0.13))
+                    .frame(width: 21, height: 21)
+                Image(systemName: iconName)
+                    .scaledFont(size: 11.5, weight: .semibold)
+                    .foregroundStyle(tint)
+            }
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 5) {
@@ -8743,13 +8749,12 @@ private struct AgentActivityStepPill: View {
         .frame(height: 38)
         .background(
             Capsule(style: .continuous)
-                .fill(theme.cardBackground)
+                .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.78))
         )
         .overlay(
             Capsule(style: .continuous)
-                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.16 : 0.30), lineWidth: 0.7)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.24 : 0.42), lineWidth: 0.7)
         )
-        .drawingGroup(opaque: false, colorMode: .linear)
     }
 }
 
