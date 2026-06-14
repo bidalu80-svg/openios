@@ -11904,7 +11904,7 @@ final class ChatViewModel {
     }
 
     private static func localAlpineNativeToolResultContent(_ result: LocalAlpineAgentResult) -> String {
-        let body = result.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = (result.modelObservation ?? result.summary).trimmingCharacters(in: .whitespacesAndNewlines)
         let fallback = result.didExecute ? "Local Alpine tool completed." : "Local Alpine tool did not execute."
         let limit = result.commandResults.contains { LocalAlpineAgentCommandResult.isReadFileCommand($0.command) }
             ? 240_000

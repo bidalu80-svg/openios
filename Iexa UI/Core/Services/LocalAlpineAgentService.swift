@@ -686,7 +686,7 @@ actor LocalAlpineAgentService {
                 await emitToolStart(context)
                 let readResult = await readFiles(command.readFiles, cwd: effectiveCWD)
                 stepLines.append(readResult.summary)
-                modelStepLines.append(readResult.summary)
+                modelStepLines.append(readResult.modelObservation ?? readResult.summary)
                 commandResults.append(contentsOf: readResult.commandResults)
                 await emitTool(Self.toolCallResult(
                     context,
@@ -3598,6 +3598,7 @@ actor LocalAlpineAgentService {
 
     private func readFiles(_ requests: [LocalAlpineReadFileRequest], cwd: String) async -> LocalAlpineStructuredToolResult {
         var lines = ["读取文件（read_file）"]
+        var modelLines = ["读取文件（read_file）"]
         var commandResults: [LocalAlpineAgentCommandResult] = []
         var hadFailure = false
 
@@ -3608,8 +3609,9 @@ actor LocalAlpineAgentService {
             do {
                 let data = try await LocalAlpineTerminalService.shared.readFile(path: target)
                 let output: String
+                let displayOutput: String
                 if let content = String(data: data, encoding: .utf8) {
-                    output = Self.numberedText(
+                    let fileText = Self.numberedReadFileText(
                         content,
                         path: target,
                         byteCount: data.count,
@@ -3618,10 +3620,14 @@ actor LocalAlpineAgentService {
                         maxBytes: maxBytes,
                         explicitRange: request.hasExplicitRange
                     )
+                    output = fileText.observation
+                    displayOutput = fileText.displaySummary
                 } else {
                     output = "== file ==\n\(target)\n\nbinary file: \(data.count) B"
+                    displayOutput = output
                 }
-                lines.append(output)
+                lines.append(displayOutput)
+                modelLines.append(output)
                 let result = LocalAlpineCommandResult(
                     command: commandDescription,
                     output: output,
@@ -3632,6 +3638,7 @@ actor LocalAlpineAgentService {
             } catch {
                 let output = "read_file failed for `\(target)`: \(error.localizedDescription)"
                 lines.append("- \(output)")
+                modelLines.append("- \(output)")
                 let result = LocalAlpineCommandResult(
                     command: commandDescription,
                     output: output,
@@ -3646,6 +3653,7 @@ actor LocalAlpineAgentService {
         let skipped = max(0, requests.count - maxCommandsPerResponse)
         if skipped > 0 {
             lines.append("- 已跳过 \(skipped) 个多余读取请求，避免一次读取过多。")
+            modelLines.append("- 已跳过 \(skipped) 个多余读取请求，避免一次读取过多。")
         }
 
         return LocalAlpineStructuredToolResult(
@@ -3654,7 +3662,8 @@ actor LocalAlpineAgentService {
             writtenFiles: [],
             editedPaths: [],
             lineDelta: nil,
-            hadFailure: hadFailure
+            hadFailure: hadFailure,
+            modelObservation: modelLines.joined(separator: "\n\n")
         )
     }
 
@@ -3759,7 +3768,7 @@ actor LocalAlpineAgentService {
         }
     }
 
-    private nonisolated static func numberedText(
+    private nonisolated static func numberedReadFileText(
         _ content: String,
         path: String,
         byteCount: Int,
@@ -3767,7 +3776,7 @@ actor LocalAlpineAgentService {
         lineCount: Int?,
         maxBytes: Int,
         explicitRange: Bool
-    ) -> String {
+    ) -> LocalAlpineReadFileText {
         let normalized = content
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
@@ -3791,17 +3800,26 @@ actor LocalAlpineAgentService {
         if body.isEmpty {
             body = "（空文件或请求范围无内容）"
         }
-        return """
+        let header = """
         == file ==
         \(path)
         bytes: \(byteCount)
         lines: \(totalLines)
         range: \(startIndex + 1)-\(endIndex)
         status: \(readStatus)
-
-        == content ==
-        \(body)
         """
+
+        let observation = [header, "== content ==", body].joined(separator: "\n\n")
+        let displaySummary = [
+            header,
+            "== content ==",
+            "（内容已读取并保留给模型；前台预览省略文件正文以降低 UI 负载。）"
+        ].joined(separator: "\n\n")
+
+        return LocalAlpineReadFileText(
+            observation: observation,
+            displaySummary: displaySummary
+        )
     }
 
     private func editFiles(_ requests: [LocalAlpineEditFileRequest], cwd: String) async -> LocalAlpineStructuredToolResult {
@@ -6972,11 +6990,35 @@ private struct LocalAlpineWriteResult {
 
 private struct LocalAlpineStructuredToolResult {
     let summary: String
+    let modelObservation: String?
     let commandResults: [LocalAlpineAgentCommandResult]
     let writtenFiles: [LocalAlpineWrittenFile]
     let editedPaths: [String]
     let lineDelta: LocalAlpineLineDelta?
     let hadFailure: Bool
+
+    init(
+        summary: String,
+        commandResults: [LocalAlpineAgentCommandResult],
+        writtenFiles: [LocalAlpineWrittenFile],
+        editedPaths: [String],
+        lineDelta: LocalAlpineLineDelta?,
+        hadFailure: Bool,
+        modelObservation: String? = nil
+    ) {
+        self.summary = summary
+        self.modelObservation = modelObservation
+        self.commandResults = commandResults
+        self.writtenFiles = writtenFiles
+        self.editedPaths = editedPaths
+        self.lineDelta = lineDelta
+        self.hadFailure = hadFailure
+    }
+}
+
+private struct LocalAlpineReadFileText {
+    let observation: String
+    let displaySummary: String
 }
 
 private enum LocalAlpineAgentEditError: LocalizedError {
