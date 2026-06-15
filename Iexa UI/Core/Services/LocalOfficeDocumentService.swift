@@ -47,6 +47,24 @@ struct LocalOfficeDocumentResult: Sendable {
     }
 }
 
+struct LocalOfficeDeleteResult: Sendable {
+    let deletedFileURL: URL
+    let deletedFolderURL: URL
+    let fileName: String
+    let summary: String
+
+    var payload: [String: Any] {
+        [
+            "ok": true,
+            "deleted": true,
+            "file_name": fileName,
+            "deleted_file_url": deletedFileURL.absoluteString,
+            "deleted_folder_url": deletedFolderURL.absoluteString,
+            "summary": summary
+        ]
+    }
+}
+
 @MainActor
 final class LocalOfficeDocumentService {
     static let shared = LocalOfficeDocumentService()
@@ -202,6 +220,31 @@ final class LocalOfficeDocumentService {
         )
     }
 
+    func deleteDocument(from call: [String: Any]) throws -> LocalOfficeDeleteResult {
+        let root = try officeRootDirectory()
+        let targetURL = try deleteTargetURL(from: call, root: root)
+        let folderURL = try officeFolderForDeleteTarget(targetURL, root: root)
+
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: folderURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw OfficeDocumentError.deleteTargetNotFound
+        }
+
+        let deletedFileURL = primaryOfficeFile(in: folderURL) ?? targetURL
+        let fileName = deletedFileURL.lastPathComponent.isEmpty
+            ? folderURL.lastPathComponent
+            : deletedFileURL.lastPathComponent
+        try fileManager.removeItem(at: folderURL)
+
+        return LocalOfficeDeleteResult(
+            deletedFileURL: deletedFileURL,
+            deletedFolderURL: folderURL,
+            fileName: fileName,
+            summary: "已删除本地 Office/PDF 文件：\(fileName)。"
+        )
+    }
+
     private func makeOutputFolder(prefix: String) throws -> URL {
         let root = try officeRootDirectory()
         let formatter = DateFormatter()
@@ -303,6 +346,131 @@ final class LocalOfficeDocumentService {
         return nil
     }
 
+    private func deleteTargetURL(from call: [String: Any], root: URL) throws -> URL {
+        let targetKeys = [
+            "file_url",
+            "source_url",
+            "source_file",
+            "input_url",
+            "input_file",
+            "url",
+            "path",
+            "file",
+            "target",
+            "from"
+        ]
+        for key in targetKeys {
+            if let url = localFileURL(from: JSONValue.string(call[key])) {
+                return url
+            }
+        }
+
+        let nameKeys = ["file_name", "filename", "name", "title"]
+        for key in nameKeys {
+            if let folder = try folderMatchingOfficeTargetName(JSONValue.string(call[key]), root: root) {
+                return folder
+            }
+        }
+
+        return try latestOfficeFolder(in: root)
+    }
+
+    private func officeFolderForDeleteTarget(_ target: URL, root: URL) throws -> URL {
+        let rootURL = root.standardizedFileURL.resolvingSymlinksInPath()
+        let targetURL = target.standardizedFileURL.resolvingSymlinksInPath()
+        let rootPath = rootURL.path
+        let targetPath = targetURL.path
+        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        guard targetPath.hasPrefix(prefix) else {
+            throw OfficeDocumentError.deleteTargetOutsideOfficeRoot
+        }
+
+        let relativePath = String(targetPath.dropFirst(prefix.count))
+        guard let firstComponent = relativePath.split(separator: "/").first,
+              !firstComponent.isEmpty else {
+            throw OfficeDocumentError.deleteTargetOutsideOfficeRoot
+        }
+        return rootURL.appendingPathComponent(String(firstComponent), isDirectory: true)
+    }
+
+    private func latestOfficeFolder(in root: URL) throws -> URL {
+        let folders = try officeFolders(in: root)
+        guard let latest = folders.max(by: { lhs, rhs in
+            officeFolderDate(lhs) < officeFolderDate(rhs)
+        }) else {
+            throw OfficeDocumentError.deleteTargetNotFound
+        }
+        return latest
+    }
+
+    private func folderMatchingOfficeTargetName(_ rawName: String, root: URL) throws -> URL? {
+        let target = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return nil }
+        let targetLower = target.lowercased()
+        let targetBase = (target as NSString).deletingPathExtension.lowercased()
+        let folders = try officeFolders(in: root).sorted {
+            officeFolderDate($0) > officeFolderDate($1)
+        }
+
+        for folder in folders {
+            if folder.lastPathComponent.lowercased() == targetLower {
+                return folder
+            }
+            guard let children = try? fileManager.contentsOfDirectory(
+                at: folder,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+            for child in children where isOfficeDocumentFile(child) {
+                let childName = child.lastPathComponent.lowercased()
+                let childBase = (child.lastPathComponent as NSString).deletingPathExtension.lowercased()
+                if childName == targetLower || childBase == targetLower || childBase == targetBase {
+                    return folder
+                }
+            }
+        }
+        return nil
+    }
+
+    private func officeFolders(in root: URL) throws -> [URL] {
+        try fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey, .creationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+        .filter { url in
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
+            return values?.isDirectory == true
+        }
+    }
+
+    private func officeFolderDate(_ url: URL) -> Date {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+        return values?.contentModificationDate ?? values?.creationDate ?? .distantPast
+    }
+
+    private func primaryOfficeFile(in folder: URL) -> URL? {
+        guard let urls = try? fileManager.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+        return urls.first(where: isOfficeDocumentFile)
+    }
+
+    private func isOfficeDocumentFile(_ url: URL) -> Bool {
+        switch url.pathExtension.lowercased() {
+        case "xlsx", "xls", "pptx", "ppt", "docx", "doc", "pdf":
+            return true
+        default:
+            return false
+        }
+    }
+
     private func previewImageURLs(in folder: URL) -> [URL] {
         guard let urls = try? fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else {
             return []
@@ -328,6 +496,8 @@ private enum OfficeDocumentError: LocalizedError {
     case documentsUnavailable
     case renderFailed
     case invalidArchive
+    case deleteTargetNotFound
+    case deleteTargetOutsideOfficeRoot
 
     var errorDescription: String? {
         switch self {
@@ -337,6 +507,10 @@ private enum OfficeDocumentError: LocalizedError {
             return "文档预览图生成失败。"
         case .invalidArchive:
             return "Office 文件打包失败。"
+        case .deleteTargetNotFound:
+            return "没有找到可删除的本地 Office/PDF 文件。"
+        case .deleteTargetOutsideOfficeRoot:
+            return "只能删除 Iexa 本地 Office 生成目录内的文件。"
         }
     }
 }

@@ -173,6 +173,41 @@ final class LocalNativeToolService {
         return nil
     }
 
+    static func officeActionName(in content: String) -> String? {
+        if officeDeleteActionName(in: content) != nil {
+            return "office.delete"
+        }
+        guard let kind = officeActionKind(in: content) else {
+            return nil
+        }
+        switch kind {
+        case .excel:
+            return "office.create_excel"
+        case .powerPoint:
+            return "office.create_ppt"
+        case .word:
+            return "office.create_word"
+        case .pdf:
+            return "office.create_pdf"
+        }
+    }
+
+    static func officeDeleteActionName(in content: String) -> String? {
+        let lower = content.lowercased()
+        let actions = [
+            "office.delete", "office_delete", "delete_office", "office.remove",
+            "office_remove", "delete_office_document", "remove_office_document",
+            "delete_document", "remove_document"
+        ]
+        return actions.first { action in
+            lower.contains(action)
+                || lower.range(
+                    of: #""(?:action|name|tool|function)"\s*:\s*""# + NSRegularExpression.escapedPattern(for: action) + #"""#,
+                    options: .regularExpression
+                ) != nil
+        }
+    }
+
     static func browserActionName(in content: String) -> String? {
         let lower = content.lowercased()
         let actions = [
@@ -288,6 +323,8 @@ final class LocalNativeToolService {
             return await executeCreateWord(call, progress: officeProgress)
         case "office.create_pdf", "office_create_pdf", "create_pdf", "pdf.create", "pdf":
             return await executeCreatePDF(call, progress: officeProgress)
+        case "office.delete", "office_delete", "delete_office", "office.remove", "office_remove", "delete_office_document", "remove_office_document", "delete_document", "remove_document":
+            return await executeDeleteOffice(call)
         default:
             return [
                 "action": action.isEmpty ? "unknown" : action,
@@ -548,6 +585,24 @@ final class LocalNativeToolService {
         }
     }
 
+    private func executeDeleteOffice(_ call: [String: Any]) async -> [String: Any] {
+        do {
+            let result = try LocalOfficeDocumentService.shared.deleteDocument(
+                from: callWithLatestOfficeDeleteTargetIfNeeded(call)
+            )
+            var payload = result.payload
+            payload["action"] = "office.delete"
+            clearRememberedOfficeResultIfDeleted(payload)
+            return payload
+        } catch {
+            return [
+                "action": "office.delete",
+                "ok": false,
+                "error": error.localizedDescription
+            ]
+        }
+    }
+
     private func rememberConvertibleOfficeResult(_ payload: [String: Any]) {
         guard (payload["ok"] as? Bool) == true,
               let url = payload["file_url"] as? String,
@@ -556,6 +611,21 @@ final class LocalNativeToolService {
         }
         latestConvertibleOfficeFileURL = url
         latestConvertibleOfficeFileName = payload["file_name"] as? String
+    }
+
+    private func clearRememberedOfficeResultIfDeleted(_ payload: [String: Any]) {
+        guard (payload["ok"] as? Bool) == true else { return }
+        let deletedURL = (payload["deleted_file_url"] as? String) ?? ""
+        let deletedName = (payload["file_name"] as? String) ?? ""
+        if !deletedURL.isEmpty, deletedURL == latestConvertibleOfficeFileURL {
+            latestConvertibleOfficeFileURL = nil
+            latestConvertibleOfficeFileName = nil
+            return
+        }
+        if !deletedName.isEmpty, deletedName == latestConvertibleOfficeFileName {
+            latestConvertibleOfficeFileURL = nil
+            latestConvertibleOfficeFileName = nil
+        }
     }
 
     private func callWithLatestOfficeSourceIfNeeded(_ call: [String: Any]) -> [String: Any] {
@@ -574,6 +644,23 @@ final class LocalNativeToolService {
         return enriched
     }
 
+    private func callWithLatestOfficeDeleteTargetIfNeeded(_ call: [String: Any]) -> [String: Any] {
+        guard !hasOfficeDeleteTarget(in: call),
+              let latestConvertibleOfficeFileURL,
+              !latestConvertibleOfficeFileURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return call
+        }
+        var enriched = call
+        enriched["file_url"] = latestConvertibleOfficeFileURL
+        enriched["latest"] = true
+        if enriched["file_name"] == nil,
+           let latestConvertibleOfficeFileName,
+           !latestConvertibleOfficeFileName.isEmpty {
+            enriched["file_name"] = latestConvertibleOfficeFileName
+        }
+        return enriched
+    }
+
     private func hasPDFSource(in call: [String: Any]) -> Bool {
         [
             "source_file",
@@ -582,6 +669,28 @@ final class LocalNativeToolService {
             "input_url",
             "file_url",
             "from"
+        ].contains { key in
+            guard let value = call[key] else { return false }
+            return !String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    private func hasOfficeDeleteTarget(in call: [String: Any]) -> Bool {
+        [
+            "file_url",
+            "source_file",
+            "source_url",
+            "input_file",
+            "input_url",
+            "url",
+            "path",
+            "file",
+            "target",
+            "from",
+            "file_name",
+            "filename",
+            "name",
+            "title"
         ].contains { key in
             guard let value = call[key] else { return false }
             return !String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1321,6 +1430,8 @@ final class LocalNativeToolService {
             return "office.create_word"
         case "office.create_pdf", "office_create_pdf", "create_pdf", "pdf.create", "pdf":
             return "office.create_pdf"
+        case "office.delete", "office_delete", "delete_office", "office.remove", "office_remove", "delete_office_document", "remove_office_document", "delete_document", "remove_document":
+            return "office.delete"
         default:
             return raw
         }
@@ -1375,7 +1486,8 @@ final class LocalNativeToolService {
              "office.create_excel", "office_create_excel", "create_excel", "excel.create", "excel",
              "office.create_ppt", "office.create_powerpoint", "office_create_ppt", "create_ppt", "create_powerpoint", "ppt.create", "powerpoint.create", "ppt",
              "office.create_word", "office.create_docx", "office_create_word", "create_word", "create_docx", "word.create", "docx.create", "word", "docx",
-             "office.create_pdf", "office_create_pdf", "create_pdf", "pdf.create", "pdf":
+             "office.create_pdf", "office_create_pdf", "create_pdf", "pdf.create", "pdf",
+             "office.delete", "office_delete", "delete_office", "office.remove", "office_remove", "delete_office_document", "remove_office_document", "delete_document", "remove_document":
             return true
         default:
             return false

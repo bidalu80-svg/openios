@@ -428,7 +428,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 AgentActivityStep(
                     id: "command-\(index)-\(command.hashValue)",
                     kind: .command,
-                    title: result.failed ? "命令失败" : "运行命令",
+                    title: commandStepTitle(for: command, failed: result.failed),
                     detail: command,
                     isRunning: false,
                     failed: result.failed,
@@ -812,6 +812,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
     static func displayTitle(for call: LocalAlpineToolCall, file: LocalAlpineWrittenFile? = nil) -> String {
         let display = LocalAlpineToolDisplayRegistry.display(for: call.name)
         let normalizedToolName = call.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let preferred = preferredDisplayTitle(for: call, fallbackTitle: display.title) {
+            return call.failed ? "\(preferred)失败" : preferred
+        }
         let fileName: String? = {
             if let fileName = file?.fileName.trimmingCharacters(in: .whitespacesAndNewlines),
                !fileName.isEmpty {
@@ -830,10 +833,22 @@ private struct AgentActivityItem: Identifiable, Hashable {
             return fileName.map { "读取 \($0)" } ?? "读取文件"
         case "edit_file", "edit_files", "replace_file", "edit", "patch_file", "patch_files", "apply_patch", "patch":
             return fileName.map { "编辑 \($0)" } ?? display.title
+        case "create_file", "create_files", "new_file", "touch":
+            return fileName.map { "创建 \($0)" } ?? display.title
+        case "create_directory", "create_dir", "make_directory", "make_dir", "mkdir":
+            return fileName.map { "创建目录 \($0)" } ?? display.title
         case "write_files", "write_file", "write", "file_write":
             return fileName.map { "写入 \($0)" } ?? display.title
         case "delete_file", "delete_files", "remove_file", "remove_files", "delete", "rm", "file_delete":
             return fileName.map { "删除 \($0)" } ?? display.title
+        case "copy_file", "copy_files", "cp":
+            return fileName.map { "复制 \($0)" } ?? display.title
+        case "move_file", "move_files", "rename_file", "rename", "mv":
+            return fileName.map { "移动 \($0)" } ?? display.title
+        case "verify", "check":
+            return fileName.map { "校验 \($0)" } ?? display.title
+        case "verify_absent", "verify_missing", "ensure_absent":
+            return fileName.map { "校验删除 \($0)" } ?? display.title
         default:
             break
         }
@@ -871,6 +886,68 @@ private struct AgentActivityItem: Identifiable, Hashable {
             return "读取网页内容"
         }
         return call.failed ? "\(display.title)失败" : display.title
+    }
+
+    private static func preferredDisplayTitle(for call: LocalAlpineToolCall, fallbackTitle: String) -> String? {
+        let title = oneLinePreview(call.title, limit: 28)
+        guard !title.isEmpty, title != fallbackTitle else { return nil }
+        let lowerTitle = title.lowercased()
+        let normalizedName = call.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let genericTitles = [
+            "tool", "call", "function", "command", "shell", "execute", "run",
+            "工具", "调用工具", "执行工具", "命令", "执行命令"
+        ]
+        guard !genericTitles.contains(lowerTitle),
+              lowerTitle != normalizedName,
+              lowerTitle != normalizedName.replacingOccurrences(of: "_", with: " "),
+              title.range(of: #"[{}\[\]<>`]"#, options: .regularExpression) == nil else {
+            return nil
+        }
+        return title
+    }
+
+    private static func commandStepTitle(for command: String, failed: Bool) -> String {
+        let normalized = command
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let title: String
+        if normalized.range(of: #"(^|[;&|]\s*)(?:ls|find|pwd\s*&&\s*(?:ls|find)|du|stat)\b"#, options: .regularExpression) != nil {
+            title = "列出目录"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:cat|sed|awk|head|tail|less|more)\b"#, options: .regularExpression) != nil {
+            title = "读取文件"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:grep|rg|ag)\b"#, options: .regularExpression) != nil {
+            title = "搜索文本"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:rm|rmdir)\b"#, options: .regularExpression) != nil {
+            title = "删除文件"
+        } else if normalized.range(of: #"(^|[;&|]\s*)mkdir\b"#, options: .regularExpression) != nil {
+            title = "创建目录"
+        } else if normalized.range(of: #"(^|[;&|]\s*)touch\b"#, options: .regularExpression) != nil {
+            title = "创建文件"
+        } else if normalized.range(of: #"(^|[;&|]\s*)cp\b"#, options: .regularExpression) != nil {
+            title = "复制文件"
+        } else if normalized.range(of: #"(^|[;&|]\s*)mv\b"#, options: .regularExpression) != nil {
+            title = "移动文件"
+        } else if normalized.contains("git diff --check")
+                    || normalized.contains("swiftlint")
+                    || normalized.contains("eslint")
+                    || normalized.contains("tsc --noemit")
+                    || normalized.range(of: #"(^|[;&|]\s*)(?:test|\[)\b"#, options: .regularExpression) != nil {
+            title = "校验"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:pytest|python3?\s+-m\s+pytest|npm\s+test|pnpm\s+test|yarn\s+test|go\s+test|cargo\s+test)\b"#, options: .regularExpression) != nil {
+            title = "测试"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:swift|xcodebuild|make|cmake|gcc|g\+\+|clang|cargo|go|npm|pnpm|yarn)\s+(?:build|compile|archive|run\s+build)\b"#, options: .regularExpression) != nil {
+            title = "编译"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:apk|apt|brew|pip3?|npm|pnpm|yarn)\s+(?:add|install|i)\b"#, options: .regularExpression) != nil {
+            title = "安装依赖"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:curl|wget)\s+"#, options: .regularExpression) != nil {
+            title = "网络请求"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:python3?|node|deno|bun|ruby|php|lua|go\s+run|cargo\s+run|swift\s+run)\b"#, options: .regularExpression) != nil {
+            title = "运行脚本"
+        } else {
+            title = "运行命令"
+        }
+        return failed ? "\(title)失败" : title
     }
 
     static func isActivityMessage(_ message: ChatMessage) -> Bool {
@@ -8748,8 +8825,8 @@ private struct AgentActivityStepPill: View, Equatable {
         .padding(.leading, 9)
         .padding(.trailing, 12)
         .frame(height: hasDetail ? 36 : 30)
-        .frame(maxWidth: 315, alignment: .leading)
         .background(fill, in: Capsule(style: .continuous))
+        .frame(maxWidth: 315, alignment: .leading)
     }
 }
 

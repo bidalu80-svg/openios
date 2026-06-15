@@ -289,10 +289,18 @@ enum LocalAlpineToolDisplayRegistry {
             return LocalAlpineToolDisplay(icon: "square.and.pencil", title: "编辑文件")
         case "patch_file", "patch_files", "apply_patch", "patch":
             return LocalAlpineToolDisplay(icon: "doc.on.doc", title: "应用补丁")
+        case "create_file", "create_files", "new_file", "touch":
+            return LocalAlpineToolDisplay(icon: "doc.badge.plus", title: "创建文件")
+        case "create_directory", "create_dir", "make_directory", "make_dir", "mkdir":
+            return LocalAlpineToolDisplay(icon: "folder.badge.plus", title: "创建目录")
         case "write_files", "write_file", "write", "file_write":
             return LocalAlpineToolDisplay(icon: "doc.badge.plus", title: "写入文件")
         case "delete_file", "delete_files", "remove_file", "remove_files", "delete", "rm", "file_delete":
             return LocalAlpineToolDisplay(icon: "trash", title: "删除文件")
+        case "copy_file", "copy_files", "cp":
+            return LocalAlpineToolDisplay(icon: "doc.on.doc", title: "复制文件")
+        case "move_file", "move_files", "rename_file", "rename", "mv":
+            return LocalAlpineToolDisplay(icon: "arrow.right.doc.on.clipboard", title: "移动文件")
         case "list_dir", "list", "ls", "file_list", "directory_list":
             return LocalAlpineToolDisplay(icon: "folder", title: "列出目录")
         case "glob", "find_files":
@@ -300,9 +308,9 @@ enum LocalAlpineToolDisplayRegistry {
         case "grep", "search_files":
             return LocalAlpineToolDisplay(icon: "magnifyingglass", title: "搜索文本")
         case "verify", "check":
-            return LocalAlpineToolDisplay(icon: "checkmark.seal", title: "验证")
+            return LocalAlpineToolDisplay(icon: "checkmark.seal", title: "校验")
         case "verify_absent", "verify_missing", "ensure_absent":
-            return LocalAlpineToolDisplay(icon: "checkmark.seal", title: "验证删除")
+            return LocalAlpineToolDisplay(icon: "checkmark.seal", title: "校验删除")
         case "compile", "build":
             return LocalAlpineToolDisplay(icon: "hammer", title: "编译")
         case "test":
@@ -681,7 +689,8 @@ actor LocalAlpineAgentService {
                     name: "read_file",
                     detail: Self.toolDetail(forReadFiles: command.readFiles),
                     cwd: effectiveCWD,
-                    filePaths: command.readFiles.map(\.path)
+                    filePaths: command.readFiles.map(\.path),
+                    preferredTitle: command.preferredToolTitle
                 )
                 await emitToolStart(context)
                 let readResult = await readFiles(command.readFiles, cwd: effectiveCWD)
@@ -707,7 +716,8 @@ actor LocalAlpineAgentService {
                     name: "read_image",
                     detail: Self.toolDetail(forReadImages: command.readImages),
                     cwd: effectiveCWD,
-                    filePaths: command.readImages.map(\.path)
+                    filePaths: command.readImages.map(\.path),
+                    preferredTitle: command.preferredToolTitle
                 )
                 await emitToolStart(context)
                 let imageResult = await readImages(command.readImages, cwd: effectiveCWD)
@@ -733,7 +743,8 @@ actor LocalAlpineAgentService {
                     name: "edit_file",
                     detail: Self.toolDetail(forEditFiles: command.editFiles),
                     cwd: effectiveCWD,
-                    filePaths: command.editFiles.map(\.path)
+                    filePaths: command.editFiles.map(\.path),
+                    preferredTitle: command.preferredToolTitle
                 )
                 await emitToolStart(context)
                 let editResult = await editFiles(command.editFiles, cwd: effectiveCWD)
@@ -761,7 +772,8 @@ actor LocalAlpineAgentService {
                     name: "patch_file",
                     detail: Self.toolDetail(forPatchFiles: command.patchFiles),
                     cwd: effectiveCWD,
-                    filePaths: command.patchFiles.compactMap(\.path)
+                    filePaths: command.patchFiles.compactMap(\.path),
+                    preferredTitle: command.preferredToolTitle
                 )
                 await emitToolStart(context)
                 let patchResult = await patchFiles(command.patchFiles, cwd: effectiveCWD)
@@ -789,7 +801,8 @@ actor LocalAlpineAgentService {
                     name: "write_files",
                     detail: Self.toolDetail(forWriteFiles: command.writeFiles),
                     cwd: effectiveCWD,
-                    filePaths: command.writeFiles.map(\.path)
+                    filePaths: command.writeFiles.map(\.path),
+                    preferredTitle: command.preferredToolTitle
                 )
                 await emitToolStart(context)
                 let writeResult = await writeFiles(command.writeFiles, cwd: effectiveCWD)
@@ -827,7 +840,8 @@ actor LocalAlpineAgentService {
                     name: "delete_files",
                     detail: Self.toolDetail(forDeleteFiles: command.deleteFiles),
                     cwd: effectiveCWD,
-                    filePaths: command.deleteFiles.map(\.path)
+                    filePaths: command.deleteFiles.map(\.path),
+                    preferredTitle: command.preferredToolTitle
                 )
                 await emitToolStart(context)
                 let deleteResult = await deleteFiles(command.deleteFiles, cwd: effectiveCWD)
@@ -934,7 +948,8 @@ actor LocalAlpineAgentService {
                     detail: classifiedShellTool.detail,
                     cwd: effectiveCWD,
                     command: commandToExecute,
-                    filePaths: command.shellToolFilePaths
+                    filePaths: command.shellToolFilePaths.isEmpty ? classifiedShellTool.filePaths : command.shellToolFilePaths,
+                    preferredTitle: command.preferredToolTitle
                 )
                 await emitToolStart(context)
                 if let delaySeconds = command.delaySeconds, delaySeconds > 0 {
@@ -1252,20 +1267,35 @@ actor LocalAlpineAgentService {
         detail: String,
         cwd: String,
         command: String? = nil,
-        filePaths: [String]
+        filePaths: [String],
+        preferredTitle: String? = nil
     ) -> LocalAlpineToolCallContext {
         let display = LocalAlpineToolDisplayRegistry.display(for: name)
         return LocalAlpineToolCallContext(
             id: UUID().uuidString,
             runId: runId,
             name: name,
-            title: display.title,
+            title: sanitizedPreferredToolTitle(preferredTitle, fallback: display.title),
             detail: String(detail.prefix(500)),
             cwd: cwd,
             command: command,
             filePaths: filePaths.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
             startedAtMs: Self.nowMs()
         )
+    }
+
+    private nonisolated static func sanitizedPreferredToolTitle(_ raw: String?, fallback: String) -> String {
+        guard let raw else { return fallback }
+        let title = oneLine(raw)
+        guard !title.isEmpty, title.count <= 24 else { return fallback }
+        let lower = title.lowercased()
+        let genericTitles = [
+            "tool", "call", "function", "command", "shell", "execute", "run",
+            "工具", "调用工具", "执行工具", "命令", "执行命令"
+        ]
+        guard !genericTitles.contains(lower) else { return fallback }
+        guard title.range(of: #"[{}\[\]<>`]"#, options: .regularExpression) == nil else { return fallback }
+        return title
     }
 
     private nonisolated static func toolCallStart(_ context: LocalAlpineToolCallContext) -> LocalAlpineToolCall {
@@ -1438,6 +1468,7 @@ actor LocalAlpineAgentService {
         var editFiles = parseEditFilesForCommand(from: dict)
         var patchFiles = parsePatchFilesForCommand(from: dict)
         var deleteFiles = parseDeleteFilesForCommand(from: dict)
+        let preferredToolTitle = Self.preferredToolTitle(from: dict)
 
         let shellCommand = Self.shellCommandString(from: dict)
         if let shellCommand,
@@ -1488,7 +1519,8 @@ actor LocalAlpineAgentService {
                 delaySeconds: commandDelaySeconds,
                 shellToolName: generatedToolCommand.toolName,
                 shellToolDetail: generatedToolCommand.detail,
-                shellToolFilePaths: generatedToolCommand.filePaths
+                shellToolFilePaths: generatedToolCommand.filePaths,
+                preferredToolTitle: preferredToolTitle
             )] + nestedCommands
         }
 
@@ -1526,7 +1558,8 @@ actor LocalAlpineAgentService {
                     readImages: readImages,
                     editFiles: editFiles,
                     patchFiles: patchFiles,
-                    deleteFiles: deleteFiles
+                    deleteFiles: deleteFiles,
+                    preferredToolTitle: preferredToolTitle
                 )] + nestedCommands
             }
             return leadingCommands + [LocalAlpineAgentCommand(
@@ -1538,7 +1571,8 @@ actor LocalAlpineAgentService {
                 editFiles: editFiles,
                 patchFiles: patchFiles,
                 deleteFiles: deleteFiles,
-                delaySeconds: commandDelaySeconds
+                delaySeconds: commandDelaySeconds,
+                preferredToolTitle: preferredToolTitle
             )] + nestedCommands
         }
 
@@ -1551,7 +1585,8 @@ actor LocalAlpineAgentService {
                 readImages: readImages,
                 editFiles: editFiles,
                 patchFiles: patchFiles,
-                deleteFiles: deleteFiles
+                deleteFiles: deleteFiles,
+                preferredToolTitle: preferredToolTitle
             )] + nestedCommands
         }
 
@@ -2369,7 +2404,7 @@ actor LocalAlpineAgentService {
         for command: String,
         fallbackName: String?,
         fallbackDetail: String?
-    ) -> (name: String, detail: String) {
+    ) -> (name: String, detail: String, filePaths: [String]) {
         let detail = fallbackDetail?.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalized = trimmedCommand
@@ -2379,11 +2414,34 @@ actor LocalAlpineAgentService {
         if let fallbackName,
            !fallbackName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            fallbackName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "command" {
-            return (fallbackName, detail?.isEmpty == false ? detail! : oneLine(trimmedCommand))
+            return (fallbackName, detail?.isEmpty == false ? detail! : oneLine(trimmedCommand), [])
         }
 
         let classifiedName: String
-        if normalized.range(of: #"(^|[;&|]\s*)(?:apk|apt|brew|pip3?|npm|pnpm|yarn)\s+(?:add|install|i)\b"#, options: .regularExpression) != nil {
+        let inferredPaths = shellCommandPathArguments(from: trimmedCommand)
+        if normalized.range(of: #"(^|[;&|]\s*)(?:ls|find|pwd\s*&&\s*(?:ls|find)|du|stat)\b"#, options: .regularExpression) != nil {
+            classifiedName = "list_dir"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:cat|sed|awk|head|tail|less|more)\b"#, options: .regularExpression) != nil {
+            classifiedName = "read_file"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:grep|rg|ag)\b"#, options: .regularExpression) != nil {
+            classifiedName = "grep"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:rm|rmdir)\b"#, options: .regularExpression) != nil {
+            classifiedName = "delete_file"
+        } else if normalized.range(of: #"(^|[;&|]\s*)mkdir\b"#, options: .regularExpression) != nil {
+            classifiedName = "create_directory"
+        } else if normalized.range(of: #"(^|[;&|]\s*)touch\b"#, options: .regularExpression) != nil {
+            classifiedName = "create_file"
+        } else if normalized.range(of: #"(^|[;&|]\s*)cp\b"#, options: .regularExpression) != nil {
+            classifiedName = "copy_file"
+        } else if normalized.range(of: #"(^|[;&|]\s*)mv\b"#, options: .regularExpression) != nil {
+            classifiedName = "move_file"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:test|\[)\b"#, options: .regularExpression) != nil
+            || normalized.contains("git diff --check")
+            || normalized.contains("swiftlint")
+            || normalized.contains("eslint")
+            || normalized.contains("tsc --noemit") {
+            classifiedName = "verify"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:apk|apt|brew|pip3?|npm|pnpm|yarn)\s+(?:add|install|i)\b"#, options: .regularExpression) != nil {
             classifiedName = "install_dependency"
         } else if normalized.range(of: #"(^|[;&|]\s*)(?:swift|xcodebuild|make|cmake|gcc|g\+\+|clang|cargo|go|npm|pnpm|yarn)\s+(?:build|compile|archive|run\s+build)\b"#, options: .regularExpression) != nil
             || normalized.contains(" py_compile ")
@@ -2402,8 +2460,43 @@ actor LocalAlpineAgentService {
 
         return (
             classifiedName,
-            detail?.isEmpty == false ? detail! : oneLine(trimmedCommand)
+            detail?.isEmpty == false ? detail! : oneLine(trimmedCommand),
+            inferredPaths
         )
+    }
+
+    private nonisolated static func shellCommandPathArguments(from command: String) -> [String] {
+        guard let words = shellLikeWords(from: command), words.count > 1 else { return [] }
+        let pathExtensions = Set(["swift", "py", "js", "ts", "tsx", "jsx", "json", "md", "txt", "html", "css", "yml", "yaml", "sh", "rb", "go", "rs", "c", "cc", "cpp", "h", "hpp", "png", "jpg", "jpeg", "webp", "svg", "pdf", "docx", "pptx", "xlsx"])
+        var paths: [String] = []
+        for word in words.dropFirst() {
+            let trimmed = word.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`"))
+            guard !trimmed.isEmpty,
+                  !trimmed.hasPrefix("-"),
+                  trimmed.range(of: #"^[A-Za-z_][A-Za-z0-9_]*="#, options: .regularExpression) == nil else {
+                continue
+            }
+            if trimmed.hasPrefix("/")
+                || trimmed.hasPrefix("./")
+                || trimmed.hasPrefix("../")
+                || trimmed.contains("/")
+                || pathExtensions.contains((trimmed as NSString).pathExtension.lowercased()) {
+                paths.append(trimmed)
+            }
+            if paths.count >= 3 { break }
+        }
+        return paths
+    }
+
+    private nonisolated static func preferredToolTitle(from dict: [String: Any]) -> String? {
+        for key in ["tool_title", "toolTitle", "step_title", "stepTitle", "display_title", "displayTitle", "label"] {
+            guard let value = stringValue(dict[key])?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else {
+                continue
+            }
+            return value
+        }
+        return nil
     }
 
     private nonisolated static func generatedShellCommand(
@@ -6780,6 +6873,7 @@ private struct LocalAlpineAgentCommand: Sendable {
     let shellToolName: String?
     let shellToolDetail: String?
     let shellToolFilePaths: [String]
+    let preferredToolTitle: String?
 
     init(
         command: String?,
@@ -6793,7 +6887,8 @@ private struct LocalAlpineAgentCommand: Sendable {
         delaySeconds: Int? = nil,
         shellToolName: String? = nil,
         shellToolDetail: String? = nil,
-        shellToolFilePaths: [String] = []
+        shellToolFilePaths: [String] = [],
+        preferredToolTitle: String? = nil
     ) {
         self.command = command
         self.cwd = cwd
@@ -6807,6 +6902,7 @@ private struct LocalAlpineAgentCommand: Sendable {
         self.shellToolName = shellToolName
         self.shellToolDetail = shellToolDetail
         self.shellToolFilePaths = shellToolFilePaths
+        self.preferredToolTitle = preferredToolTitle
     }
 }
 
