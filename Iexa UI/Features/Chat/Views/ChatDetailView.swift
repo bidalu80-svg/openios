@@ -1284,6 +1284,8 @@ struct ChatDetailView: View {
     @State private var agentFloatingFilePreview: LocalAlpineWrittenFilePreviewItem?
     @State private var agentFloatingStepPreview: AgentFloatingStepPreviewItem?
     @State private var agentFloatingLoadingPath: String?
+    @State private var hideAgentFloatingBarForKeyboard = false
+    @State private var agentFloatingBarKeyboardHideGeneration = 0
 
     private var toolbarControlsMinWidth: CGFloat {
         var buttonCount = 1
@@ -1618,6 +1620,10 @@ struct ChatDetailView: View {
             return live
         }
         return agentFloatingActivitySnapshot
+    }
+
+    private var shouldHideAgentFloatingBarForKeyboard: Bool {
+        hideAgentFloatingBarForKeyboard || keyboard.isVisible || keyboard.height > 1
     }
 
     private func refreshAgentFloatingActivitySnapshot(includeInactive: Bool) {
@@ -2036,20 +2042,24 @@ struct ChatDetailView: View {
             )
         }
         .onChange(of: keyboard.isVisible) { _, isVisible in
+            updateAgentFloatingBarKeyboardVisibility(isKeyboardVisible: isVisible || keyboard.height > 1)
             if !isVisible {
                 releasePostSendWaitingUIDelayAfterKeyboardSettles()
             }
         }
         .onChange(of: keyboard.height) { _, height in
+            updateAgentFloatingBarKeyboardVisibility(isKeyboardVisible: keyboard.isVisible || height > 1)
             if height <= 1 {
                 releasePostSendWaitingUIDelayAfterKeyboardSettles()
             }
         }
         .onAppear {
             viewModel.syncOnEntry()
+            hideAgentFloatingBarForKeyboard = keyboard.isVisible || keyboard.height > 1
         }
         .onDisappear {
             keyboard.stop()
+            agentFloatingBarKeyboardHideGeneration += 1
             // Stop TTS playback and clear state when navigating away from chat
             if speakingMessageId != nil || ttsGeneratingMessageId != nil {
                 dependencies.textToSpeechService.stop()
@@ -2599,6 +2609,7 @@ struct ChatDetailView: View {
                 conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
                 fallbackItem: visibleAgentActivityWindowPreview,
                 stepLimit: Self.agentFloatingPreviewStepLimit,
+                isHiddenForKeyboard: shouldHideAgentFloatingBarForKeyboard,
                 onOpenAgentLog: openAgentTaskPanel,
                 onPreviewTap: { item, index in
                     openAgentFloatingPreview(item: item, initialIndex: index)
@@ -3229,6 +3240,26 @@ struct ChatDetailView: View {
             withAnimation(.easeOut(duration: 0.18)) {
                 isPostSendWaitingUIDelayed = false
             }
+        }
+    }
+
+    private func updateAgentFloatingBarKeyboardVisibility(isKeyboardVisible: Bool) {
+        agentFloatingBarKeyboardHideGeneration += 1
+        let generation = agentFloatingBarKeyboardHideGeneration
+
+        if isKeyboardVisible {
+            hideAgentFloatingBarForKeyboard = true
+            return
+        }
+
+        let delay = max(0.08, min(keyboard.animationDuration + 0.05, 0.55))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard agentFloatingBarKeyboardHideGeneration == generation,
+                  !keyboard.isVisible,
+                  keyboard.height <= 1 else {
+                return
+            }
+            hideAgentFloatingBarForKeyboard = false
         }
     }
 
@@ -8319,6 +8350,7 @@ private struct AgentStepFloatingBarHost: View {
     let conversationId: String?
     let fallbackItem: AgentActivityItem?
     let stepLimit: Int
+    let isHiddenForKeyboard: Bool
     let onOpenAgentLog: () -> Void
     let onPreviewTap: (AgentActivityItem, Int) -> Void
 
@@ -8373,7 +8405,8 @@ private struct AgentStepFloatingBarHost: View {
 
     var body: some View {
         Group {
-            if let item = renderItem {
+            if !isHiddenForKeyboard,
+               let item = renderItem {
                 AgentStepFloatingBar(
                     item: item,
                     taskCount: item.totalStepCount,
