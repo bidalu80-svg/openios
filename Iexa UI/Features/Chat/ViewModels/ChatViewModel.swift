@@ -20060,7 +20060,7 @@ final class ChatViewModel {
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
         await Task.yield()
 
-        beginStreamingBackgroundTaskIfNeeded()
+        LocalAlpineBackgroundExecution.begin(reason: "agent")
         await startLocalAlpineLiveActivity(
             id: resultMessageId,
             command: content,
@@ -20072,7 +20072,7 @@ final class ChatViewModel {
         )
         defer {
             progressHeartbeat.cancel()
-            endBackgroundTask()
+            LocalAlpineBackgroundExecution.finish()
         }
 
         let toolResult = await LocalAlpineTerminalAgentRunner.run(

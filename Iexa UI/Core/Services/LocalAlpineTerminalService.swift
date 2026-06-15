@@ -1,5 +1,6 @@
 import Foundation
 import os.log
+import UIKit
 
 struct LocalAlpineStatus: Sendable {
     let isRuntimeLinked: Bool
@@ -140,6 +141,56 @@ enum LocalAlpineOpenMarkerParser {
             return target.isEmpty ? nil : target
         }
         return nil
+    }
+}
+
+@MainActor
+enum LocalAlpineBackgroundExecution {
+    private static var taskId: UIBackgroundTaskIdentifier = .invalid
+    private static var depth = 0
+
+    static func begin(reason: String) {
+        depth += 1
+        guard taskId == .invalid else { return }
+
+        let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        let taskName = trimmedReason.isEmpty ? "Local Alpine" : "Local Alpine \(trimmedReason)"
+        taskId = UIApplication.shared.beginBackgroundTask(withName: taskName) {
+            Task { @MainActor in
+                expire()
+            }
+        }
+    }
+
+    static func finish() {
+        guard depth > 0 else {
+            endLocked()
+            return
+        }
+
+        depth -= 1
+        if depth == 0 {
+            endLocked()
+        }
+    }
+
+    private static func expire() {
+        Logger(subsystem: "com.openui", category: "LocalAlpine")
+            .warning("Local Alpine background execution expired")
+        depth = 0
+        endLocked()
+    }
+
+    private static func endLocked() {
+        guard taskId != .invalid else {
+            depth = 0
+            return
+        }
+
+        let id = taskId
+        taskId = .invalid
+        depth = 0
+        UIApplication.shared.endBackgroundTask(id)
     }
 }
 
@@ -627,6 +678,7 @@ actor LocalAlpineTerminalService {
             wrappedCommandForInteractiveInput(command: bootstrappedCommand, stdinInput: $0)
         } ?? bootstrappedCommand
         let materialized = await materializedRuntimeCommandIfNeeded(runtimeCommand)
+        await LocalAlpineBackgroundExecution.begin(reason: "command")
         let result = await LocalAlpineNativeRuntime.shared.execute(
             LocalAlpineNativeCommand(
                 command: materialized.command,
@@ -641,7 +693,7 @@ actor LocalAlpineTerminalService {
         if runtimeLikelyStarted(from: result) {
             nativeRuntimeStarted = true
         }
-        return resultByExtractingOpenMarkers(
+        let commandResult = resultByExtractingOpenMarkers(
             LocalAlpineCommandResult(
                 command: trimmed,
                 output: result.output,
@@ -649,6 +701,8 @@ actor LocalAlpineTerminalService {
                 interactiveRequest: nil
             )
         )
+        await LocalAlpineBackgroundExecution.finish()
+        return commandResult
     }
 
     func executeStreaming(
@@ -732,6 +786,7 @@ actor LocalAlpineTerminalService {
         let bootstrappedCommand = bootstrappedShellCommand(for: compatibleCommand)
         let materialized = await materializedRuntimeCommandIfNeeded(bootstrappedCommand)
 
+        await LocalAlpineBackgroundExecution.begin(reason: "terminal")
         let streamedResult = await executeMaterializedCommandStreaming(
             originalCommand: trimmed,
             materializedCommand: materialized.command,
@@ -748,6 +803,7 @@ actor LocalAlpineTerminalService {
             try? await deleteItem(path: cleanupPath)
         }
         guard let streamedResult else {
+            await LocalAlpineBackgroundExecution.finish()
             return LocalAlpineCommandResult(
                 command: trimmed,
                 output: "Local Alpine streaming session could not be started; command was not re-run.",
@@ -759,6 +815,7 @@ actor LocalAlpineTerminalService {
         if runtimeLikelyStarted(from: streamedResult) {
             nativeRuntimeStarted = true
         }
+        await LocalAlpineBackgroundExecution.finish()
         return streamedResult
     }
 
