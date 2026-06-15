@@ -1747,8 +1747,19 @@ struct ChatDetailView: View {
         }
 
         let metadata = message.metadata ?? [:]
+        var cachedVisibleCleanedAssistantText: String?
+        func hasVisibleCleanedAssistantText() -> Bool {
+            guard message.role == .assistant else { return false }
+            if let cachedVisibleCleanedAssistantText {
+                return !cachedVisibleCleanedAssistantText.isEmpty
+            }
+            let visible = visibleAssistantTextAfterToolProtocolCleanup(for: message)
+            cachedVisibleCleanedAssistantText = visible
+            return !visible.isEmpty
+        }
+
         if metadata["iexa_local_native_hidden_tool_parent"] == "true" {
-            return !hasRenderableAgentActivity(for: message)
+            return !hasVisibleCleanedAssistantText() && !hasRenderableAgentActivity(for: message)
         }
         if isLocalAlpineResultMessage(message) {
             if hasVisibleLocalAlpineFinalSummary(after: message) {
@@ -1776,9 +1787,12 @@ struct ChatDetailView: View {
            metadata["iexa_local_alpine_final_summary"] == nil {
             if metadata["iexa_local_alpine_auto_verify"] != nil
                 || metadata["iexa_local_alpine_missing_tool_correction"] != nil {
-                return true
+                return !isMessageVisuallyStreaming(message) && !hasVisibleCleanedAssistantText()
             }
             if isMessageVisuallyStreaming(message) {
+                return false
+            }
+            if hasVisibleCleanedAssistantText() {
                 return false
             }
             if contentContainsLocalAlpineInstruction(message.content) {
@@ -1788,14 +1802,20 @@ struct ChatDetailView: View {
                 && messageHasProcessOnlyStatus(message)
         }
         if metadata["iexa_local_alpine_hidden_tool_parent"] == "true" {
-            return !hasRenderableAgentActivity(for: message)
+            return !hasVisibleCleanedAssistantText() && !hasRenderableAgentActivity(for: message)
         }
         if metadata["iexa_local_alpine_auto_verify"] != nil
             || metadata["iexa_local_alpine_missing_tool_correction"] != nil
             || metadata["iexa_local_alpine_hidden_correction_parent"] == "true" {
-            return true
+            return !isMessageVisuallyStreaming(message) && !hasVisibleCleanedAssistantText()
         }
         if contentContainsLocalAlpineInstruction(message.content) {
+            if isMessageVisuallyStreaming(message) {
+                return false
+            }
+            if hasVisibleCleanedAssistantText() {
+                return false
+            }
             return !hasRenderableAgentActivity(for: message)
         }
         if message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
