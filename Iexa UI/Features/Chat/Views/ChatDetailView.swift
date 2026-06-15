@@ -1120,6 +1120,11 @@ private final class AgentActivityItemCache {
     }
 }
 
+private final class ChatScrollRuntimeState {
+    var lastScrollOffset: CGFloat = 0
+    var isNearBottom: Bool = true
+}
+
 struct ChatDetailView: View {
     @Environment(AppDependencyContainer.self) private var dependencies
     @Environment(AppRouter.self) private var router
@@ -1134,6 +1139,7 @@ struct ChatDetailView: View {
     private let onNewChat: (() -> Void)?
     @State private var viewModel: ChatViewModel
     @State private var agentActivityCache = AgentActivityItemCache()
+    @State private var scrollRuntime = ChatScrollRuntimeState()
 
     // MARK: Model selector sheet
     @State private var isShowingModelSelectorSheet = false
@@ -1148,8 +1154,8 @@ struct ChatDetailView: View {
     @State private var scrollPosition: ScrollPosition = .init()
     /// True when the user has manually scrolled away from the bottom.
     @State private var isScrolledUp = false
-    /// Last known contentOffset.y — used to detect user-initiated upward drags.
-    @State private var lastScrollOffset: CGFloat = 0
+    // Last known contentOffset.y lives in `scrollRuntime` so scroll tracking
+    // does not invalidate the entire chat view on every few pixels of drag.
     /// Cached distance from the scroll viewport bottom to the content bottom.
     /// Tracks "near bottom" state so IME/layout changes can re-pin only when
     /// the user was already following the latest message.
@@ -2923,11 +2929,18 @@ struct ChatDetailView: View {
         } action: { _, newOffset in
             let distanceFromBottom = max(0,
                 viewState_contentHeight - newOffset.y - viewState_containerHeight)
-            self.distanceFromBottom = distanceFromBottom
             if distanceFromBottom <= 100 {
                 // User scrolled very close to the bottom — re-engage auto-scroll.
                 if isScrolledUp { isScrolledUp = false }
+                if !scrollRuntime.isNearBottom {
+                    scrollRuntime.isNearBottom = true
+                    self.distanceFromBottom = 0
+                }
             } else {
+                if scrollRuntime.isNearBottom {
+                    scrollRuntime.isNearBottom = false
+                    self.distanceFromBottom = 101
+                }
                 // Suppress false "user scrolled up" detection after any programmatic
                 // scroll. The scroll animation itself causes the offset to momentarily
                 // move in various directions, which would otherwise trigger
@@ -2941,7 +2954,7 @@ struct ChatDetailView: View {
                 // A strong upward drag (>30 pt in one callback) is unambiguously
                 // intentional — bypass the time guard entirely so it registers
                 // immediately even during the 0.1 s scroll-pump interval.
-                let dragDelta = lastScrollOffset - newOffset.y  // positive = upward
+                let dragDelta = scrollRuntime.lastScrollOffset - newOffset.y  // positive = upward
                 let isStrongDrag = dragDelta > 30
                 if !isStrongDrag {
                     guard timeSinceProgrammatic > suppressionWindow else { return }
@@ -2952,12 +2965,12 @@ struct ChatDetailView: View {
                 // Outside of streaming, require a small but intentional drag (8pt)
                 // to avoid accidental break-out from bounce/inertia.
                 let threshold: CGFloat = viewModel.isStreaming ? 2 : 8
-                if newOffset.y < lastScrollOffset - threshold {
+                if newOffset.y < scrollRuntime.lastScrollOffset - threshold {
                     if !isScrolledUp { isScrolledUp = true }
                 }
             }
-            if abs(newOffset.y - lastScrollOffset) > 2 {
-                lastScrollOffset = newOffset.y
+            if abs(newOffset.y - scrollRuntime.lastScrollOffset) > 2 {
+                scrollRuntime.lastScrollOffset = newOffset.y
             }
         }
         .onScrollGeometryChange(for: CGSize.self) { geo in
@@ -7888,30 +7901,31 @@ private struct AgentInlineStepsView: View {
     }
 
     var body: some View {
-        Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 7) {
-                ForEach(visibleSteps, id: \.id) { step in
-                    AgentActivityStepPill(step: step)
-                }
-
-                if item.steps.count > visibleSteps.count {
-                    HStack(spacing: 6) {
-                        Image(systemName: "ellipsis")
-                            .scaledFont(size: 11, weight: .bold)
-                        Text("还有 \(item.steps.count - visibleSteps.count) 个较早步骤")
-                            .scaledFont(size: 11, weight: .semibold)
-                    }
-                    .foregroundStyle(theme.textTertiary)
-                    .padding(.leading, 12)
-                }
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(visibleSteps, id: \.id) { step in
+                AgentActivityStepPill(step: step)
+                    .equatable()
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if item.steps.count > visibleSteps.count {
+                HStack(spacing: 6) {
+                    Image(systemName: "ellipsis")
+                        .scaledFont(size: 11, weight: .bold)
+                    Text("还有 \(item.steps.count - visibleSteps.count) 个较早步骤")
+                        .scaledFont(size: 11, weight: .semibold)
+                }
+                .foregroundStyle(theme.textTertiary)
+                .padding(.leading, 12)
+            }
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
         .transaction { transaction in
             transaction.animation = nil
         }
         .accessibilityLabel("查看步骤")
+        .accessibilityAddTraits(.isButton)
     }
 }
 
@@ -8078,6 +8092,7 @@ private struct AgentTaskCard: View {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(item.steps.prefix(6)), id: \.id) { step in
                         AgentActivityStepPill(step: step)
+                            .equatable()
                     }
                 }
             }
@@ -8674,10 +8689,14 @@ private struct AgentToolPreviewThumbnail: View {
     }
 }
 
-private struct AgentActivityStepPill: View {
+private struct AgentActivityStepPill: View, Equatable {
     let step: AgentActivityStep
 
     @Environment(\.theme) private var theme
+
+    static func == (lhs: AgentActivityStepPill, rhs: AgentActivityStepPill) -> Bool {
+        lhs.step == rhs.step
+    }
 
     private var tint: Color {
         if step.failed { return .orange }
@@ -8686,7 +8705,7 @@ private struct AgentActivityStepPill: View {
 
     private var iconName: String {
         if step.failed { return "exclamationmark.circle.fill" }
-        if step.isRunning { return "progress.indicator" }
+        if step.isRunning { return "circle.fill" }
         switch step.kind {
         case .file:
             return "doc.text"
