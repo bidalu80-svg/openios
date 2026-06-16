@@ -215,8 +215,8 @@ struct LocalAlpineLineDelta: Codable, Hashable, Sendable {
 }
 
 struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
-    private static let defaultOutputPreviewLimit = 2_000
-    private static let readFileOutputPreviewLimit = 2_400
+    private static let defaultOutputPreviewLimit = 6_000
+    private static let readFileOutputPreviewLimit = 6_000
 
     let command: String
     let cwd: String
@@ -332,8 +332,8 @@ enum LocalAlpineToolDisplayRegistry {
 }
 
 struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
-    private static let defaultOutputPreviewLimit = 1_600
-    private static let readFileOutputPreviewLimit = 1_800
+    private static let defaultOutputPreviewLimit = 6_000
+    private static let readFileOutputPreviewLimit = 6_000
 
     let id: String
     let runId: String

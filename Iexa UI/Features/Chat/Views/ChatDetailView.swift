@@ -67,6 +67,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
     let isRunning: Bool
     let failed: Bool
     let outputPreview: String
+    let fullOutput: String?
     let file: LocalAlpineWrittenFile?
     let filePaths: [String]
     let command: String?
@@ -79,6 +80,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
         file != nil
             || command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             || outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            || fullOutput?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 
     var isLocalStatusPlaceholder: Bool {
@@ -93,6 +95,40 @@ private struct AgentActivityStep: Identifiable, Hashable {
             || normalizedId.contains("browser_web_search")
             || normalizedId.contains("get_readable")
             || normalizedId.contains("readable")
+    }
+
+    static func == (lhs: AgentActivityStep, rhs: AgentActivityStep) -> Bool {
+        lhs.id == rhs.id
+            && lhs.kind == rhs.kind
+            && lhs.title == rhs.title
+            && lhs.detail == rhs.detail
+            && lhs.isRunning == rhs.isRunning
+            && lhs.failed == rhs.failed
+            && lhs.outputPreview == rhs.outputPreview
+            && lhs.file == rhs.file
+            && lhs.filePaths == rhs.filePaths
+            && lhs.command == rhs.command
+            && lhs.cwd == rhs.cwd
+            && lhs.previewThumbnailReference == rhs.previewThumbnailReference
+            && lhs.previewOpenURL == rhs.previewOpenURL
+            && lhs.previewFile == rhs.previewFile
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(kind)
+        hasher.combine(title)
+        hasher.combine(detail)
+        hasher.combine(isRunning)
+        hasher.combine(failed)
+        hasher.combine(outputPreview)
+        hasher.combine(file)
+        hasher.combine(filePaths)
+        hasher.combine(command)
+        hasher.combine(cwd)
+        hasher.combine(previewThumbnailReference)
+        hasher.combine(previewOpenURL)
+        hasher.combine(previewFile)
     }
 }
 
@@ -251,6 +287,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
             toolCalls: toolCalls,
             writtenFiles: [],
             commandResults: [],
+            fullToolCalls: toolCalls,
+            fullCommandResults: [],
             statusHistory: statusHistory,
             officePreviewReferences: [],
             officeDocumentFiles: []
@@ -327,6 +365,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             isRunning: step.isRunning,
             failed: step.failed,
             outputPreview: clippedFloatingText(step.outputPreview, limit: floatingOutputPreviewLimit),
+            fullOutput: step.fullOutput ?? step.outputPreview,
             file: step.file,
             filePaths: step.filePaths,
             command: step.command.map { clippedFloatingText($0, limit: floatingCommandLimit) },
@@ -358,6 +397,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
         toolCalls: [LocalAlpineToolCall],
         writtenFiles: [LocalAlpineWrittenFile],
         commandResults: [LocalAlpineAgentCommandResult],
+        fullToolCalls: [LocalAlpineToolCall]? = nil,
+        fullCommandResults: [LocalAlpineAgentCommandResult]? = nil,
         statusHistory: [ChatStatusUpdate],
         officePreviewReferences: [String],
         officeDocumentFiles: [ChatMessageFile]
@@ -368,12 +409,21 @@ private struct AgentActivityItem: Identifiable, Hashable {
             officeDocumentFiles: officeDocumentFiles
         )
         let localStatusPlaceholders = localStatusSteps(from: statusHistory)
+        var fullToolOutputById: [String: String] = [:]
+        for call in fullToolCalls ?? toolCalls {
+            let output = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !output.isEmpty || fullToolOutputById[call.id] == nil {
+                fullToolOutputById[call.id] = output
+            }
+        }
+        let fullCommandOutputs = fullCommandResults ?? commandResults
 
         steps.append(contentsOf: toolCalls.map { call in
             let matchedFile = file(for: call, in: writtenFiles)
             let title = displayTitle(for: call, file: matchedFile)
             let detail = call.displayDetail
             let output = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let fullOutput = fullToolOutputById[call.id]?.isEmpty == false ? fullToolOutputById[call.id] : output
             return AgentActivityStep(
                 id: "tool-\(call.id)",
                 kind: .tool,
@@ -382,6 +432,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 isRunning: call.isRunning,
                 failed: call.failed,
                 outputPreview: output,
+                fullOutput: fullOutput,
                 file: matchedFile,
                 filePaths: call.filePaths,
                 command: call.command,
@@ -403,6 +454,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     isRunning: false,
                     failed: false,
                     outputPreview: file.previewLines(limit: 10).joined(separator: "\n"),
+                    fullOutput: nil,
                     file: file,
                     filePaths: [file.path],
                     command: nil,
@@ -424,6 +476,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
             guard !command.isEmpty, command.lowercased() != "write_files" else { continue }
             guard !existingCommands.contains(command) else { continue }
             guard !Self.commandDuplicatesStructuredTool(command, toolPathsByName: structuredToolPathsByName) else { continue }
+            let fullOutput = fullCommandOutputs.indices.contains(index)
+                ? fullCommandOutputs[index].outputPreview
+                : result.outputPreview
             steps.append(
                 AgentActivityStep(
                     id: "command-\(index)-\(command.hashValue)",
@@ -433,6 +488,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     isRunning: false,
                     failed: result.failed,
                     outputPreview: result.outputPreview,
+                    fullOutput: fullOutput,
                     file: nil,
                     filePaths: [],
                     command: command,
@@ -566,6 +622,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 isRunning: status.done != true,
                 failed: false,
                 outputPreview: output.isEmpty ? detail : output,
+                fullOutput: output.isEmpty ? detail : output,
                 file: nil,
                 filePaths: [],
                 command: nil,
@@ -599,6 +656,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 isRunning: status.done != true,
                 failed: false,
                 outputPreview: detail,
+                fullOutput: detail,
                 file: nil,
                 filePaths: [],
                 command: nil,
@@ -996,7 +1054,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
         let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata?["iexa_local_alpine_written_files"])
         let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata?["iexa_local_alpine_command_results"])
         let persistedToolCalls = LocalAlpineToolCall.decodeMetadata(metadata?["iexa_local_alpine_tool_calls"])
-        let toolCalls = Self.uiToolCalls(Self.mergedToolCalls(persisted: persistedToolCalls, live: liveToolCalls))
+        let mergedToolCalls = Self.mergedToolCalls(persisted: persistedToolCalls, live: liveToolCalls)
+        let toolCalls = Self.uiToolCalls(mergedToolCalls)
         let uiCommandResults = Self.uiCommandResults(commandResults)
         let statusHistory = liveStatus.map { message.statusHistory + [$0] } ?? message.statusHistory
         let officePreviewReferences = Self.officePreviewReferences(from: message.files)
@@ -1011,6 +1070,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
             metadata: metadata
         )
         let visibleCommands = uiCommandResults.filter {
+            $0.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "write_files"
+        }
+        let visibleFullCommands = commandResults.filter {
             $0.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "write_files"
         }
         let hasError = parsed.hasNonZeroExit || commandResults.contains { $0.failed } || toolCalls.contains { $0.failed }
@@ -1041,6 +1103,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
             toolCalls: toolCalls,
             writtenFiles: writtenFiles,
             commandResults: visibleCommands,
+            fullToolCalls: mergedToolCalls,
+            fullCommandResults: visibleFullCommands,
             statusHistory: statusHistory,
             officePreviewReferences: officePreviewReferences,
             officeDocumentFiles: officeDocumentFiles
@@ -1284,6 +1348,8 @@ struct ChatDetailView: View {
     @State private var agentFloatingLoadingPath: String?
     @State private var hideAgentFloatingBarForKeyboard = false
     @State private var suppressStaleAgentFloatingBarAfterKeyboard = false
+    @State private var pendingAgentFloatingBarResumeAfterKeyboard = false
+    @State private var agentFloatingKeyboardHideGeneration = 0
 
     private var toolbarControlsMinWidth: CGFloat {
         var buttonCount = 1
@@ -1331,6 +1397,11 @@ struct ChatDetailView: View {
     }
 
     private var agentActivityRefreshSignature: Int {
+        if hideAgentFloatingBarForKeyboard,
+           !hasActiveAgentFloatingActivity,
+           !pendingAgentFloatingBarResumeAfterKeyboard {
+            return viewModel.messages.count
+        }
         var signature = viewModel.messages.count
         for message in viewModel.messages.suffix(12) {
             guard AgentActivityItem.isActivityMessage(message) else { continue }
@@ -1347,7 +1418,9 @@ struct ChatDetailView: View {
                     if let value = metadata[key] {
                         signature &+= key.hashValue
                         signature &+= value.isEmpty ? 0 : 1
+                        signature &+= value.utf8.count &* 17
                         signature &+= value.prefix(192).hashValue
+                        signature &+= value.suffix(192).hashValue
                     }
                 }
             }
@@ -1413,7 +1486,9 @@ struct ChatDetailView: View {
                 if let value = metadata[key] {
                     signature &+= key.hashValue
                     signature &+= value.isEmpty ? 0 : 1
+                    signature &+= value.utf8.count &* 17
                     signature &+= value.prefix(192).hashValue
+                    signature &+= value.suffix(192).hashValue
                 }
             }
         }
@@ -2903,10 +2978,16 @@ struct ChatDetailView: View {
                 agentFloatingActivitySnapshot = nil
                 resumeAgentFloatingBarForNewTask()
             } else {
+                if pendingAgentFloatingBarResumeAfterKeyboard || hasActiveAgentFloatingActivity {
+                    resumeAgentFloatingBarForNewTask()
+                }
                 refreshAgentFloatingActivitySnapshot(includeInactive: !viewModel.isStreaming && !viewModel.streamingStore.isActive)
             }
         }
         .onChange(of: agentActivityRefreshSignature) { _, _ in
+            if pendingAgentFloatingBarResumeAfterKeyboard || hasActiveAgentFloatingActivity {
+                resumeAgentFloatingBarForNewTask()
+            }
             refreshAgentFloatingActivitySnapshot(includeInactive: true)
         }
         // Auto-scroll only when the rendered transcript changes. This avoids
@@ -2966,6 +3047,7 @@ struct ChatDetailView: View {
         // scrolled up, respect that position and don't yank them back.
         .onChange(of: viewModel.isStreaming) { _, streaming in
             if streaming && !isScrolledUp {
+                resumeAgentFloatingBarForNewTask()
                 refreshAgentFloatingActivitySnapshot(includeInactive: false)
                 // Already following the turn. If the keyboard is visible, or
                 // the assistant placeholder has not become visible yet, keep
@@ -2981,13 +3063,20 @@ struct ChatDetailView: View {
                     scrollToLatestMessageWithoutAnimation(anchor: .bottom)
                 }
             } else if !streaming {
+                if pendingAgentFloatingBarResumeAfterKeyboard {
+                    resumeAgentFloatingBarForNewTask()
+                }
                 refreshAgentFloatingActivitySnapshot(includeInactive: true)
             }
         }
         .onChange(of: viewModel.streamingStore.isActive) { _, active in
             if active {
+                resumeAgentFloatingBarForNewTask()
                 refreshAgentFloatingActivitySnapshot(includeInactive: false)
             } else {
+                if pendingAgentFloatingBarResumeAfterKeyboard {
+                    resumeAgentFloatingBarForNewTask()
+                }
                 refreshAgentFloatingActivitySnapshot(includeInactive: true)
             }
         }
@@ -3232,6 +3321,10 @@ struct ChatDetailView: View {
         }
 
         isPostSendWaitingUIDelayed = true
+        pendingAgentFloatingBarResumeAfterKeyboard = true
+        suppressStaleAgentFloatingBarAfterKeyboard = false
+        agentFloatingActivitySnapshot = nil
+        setAgentFloatingBarHiddenForKeyboard(true)
         let fallbackDelay = max(0.24, min(keyboard.animationDuration + 0.18, 0.72))
         DispatchQueue.main.asyncAfter(deadline: .now() + fallbackDelay) {
             guard postSendWaitingUIDelayGeneration == generation else { return }
@@ -3255,6 +3348,8 @@ struct ChatDetailView: View {
     }
 
     private func hideAgentFloatingBarForKeyboardWillShow() {
+        agentFloatingKeyboardHideGeneration += 1
+        pendingAgentFloatingBarResumeAfterKeyboard = false
         suppressStaleAgentFloatingBarAfterKeyboard = !hasActiveAgentFloatingActivity
         if suppressStaleAgentFloatingBarAfterKeyboard {
             agentFloatingActivitySnapshot = nil
@@ -3264,17 +3359,43 @@ struct ChatDetailView: View {
 
     private func finishAgentFloatingBarKeyboardHide() {
         guard !keyboard.isVisible, keyboard.height <= 1 else { return }
-        setAgentFloatingBarHiddenForKeyboard(false)
-        if !suppressStaleAgentFloatingBarAfterKeyboard {
-            refreshAgentFloatingActivitySnapshot(includeInactive: true)
+        agentFloatingKeyboardHideGeneration += 1
+        let generation = agentFloatingKeyboardHideGeneration
+
+        guard pendingAgentFloatingBarResumeAfterKeyboard else {
+            suppressStaleAgentFloatingBarAfterKeyboard = true
+            agentFloatingActivitySnapshot = nil
+            setAgentFloatingBarHiddenForKeyboard(true)
+            return
+        }
+
+        let delay = max(0.14, min(keyboard.animationDuration + 0.10, 0.42))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard agentFloatingKeyboardHideGeneration == generation,
+                  pendingAgentFloatingBarResumeAfterKeyboard,
+                  !keyboard.isVisible,
+                  keyboard.height <= 1 else {
+                return
+            }
+            suppressStaleAgentFloatingBarAfterKeyboard = false
+            if hasActiveAgentFloatingActivity {
+                pendingAgentFloatingBarResumeAfterKeyboard = false
+                setAgentFloatingBarHiddenForKeyboard(false)
+                refreshAgentFloatingActivitySnapshot(includeInactive: false)
+            } else {
+                setAgentFloatingBarHiddenForKeyboard(true)
+            }
         }
     }
 
     private func resumeAgentFloatingBarForNewTask() {
         suppressStaleAgentFloatingBarAfterKeyboard = false
+        agentFloatingActivitySnapshot = nil
         if keyboard.isVisible || keyboard.height > 1 {
+            pendingAgentFloatingBarResumeAfterKeyboard = true
             setAgentFloatingBarHiddenForKeyboard(true)
         } else {
+            pendingAgentFloatingBarResumeAfterKeyboard = false
             setAgentFloatingBarHiddenForKeyboard(false)
         }
     }
@@ -3289,6 +3410,12 @@ struct ChatDetailView: View {
     }
 
     private func forceDismissInputAfterSend() {
+        if keyboard.isVisible || keyboard.height > 1 {
+            pendingAgentFloatingBarResumeAfterKeyboard = true
+            suppressStaleAgentFloatingBarAfterKeyboard = false
+            agentFloatingActivitySnapshot = nil
+            setAgentFloatingBarHiddenForKeyboard(true)
+        }
         NotificationCenter.default.post(name: .chatInputFieldDismissKeyboard, object: nil)
         UIApplication.shared.sendAction(
             #selector(UIResponder.resignFirstResponder),
@@ -8108,6 +8235,8 @@ private struct AgentInlineStepsHost: View {
         signature &+= item.currentStep?.id.hashValue ?? 0
         signature &+= item.isActive ? 17 : 3
         signature &+= item.hasFailure ? 23 : 5
+        signature &+= item.currentStep?.outputPreview.utf8.count ?? 0
+        signature &+= item.currentPreviewText.utf8.count &* 7
         return signature
     }
 
@@ -8238,6 +8367,8 @@ private struct AgentStepFloatingBarHost: View {
         signature &+= item.currentStep?.id.hashValue ?? 0
         signature &+= item.isActive ? 17 : 3
         signature &+= item.hasFailure ? 23 : 5
+        signature &+= item.currentStep?.outputPreview.utf8.count ?? 0
+        signature &+= item.currentPreviewText.utf8.count &* 7
         return signature
     }
 
@@ -8640,7 +8771,13 @@ private struct AgentActivityStepPill: View, Equatable {
     @Environment(\.theme) private var theme
 
     static func == (lhs: AgentActivityStepPill, rhs: AgentActivityStepPill) -> Bool {
-        lhs.step == rhs.step
+        lhs.step.id == rhs.step.id
+            && lhs.step.kind == rhs.step.kind
+            && lhs.step.title == rhs.step.title
+            && lhs.step.detail == rhs.step.detail
+            && lhs.step.isRunning == rhs.step.isRunning
+            && lhs.step.failed == rhs.step.failed
+            && lhs.step.command == rhs.step.command
     }
 
     private var tint: Color {
@@ -9180,7 +9317,7 @@ private struct AgentFloatingStepPreviewSheet: View {
                 path: path,
                 fileName: (path as NSString).lastPathComponent,
                 language: LocalCodeWriteGuard.language(forPath: path),
-                fallbackLines: step.outputPreview.components(separatedBy: .newlines),
+                fallbackLines: outputText(for: step).components(separatedBy: .newlines),
                 byteCount: nil
             )
         } else if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
@@ -9212,25 +9349,18 @@ private struct AgentFloatingStepPreviewSheet: View {
     }
 
     private func terminalPreview(_ step: AgentActivityStep) -> some View {
-        Text(terminalText(for: step))
-            .font(.system(size: 15, weight: .semibold, design: .monospaced))
-            .foregroundStyle(Color(red: 0.32, green: 0.86, blue: 0.45))
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(18)
-            .background(Color.black)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        AgentLazyOutputPreview(
+            text: terminalText(for: step),
+            style: .terminal
+        )
     }
 
     private func textPreview(_ step: AgentActivityStep) -> some View {
-        Text(copyText(for: step).isEmpty ? "（无内容）" : copyText(for: step))
-            .font(.system(size: 14, weight: .regular, design: .monospaced))
-            .foregroundStyle(theme.textPrimary)
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(16)
-            .background(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.98))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        let text = copyText(for: step)
+        return AgentLazyOutputPreview(
+            text: text.isEmpty ? "（无内容）" : text,
+            style: .plain
+        )
     }
 
     private var controlPanel: some View {
@@ -9310,13 +9440,21 @@ private struct AgentFloatingStepPreviewSheet: View {
         return "Tool"
     }
 
+    private func outputText(for step: AgentActivityStep) -> String {
+        let full = step.fullOutput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !full.isEmpty {
+            return full
+        }
+        return step.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func terminalText(for step: AgentActivityStep) -> String {
         var lines: [String] = []
         if let command = step.command?.trimmingCharacters(in: .whitespacesAndNewlines),
            !command.isEmpty {
             lines.append("$ \(command)")
         }
-        let output = step.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = outputText(for: step)
         if !output.isEmpty {
             lines.append(output)
         }
@@ -9331,9 +9469,94 @@ private struct AgentFloatingStepPreviewSheet: View {
         if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
             return terminalText(for: step)
         }
-        return step.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let output = outputText(for: step)
+        return output.isEmpty
             ? step.detail
-            : step.outputPreview
+            : output
+    }
+}
+
+private struct AgentLazyOutputPreview: View {
+    enum Style {
+        case terminal
+        case plain
+    }
+
+    let lines: [String]
+    let style: Style
+
+    @Environment(\.theme) private var theme
+
+    init(text: String, style: Style) {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.lines = Self.softWrappedLines(normalized.isEmpty ? "（无内容）" : normalized)
+        self.style = style
+    }
+
+    var body: some View {
+        LazyVStack(alignment: .leading, spacing: 2) {
+            ForEach(lines.indices, id: \.self) { index in
+                Text(lines[index])
+                    .font(font)
+                    .foregroundStyle(foreground)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(style == .terminal ? 18 : 16)
+        .background(background)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var font: Font {
+        switch style {
+        case .terminal:
+            return .system(size: 15, weight: .semibold, design: .monospaced)
+        case .plain:
+            return .system(size: 14, weight: .regular, design: .monospaced)
+        }
+    }
+
+    private var foreground: Color {
+        switch style {
+        case .terminal:
+            return Color(red: 0.32, green: 0.86, blue: 0.45)
+        case .plain:
+            return theme.textPrimary
+        }
+    }
+
+    private var background: Color {
+        switch style {
+        case .terminal:
+            return .black
+        case .plain:
+            return theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.98)
+        }
+    }
+
+    private static func softWrappedLines(_ text: String, maxLineLength: Int = 240) -> [String] {
+        var rendered: [String] = []
+        rendered.reserveCapacity(min(text.count / 48 + 1, 512))
+
+        for rawLine in text.components(separatedBy: .newlines) {
+            guard !rawLine.isEmpty else {
+                rendered.append(" ")
+                continue
+            }
+
+            var start = rawLine.startIndex
+            while start < rawLine.endIndex {
+                let end = rawLine.index(start, offsetBy: maxLineLength, limitedBy: rawLine.endIndex)
+                    ?? rawLine.endIndex
+                rendered.append(String(rawLine[start..<end]))
+                start = end
+            }
+        }
+
+        return rendered.isEmpty ? ["（无内容）"] : rendered
     }
 }
 

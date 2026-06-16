@@ -68,7 +68,11 @@ final class KeyboardTracker {
                 updates()
             }
         } else {
-            updates()
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                updates()
+            }
         }
     }
 
@@ -114,9 +118,21 @@ final class KeyboardTracker {
         let visibilityChanged = isVisible != newVisible
         guard heightChanged || visibilityChanged else { return }
 
-        withAnimation(swiftUIAnimation(duration: duration, curve: curve)) {
-            height = adjustedHeight
-            isVisible = newVisible
+        let updates = {
+            self.height = adjustedHeight
+            self.isVisible = newVisible
+        }
+
+        if newVisible {
+            withAnimation(swiftUIAnimation(duration: duration, curve: curve)) {
+                updates()
+            }
+        } else {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                updates()
+            }
         }
     }
 

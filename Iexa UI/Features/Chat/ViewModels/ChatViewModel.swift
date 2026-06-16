@@ -2106,6 +2106,7 @@ final class ChatViewModel {
         BusyBox/ash compatibility:
         - Prefer structured wrappers (`list_dir`, `glob`, `grep`, `verify`, `browser_use`) for common list/search/check/fetch work; the host converts them into bounded BusyBox-safe commands.
         - If raw `command` is necessary, write POSIX sh/ash only. Never route Local Alpine work to Open Terminal, a server terminal, iOS/macOS shell commands, or Debian/Ubuntu package commands.
+        - Dependency installs happen inside Local Alpine with `apk`, not apt/brew/system tools. Check first with `command -v <tool>` or `apk info -e <pkg>`, then install missing OS tools/libraries with `apk add --no-cache <pkg>` in the same bounded shell step when needed.
         - Non-Alpine or iSH-unsafe command families are rejected by the app before execution: `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, `open`, `osascript`, `powershell`, `cmd.exe`, and `lsof`. Translate those intentions to Alpine/BusyBox equivalents.
         - Known bad patterns here: `find -printf`, `grep -P`, `sed -i ''`, Bash `[[ ... ]]`, `source`, `mapfile`, `readarray`, and process substitution `<(...)` or `>(...)`.
         - Safe replacements: `find PATH -type f -print | sed -n '1,200p'`, `grep -E`, `. ./script.sh`, `[ ... ]`, `while IFS= read -r line; do ...; done`, and `nc -z 127.0.0.1 PORT` for localhost port checks.
@@ -2119,7 +2120,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "shell_execute",
-                    "description": "Run one bounded POSIX sh/BusyBox ash command inside Iexa's isolated Alpine rootfs. This tool never runs Open Terminal, server terminal, iOS, macOS, Windows, Debian, or Ubuntu commands. The user workspace is /mnt/iexa; relative paths resolve there. Use only for list/search/run/install/build/test/verify work. Do not scan the whole rootfs for user files; start under /mnt/iexa unless the user asks for runtime/system inspection. Do not use shell heredocs, echo, printf, cat, tee, or inline writer scripts to create source files; use file_write/file_edit instead. Use the delay argument instead of shell sleep or Python time.sleep().",
+                    "description": "Run one bounded POSIX sh/BusyBox ash command inside Iexa's isolated Alpine rootfs. This tool never runs Open Terminal, server terminal, iOS, macOS, Windows, Debian, or Ubuntu commands. The user workspace is /mnt/iexa; relative paths resolve there. Use only for list/search/run/install/build/test/verify work. For missing OS tools or libraries, use Alpine apk commands such as `command -v jq >/dev/null 2>&1 || apk add --no-cache jq`; never use apt/brew/sudo. Do not scan the whole rootfs for user files; start under /mnt/iexa unless the user asks for runtime/system inspection. Do not use shell heredocs, echo, printf, cat, tee, or inline writer scripts to create source files; use file_write/file_edit instead. Use the delay argument instead of shell sleep or Python time.sleep().",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2281,7 +2282,7 @@ final class ChatViewModel {
         - The Alpine rootfs is sandbox-internal. Paths such as `/bin`, `/etc`, `/usr`, `/lib`, `/var`, `/tmp`, `/root`, and `/home` are inside the local Alpine environment, not the iOS host filesystem.
         - For user files, projects, generated artifacts, attachments, and previewable outputs, stay under `/mnt/iexa`. Do not scan the whole rootfs to look for user files; list/search `/mnt/iexa` first unless the user explicitly asks for runtime/system inspection.
         - Shell: Alpine Linux with BusyBox/ash, not bash/macOS/Ubuntu.
-        - Package manager: `apk`; never use `apt`, `yum`, `dnf`, `brew`, `sudo`, `systemctl`, or macOS-only commands.
+        - Package manager: `apk`; never use `apt`, `yum`, `dnf`, `brew`, `sudo`, `systemctl`, or macOS-only commands. If a required command/library is missing, use `command -v <tool> >/dev/null 2>&1 || apk add --no-cache <pkg>` or `apk info -e <pkg> || apk add --no-cache <pkg>` inside Local Alpine, then continue with the real task.
 
         Tool rules:
         - Create source files with `file_write`. Modify existing files with `file_read` followed by `file_edit` or a complete same-path `file_write`.
@@ -2296,6 +2297,7 @@ final class ChatViewModel {
         \(memoryRule)- Never write source code through `shell_execute` using heredocs, redirection, `echo`, `printf`, `cat`, `tee`, or inline Python writer scripts.
         - Use `browser_use` for bounded HTTP/HTTPS fetches and optional save/open-preview flows. It is lightweight and non-interactive; it does not support full click/type browser automation.
         - Use `shell_execute` only for bounded list/search/run/install/build/test/verify commands.
+        - For dependency setup, prefer Alpine package names and `apk add --no-cache`. Use Python `pip`/Node package managers only for language-level project dependencies after the runtime/package manager exists, not as a replacement for OS packages.
         - Commands must be POSIX sh/BusyBox ash compatible. Avoid `find -printf`, `grep -P`, Bash `[[ ... ]]`, `source`, arrays, process substitution, and GNU/macOS-only flags.
         - If a delay is needed, use the tool `delay` argument. Avoid shell `sleep` and generated Python `time.sleep()`.
         - One step should finish before the next decision. A file write plus one matching verification command is allowed; unrelated follow-up work waits for the returned result.
@@ -2634,6 +2636,7 @@ final class ChatViewModel {
         - Execution boundary: every command is executed by the embedded Local Alpine/iSH runtime only, not by Open Terminal, a remote server terminal, iOS/macOS shell, Windows shell, Debian, or Ubuntu. Use Alpine/BusyBox/POSIX commands.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
         - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`. Accepted delay keys are `delay`, `delay_seconds`, or `delaySeconds`; use them instead of shell/Python sleeps.
+        - Dependency install pattern: this runtime is Alpine. If a tool/library is missing, use `command -v <tool> >/dev/null 2>&1 || apk add --no-cache <pkg>` or `apk info -e <pkg> || apk add --no-cache <pkg>` in Local Alpine. Translate Debian/macOS package-manager instincts to `apk`; do not ask the user to install packages elsewhere.
         - Step titles: you may include a short `tool_title`, `step_title`, `display_title`, or `label` string to name the visible execution capsule. Keep it under 24 characters and action-oriented, such as `读取目录`, `写入配置`, `校验脚本`, or `删除旧文件`.
         - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `file_edit` -> `edit_file`, `read_image`/`image_read` -> host-decoded image metadata, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
         - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls. `browser_use` supports optional `save_to`/`output` plus `open_preview:true` so large HTML/SVG/JSON responses can be written under `/mnt/iexa` and opened through the preview bridge instead of being pasted into chat.
@@ -2643,7 +2646,7 @@ final class ChatViewModel {
           Use another free port if 8080 is unavailable. Include the exact `http://localhost:<port>/` in the final answer. Use the Python server command above; do not invent or call custom preview helper commands. For npm/Vite/React/etc., start the dev server on `127.0.0.1`/`localhost`, verify with a bounded fetch/curl/wget, run `iexa-open http://localhost:<port>/`, and give the same URL. Never answer "open index.html manually" as the final preview path for a website project.
         - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
         \(localAlpineBusyBoxCompatibilityNotes)
-        - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, `lsof`, or macOS-only utilities.
+        - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. For example, `apt install jq` must become `apk add --no-cache jq`; `sudo apt-get install python3-dev` must become an Alpine package such as `apk add --no-cache python3-dev` when available. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, `lsof`, or macOS-only utilities.
         - Rootfs/environment/dependency checks: if the user asks whether Python/Lua/Node/C++ or dependencies exist, inspect the running Alpine rootfs/runtime/toolchain directly with bounded `command -v`, `--version`, `apk info`, `python3 -m pip list`, `find /usr/lib /usr/local/lib`, or small module-list commands. Do not invent `/mnt/iexa/rootfs`; `/mnt/iexa` is only the workspace mount. Do not only search `/mnt/iexa` project dependency files unless the user specifically asks for project dependency files.
         - Service/process commands: prefer foreground commands and bounded verification. The exception is website preview servers: use `python3 -m http.server <port> --bind 127.0.0.1` for static sites or a framework dev server bound to localhost, then verify and share the localhost URL. Do not assume OpenRC/system services are available unless a prior command proves it.
         - `command`/`shell_execute` is shell text only. For structured tools, use top-level keys such as `read_file`, `file_read`, `write_files`, `file_write`, `edit_file`, `patch_file`, `delete_file`, `delete_files`, `list_dir`, `glob`, `grep`, `verify`, or `browser_use`.
@@ -8323,7 +8326,7 @@ final class ChatViewModel {
             command: command,
             cwd: "/mnt/iexa",
             exitCode: result.exitCode,
-            outputPreview: String(result.output.prefix(2_400))
+            outputPreview: String(result.output.prefix(LocalAlpineAgentCommandResult.previewLimit(for: command)))
         )
         let directCompletedAtMs = Int64((Date().timeIntervalSince1970 * 1_000).rounded())
         let directToolCall = LocalAlpineToolCall(
@@ -16167,7 +16170,7 @@ final class ChatViewModel {
         Environment:
         - Workspace: `/mnt/iexa`. Relative paths resolve there.
         - Shell: Alpine Linux BusyBox/ash. Prefer portable POSIX `sh` syntax; avoid Bash-only arrays, process substitution, and Debian/macOS assumptions unless the needed tool is first proven installed.
-        - Package manager: `apk`. Check first with `apk info -e <pkg>` or `command -v <tool>`; install only packages proven missing with `apk add --no-cache <pkg>`.
+        - Package manager: `apk`. Check first with `apk info -e <pkg>` or `command -v <tool>`; install only packages proven missing with `apk add --no-cache <pkg>`. When a task needs a missing OS tool/library, install it through Local Alpine `apk` and continue; do not tell the user to install it on iOS/macOS/Ubuntu and do not use `apt`/`brew`/`sudo`.
         - Unsupported command families here: `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, and macOS-only utilities. Translate those intentions to Alpine/BusyBox equivalents.
         - Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, and `/var` are system paths. Inspect them when useful; do not edit them except through package-manager operations or explicit user requests.
         - Do not check `/mnt/iexa/rootfs` unless the user explicitly created that folder; the Local Alpine commands already execute inside the Alpine rootfs.
@@ -16181,6 +16184,7 @@ final class ChatViewModel {
         - If a demo request omits a URL, filename, or sample input, choose safe defaults and proceed: `example.com`/`example.org` for network demos and simple names like `test.lua`, `main.cpp`, or `simple_spider.py`.
         - Do not ask for confirmation for explicit `/mnt/iexa` deletes, edits, reads, checks, runs, or reruns. Ask only when the target is outside `/mnt/iexa`, destructive across many files, or genuinely unknown.
         - If the user asks you to write/run/fix/check a project or script, operate under `/mnt/iexa`, verify with a bounded command, and then summarize the real result.
+        - If verification/build/run fails because a command or library is missing, do one bounded Alpine dependency step such as `command -v make >/dev/null 2>&1 || apk add --no-cache make`, then rerun the relevant check. Use language package managers only for project dependencies after their runtime exists.
         - For existing source files, read the target first and prefer same-path `edit_file`/`patch_file`; use `write_files` for new files or large same-path rewrites. For deletes, use `delete_file`/`delete_files` instead of shell `rm`; set `recursive:true` only when deleting a directory.
         - Prefer structured `list_dir`, `glob`, `grep`, and `verify` wrappers over ad-hoc `find`/`grep`/run syntax when they fit.
         - If the user asks to run recent code from the conversation, save the latest runnable code block under `/mnt/iexa`, run it with the right interpreter/compiler, and summarize the real output.
