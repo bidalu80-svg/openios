@@ -2103,15 +2103,13 @@ final class ChatViewModel {
     ]
 
     private static let localAlpineBusyBoxCompatibilityNotes = """
-        BusyBox/ash compatibility:
-        - Prefer structured wrappers (`list_dir`, `glob`, `grep`, `verify`, `browser_use`) for common list/search/check/fetch work; the host converts them into bounded BusyBox-safe commands.
-        - If raw `command` is necessary, write POSIX sh/ash only. Never route Local Alpine work to Open Terminal, a server terminal, iOS/macOS shell commands, or Debian/Ubuntu package commands.
-        - Dependency installs happen inside Local Alpine with `apk`, not apt/brew/system tools. Check first with `command -v <tool>` or `apk info -e <pkg>`, then install missing OS tools/libraries with `apk add --no-cache <pkg>` in the same bounded shell step when needed.
-        - Non-Alpine or iSH-unsafe command families are rejected by the app before execution: `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, `open`, `osascript`, `powershell`, `cmd.exe`, and `lsof`. Translate those intentions to Alpine/BusyBox equivalents.
-        - Known bad patterns here: `find -printf`, `grep -P`, `sed -i ''`, Bash `[[ ... ]]`, `source`, `mapfile`, `readarray`, and process substitution `<(...)` or `>(...)`.
-        - Safe replacements: `find PATH -type f -print | sed -n '1,200p'`, `grep -E`, `. ./script.sh`, `[ ... ]`, `while IFS= read -r line; do ...; done`, and `nc -z 127.0.0.1 PORT` for localhost port checks.
-        - Waiting/polling: use the JSON `delay`/`delay_seconds` field on a `command`/`shell_execute` step instead of putting `sleep` in shell text or `time.sleep()` in generated scripts/tests.
-        - iSH/Python runtime quirk: `time.sleep()` can raise `OSError: [Errno 38] Function not implemented`; make generated Python tests deterministic and delay between tool steps through `delay`. The host also auto-repairs common Python `time.sleep(...)` file writes/runs into an iSH-compatible helper instead of asking the user to fix it.
+        Local Alpine rules:
+        - Prefer `file_read`, `file_write`, `file_edit`, `list_dir`, `glob`, `grep`, `verify`, and `browser_use` over raw shell for common work.
+        - Raw shell must be POSIX sh/BusyBox ash. Use `/mnt/iexa` for user/project files.
+        - Install OS packages with Alpine `apk` only: check `command -v <tool>` or `apk info -e <pkg>`, then `apk add --no-cache <pkg>`.
+        - Do not use apt/brew/sudo/systemctl/macOS/Windows commands or bash/GNU-only syntax such as `find -printf`, `grep -P`, `[[ ... ]]`, `source`, process substitution, or `sed -i ''`.
+        - Use the tool `delay` field for waits; avoid shell `sleep` and Python `time.sleep()` in generated tests.
+        - Large command/tool outputs are offloaded under `/mnt/iexa/.iexa-output-offload`; use `file_read` on an `output_reference` if full content is needed.
         """
 
     private static func localAlpineNativeToolSchemas(includeMemoryTools: Bool) -> [[String: Any]] {
@@ -2120,13 +2118,13 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "shell_execute",
-                    "description": "Run one bounded POSIX sh/BusyBox ash command inside Iexa's isolated Alpine rootfs. This tool never runs Open Terminal, server terminal, iOS, macOS, Windows, Debian, or Ubuntu commands. The user workspace is /mnt/iexa; relative paths resolve there. Use only for list/search/run/install/build/test/verify work. For missing OS tools or libraries, use Alpine apk commands such as `command -v jq >/dev/null 2>&1 || apk add --no-cache jq`; never use apt/brew/sudo. Do not scan the whole rootfs for user files; start under /mnt/iexa unless the user asks for runtime/system inspection. Do not use shell heredocs, echo, printf, cat, tee, or inline writer scripts to create source files; use file_write/file_edit instead. Use the delay argument instead of shell sleep or Python time.sleep().",
+                    "description": "Run one bounded POSIX sh/BusyBox ash command in Local Alpine. Use `/mnt/iexa` for project work and `apk add --no-cache` for missing OS packages.",
                     "parameters": [
                         "type": "object",
                         "properties": [
                             "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
                             "command": ["type": "string", "description": "POSIX sh/BusyBox ash command under 1000 characters."],
-                            "cwd": ["type": "string", "description": "Working directory. Defaults to /mnt/iexa. Use /mnt/iexa for user files and project work; use rootfs paths like /usr or /etc only for bounded runtime inspection."],
+                            "cwd": ["type": "string", "description": "Working directory; defaults to /mnt/iexa."],
                             "timeout": ["type": "integer", "description": "Timeout in seconds for the command."],
                             "delay": ["type": "number", "description": "Optional host-side delay before running the command, in seconds."]
                         ],
@@ -2138,7 +2136,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "file_read",
-                    "description": "Read a UTF-8 text file. By default the app returns the complete file up to a safety cap, so omit offset/lines for normal source files. Use offset/lines only when the result says partial/truncated or you intentionally need a small range. For user/project files, read under /mnt/iexa; use Alpine rootfs paths only for bounded runtime/system inspection. Prefer this over shell cat/sed/nl because the app returns metadata and can detect no-progress loops.",
+                    "description": "Read a UTF-8 text file from `/mnt/iexa` or a bounded rootfs path. Omit ranges for normal source files.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2160,7 +2158,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "read_image",
-                    "description": "Read an image file from /mnt/iexa or the Alpine rootfs and return host-decoded metadata such as dimensions, frame count, byte size, and type. Use for generated charts, screenshots, downloaded images, or visual artifacts that need inspection or preview.",
+                    "description": "Read an image file and return host-decoded metadata for inspection.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2175,7 +2173,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "file_write",
-                    "description": "Create or overwrite a UTF-8 text file in the user workspace. Use /mnt/iexa or relative paths for project files; do not write to Alpine system paths unless the user explicitly asks and the path is appropriate. Use this for new source files or complete same-path rewrites so indentation and code structure are preserved.",
+                    "description": "Create or overwrite a UTF-8 text file, normally under `/mnt/iexa`.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2193,7 +2191,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "file_edit",
-                    "description": "Modify an existing UTF-8 text file by exact replacement. Use for /mnt/iexa user/project files unless the user explicitly targets a sandbox rootfs file. Always read the file first, then replace the precise old_string. Use replace_all only when every match should change.",
+                    "description": "Modify an existing UTF-8 text file by exact replacement. Read before editing.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2211,7 +2209,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "browser_use",
-                    "description": "Lightweight browser fetch tool for Iexa Alpine. It fetches an HTTP/HTTPS URL with curl/wget, can save the response under /mnt/iexa, and can open the saved artifact through Iexa preview. This is not a full interactive browser; use url/save_to/open_preview/max_lines/timeout.",
+                    "description": "Fetch an HTTP/HTTPS URL, optionally save it under `/mnt/iexa`, and open preview.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2275,33 +2273,24 @@ final class ChatViewModel {
             : ""
         return """
         [Local Alpine native tools]
-        Use the provided native tools for local work: `file_read`, `file_write`, `file_edit`, `read_image`, `browser_use`\(memoryToolNames), and `shell_execute`. The iOS host executes each tool call in the local Alpine workspace and returns the real tool result to this same model turn. Do not fake results.
+        Use the provided native tools for local work: `file_read`, `file_write`, `file_edit`, `read_image`, `browser_use`\(memoryToolNames), and `shell_execute`. Iexa executes them inside Local Alpine and returns real results. Do not fake results.
 
         Environment:
-        - Workspace: `/mnt/iexa`; relative paths resolve there. This is the bidirectional Iexa Alpine app/user workspace.
-        - Execution boundary: every tool call runs only inside the embedded Local Alpine/iSH runtime. Do not ask for, invoke, or rely on Open Terminal, server terminals, iOS/macOS host commands, Windows commands, Debian, or Ubuntu commands for this Local Alpine task.
-        - The Alpine rootfs is sandbox-internal. Paths such as `/bin`, `/etc`, `/usr`, `/lib`, `/var`, `/tmp`, `/root`, and `/home` are inside the local Alpine environment, not the iOS host filesystem.
-        - For user files, projects, generated artifacts, attachments, and previewable outputs, stay under `/mnt/iexa`. Do not scan the whole rootfs to look for user files; list/search `/mnt/iexa` first unless the user explicitly asks for runtime/system inspection.
-        - Shell: Alpine Linux with BusyBox/ash, not bash/macOS/Ubuntu.
-        - Package manager: `apk`; never use `apt`, `yum`, `dnf`, `brew`, `sudo`, `systemctl`, or macOS-only commands. If a required command/library is missing, use `command -v <tool> >/dev/null 2>&1 || apk add --no-cache <pkg>` or `apk info -e <pkg> || apk add --no-cache <pkg>` inside Local Alpine, then continue with the real task.
+        - Workspace: `/mnt/iexa`; relative paths resolve there.
+        - Shell: Alpine Linux BusyBox/ash. Use `apk add --no-cache` for missing OS packages; never use apt/brew/sudo/systemctl/macOS/Windows commands.
+        - Rootfs paths such as `/bin`, `/etc`, `/usr`, `/lib`, `/var`, `/tmp`, `/root`, and `/home` are inside Local Alpine. Search `/mnt/iexa` first for user files unless runtime inspection is requested.
 
         Tool rules:
-        - Always fill the `tool_title` argument on every tool call. Keep it under 24 characters, user-facing, action-oriented, and in the user's language, for example `读取目录`, `写入配置`, `校验脚本`, or `删除旧文件`.
-        - Create source files with `file_write`. Modify existing files with `file_read` followed by `file_edit` or a complete same-path `file_write`.
-        - Website project workflow: create or update `index.html`, CSS, JS, assets, and config files through structured `file_write`/`file_edit` only. Never create website source files with shell heredocs, redirection, `cat`, `tee`, `echo`, `printf`, or inline writer scripts.
-        - Treat `file_write`, `file_edit`, and deletion targets outside `/mnt/iexa` as advanced sandbox-rootfs operations. Only do them when the user explicitly names that path or when a package/runtime setup requires it.
-        - Prefer `file_read` for source inspection instead of shell `cat`, `sed`, `nl`, or inline Python readers; structured reads include line metadata and help the app detect no-progress loops.
-        - For normal source files, call `file_read` once with only `path`. Do not split into offset/lines chunks unless the previous read result explicitly says `status: partial`, `truncated`, or the user asked for a range.
+        - Always fill `tool_title`, under 24 characters, user-facing, action-oriented, and in the user's language.
+        - Use `file_read` for source inspection, `file_write` for new files/complete rewrites, and `file_edit` for exact same-path edits. Never write source code through shell heredocs/redirection/echo/cat/tee/printf.
+        - Treat writes/edits/deletes outside `/mnt/iexa` as advanced rootfs operations; only do them for explicit paths or package/runtime setup.
         - Use `read_image` for generated charts, downloaded screenshots, or image artifacts that need host-decoded dimensions/type metadata. Use `iexa-open /mnt/iexa/<image>` when the user should preview the image in chat.
         - Website preview is mandatory after creating or modifying a website/app page. Do not tell the user to open files manually and do not stop after listing files. For static HTML/CSS/JS/SVG output, start the real Alpine Python server as its own tool step:
           `cd /mnt/iexa/<project-or-directory> || exit 1; python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/iexa-preview-8080.log 2>&1 & printf 'Preview URL: http://localhost:8080/\\n'`
           Use another free port if 8080 is unavailable. Include the exact `http://localhost:<port>/` URL in your final answer so the app renders a yellow clickable link. Use the Python server command above; do not invent or call custom preview helper commands. For npm/Vite/React/etc. projects, start the dev server bound to `127.0.0.1`/`localhost`, verify it responds, then run `iexa-open http://localhost:<port>/` and give that exact URL.
-        \(memoryRule)- Never write source code through `shell_execute` using heredocs, redirection, `echo`, `printf`, `cat`, `tee`, or inline Python writer scripts.
-        - Use `browser_use` for bounded HTTP/HTTPS fetches and optional save/open-preview flows. It is lightweight and non-interactive; it does not support full click/type browser automation.
-        - Use `shell_execute` only for bounded list/search/run/install/build/test/verify commands.
-        - For dependency setup, prefer Alpine package names and `apk add --no-cache`. Use Python `pip`/Node package managers only for language-level project dependencies after the runtime/package manager exists, not as a replacement for OS packages.
-        - Commands must be POSIX sh/BusyBox ash compatible. Avoid `find -printf`, `grep -P`, Bash `[[ ... ]]`, `source`, arrays, process substitution, and GNU/macOS-only flags.
-        - If a delay is needed, use the tool `delay` argument. Avoid shell `sleep` and generated Python `time.sleep()`.
+        \(memoryRule)- Use `browser_use` for bounded HTTP fetch/save/open-preview flows. Use `shell_execute` only for bounded list/search/run/install/build/test/verify commands.
+        - Commands must be POSIX sh/BusyBox ash compatible. Use tool `delay` for waits; avoid shell `sleep` and Python `time.sleep()`.
+        - Large outputs may include `output_reference`; use `file_read` on that path when full content is needed.
         - One step should finish before the next decision. A file write plus one matching verification command is allowed; unrelated follow-up work waits for the returned result.
         - Do not repeatedly read or edit the same file when a previous tool result already showed the same state. After two failed/no-op attempts, stop and explain the blocker or choose a different verification path.
         - If a tool result shows success and the user goal is complete, stop tool use and answer normally with a concise real summary.
@@ -2637,26 +2626,25 @@ final class ChatViewModel {
         - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
         - Execution boundary: every command is executed by the embedded Local Alpine/iSH runtime only, not by Open Terminal, a remote server terminal, iOS/macOS shell, Windows shell, Debian, or Ubuntu. Use Alpine/BusyBox/POSIX commands.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
-        - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`. Accepted delay keys are `delay`, `delay_seconds`, or `delaySeconds`; use them instead of shell/Python sleeps.
-        - Dependency install pattern: this runtime is Alpine. If a tool/library is missing, use `command -v <tool> >/dev/null 2>&1 || apk add --no-cache <pkg>` or `apk info -e <pkg> || apk add --no-cache <pkg>` in Local Alpine. Translate Debian/macOS package-manager instincts to `apk`; do not ask the user to install packages elsewhere.
+        - Shell fallback: accepted command keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`; accepted delay keys are `delay`, `delay_seconds`, or `delaySeconds`.
+        - Dependency install pattern: this runtime is Alpine. Check first with `command -v <tool>` or `apk info -e <pkg>`, then install missing OS packages with `apk add --no-cache <pkg>`.
         - Step titles: every tool step must include a short `tool_title`, `step_title`, `display_title`, or `label` string to name the visible execution capsule. Keep it under 24 characters, use the user's language, and make it action-oriented, such as `读取目录`, `写入配置`, `校验脚本`, or `删除旧文件`.
         - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `file_edit` -> `edit_file`, `read_image`/`image_read` -> host-decoded image metadata, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
-        - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls. `browser_use` supports optional `save_to`/`output` plus `open_preview:true` so large HTML/SVG/JSON responses can be written under `/mnt/iexa` and opened through the preview bridge instead of being pasted into chat.
+        - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. `browser_use` can save large responses under `/mnt/iexa` and open preview.
         - In-app preview bridge: after creating a user-viewable non-website file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.
         - Website preview rule: after creating or changing any website/app page, start a localhost preview and give the user the clickable URL. For static HTML/CSS/JS/SVG, run the real Alpine Python server as its own tool step:
           `cd /mnt/iexa/<project-or-directory> || exit 1; python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/iexa-preview-8080.log 2>&1 & printf 'Preview URL: http://localhost:8080/\\n'`
           Use another free port if 8080 is unavailable. Include the exact `http://localhost:<port>/` in the final answer. Use the Python server command above; do not invent or call custom preview helper commands. For npm/Vite/React/etc., start the dev server on `127.0.0.1`/`localhost`, verify with a bounded fetch/curl/wget, run `iexa-open http://localhost:<port>/`, and give the same URL. Never answer "open index.html manually" as the final preview path for a website project.
-        - Command dialect: this is Alpine Linux with BusyBox/ash. Generate POSIX sh/ash-compatible commands, not Ubuntu/Debian/macOS commands.
+        - Command dialect: Alpine BusyBox/ash, not Ubuntu/Debian/macOS/bash.
         \(localAlpineBusyBoxCompatibilityNotes)
-        - Package commands: use `apk info -e <pkg>` to check an installed package, `apk search <pkg>` to search, and `apk add --no-cache <pkg>` to install. For example, `apt install jq` must become `apk add --no-cache jq`; `sudo apt-get install python3-dev` must become an Alpine package such as `apk add --no-cache python3-dev` when available. Do not use `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, `lsof`, or macOS-only utilities.
         - Rootfs/environment/dependency checks: if the user asks whether Python/Lua/Node/C++ or dependencies exist, inspect the running Alpine rootfs/runtime/toolchain directly with bounded `command -v`, `--version`, `apk info`, `python3 -m pip list`, `find /usr/lib /usr/local/lib`, or small module-list commands. Do not invent `/mnt/iexa/rootfs`; `/mnt/iexa` is only the workspace mount. Do not only search `/mnt/iexa` project dependency files unless the user specifically asks for project dependency files.
         - Service/process commands: prefer foreground commands and bounded verification. The exception is website preview servers: use `python3 -m http.server <port> --bind 127.0.0.1` for static sites or a framework dev server bound to localhost, then verify and share the localhost URL. Do not assume OpenRC/system services are available unless a prior command proves it.
         - `command`/`shell_execute` is shell text only. For structured tools, use top-level keys such as `read_file`, `file_read`, `write_files`, `file_write`, `edit_file`, `patch_file`, `delete_file`, `delete_files`, `list_dir`, `glob`, `grep`, `verify`, or `browser_use`.
         - Hard protocol rule: for any intermediate local-work step, pure prose means "stop and answer normally"; it will not be auto-upgraded into execution. Emit a real tool block only when you are intentionally requesting local execution.
         - JSON tool capabilities:
         \(capabilities)
-        - Source file writes: all code files (`.py`, `.js`, `.ts`, `.lua`, `.sh`, `.html`, `.css`, `.swift`, `.java`, `.go`, `.rs`, etc.) are indentation/escaping-sensitive. Never write them through shell text redirection, heredocs, `echo`, `printf`, `cat`, `tee`, or inline writer scripts. Use structured `write_files`/`file_write` with `code_lines`, `content_lines`, or `content_base64`; use same-path `edit_file`/`file_edit` or `patch_file` for targeted modifications.
-        - Website project creation: write `index.html`, CSS, JS, assets, and config files with structured JSON file tools first. After file writes and one bounded verification, start a static preview with `cd /mnt/iexa/<project-or-directory> || exit 1; python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/iexa-preview-8080.log 2>&1 & printf 'Preview URL: http://localhost:8080/\\n'` as a separate preview step and share the printed localhost URL.
+        - Source file writes: never write code through shell redirection/heredocs/echo/cat/tee/printf. Use structured `write_files`/`file_write`, `edit_file`/`file_edit`, or `patch_file`.
+        - Website project creation: write files with structured tools, then start/verify a localhost preview and share the printed URL.
         - Generated scripts must be runtime-compatible before execution: Python should avoid `time.sleep()`; shell scripts must be BusyBox ash/POSIX, not bash. If a delay is needed, set `delay` on the next command step.
         - Code write validation: source files must be written as exact UTF-8 bytes through structured tools. Python additionally gets AST/compile validation, but the structured-write rule applies to every programming language, not only `.py`.
         - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
@@ -2749,10 +2737,18 @@ final class ChatViewModel {
                 lines.append("  command observations:")
                 for result in commandResults.suffix(3) {
                     let exit = result.exitCode.map(String.init) ?? "unknown"
+                    let outputReference = result.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let outputReferenceLine: String
+                    if let outputReference, !outputReference.isEmpty {
+                        outputReferenceLine = "\noutput_reference: \(outputReference)"
+                    } else {
+                        outputReferenceLine = ""
+                    }
+                    let outputSizeLine = result.outputByteCount.map { "\noutput_bytes: \($0)" } ?? ""
                     lines.append(indentForSystemContext("""
                     command: \(result.command)
                     cwd: \(result.cwd)
-                    exit_code: \(exit)
+                    exit_code: \(exit)\(outputReferenceLine)\(outputSizeLine)
                     output:
                     \(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : contextTextForModel(redactedLocalAlpineInternalPaths(in: result.outputPreview), label: "local-alpine-command-output", maxInlineCharacters: localAlpineObservationOutputLimit(for: result.command)))
                     """))
@@ -8324,11 +8320,16 @@ final class ChatViewModel {
             isStreaming: false,
             statusHistory: [localAlpineStatus(description: doneDescription, done: true)]
         )
-        let directCommandResult = LocalAlpineAgentCommandResult(
+        let directCommandResult = LocalAlpineAgentCommandResult.compact(
             command: command,
             cwd: "/mnt/iexa",
             exitCode: result.exitCode,
-            outputPreview: String(result.output.prefix(LocalAlpineAgentCommandResult.previewLimit(for: command)))
+            output: result.output
+        )
+        let directToolOutput = LocalAlpineOutputOffloadStore.compactText(
+            result.output,
+            label: "direct-command-tool-output",
+            previewLimit: 1_600
         )
         let directCompletedAtMs = Int64((Date().timeIntervalSince1970 * 1_000).rounded())
         let directToolCall = LocalAlpineToolCall(
@@ -8341,7 +8342,10 @@ final class ChatViewModel {
             cwd: "/mnt/iexa",
             command: command,
             exitCode: result.exitCode,
-            outputPreview: String(result.output.prefix(1_600)),
+            outputPreview: directToolOutput.preview,
+            outputReference: directToolOutput.reference,
+            outputByteCount: directToolOutput.byteCount,
+            outputLineCount: directToolOutput.lineCount,
             filePaths: [],
             startedAtMs: directStartedAtMs,
             completedAtMs: directCompletedAtMs,
@@ -8681,10 +8685,16 @@ final class ChatViewModel {
     }
 
     private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
-        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let compact = LocalAlpineOutputOffloadStore.compactText(
+            result.output,
+            label: "direct-command-output",
+            previewLimit: 2_400
+        )
+        let output = compact.preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "（无输出）"
-            : Self.clippedForSystemContext(result.output, maxCharacters: 2_400)
+            : compact.preview
         let exit = result.exitCode.map(String.init) ?? "unknown"
+        let referenceLine = compact.reference.map { "\n完整输出：`\($0)`\n" } ?? ""
         return """
         Local Alpine 执行结果
 
@@ -8695,6 +8705,7 @@ final class ChatViewModel {
         ```
 
         退出码：`\(exit)`
+        \(referenceLine)
 
         输出
 
@@ -11776,11 +11787,11 @@ final class ChatViewModel {
                 summary: output,
                 interactiveRequest: nil,
                 commandResults: [
-                    LocalAlpineAgentCommandResult(
+                    LocalAlpineAgentCommandResult.compact(
                         command: trimmedName,
                         cwd: "/mnt/iexa",
                         exitCode: failed ? 1 : 0,
-                        outputPreview: output
+                        output: output
                     )
                 ],
                 writtenFiles: [],
@@ -11802,11 +11813,11 @@ final class ChatViewModel {
                 summary: output,
                 interactiveRequest: nil,
                 commandResults: [
-                    LocalAlpineAgentCommandResult(
+                    LocalAlpineAgentCommandResult.compact(
                         command: trimmedName,
                         cwd: "/mnt/iexa",
                         exitCode: failed ? 1 : 0,
-                        outputPreview: output
+                        output: output
                     )
                 ],
                 writtenFiles: [],
@@ -12294,6 +12305,7 @@ final class ChatViewModel {
     private func shouldExposeLocalImageNativeTools(for text: String?) -> Bool {
         guard canUseDirectImageEndpointProvider,
               imageGenerationEnabled,
+              !selectedModelCanGenerateImages,
               let text,
               Self.looksLikeDirectImageGenerationRequest(text) else {
             return false
@@ -17245,6 +17257,14 @@ final class ChatViewModel {
                 let exit = result.exitCode.map(String.init) ?? "unknown"
                 let redactedCommand = redactedLocalAlpineInternalPaths(in: result.command)
                 let redactedOutput = redactedLocalAlpineInternalPaths(in: result.outputPreview)
+                let outputReference = result.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let outputReferenceLine: String
+                if let outputReference, !outputReference.isEmpty {
+                    outputReferenceLine = "\n  output_reference: \(outputReference)"
+                } else {
+                    outputReferenceLine = ""
+                }
+                let outputSizeLine = result.outputByteCount.map { "\n  output_bytes: \($0)" } ?? ""
                 let output = redactedOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     ? "（无输出）"
                     : contextTextForModel(
@@ -17255,7 +17275,7 @@ final class ChatViewModel {
                 lines.append("""
                 - command: \(redactedCommand)
                   cwd: \(result.cwd)
-                  exit_code: \(exit)
+                  exit_code: \(exit)\(outputReferenceLine)\(outputSizeLine)
                   output:
                 \(indentForSystemContext(output))
                 """)
@@ -22150,6 +22170,9 @@ final class ChatViewModel {
             command: call.command.map { Self.prefixForLiveUI($0, limit: localAlpineLiveToolCommandLimit) },
             exitCode: call.exitCode,
             outputPreview: call.outputPreview.map { Self.prefixForLiveUI($0, limit: localAlpineLiveToolPreviewLimit) },
+            outputReference: call.outputReference,
+            outputByteCount: call.outputByteCount,
+            outputLineCount: call.outputLineCount,
             filePaths: Array(call.filePaths.prefix(8)),
             lineDelta: call.lineDelta,
             startedAtMs: call.startedAtMs,
