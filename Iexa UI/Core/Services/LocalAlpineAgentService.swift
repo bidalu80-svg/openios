@@ -44,6 +44,127 @@ struct LocalAlpineAgentResult: Sendable {
     }
 }
 
+enum LocalAlpineOutputOffloadStore {
+    struct CompactText: Sendable {
+        let preview: String
+        let reference: String?
+        let byteCount: Int
+        let lineCount: Int
+    }
+
+    private static let maximumStoredFiles = 96
+    private static let maximumFileAge: TimeInterval = 60 * 60 * 24 * 7
+
+    static func compactText(_ text: String, label: String, previewLimit: Int) -> CompactText {
+        let byteCount = text.data(using: .utf8)?.count ?? text.utf8.count
+        let lineCount = Self.lineCount(in: text)
+        let preview = text.count > previewLimit ? String(text.prefix(previewLimit)) : text
+        let shouldOffload = text.count > previewLimit || byteCount > previewLimit * 2
+        let reference = shouldOffload ? write(label: label, text: text) : nil
+        return CompactText(
+            preview: preview,
+            reference: reference,
+            byteCount: byteCount,
+            lineCount: lineCount
+        )
+    }
+
+    private static func write(label: String, text: String) -> String? {
+        do {
+            let directory = try offloadDirectory()
+            cleanup(directory: directory.url)
+            let fileName = "\(slug(label))-\(stableHash(text)).txt"
+            let fileURL = directory.url.appendingPathComponent(fileName)
+            if !FileManager.default.fileExists(atPath: fileURL.path) {
+                try text.write(to: fileURL, atomically: true, encoding: .utf8)
+            }
+            return "\(directory.displayPath)/\(fileName)"
+        } catch {
+            return nil
+        }
+    }
+
+    private static func offloadDirectory() throws -> (url: URL, displayPath: String) {
+        let fileManager = FileManager.default
+        if let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let shared = documents
+                .appendingPathComponent("Iexa Alpine", isDirectory: true)
+                .appendingPathComponent("shared", isDirectory: true)
+                .appendingPathComponent(".iexa-output-offload", isDirectory: true)
+            try fileManager.createDirectory(at: shared, withIntermediateDirectories: true)
+            return (shared, "/mnt/iexa/.iexa-output-offload")
+        }
+
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
+        let fallback = base.appendingPathComponent("IexaOutputOffloads", isDirectory: true)
+        try fileManager.createDirectory(at: fallback, withIntermediateDirectories: true)
+        return (fallback, fallback.path)
+    }
+
+    private static func cleanup(directory: URL) {
+        let fileManager = FileManager.default
+        guard let urls = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        let now = Date()
+        let files = urls.compactMap { url -> (url: URL, modified: Date)? in
+            guard url.pathExtension.lowercased() == "txt",
+                  let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                  values.isRegularFile == true else {
+                return nil
+            }
+            return (url, values.contentModificationDate ?? .distantPast)
+        }
+
+        for file in files where now.timeIntervalSince(file.modified) > maximumFileAge {
+            try? fileManager.removeItem(at: file.url)
+        }
+
+        let remaining = files
+            .filter { now.timeIntervalSince($0.modified) <= maximumFileAge }
+            .sorted { $0.modified > $1.modified }
+        for file in remaining.dropFirst(maximumStoredFiles) {
+            try? fileManager.removeItem(at: file.url)
+        }
+    }
+
+    private static func lineCount(in text: String) -> Int {
+        guard !text.isEmpty else { return 0 }
+        return text.reduce(1) { count, character in
+            character == "\n" ? count + 1 : count
+        }
+    }
+
+    private static func stableHash(_ text: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
+    }
+
+    private static func slug(_ label: String) -> String {
+        var result = ""
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        for scalar in label.unicodeScalars {
+            if allowed.contains(scalar) {
+                result.append(Character(scalar))
+            } else if result.last != "-" {
+                result.append("-")
+            }
+        }
+        let trimmed = result.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return trimmed.isEmpty ? "output" : String(trimmed.prefix(48))
+    }
+}
+
 struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
     let path: String
     let source: String
@@ -222,6 +343,27 @@ struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
     let cwd: String
     let exitCode: Int?
     let outputPreview: String
+    let outputReference: String?
+    let outputByteCount: Int?
+    let outputLineCount: Int?
+
+    init(
+        command: String,
+        cwd: String,
+        exitCode: Int?,
+        outputPreview: String,
+        outputReference: String? = nil,
+        outputByteCount: Int? = nil,
+        outputLineCount: Int? = nil
+    ) {
+        self.command = command
+        self.cwd = cwd
+        self.exitCode = exitCode
+        self.outputPreview = outputPreview
+        self.outputReference = outputReference
+        self.outputByteCount = outputByteCount
+        self.outputLineCount = outputLineCount
+    }
 
     var failed: Bool {
         guard let exitCode else { return true }
@@ -234,7 +376,10 @@ struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
                 command: result.command,
                 cwd: result.cwd,
                 exitCode: result.exitCode,
-                outputPreview: String(result.outputPreview.prefix(previewLimit(for: result.command)))
+                outputPreview: String(result.outputPreview.prefix(previewLimit(for: result.command))),
+                outputReference: result.outputReference,
+                outputByteCount: result.outputByteCount,
+                outputLineCount: result.outputLineCount
             )
         }
         guard !limitedResults.isEmpty,
@@ -251,6 +396,29 @@ struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
             return []
         }
         return results
+    }
+
+    static func compact(
+        command: String,
+        cwd: String,
+        exitCode: Int?,
+        output: String
+    ) -> LocalAlpineAgentCommandResult {
+        let normalizedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let compact = LocalAlpineOutputOffloadStore.compactText(
+            output,
+            label: "command-output",
+            previewLimit: previewLimit(for: normalizedCommand)
+        )
+        return LocalAlpineAgentCommandResult(
+            command: normalizedCommand,
+            cwd: cwd.trimmingCharacters(in: .whitespacesAndNewlines),
+            exitCode: exitCode,
+            outputPreview: compact.preview,
+            outputReference: compact.reference,
+            outputByteCount: compact.byteCount,
+            outputLineCount: compact.lineCount
+        )
     }
 
     static func isReadFileCommand(_ command: String) -> Bool {
@@ -345,6 +513,9 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
     let command: String?
     let exitCode: Int?
     let outputPreview: String?
+    let outputReference: String?
+    let outputByteCount: Int?
+    let outputLineCount: Int?
     let filePaths: [String]
     let lineDelta: LocalAlpineLineDelta?
     let startedAtMs: Int64
@@ -353,6 +524,7 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, runId, name, phase, title, detail, cwd, command, exitCode, outputPreview
+        case outputReference, outputByteCount, outputLineCount
         case filePaths, lineDelta, startedAtMs, completedAtMs, failed
     }
 
@@ -367,6 +539,9 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
         command: String?,
         exitCode: Int?,
         outputPreview: String?,
+        outputReference: String? = nil,
+        outputByteCount: Int? = nil,
+        outputLineCount: Int? = nil,
         filePaths: [String],
         lineDelta: LocalAlpineLineDelta? = nil,
         startedAtMs: Int64,
@@ -383,6 +558,9 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
         self.command = command
         self.exitCode = exitCode
         self.outputPreview = outputPreview
+        self.outputReference = outputReference
+        self.outputByteCount = outputByteCount
+        self.outputLineCount = outputLineCount
         self.filePaths = filePaths
         self.lineDelta = lineDelta
         self.startedAtMs = startedAtMs
@@ -402,6 +580,9 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
         command = try? container.decode(String.self, forKey: .command)
         exitCode = try? container.decode(Int.self, forKey: .exitCode)
         outputPreview = try? container.decode(String.self, forKey: .outputPreview)
+        outputReference = try? container.decode(String.self, forKey: .outputReference)
+        outputByteCount = try? container.decode(Int.self, forKey: .outputByteCount)
+        outputLineCount = try? container.decode(Int.self, forKey: .outputLineCount)
         filePaths = (try? container.decode([String].self, forKey: .filePaths)) ?? []
         lineDelta = try? container.decode(LocalAlpineLineDelta.self, forKey: .lineDelta)
         startedAtMs = (try? container.decode(Int64.self, forKey: .startedAtMs)) ?? 0
@@ -452,6 +633,9 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
                 outputPreview: call.outputPreview.map {
                     String($0.prefix(outputPreviewLimit(for: call.name)))
                 },
+                outputReference: call.outputReference,
+                outputByteCount: call.outputByteCount,
+                outputLineCount: call.outputLineCount,
                 filePaths: Array(call.filePaths.prefix(12)),
                 lineDelta: call.lineDelta,
                 startedAtMs: call.startedAtMs,
@@ -1253,11 +1437,11 @@ actor LocalAlpineAgentService {
         result: LocalAlpineCommandResult
     ) -> LocalAlpineAgentCommandResult {
         let normalizedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        return LocalAlpineAgentCommandResult(
+        return LocalAlpineAgentCommandResult.compact(
             command: normalizedCommand,
-            cwd: cwd.trimmingCharacters(in: .whitespacesAndNewlines),
+            cwd: cwd,
             exitCode: result.exitCode,
-            outputPreview: String(result.output.prefix(LocalAlpineAgentCommandResult.previewLimit(for: normalizedCommand)))
+            output: result.output
         )
     }
 
@@ -1325,6 +1509,13 @@ actor LocalAlpineAgentService {
         lineDelta: LocalAlpineLineDelta? = nil,
         failed: Bool
     ) -> LocalAlpineToolCall {
+        let compact = outputPreview.map {
+            LocalAlpineOutputOffloadStore.compactText(
+                $0,
+                label: "\(context.name)-tool-output",
+                previewLimit: LocalAlpineToolCall.outputPreviewLimit(for: context.name)
+            )
+        }
         LocalAlpineToolCall(
             id: context.id,
             runId: context.runId,
@@ -1335,9 +1526,10 @@ actor LocalAlpineAgentService {
             cwd: context.cwd,
             command: context.command,
             exitCode: exitCode,
-            outputPreview: outputPreview.map {
-                String($0.prefix(LocalAlpineToolCall.outputPreviewLimit(for: context.name)))
-            },
+            outputPreview: compact?.preview,
+            outputReference: compact?.reference,
+            outputByteCount: compact?.byteCount,
+            outputLineCount: compact?.lineCount,
             filePaths: context.filePaths,
             lineDelta: lineDelta?.isEmpty == true ? nil : lineDelta,
             startedAtMs: context.startedAtMs,

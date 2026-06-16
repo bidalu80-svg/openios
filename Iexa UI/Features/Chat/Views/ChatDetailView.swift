@@ -68,6 +68,9 @@ private struct AgentActivityStep: Identifiable, Hashable {
     let failed: Bool
     let outputPreview: String
     let fullOutput: String?
+    let outputReference: String?
+    let outputByteCount: Int?
+    let outputLineCount: Int?
     let file: LocalAlpineWrittenFile?
     let filePaths: [String]
     let command: String?
@@ -81,6 +84,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
             || command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             || outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             || fullOutput?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            || outputReference?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 
     var isLocalStatusPlaceholder: Bool {
@@ -105,6 +109,9 @@ private struct AgentActivityStep: Identifiable, Hashable {
             && lhs.isRunning == rhs.isRunning
             && lhs.failed == rhs.failed
             && lhs.outputPreview == rhs.outputPreview
+            && lhs.outputReference == rhs.outputReference
+            && lhs.outputByteCount == rhs.outputByteCount
+            && lhs.outputLineCount == rhs.outputLineCount
             && lhs.file == rhs.file
             && lhs.filePaths == rhs.filePaths
             && lhs.command == rhs.command
@@ -122,6 +129,9 @@ private struct AgentActivityStep: Identifiable, Hashable {
         hasher.combine(isRunning)
         hasher.combine(failed)
         hasher.combine(outputPreview)
+        hasher.combine(outputReference)
+        hasher.combine(outputByteCount)
+        hasher.combine(outputLineCount)
         hasher.combine(file)
         hasher.combine(filePaths)
         hasher.combine(command)
@@ -366,6 +376,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
             failed: step.failed,
             outputPreview: clippedFloatingText(step.outputPreview, limit: floatingOutputPreviewLimit),
             fullOutput: nil,
+            outputReference: step.outputReference,
+            outputByteCount: step.outputByteCount,
+            outputLineCount: step.outputLineCount,
             file: step.file,
             filePaths: step.filePaths,
             command: step.command.map { clippedFloatingText($0, limit: floatingCommandLimit) },
@@ -409,21 +422,13 @@ private struct AgentActivityItem: Identifiable, Hashable {
             officeDocumentFiles: officeDocumentFiles
         )
         let localStatusPlaceholders = localStatusSteps(from: statusHistory)
-        var fullToolOutputById: [String: String] = [:]
-        for call in fullToolCalls ?? toolCalls {
-            let output = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !output.isEmpty || fullToolOutputById[call.id] == nil {
-                fullToolOutputById[call.id] = output
-            }
-        }
-        let fullCommandOutputs = fullCommandResults ?? commandResults
-
         steps.append(contentsOf: toolCalls.map { call in
             let matchedFile = file(for: call, in: writtenFiles)
             let title = displayTitle(for: call, file: matchedFile)
             let detail = call.displayDetail
             let output = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let fullOutput = fullToolOutputById[call.id]?.isEmpty == false ? fullToolOutputById[call.id] : output
+            let reference = call.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasReference = !(reference?.isEmpty ?? true)
             return AgentActivityStep(
                 id: "tool-\(call.id)",
                 kind: .tool,
@@ -432,7 +437,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 isRunning: call.isRunning,
                 failed: call.failed,
                 outputPreview: output,
-                fullOutput: fullOutput,
+                fullOutput: hasReference ? nil : output,
+                outputReference: hasReference ? reference : nil,
+                outputByteCount: call.outputByteCount,
+                outputLineCount: call.outputLineCount,
                 file: matchedFile,
                 filePaths: call.filePaths,
                 command: call.command,
@@ -455,6 +463,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     failed: false,
                     outputPreview: file.previewLines(limit: 10).joined(separator: "\n"),
                     fullOutput: nil,
+                    outputReference: nil,
+                    outputByteCount: nil,
+                    outputLineCount: nil,
                     file: file,
                     filePaths: [file.path],
                     command: nil,
@@ -476,9 +487,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
             guard !command.isEmpty, command.lowercased() != "write_files" else { continue }
             guard !existingCommands.contains(command) else { continue }
             guard !Self.commandDuplicatesStructuredTool(command, toolPathsByName: structuredToolPathsByName) else { continue }
-            let fullOutput = fullCommandOutputs.indices.contains(index)
-                ? fullCommandOutputs[index].outputPreview
-                : result.outputPreview
+            let reference = result.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasReference = !(reference?.isEmpty ?? true)
             steps.append(
                 AgentActivityStep(
                     id: "command-\(index)-\(command.hashValue)",
@@ -488,7 +498,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     isRunning: false,
                     failed: result.failed,
                     outputPreview: result.outputPreview,
-                    fullOutput: fullOutput,
+                    fullOutput: hasReference ? nil : result.outputPreview,
+                    outputReference: hasReference ? reference : nil,
+                    outputByteCount: result.outputByteCount,
+                    outputLineCount: result.outputLineCount,
                     file: nil,
                     filePaths: [],
                     command: command,
@@ -623,6 +636,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 failed: false,
                 outputPreview: output.isEmpty ? detail : output,
                 fullOutput: output.isEmpty ? detail : output,
+                outputReference: nil,
+                outputByteCount: nil,
+                outputLineCount: nil,
                 file: nil,
                 filePaths: [],
                 command: nil,
@@ -657,6 +673,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 failed: false,
                 outputPreview: detail,
                 fullOutput: detail,
+                outputReference: nil,
+                outputByteCount: nil,
+                outputLineCount: nil,
                 file: nil,
                 filePaths: [],
                 command: nil,
@@ -1126,7 +1145,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 command: result.command,
                 cwd: result.cwd,
                 exitCode: result.exitCode,
-                outputPreview: clippedUIPreview(result.outputPreview)
+                outputPreview: clippedUIPreview(result.outputPreview),
+                outputReference: result.outputReference,
+                outputByteCount: result.outputByteCount,
+                outputLineCount: result.outputLineCount
             )
         }
     }
@@ -1144,6 +1166,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 command: call.command,
                 exitCode: call.exitCode,
                 outputPreview: call.outputPreview.map { Self.clippedUIPreview($0) },
+                outputReference: call.outputReference,
+                outputByteCount: call.outputByteCount,
+                outputLineCount: call.outputLineCount,
                 filePaths: call.filePaths,
                 lineDelta: call.lineDelta,
                 startedAtMs: call.startedAtMs,
@@ -9363,6 +9388,15 @@ private struct AgentFloatingStepPreviewSheet: View {
     private func stepPreview(_ step: AgentActivityStep) -> some View {
         if let file = step.file {
             filePreview(file)
+        } else if let outputReference = step.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !outputReference.isEmpty {
+            LocalAlpineLazyFilePreview(
+                path: outputReference,
+                fileName: (outputReference as NSString).lastPathComponent,
+                language: "text",
+                fallbackLines: outputText(for: step).components(separatedBy: .newlines),
+                byteCount: step.outputByteCount
+            )
         } else if let path = lazyPreviewPath(for: step) {
             LocalAlpineLazyFilePreview(
                 path: path,
