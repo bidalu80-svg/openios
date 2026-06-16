@@ -31,6 +31,16 @@ struct LocalAlpineCommandResult: Sendable {
     }
 }
 
+struct LocalAlpineFileSample: Sendable {
+    let data: Data
+    let fullSize: Int64?
+
+    var isTruncated: Bool {
+        guard let fullSize else { return false }
+        return Int64(data.count) < fullSize
+    }
+}
+
 struct LocalAlpineInteractiveRequest: Identifiable, Sendable {
     enum Kind: String, Sendable {
         case command
@@ -396,6 +406,19 @@ actor LocalAlpineTerminalService {
         return try Data(contentsOf: url)
     }
 
+    func readFileSample(path: String, maxBytes: Int) async throws -> LocalAlpineFileSample {
+        let root = try ensureSharedWorkspaceDirectory()
+        let url = try resolve(path: path, root: root, allowRoot: false)
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: max(1, maxBytes)) ?? Data()
+        return LocalAlpineFileSample(
+            data: data,
+            fullSize: values?.fileSize.map(Int64.init)
+        )
+    }
+
     func readRootFSFile(path: String) async throws -> Data {
         let rootPath = try normalizedRootFSPath(path)
         guard rootPath != "/" else {
@@ -423,6 +446,38 @@ actor LocalAlpineTerminalService {
             throw LocalAlpineError.commandFailed("Unable to decode rootfs file data.")
         }
         return data
+    }
+
+    func readRootFSFileSample(path: String, maxBytes: Int) async throws -> LocalAlpineFileSample {
+        let rootPath = try normalizedRootFSPath(path)
+        guard rootPath != "/" else {
+            throw LocalAlpineError.invalidPath(path)
+        }
+
+        let result = await execute(
+            command: rootFSSampledReadCommand(path: rootPath, maxBytes: maxBytes),
+            cwd: "/mnt/iexa"
+        )
+        guard result.exitCode == 0 else {
+            throw LocalAlpineError.commandFailed(rootFSUserFacingError(from: result.output))
+        }
+
+        guard let output = rootFSCommandPayload(
+            from: result.output,
+            begin: "IEXA_ROOTFS_B64_BEGIN",
+            end: "IEXA_ROOTFS_B64_END"
+        ) else {
+            throw LocalAlpineError.commandFailed(rootFSUserFacingError(from: result.output))
+        }
+
+        let encoded = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = Data(base64Encoded: encoded, options: [.ignoreUnknownCharacters]) else {
+            throw LocalAlpineError.commandFailed("Unable to decode rootfs file preview data.")
+        }
+        return LocalAlpineFileSample(
+            data: data,
+            fullSize: rootFSReadSize(from: result.output)
+        )
     }
 
     func materializePreviewURL(for request: LocalAlpineOpenRequest) async throws -> URL {
@@ -1561,6 +1616,42 @@ actor LocalAlpineTerminalService {
           exit 23
         fi
         """
+    }
+
+    private func rootFSSampledReadCommand(path: String, maxBytes: Int) -> String {
+        """
+        target=\(shellSingleQuoted(path))
+        max_bytes=\(max(1, maxBytes))
+        if [ ! -f "$target" ]; then
+          printf 'Not a regular file: %s\\n' "$target" >&2
+          exit 21
+        fi
+        size=$(wc -c < "$target" 2>/dev/null | tr -d ' ' || echo 0)
+        case "$size" in
+          ''|*[!0-9]*) size=0 ;;
+        esac
+        printf 'IEXA_ROOTFS_SIZE\\t%s\\n' "$size"
+        if command -v base64 >/dev/null 2>&1; then
+          printf 'IEXA_ROOTFS_B64_BEGIN\\n'
+          head -c "$max_bytes" "$target" | base64 | tr -d '\\n'
+          printf '\\nIEXA_ROOTFS_B64_END\\n'
+        elif command -v python3 >/dev/null 2>&1; then
+          python3 -c 'import base64,pathlib,sys; p=pathlib.Path(sys.argv[1]); n=int(sys.argv[2]); data=p.read_bytes()[:n]; print("IEXA_ROOTFS_B64_BEGIN"); print(base64.b64encode(data).decode("ascii")); print("IEXA_ROOTFS_B64_END")' "$target" "$max_bytes"
+        else
+          printf 'base64 is unavailable in this rootfs.\\n' >&2
+          exit 23
+        fi
+        """
+    }
+
+    private func rootFSReadSize(from output: String) -> Int64? {
+        let marker = "IEXA_ROOTFS_SIZE\t"
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = String(rawLine)
+            guard line.hasPrefix(marker) else { continue }
+            return Int64(line.dropFirst(marker.count).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
     }
 
     private func rootFSDeleteCommand(path: String) -> String {
