@@ -365,7 +365,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             isRunning: step.isRunning,
             failed: step.failed,
             outputPreview: clippedFloatingText(step.outputPreview, limit: floatingOutputPreviewLimit),
-            fullOutput: step.fullOutput ?? step.outputPreview,
+            fullOutput: nil,
             file: step.file,
             filePaths: step.filePaths,
             command: step.command.map { clippedFloatingText($0, limit: floatingCommandLimit) },
@@ -1454,8 +1454,7 @@ struct ChatDetailView: View {
                 for key in [
                     "iexa_local_alpine_tool_calls",
                     "iexa_local_alpine_command_results",
-                    "iexa_local_alpine_written_files",
-                    "iexa_local_alpine_raw_result"
+                    "iexa_local_alpine_written_files"
                 ] {
                     if let value = metadata[key] {
                         signature &+= key.hashValue
@@ -1521,7 +1520,6 @@ struct ChatDetailView: View {
                 "iexa_local_alpine_tool_calls",
                 "iexa_local_alpine_command_results",
                 "iexa_local_alpine_written_files",
-                "iexa_local_alpine_raw_result",
                 "iexa_local_alpine_result",
                 "iexa_local_alpine_final_summary"
             ] {
