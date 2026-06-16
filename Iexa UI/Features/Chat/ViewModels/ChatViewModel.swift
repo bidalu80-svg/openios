@@ -15396,11 +15396,36 @@ final class ChatViewModel {
     private static func estimatedTokenCount(for text: String) -> Int {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return 0 }
+        if trimmed.utf8.count > 64_000 {
+            return estimatedTokenCountForLargeText(trimmed)
+        }
         let cjkCount = trimmed.unicodeScalars.filter {
             (0x4E00...0x9FFF).contains(Int($0.value))
         }.count
         let otherCount = max(0, trimmed.count - cjkCount)
         return max(1, cjkCount + Int(ceil(Double(otherCount) / 4.0)))
+    }
+
+    private static func estimatedTokenCountForLargeText(_ text: String) -> Int {
+        let byteCount = text.utf8.count
+        var sampledScalars = 0
+        var sampledBytes = 0
+        var sampledCJK = 0
+        for scalar in text.unicodeScalars.prefix(8_192) {
+            sampledScalars += 1
+            sampledBytes += scalar.utf8.count
+            if (0x4E00...0x9FFF).contains(Int(scalar.value)) {
+                sampledCJK += 1
+            }
+        }
+        guard sampledScalars > 0, sampledBytes > 0 else { return max(1, byteCount / 4) }
+
+        let averageBytesPerScalar = max(1.0, Double(sampledBytes) / Double(sampledScalars))
+        let estimatedScalarCount = max(1, Int(Double(byteCount) / averageBytesPerScalar))
+        let cjkRatio = Double(sampledCJK) / Double(sampledScalars)
+        let estimatedCJKCount = Int(Double(estimatedScalarCount) * cjkRatio)
+        let estimatedOtherCount = max(0, estimatedScalarCount - estimatedCJKCount)
+        return max(1, estimatedCJKCount + Int(ceil(Double(estimatedOtherCount) / 4.0)))
     }
 
     private static func estimatedAttachmentTokens(for attachment: ChatAttachment) -> Int {
