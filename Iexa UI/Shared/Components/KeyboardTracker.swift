@@ -123,16 +123,10 @@ final class KeyboardTracker {
             self.isVisible = newVisible
         }
 
-        if newVisible {
-            withAnimation(swiftUIAnimation(duration: duration, curve: curve)) {
-                updates()
-            }
-        } else {
-            var transaction = Transaction(animation: nil)
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                updates()
-            }
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            updates()
         }
     }
 
