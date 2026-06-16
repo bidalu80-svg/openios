@@ -2688,7 +2688,28 @@ final class ChatViewModel {
             """
         }
 
-        let blocks = alpineMessages.suffix(2).map { message -> String in
+        let latestUserIndex = messages.lastIndex(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })
+        let currentTurnAlpineMessages: [ChatMessage] = {
+            guard let latestUserIndex else {
+                return alpineMessages
+            }
+            let start = messages.index(after: latestUserIndex)
+            guard start < messages.endIndex else { return [] }
+            return messages[start...].filter {
+                isLocalAlpineAgentResult($0) && !isLocalAlpineProtocolCorrectionMessage($0)
+            }
+        }()
+        let selectedAlpineMessages = currentTurnAlpineMessages.isEmpty
+            ? Array(alpineMessages.suffix(2))
+            : currentTurnAlpineMessages
+        let detailedAlpineMessages = Array(selectedAlpineMessages.suffix(2))
+        let earlierTurnHistory = Self.localAlpineCompactTurnHistory(
+            selectedAlpineMessages.dropLast(detailedAlpineMessages.count)
+        )
+
+        let blocks = detailedAlpineMessages.map { message -> String in
             let metadata = message.metadata ?? [:]
             let status = message.statusHistory.last?.description?.trimmingCharacters(in: .whitespacesAndNewlines)
             let state = message.isStreaming ? "running" : "completed"
@@ -2802,6 +2823,8 @@ final class ChatViewModel {
         [Local Alpine execution state]
         The iOS host app simulates a Codex CLI tool loop. A fenced `iexa_alpine` block is the local tool_use, and each Local Alpine result below is the tool_result/observation. This state is real host-side execution state, even if the command block itself is no longer visible in chat.
 
+        \(earlierTurnHistory.map { "Earlier steps in the current user turn (compact):\n\($0)\n" } ?? "")
+
         \(blocks.joined(separator: "\n\n"))
 
         Rules for this state:
@@ -2818,6 +2841,53 @@ final class ChatViewModel {
         - If the latest result contains a BusyBox/ash compatibility error, rewrite the command using `list_dir`, `glob`, `grep`, `verify`, or POSIX sh/ash syntax. Do not repeat GNU/bash-only syntax.
         [/Local Alpine execution state]
         """
+    }
+
+    private static func localAlpineCompactTurnHistory(_ messages: ArraySlice<ChatMessage>) -> String? {
+        let compactMessages = messages.suffix(8)
+        guard !compactMessages.isEmpty else { return nil }
+
+        let lines = compactMessages.compactMap { message -> String? in
+            let metadata = message.metadata ?? [:]
+            let state = message.isStreaming ? "running" : "completed"
+            let calls = LocalAlpineToolCall.decodeMetadata(metadata["iexa_local_alpine_tool_calls"])
+            let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata["iexa_local_alpine_command_results"])
+            let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata["iexa_local_alpine_written_files"])
+
+            var parts: [String] = []
+            let callTitles = calls.suffix(5).map { call in
+                let title = call.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                return title.isEmpty ? call.name : title
+            }.filter { !$0.isEmpty }
+            if !callTitles.isEmpty {
+                parts.append("steps: \(callTitles.joined(separator: " -> "))")
+            }
+            if !writtenFiles.isEmpty {
+                let fileList = writtenFiles.suffix(4).map { $0.path }.joined(separator: ", ")
+                parts.append("files: \(fileList)")
+            }
+            if !commandResults.isEmpty {
+                let commandList = commandResults.suffix(3).map { result -> String in
+                    let exit = result.exitCode.map(String.init) ?? "?"
+                    return "\(Self.clippedForSystemContext(result.command, maxCharacters: 120)) exit=\(exit)"
+                }.joined(separator: " | ")
+                parts.append("commands: \(commandList)")
+            }
+
+            if parts.isEmpty {
+                let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !content.isEmpty else { return nil }
+                parts.append(Self.clippedForSystemContext(
+                    Self.redactedLocalAlpineInternalPaths(in: content),
+                    maxCharacters: 360
+                ))
+            }
+
+            return "- \(state): \(parts.joined(separator: "; "))"
+        }
+
+        guard !lines.isEmpty else { return nil }
+        return Self.indentForSystemContext(lines.joined(separator: "\n"))
     }
 
     private func inlineTextDisplayFile(for attachment: ChatAttachment, data: Data) -> ChatMessageFile {
@@ -10019,6 +10089,7 @@ final class ChatViewModel {
         to acc: ContentAccumulator,
         assistantMessageId: String
     ) -> Bool {
+        ensureStreamingAccumulatorUpdates(acc, assistantMessageId: assistantMessageId)
         var didUpdate = false
 
         if let reasoning = event.reasoningDelta,
@@ -10032,10 +10103,19 @@ final class ChatViewModel {
             didUpdate = true
         }
 
-        if didUpdate {
-            updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
-        }
         return didUpdate
+    }
+
+    private func ensureStreamingAccumulatorUpdates(
+        _ acc: ContentAccumulator,
+        assistantMessageId: String
+    ) {
+        guard acc.onUpdate == nil else { return }
+        let messageId = assistantMessageId
+        acc.onUpdate = { [weak self] content in
+            guard let self, !self.hasFinishedStreaming else { return }
+            self.updateAssistantMessage(id: messageId, content: content, isStreaming: true)
+        }
     }
 
     private struct LocalAlpineNativeToolCall {
