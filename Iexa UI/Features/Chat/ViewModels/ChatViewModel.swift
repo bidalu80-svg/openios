@@ -15682,15 +15682,23 @@ final class ChatViewModel {
         guard let conversation else { return 0 }
         return conversation.messages.reduce(0) { total, message in
             guard !message.isStreaming,
-                  !isLocalWorkspaceAgentResult(message),
-                  !isLocalAlpineProtocolCorrectionMessage(message),
-                  !isLocalAlpineHiddenCorrectionParent(message),
-                  !isLocalAlpineHiddenToolParent(message) else {
+                   !isLocalWorkspaceAgentResult(message),
+                   !isLocalAlpineProtocolCorrectionMessage(message) else {
                 return total
             }
-            let content = isLocalAlpineAgentResult(message)
-                ? localAlpineObservationContent(for: message)
-                : message.content
+            let content: String
+            if isLocalAlpineAgentResult(message) {
+                content = localAlpineObservationContent(for: message)
+            } else if isLocalAlpineHiddenCorrectionParent(message) || isLocalAlpineHiddenToolParent(message) {
+                content = visibleHiddenToolParentContent(from: message.content)
+            } else if isLocalNativeHiddenToolParent(message) {
+                content = visibleHiddenNativeToolParentContent(from: message.content)
+            } else {
+                content = message.content
+            }
+            guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return total
+            }
             return total + 4 + estimatedTokenCount(for: content)
                 + message.files.count * 256
         }
@@ -16853,9 +16861,11 @@ final class ChatViewModel {
         includeImageCanvasInstruction: Bool = false
     ) -> String {
         if Self.isLocalAlpineHiddenToolParent(message)
-            || Self.isLocalNativeHiddenToolParent(message)
             || Self.isLocalAlpineHiddenCorrectionParent(message) {
-            return ""
+            return Self.visibleHiddenToolParentContent(from: message.content)
+        }
+        if Self.isLocalNativeHiddenToolParent(message) {
+            return Self.visibleHiddenNativeToolParentContent(from: message.content)
         }
         if Self.isLocalAlpineAgentResult(message) {
             return Self.localAlpineObservationContent(for: message)
@@ -16891,6 +16901,16 @@ final class ChatViewModel {
             return extraContexts.joined(separator: "\n\n")
         }
         return content + "\n\n" + extraContexts.joined(separator: "\n\n")
+    }
+
+    private static func visibleHiddenToolParentContent(from content: String) -> String {
+        LocalAlpineAgentService.visibleContent(from: content)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func visibleHiddenNativeToolParentContent(from content: String) -> String {
+        LocalNativeToolService.visibleContent(from: content)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private struct LocalOfficeRevisionSnapshot {
@@ -17680,15 +17700,16 @@ final class ChatViewModel {
             if isLocalAlpineResult && Self.isLocalAlpineProtocolCorrectionMessage(message) {
                 continue
             }
-            if Self.isLocalAlpineHiddenCorrectionParent(message)
-                || Self.isLocalAlpineHiddenToolParent(message)
-                || Self.isLocalNativeHiddenToolParent(message) {
-                continue
-            }
             let modelContent = contentForModel(
                 message: message,
                 includeImageCanvasInstruction: message.id == imageCanvasInstructionMessageId
             )
+            if (Self.isLocalAlpineHiddenCorrectionParent(message)
+                || Self.isLocalAlpineHiddenToolParent(message)
+                || Self.isLocalNativeHiddenToolParent(message))
+                && modelContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                continue
+            }
             let modelRole = isLocalAlpineResult ? "system" : message.role.rawValue
             let imageFiles = message.files.filter { f in
                 f.type == "image" || (f.contentType ?? "").hasPrefix("image/")

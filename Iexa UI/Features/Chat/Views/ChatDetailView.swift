@@ -1278,14 +1278,12 @@ struct ChatDetailView: View {
     @State private var usagePopoverMessageId: String?
     @State private var sourcesSheetMessage: ChatMessage?
     @State private var randomPrompts: [SuggestedPrompt] = []
-    @State private var showAgentTaskPanel = false
-    @State private var agentActivitySnapshot: [AgentActivityItem] = []
     @State private var agentFloatingActivitySnapshot: AgentActivityItem?
     @State private var agentFloatingFilePreview: LocalAlpineWrittenFilePreviewItem?
     @State private var agentFloatingStepPreview: AgentFloatingStepPreviewItem?
     @State private var agentFloatingLoadingPath: String?
     @State private var hideAgentFloatingBarForKeyboard = false
-    @State private var agentFloatingBarKeyboardHideGeneration = 0
+    @State private var allowAgentFloatingBarResumeAfterKeyboard = false
 
     private var toolbarControlsMinWidth: CGFloat {
         var buttonCount = 1
@@ -1296,12 +1294,6 @@ struct ChatDetailView: View {
         let horizontalPadding = 12
         let spacingWidth = max(0, buttonCount - 1) * buttonSpacing
         return CGFloat(buttonCount * buttonWidth + spacingWidth + horizontalPadding)
-    }
-
-    private var recentAgentActivityItems: [AgentActivityItem] {
-        viewModel.messages
-            .suffix(40)
-            .compactMap { activityItem(for: $0) }
     }
 
     private var currentTurnAgentActivityItems: [AgentActivityItem] {
@@ -1590,10 +1582,6 @@ struct ChatDetailView: View {
         return true
     }
 
-    private var latestVisibleAgentActivity: AgentActivityItem? {
-        agentActivityWindowPreview(includeInactive: false)
-    }
-
     private func agentActivityWindowPreview(includeInactive: Bool) -> AgentActivityItem? {
         let turnItems = currentTurnAgentActivityItems(includeInactive: includeInactive)
         let isLive = viewModel.isStreaming || viewModel.streamingStore.isActive
@@ -1634,18 +1622,7 @@ struct ChatDetailView: View {
         agentFloatingActivitySnapshot = item.limitingSteps(to: Self.agentFloatingPreviewStepLimit)
     }
 
-    private func refreshAgentActivitySnapshot() {
-        agentActivitySnapshot = recentAgentActivityItems
-    }
-
-    private func openAgentTaskPanel() {
-        Haptics.play(.light)
-        refreshAgentActivitySnapshot()
-        showAgentTaskPanel = true
-    }
-
     private func collapseTransientAgentViewsForBackground() {
-        showAgentTaskPanel = false
         agentFloatingFilePreview = nil
         agentFloatingStepPreview = nil
         agentFloatingLoadingPath = nil
@@ -1654,7 +1631,6 @@ struct ChatDetailView: View {
     @MainActor
     private func openAgentFloatingPreview(item: AgentActivityItem, initialIndex: Int) {
         guard item.hasConcreteSteps else {
-            openAgentTaskPanel()
             return
         }
         let clampedIndex = min(max(initialIndex, 0), max(item.steps.count - 1, 0))
@@ -2075,17 +2051,11 @@ struct ChatDetailView: View {
                 releasePostSendWaitingUIDelayAfterKeyboardSettles()
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { notification in
-            updateAgentFloatingBarKeyboardVisibility(
-                isKeyboardVisible: true,
-                animationDuration: keyboardAnimationDuration(from: notification)
-            )
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            updateAgentFloatingBarKeyboardVisibility(isKeyboardVisible: true)
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { notification in
-            updateAgentFloatingBarKeyboardVisibility(
-                isKeyboardVisible: false,
-                animationDuration: keyboardAnimationDuration(from: notification)
-            )
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            updateAgentFloatingBarKeyboardVisibility(isKeyboardVisible: false)
         }
         .onAppear {
             viewModel.syncOnEntry()
@@ -2093,7 +2063,6 @@ struct ChatDetailView: View {
         }
         .onDisappear {
             keyboard.stop()
-            agentFloatingBarKeyboardHideGeneration += 1
             // Stop TTS playback and clear state when navigating away from chat
             if speakingMessageId != nil || ttsGeneratingMessageId != nil {
                 dependencies.textToSpeechService.stop()
@@ -2185,12 +2154,6 @@ struct ChatDetailView: View {
         }
         .sheet(item: $sourcesSheetMessage) { message in
             SourcesDetailSheet(sources: message.sources)
-        }
-        .sheet(isPresented: $showAgentTaskPanel, onDismiss: {
-            agentActivitySnapshot = []
-        }) {
-            AgentTaskPanelView(items: agentActivitySnapshot)
-                .themed()
         }
         .sheet(item: $agentFloatingFilePreview) { item in
             LocalAlpineWrittenFilePreviewSheet(item: item)
@@ -2644,7 +2607,6 @@ struct ChatDetailView: View {
                     conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
                     fallbackItem: visibleAgentActivityWindowPreview,
                     stepLimit: Self.agentFloatingPreviewStepLimit,
-                    onOpenAgentLog: openAgentTaskPanel,
                     onPreviewTap: { item, index in
                         openAgentFloatingPreview(item: item, initialIndex: index)
                     }
@@ -2928,6 +2890,7 @@ struct ChatDetailView: View {
             guard new > old else { return }
             if viewModel.messages.last?.role == .user {
                 agentFloatingActivitySnapshot = nil
+                resumeAgentFloatingBarForNewTask()
             } else {
                 refreshAgentFloatingActivitySnapshot(includeInactive: !viewModel.isStreaming && !viewModel.streamingStore.isActive)
             }
@@ -3278,27 +3241,29 @@ struct ChatDetailView: View {
         }
     }
 
-    private func updateAgentFloatingBarKeyboardVisibility(
-        isKeyboardVisible: Bool,
-        animationDuration: Double? = nil
-    ) {
-        agentFloatingBarKeyboardHideGeneration += 1
-        let generation = agentFloatingBarKeyboardHideGeneration
-
+    private func updateAgentFloatingBarKeyboardVisibility(isKeyboardVisible: Bool) {
         if isKeyboardVisible {
+            allowAgentFloatingBarResumeAfterKeyboard = false
+            agentFloatingActivitySnapshot = nil
             setAgentFloatingBarHiddenForKeyboard(true)
             return
         }
 
-        let delay = max(0.08, min((animationDuration ?? keyboard.animationDuration) + 0.05, 0.55))
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            guard agentFloatingBarKeyboardHideGeneration == generation,
-                  !keyboard.isVisible,
-                  keyboard.height <= 1 else {
-                return
-            }
+        guard !keyboard.isVisible,
+              keyboard.height <= 1,
+              allowAgentFloatingBarResumeAfterKeyboard else {
+            return
+        }
+        setAgentFloatingBarHiddenForKeyboard(false)
+        refreshAgentFloatingActivitySnapshot(includeInactive: !(viewModel.isStreaming || viewModel.streamingStore.isActive))
+    }
+
+    private func resumeAgentFloatingBarForNewTask() {
+        allowAgentFloatingBarResumeAfterKeyboard = true
+        if keyboard.isVisible || keyboard.height > 1 {
+            setAgentFloatingBarHiddenForKeyboard(true)
+        } else {
             setAgentFloatingBarHiddenForKeyboard(false)
-            refreshAgentFloatingActivitySnapshot(includeInactive: !(viewModel.isStreaming || viewModel.streamingStore.isActive))
         }
     }
 
@@ -3309,10 +3274,6 @@ struct ChatDetailView: View {
         withTransaction(transaction) {
             hideAgentFloatingBarForKeyboard = hidden
         }
-    }
-
-    private func keyboardAnimationDuration(from notification: Notification) -> Double? {
-        notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double
     }
 
     private func forceDismissInputAfterSend() {
@@ -3722,8 +3683,7 @@ struct ChatDetailView: View {
                         viewModel.localAlpineLiveToolCalls(for: message.id),
                         viewModel.localAlpineLiveToolStatus(for: message.id)
                     )
-                },
-                onTap: openAgentTaskPanel
+                }
             )
             .padding(.horizontal, Spacing.screenPadding)
             .padding(.top, Spacing.xs)
@@ -8053,7 +8013,6 @@ private struct AgentFallbackStepPill: View {
 
 private struct AgentInlineStepsView: View {
     let item: AgentActivityItem
-    let onTap: () -> Void
 
     @Environment(\.theme) private var theme
 
@@ -8081,193 +8040,10 @@ private struct AgentInlineStepsView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
         .transaction { transaction in
             transaction.animation = nil
         }
-        .accessibilityLabel("查看步骤")
-        .accessibilityAddTraits(.isButton)
-    }
-}
-
-private struct AgentTaskPanelView: View {
-    let items: [AgentActivityItem]
-
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if items.isEmpty {
-                    ContentUnavailableView("暂无步骤", systemImage: "checklist")
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 12) {
-                            AgentTaskPanelSummary(items: items)
-                            ForEach(items.reversed()) { item in
-                                AgentTaskCard(item: item)
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                    }
-                    .background(theme.background)
-                }
-            }
-            .navigationTitle("步骤")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
-                        .fontWeight(.semibold)
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
-    }
-}
-
-private struct AgentTaskPanelSummary: View {
-    let items: [AgentActivityItem]
-
-    @Environment(\.theme) private var theme
-
-    private var commandCount: Int {
-        items.reduce(0) { $0 + $1.commandCount }
-    }
-
-    private var fileCount: Int {
-        items.reduce(0) { $0 + $1.fileCount }
-    }
-
-    private var failedCount: Int {
-        items.filter { $0.hasFailure }.count
-    }
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                AgentTaskMetricPill(icon: "checklist", title: "任务", value: "\(items.count)", tint: theme.brandPrimary)
-                AgentTaskMetricPill(icon: "terminal.fill", title: "命令", value: "\(commandCount)", tint: theme.textSecondary)
-                AgentTaskMetricPill(icon: "square.and.pencil", title: "文件", value: "\(fileCount)", tint: theme.brandPrimary)
-                if failedCount > 0 {
-                    AgentTaskMetricPill(icon: "exclamationmark.circle.fill", title: "错误", value: "\(failedCount)", tint: .orange)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct AgentTaskMetricPill: View {
-    let icon: String
-    let title: String
-    let value: String
-    let tint: Color
-
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: icon)
-                .scaledFont(size: 11, weight: .semibold)
-            Text(title)
-                .scaledFont(size: 11, weight: .semibold)
-            Text(value)
-                .scaledFont(size: 11, weight: .bold)
-        }
-        .foregroundStyle(tint)
-        .padding(.horizontal, 9)
-        .frame(height: 28)
-        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.34 : 0.70))
-        .clipShape(Capsule(style: .continuous))
-    }
-}
-
-private struct AgentTaskCard: View {
-    let item: AgentActivityItem
-
-    @Environment(\.theme) private var theme
-
-    private var statusIcon: String {
-        if item.isStreaming { return "progress.indicator" }
-        return item.hasFailure ? "exclamationmark.circle.fill" : "checkmark.circle.fill"
-    }
-
-    private var statusColor: Color {
-        if item.isStreaming { return theme.brandPrimary }
-        return item.hasFailure ? .orange : .green
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .top, spacing: 10) {
-                ZStack {
-                    Circle()
-                        .fill(statusColor.opacity(theme.isDark ? 0.18 : 0.12))
-                        .frame(width: 30, height: 30)
-                    Image(systemName: statusIcon)
-                        .scaledFont(size: 15, weight: .semibold)
-                        .foregroundStyle(statusColor)
-                }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.currentStepTitle)
-                        .scaledFont(size: 15, weight: .semibold)
-                        .foregroundStyle(theme.textPrimary)
-                        .lineLimit(2)
-
-                    Text(item.currentStepDetail)
-                        .scaledFont(size: 12, weight: .medium)
-                        .foregroundStyle(theme.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
-                Spacer(minLength: 0)
-
-                Text("\(item.completedStepCount)/\(item.totalStepCount)")
-                    .scaledFont(size: 12, weight: .semibold, design: .rounded)
-                    .foregroundStyle(statusColor)
-                    .padding(.horizontal, 8)
-                    .frame(height: 24)
-                    .background(statusColor.opacity(theme.isDark ? 0.14 : 0.10))
-                    .clipShape(Capsule(style: .continuous))
-            }
-
-            HStack(spacing: 8) {
-                Text(item.timestamp.formatted(date: .omitted, time: .shortened))
-                if item.commandCount > 0 {
-                    Label("\(item.commandCount)", systemImage: "terminal.fill")
-                }
-                if item.fileCount > 0 {
-                    Label("\(item.fileCount)", systemImage: "square.and.pencil")
-                }
-            }
-            .scaledFont(size: 11, weight: .medium)
-            .foregroundStyle(theme.textTertiary)
-
-            if !item.steps.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(item.steps.prefix(6)), id: \.id) { step in
-                        AgentActivityStepPill(step: step)
-                            .equatable()
-                    }
-                }
-            }
-        }
-        .contentShape(Rectangle())
-        .padding(13)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.97))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.30 : 0.45), lineWidth: 0.7)
-        )
+        .accessibilityLabel("步骤")
     }
 }
 
@@ -8276,7 +8052,6 @@ private struct AgentInlineStepsHost: View {
     let messageId: String
     let fallbackItem: AgentActivityItem?
     let liveSnapshot: () -> ([LocalAlpineToolCall], ChatStatusUpdate?)
-    let onTap: () -> Void
 
     @State private var liveCalls: [LocalAlpineToolCall] = []
     @State private var liveStatus: ChatStatusUpdate?
@@ -8328,7 +8103,7 @@ private struct AgentInlineStepsHost: View {
             if let item = renderItem,
                item.hasConcreteSteps,
                !item.hasOnlyWebSearchStatusSteps {
-                AgentInlineStepsView(item: item, onTap: onTap)
+                AgentInlineStepsView(item: item)
             }
         }
         .onAppear {
@@ -8402,7 +8177,6 @@ private struct AgentStepFloatingBarHost: View {
     let conversationId: String?
     let fallbackItem: AgentActivityItem?
     let stepLimit: Int
-    let onOpenAgentLog: () -> Void
     let onPreviewTap: (AgentActivityItem, Int) -> Void
 
     @State private var liveCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
@@ -8460,7 +8234,6 @@ private struct AgentStepFloatingBarHost: View {
                 AgentStepFloatingBar(
                     item: item,
                     taskCount: item.totalStepCount,
-                    onOpenAgentLog: onOpenAgentLog,
                     onPreviewTap: onPreviewTap
                 )
                 .padding(.horizontal, 16)
@@ -8537,7 +8310,6 @@ private struct AgentStepFloatingBarHost: View {
 private struct AgentStepFloatingBar: View {
     let item: AgentActivityItem
     let taskCount: Int
-    let onOpenAgentLog: () -> Void
     let onPreviewTap: (AgentActivityItem, Int) -> Void
 
     @Environment(\.theme) private var theme
@@ -8635,8 +8407,6 @@ private struct AgentStepFloatingBar: View {
                     .truncationMode(.tail)
                     .minimumScaleFactor(0.82)
                     .layoutPriority(1)
-                    .contentShape(Rectangle())
-                    .onTapGesture(perform: onOpenAgentLog)
 
                 Spacer(minLength: 6)
 
