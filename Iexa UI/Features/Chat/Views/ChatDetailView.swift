@@ -1290,6 +1290,20 @@ private struct TranscriptRenderSnapshot {
     let signature: Int
     let messages: [ChatMessage]
     let ids: [String]
+    let turnGroups: [TranscriptMessageTurnGroup]
+    let indexByMessageId: [String: Int]
+    let lastTurnGroupId: String?
+    let lastVisibleMessageId: String?
+    let latestUserMessageId: String?
+}
+
+private struct TranscriptMessageTurnGroup: Identifiable {
+    let id: String
+    let messages: [ChatMessage]
+
+    var containsUserMessage: Bool {
+        messages.contains { $0.role == .user }
+    }
 }
 
 private final class TranscriptMessagesCache {
@@ -1449,10 +1463,19 @@ struct ChatDetailView: View {
 
         let context = transcriptVisibilityContext(for: messages)
         let visibleMessages = messages.filter { !shouldHideFromTranscript($0, context: context) }
+        let turnGroups = Self.messageTurnGroups(from: visibleMessages)
         let snapshot = TranscriptRenderSnapshot(
             signature: signature,
             messages: visibleMessages,
-            ids: visibleMessages.map(\.id)
+            ids: visibleMessages.map(\.id),
+            turnGroups: turnGroups,
+            indexByMessageId: Dictionary(
+                visibleMessages.enumerated().map { ($1.id, $0) },
+                uniquingKeysWith: { first, _ in first }
+            ),
+            lastTurnGroupId: turnGroups.last(where: { $0.containsUserMessage })?.id,
+            lastVisibleMessageId: visibleMessages.last?.id,
+            latestUserMessageId: visibleMessages.last(where: { $0.role == .user })?.id
         )
         transcriptCache.store(snapshot)
         return snapshot
@@ -3455,23 +3478,14 @@ struct ChatDetailView: View {
         return containerHeight
     }
 
-    private struct MessageTurnGroup: Identifiable {
-        let id: String
-        let messages: [ChatMessage]
-
-        var containsUserMessage: Bool {
-            messages.contains { $0.role == .user }
-        }
-    }
-
-    private func messageTurnGroups(from messages: [ChatMessage]) -> [MessageTurnGroup] {
-        var groups: [MessageTurnGroup] = []
+    private static func messageTurnGroups(from messages: [ChatMessage]) -> [TranscriptMessageTurnGroup] {
+        var groups: [TranscriptMessageTurnGroup] = []
         var currentMessages: [ChatMessage] = []
         var currentId: String?
 
         func flushCurrentGroup() {
             guard !currentMessages.isEmpty else { return }
-            groups.append(MessageTurnGroup(
+            groups.append(TranscriptMessageTurnGroup(
                 id: currentId ?? currentMessages[0].id,
                 messages: currentMessages
             ))
@@ -3704,30 +3718,23 @@ struct ChatDetailView: View {
     ///
     /// All earlier messages render at their natural height.
     private var messagesList: some View {
-        let messages = transcriptMessages
-        let turnGroups = messageTurnGroups(from: messages)
-        let lastTurnGroupId = turnGroups.last(where: { $0.containsUserMessage })?.id
-        let lastVisibleMessageId = messages.last?.id
-        let latestUserMessageId = messages.last(where: { $0.role == .user })?.id
+        let snapshot = transcriptSnapshot
 
-        let indexMap = Dictionary(messages.enumerated().map { ($1.id, $0) },
-                                  uniquingKeysWith: { first, _ in first })
-
-        return ForEach(turnGroups) { group in
+        return ForEach(snapshot.turnGroups) { group in
             VStack(spacing: 0) {
                 ForEach(group.messages) { message in
-                    let index = indexMap[message.id] ?? 0
+                    let index = snapshot.indexByMessageId[message.id] ?? 0
                     messageRow(
                         message: message,
                         index: index,
-                        lastVisibleMessageId: lastVisibleMessageId,
-                        latestUserMessageId: latestUserMessageId
+                        lastVisibleMessageId: snapshot.lastVisibleMessageId,
+                        latestUserMessageId: snapshot.latestUserMessageId
                     )
                         .id(message.id)
                 }
             }
             .frame(
-                minHeight: group.id == lastTurnGroupId ? lastTurnMinHeight : 0,
+                minHeight: group.id == snapshot.lastTurnGroupId ? lastTurnMinHeight : 0,
                 alignment: .top
             )
         }
