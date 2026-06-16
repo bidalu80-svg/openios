@@ -42,6 +42,12 @@ struct StreamingMarkdownView: View {
     /// Base body font size used by MarkdownTheme.default (UIFont.preferredFont(.body)).
     /// We scale relative to this so the user's content text scale applies correctly.
     private static let baseBodyFontSize: CGFloat = UIFont.preferredFont(forTextStyle: .body).pointSize
+    private static let segmentParseCache: NSCache<NSString, SegmentCacheEntry> = {
+        let cache = NSCache<NSString, SegmentCacheEntry>()
+        cache.countLimit = 160
+        cache.totalCostLimit = 12 * 1_024 * 1_024
+        return cache
+    }()
 
     init(
         content: String,
@@ -141,6 +147,25 @@ struct StreamingMarkdownView: View {
         )
         guard !renderContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
 
+        if !isStreaming {
+            let key = Self.segmentCacheKey(for: renderContent)
+            if let cached = Self.segmentParseCache.object(forKey: key) {
+                return cached.segments
+            }
+            let segments = resolveSegmentsUncached(renderContent)
+            let cost = max(renderContent.utf8.count, segments.count * 128)
+            Self.segmentParseCache.setObject(
+                SegmentCacheEntry(segments: segments),
+                forKey: key,
+                cost: min(cost, 2 * 1_024 * 1_024)
+            )
+            return segments
+        }
+
+        return resolveSegmentsUncached(renderContent)
+    }
+
+    private func resolveSegmentsUncached(_ renderContent: String) -> [ContentSegment] {
         if InlineDataPayloadSanitizer.mayContainInlineDataURI(renderContent) {
             let safeText = Self.sanitizedMarkdownTextForDisplay(renderContent)
             return safeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -184,6 +209,10 @@ struct StreamingMarkdownView: View {
         // (opening AND closing fence both arrived). Keep the existing final parser
         // for HTML/SVG/chart previews and normal fenced code blocks.
         return parseSpecialBlocks(renderContent)
+    }
+
+    private static func segmentCacheKey(for text: String) -> NSString {
+        "\(text.utf8.count):\(text.hashValue)" as NSString
     }
 
     /// Detects an incomplete (unclosed) special code block in `text` during
@@ -446,6 +475,14 @@ struct StreamingMarkdownView: View {
         case math(String, displayMode: Bool)
         case markdownImage(imageURL: URL, altText: String, linkURL: URL?)
         case visualization(String)
+    }
+
+    private final class SegmentCacheEntry {
+        let segments: [ContentSegment]
+
+        init(segments: [ContentSegment]) {
+            self.segments = segments
+        }
     }
 
     private struct ParsedBlock {

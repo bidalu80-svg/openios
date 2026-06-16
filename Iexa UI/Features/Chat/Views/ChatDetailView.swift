@@ -1388,12 +1388,54 @@ struct ChatDetailView: View {
             .filter { $0.hasConcreteSteps || $0.isActive }
     }
 
+    private struct TranscriptVisibilityContext {
+        var visibleFinalSummaryAfter: Set<String> = []
+        var laterLocalAlpineTurnMessageAfter: Set<String> = []
+    }
+
     private var transcriptMessages: [ChatMessage] {
-        viewModel.messages.filter { !shouldHideFromTranscript($0) }
+        let messages = viewModel.messages
+        let context = transcriptVisibilityContext(for: messages)
+        return messages.filter { !shouldHideFromTranscript($0, context: context) }
     }
 
     private var transcriptMessageIds: [String] {
         transcriptMessages.map(\.id)
+    }
+
+    private func transcriptVisibilityContext(for messages: [ChatMessage]) -> TranscriptVisibilityContext {
+        var context = TranscriptVisibilityContext()
+        var seenVisibleFinalSummaryInTurn = false
+        var seenLaterLocalAlpineTurnMessage = false
+
+        for message in messages.reversed() {
+            if message.role == .user {
+                seenVisibleFinalSummaryInTurn = false
+                seenLaterLocalAlpineTurnMessage = false
+                continue
+            }
+
+            if seenVisibleFinalSummaryInTurn {
+                context.visibleFinalSummaryAfter.insert(message.id)
+            }
+            if seenLaterLocalAlpineTurnMessage {
+                context.laterLocalAlpineTurnMessageAfter.insert(message.id)
+            }
+
+            let isFinalSummary = message.metadata?["iexa_local_alpine_final_summary"] != nil
+            let hasFinalSummaryContent = isFinalSummary
+                && (message.error != nil
+                    || !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if hasFinalSummaryContent {
+                seenVisibleFinalSummaryInTurn = true
+            }
+            if isLocalAlpineResultMessage(message)
+                || (isFinalSummary && (message.isStreaming || hasFinalSummaryContent)) {
+                seenLaterLocalAlpineTurnMessage = true
+            }
+        }
+
+        return context
     }
 
     private var agentActivityRefreshSignature: Int {
@@ -1801,7 +1843,7 @@ struct ChatDetailView: View {
         }
     }
 
-    private func shouldHideFromTranscript(_ message: ChatMessage) -> Bool {
+    private func shouldHideFromTranscript(_ message: ChatMessage, context: TranscriptVisibilityContext) -> Bool {
         if isLocalNativeResultMessage(message) {
             return true
         }
@@ -1826,10 +1868,10 @@ struct ChatDetailView: View {
             return !hasVisibleCleanedAssistantText() && !hasRenderableAgentActivity(for: message)
         }
         if isLocalAlpineResultMessage(message) {
-            if hasVisibleLocalAlpineFinalSummary(after: message) {
+            if context.visibleFinalSummaryAfter.contains(message.id) {
                 return true
             }
-            if hasLaterLocalAlpineTurnMessage(after: message) {
+            if context.laterLocalAlpineTurnMessageAfter.contains(message.id) {
                 return true
             }
             let hasVisibleActivity = activityItem(for: message)?.hasConcreteSteps == true
@@ -3532,6 +3574,8 @@ struct ChatDetailView: View {
         let messages = transcriptMessages
         let turnGroups = messageTurnGroups(from: messages)
         let lastTurnGroupId = turnGroups.last(where: { $0.containsUserMessage })?.id
+        let lastVisibleMessageId = messages.last?.id
+        let latestUserMessageId = messages.last(where: { $0.role == .user })?.id
 
         let indexMap = Dictionary(messages.enumerated().map { ($1.id, $0) },
                                   uniquingKeysWith: { first, _ in first })
@@ -3540,7 +3584,12 @@ struct ChatDetailView: View {
             VStack(spacing: 0) {
                 ForEach(group.messages) { message in
                     let index = indexMap[message.id] ?? 0
-                    messageRow(message: message, index: index)
+                    messageRow(
+                        message: message,
+                        index: index,
+                        lastVisibleMessageId: lastVisibleMessageId,
+                        latestUserMessageId: latestUserMessageId
+                    )
                         .id(message.id)
                 }
             }
@@ -3554,15 +3603,19 @@ struct ChatDetailView: View {
     // MARK: - Message Row
 
     @ViewBuilder
-    private func messageRow(message: ChatMessage, index: Int) -> some View {
-        let lastVisibleMessageId = transcriptMessages.last?.id
+    private func messageRow(
+        message: ChatMessage,
+        index: Int,
+        lastVisibleMessageId: String?,
+        latestUserMessageId: String?
+    ) -> some View {
         let isLastAssistant = message.role == .assistant && message.id == lastVisibleMessageId
         let userTextIsEmpty = message.role == .user
             && activeUserDisplayContent(for: message).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let waitingUIIsDelayed = shouldDelayWaitingUI(for: message)
         let suppressAssistantBubble = shouldSuppressAssistantBubbleForActivityParent(message)
         let isLatestUserMessage = message.role == .user
-            && message.id == transcriptMessages.last(where: { $0.role == .user })?.id
+            && message.id == latestUserMessageId
 
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 0) {
 
