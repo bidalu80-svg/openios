@@ -1484,7 +1484,7 @@ struct ChatDetailView: View {
                 signature &+= latestStatus.hidden == true ? 19 : 7
             }
             signature &+= message.files.count &* 17
-            signature &+= message.error?.content.utf8.count ?? 0
+            signature &+= message.error?.content?.utf8.count ?? 0
             if let metadata = message.metadata {
                 signature &+= metadata.count &* 19
                 for key in Self.transcriptMetadataSignatureKeys {
