@@ -2130,7 +2130,7 @@ final class ChatViewModel {
                             "timeout": ["type": "integer", "description": "Timeout in seconds for the command."],
                             "delay": ["type": "number", "description": "Optional host-side delay before running the command, in seconds."]
                         ],
-                        "required": ["command"]
+                        "required": ["tool_title", "command"]
                     ]
                 ]
             ],
@@ -2149,7 +2149,7 @@ final class ChatViewModel {
                             "max_length": ["type": "integer", "description": "Optional maximum bytes/characters to return. Leave unset for the host's larger source-file read cap."],
                             "direction": ["type": "string", "enum": ["forward", "backward"]]
                         ],
-                        "required": ["path"]
+                        "required": ["tool_title", "path"]
                     ]
                 ]
             ]
@@ -2167,7 +2167,7 @@ final class ChatViewModel {
                             "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
                             "path": ["type": "string", "description": "Image path, relative to /mnt/iexa or absolute."]
                         ],
-                        "required": ["path"]
+                        "required": ["tool_title", "path"]
                     ]
                 ]
             ],
@@ -2185,7 +2185,7 @@ final class ChatViewModel {
                             "append": ["type": "boolean", "description": "Append instead of overwrite."],
                             "create_dirs": ["type": "boolean", "description": "Create parent directories when missing."]
                         ],
-                        "required": ["path", "content"]
+                        "required": ["tool_title", "path", "content"]
                     ]
                 ]
             ],
@@ -2203,7 +2203,7 @@ final class ChatViewModel {
                             "new_string": ["type": "string", "description": "Replacement text."],
                             "replace_all": ["type": "boolean", "description": "Replace all matches instead of exactly one."]
                         ],
-                        "required": ["path", "old_string", "new_string"]
+                        "required": ["tool_title", "path", "old_string", "new_string"]
                     ]
                 ]
             ],
@@ -2223,7 +2223,7 @@ final class ChatViewModel {
                             "max_lines": ["type": "integer", "description": "Maximum text preview lines to return."],
                             "timeout": ["type": "integer", "description": "Fetch timeout in seconds."]
                         ],
-                        "required": ["url"]
+                        "required": ["tool_title", "url"]
                     ]
                 ]
             ],
@@ -2242,7 +2242,7 @@ final class ChatViewModel {
                             "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
                             "content": ["type": "string", "description": "The concise memory content to save."]
                         ],
-                        "required": ["content"]
+                        "required": ["tool_title", "content"]
                     ]
                 ]
             ],
@@ -2257,7 +2257,8 @@ final class ChatViewModel {
                             "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
                             "keywords": ["type": "string", "description": "Optional space-separated keywords. All keywords must match a memory."],
                             "scope": ["type": "string", "enum": ["all"], "description": "Reserved for compatibility; Iexa local memories are stored per provider server URL."]
-                        ]
+                        ],
+                        "required": ["tool_title"]
                     ]
                 ]
             ]
@@ -2285,6 +2286,7 @@ final class ChatViewModel {
         - Package manager: `apk`; never use `apt`, `yum`, `dnf`, `brew`, `sudo`, `systemctl`, or macOS-only commands. If a required command/library is missing, use `command -v <tool> >/dev/null 2>&1 || apk add --no-cache <pkg>` or `apk info -e <pkg> || apk add --no-cache <pkg>` inside Local Alpine, then continue with the real task.
 
         Tool rules:
+        - Always fill the `tool_title` argument on every tool call. Keep it under 24 characters, user-facing, action-oriented, and in the user's language, for example `读取目录`, `写入配置`, `校验脚本`, or `删除旧文件`.
         - Create source files with `file_write`. Modify existing files with `file_read` followed by `file_edit` or a complete same-path `file_write`.
         - Website project workflow: create or update `index.html`, CSS, JS, assets, and config files through structured `file_write`/`file_edit` only. Never create website source files with shell heredocs, redirection, `cat`, `tee`, `echo`, `printf`, or inline writer scripts.
         - Treat `file_write`, `file_edit`, and deletion targets outside `/mnt/iexa` as advanced sandbox-rootfs operations. Only do them when the user explicitly names that path or when a package/runtime setup requires it.
@@ -2630,14 +2632,14 @@ final class ChatViewModel {
         - This is a client-side Markdown tool bridge, not a provider/native function. Do not check provider tool availability. Never call `iexa_alpine` through function-call syntax and never say the provider tool does not exist.
         - Valid call shape:
           ```iexa_alpine
-          {"command":"pwd && ls -la","cwd":"/mnt/iexa"}
+          {"tool_title":"列出目录","command":"pwd && ls -la","cwd":"/mnt/iexa"}
           ```
         - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
         - Execution boundary: every command is executed by the embedded Local Alpine/iSH runtime only, not by Open Terminal, a remote server terminal, iOS/macOS shell, Windows shell, Debian, or Ubuntu. Use Alpine/BusyBox/POSIX commands.
         - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
         - Shell fallback: plain POSIX shell is allowed for bounded list/search/run/install commands. Accepted JSON keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; they all map to the same Local Alpine shell runner. Accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`. Accepted delay keys are `delay`, `delay_seconds`, or `delaySeconds`; use them instead of shell/Python sleeps.
         - Dependency install pattern: this runtime is Alpine. If a tool/library is missing, use `command -v <tool> >/dev/null 2>&1 || apk add --no-cache <pkg>` or `apk info -e <pkg> || apk add --no-cache <pkg>` in Local Alpine. Translate Debian/macOS package-manager instincts to `apk`; do not ask the user to install packages elsewhere.
-        - Step titles: you may include a short `tool_title`, `step_title`, `display_title`, or `label` string to name the visible execution capsule. Keep it under 24 characters and action-oriented, such as `读取目录`, `写入配置`, `校验脚本`, or `删除旧文件`.
+        - Step titles: every tool step must include a short `tool_title`, `step_title`, `display_title`, or `label` string to name the visible execution capsule. Keep it under 24 characters, use the user's language, and make it action-oriented, such as `读取目录`, `写入配置`, `校验脚本`, or `删除旧文件`.
         - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `file_edit` -> `edit_file`, `read_image`/`image_read` -> host-decoded image metadata, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
         - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. The host converts them into Alpine-safe bounded commands and records them as tool calls. `browser_use` supports optional `save_to`/`output` plus `open_preview:true` so large HTML/SVG/JSON responses can be written under `/mnt/iexa` and opened through the preview bridge instead of being pasted into chat.
         - In-app preview bridge: after creating a user-viewable non-website file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.

@@ -1670,7 +1670,7 @@ actor LocalAlpineAgentService {
             rawArguments = function["arguments"] ?? function["args"] ?? function["input"]
         }
 
-        let arguments: [String: Any]
+        var arguments: [String: Any]
         if let argumentDict = Self.dictionaryValue(rawArguments) {
             arguments = Self.repairedToolArguments(argumentDict, for: normalizedName)
         } else if let rawArguments {
@@ -1685,6 +1685,10 @@ actor LocalAlpineAgentService {
                 trimmed.removeValue(forKey: key)
             }
             arguments = Self.repairedToolArguments(trimmed, for: normalizedName)
+        }
+        if Self.preferredToolTitle(from: arguments) == nil,
+           let wrapperTitle = Self.preferredToolTitle(from: dict) {
+            arguments["tool_title"] = wrapperTitle
         }
 
         let wrapper: [String: Any] = [
