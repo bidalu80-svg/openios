@@ -110,6 +110,10 @@ final class KeyboardTracker {
         animationDuration = duration
         animationCurve = curve
 
+        let heightChanged = abs(height - adjustedHeight) > 0.5
+        let visibilityChanged = isVisible != newVisible
+        guard heightChanged || visibilityChanged else { return }
+
         withAnimation(swiftUIAnimation(duration: duration, curve: curve)) {
             height = adjustedHeight
             isVisible = newVisible

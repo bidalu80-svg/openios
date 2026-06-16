@@ -1283,7 +1283,7 @@ struct ChatDetailView: View {
     @State private var agentFloatingStepPreview: AgentFloatingStepPreviewItem?
     @State private var agentFloatingLoadingPath: String?
     @State private var hideAgentFloatingBarForKeyboard = false
-    @State private var allowAgentFloatingBarResumeAfterKeyboard = false
+    @State private var suppressStaleAgentFloatingBarAfterKeyboard = false
 
     private var toolbarControlsMinWidth: CGFloat {
         var buttonCount = 1
@@ -1611,8 +1611,13 @@ struct ChatDetailView: View {
         return agentFloatingActivitySnapshot
     }
 
+    private var hasActiveAgentFloatingActivity: Bool {
+        viewModel.isStreaming || viewModel.streamingStore.isActive
+    }
+
     private var shouldHideAgentFloatingBarForKeyboard: Bool {
         hideAgentFloatingBarForKeyboard
+            || (suppressStaleAgentFloatingBarAfterKeyboard && !hasActiveAgentFloatingActivity)
     }
 
     private func refreshAgentFloatingActivitySnapshot(includeInactive: Bool) {
@@ -2040,22 +2045,20 @@ struct ChatDetailView: View {
             )
         }
         .onChange(of: keyboard.isVisible) { _, isVisible in
-            updateAgentFloatingBarKeyboardVisibility(isKeyboardVisible: isVisible || keyboard.height > 1)
             if !isVisible {
                 releasePostSendWaitingUIDelayAfterKeyboardSettles()
             }
         }
         .onChange(of: keyboard.height) { _, height in
-            updateAgentFloatingBarKeyboardVisibility(isKeyboardVisible: keyboard.isVisible || height > 1)
             if height <= 1 {
                 releasePostSendWaitingUIDelayAfterKeyboardSettles()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            updateAgentFloatingBarKeyboardVisibility(isKeyboardVisible: true)
+            hideAgentFloatingBarForKeyboardWillShow()
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            updateAgentFloatingBarKeyboardVisibility(isKeyboardVisible: false)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidHideNotification)) { _ in
+            finishAgentFloatingBarKeyboardHide()
         }
         .onAppear {
             viewModel.syncOnEntry()
@@ -3235,31 +3238,28 @@ struct ChatDetailView: View {
         let delay = max(0.08, min(keyboard.animationDuration + 0.04, 0.45))
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             guard postSendWaitingUIDelayGeneration == generation else { return }
-            withAnimation(.easeOut(duration: 0.18)) {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
                 isPostSendWaitingUIDelayed = false
             }
         }
     }
 
-    private func updateAgentFloatingBarKeyboardVisibility(isKeyboardVisible: Bool) {
-        if isKeyboardVisible {
-            allowAgentFloatingBarResumeAfterKeyboard = false
-            agentFloatingActivitySnapshot = nil
-            setAgentFloatingBarHiddenForKeyboard(true)
-            return
-        }
+    private func hideAgentFloatingBarForKeyboardWillShow() {
+        suppressStaleAgentFloatingBarAfterKeyboard = true
+        agentFloatingActivitySnapshot = nil
+        setAgentFloatingBarHiddenForKeyboard(true)
+    }
 
-        guard !keyboard.isVisible,
-              keyboard.height <= 1,
-              allowAgentFloatingBarResumeAfterKeyboard else {
-            return
-        }
+    private func finishAgentFloatingBarKeyboardHide() {
+        guard !keyboard.isVisible, keyboard.height <= 1 else { return }
+        guard hasActiveAgentFloatingActivity || !suppressStaleAgentFloatingBarAfterKeyboard else { return }
         setAgentFloatingBarHiddenForKeyboard(false)
-        refreshAgentFloatingActivitySnapshot(includeInactive: !(viewModel.isStreaming || viewModel.streamingStore.isActive))
     }
 
     private func resumeAgentFloatingBarForNewTask() {
-        allowAgentFloatingBarResumeAfterKeyboard = true
+        suppressStaleAgentFloatingBarAfterKeyboard = false
         if keyboard.isVisible || keyboard.height > 1 {
             setAgentFloatingBarHiddenForKeyboard(true)
         } else {
@@ -3288,7 +3288,7 @@ struct ChatDetailView: View {
         let generation = postSendWaitingUIDelayGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
             guard postSendWaitingUIDelayGeneration == generation else { return }
-            keyboard.forceHidden()
+            keyboard.forceHidden(animated: false)
             releasePostSendWaitingUIDelayAfterKeyboardSettles()
         }
     }
