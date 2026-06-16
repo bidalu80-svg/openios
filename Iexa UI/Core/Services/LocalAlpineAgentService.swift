@@ -1483,7 +1483,7 @@ actor LocalAlpineAgentService {
     }
 
     private nonisolated static func toolCallStart(_ context: LocalAlpineToolCallContext) -> LocalAlpineToolCall {
-        LocalAlpineToolCall(
+        return LocalAlpineToolCall(
             id: context.id,
             runId: context.runId,
             name: context.name,
