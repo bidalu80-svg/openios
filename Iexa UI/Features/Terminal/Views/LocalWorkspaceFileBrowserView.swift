@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 import QuickLook
 import UniformTypeIdentifiers
 import UIKit
@@ -697,6 +698,10 @@ private struct LocalWorkspaceFilePreviewSheet: View {
     @State private var errorMessage: String?
     @State private var copied = false
     @State private var confirmDelete = false
+    @State private var isTextPreviewTruncated = false
+    @State private var textPreviewFullSize: Int64?
+
+    private static let textPreviewByteLimit = 96_000
 
     private var kind: LocalWorkspaceFileKind {
         LocalWorkspaceFileKind(fileName: item.name)
@@ -728,7 +733,10 @@ private struct LocalWorkspaceFilePreviewSheet: View {
                                 Haptics.notify(.success)
                                 resetCopiedState()
                             } label: {
-                                Label(copied ? "已复制" : "复制内容", systemImage: copied ? "checkmark" : "doc.on.doc")
+                                Label(
+                                    copied ? "已复制" : (isTextPreviewTruncated ? "复制预览内容" : "复制内容"),
+                                    systemImage: copied ? "checkmark" : "doc.on.doc"
+                                )
                             }
                         }
 
@@ -738,12 +746,10 @@ private struct LocalWorkspaceFilePreviewSheet: View {
                             Label("分享文件", systemImage: "square.and.arrow.up")
                         }
 
-                        if temporaryFileURL != nil || data != nil {
-                            Button {
-                                Task { await openQuickLook() }
-                            } label: {
-                                Label("系统预览", systemImage: "eye")
-                            }
+                        Button {
+                            Task { await openQuickLook() }
+                        } label: {
+                            Label("系统预览", systemImage: "eye")
                         }
 
                         Divider()
@@ -837,28 +843,49 @@ private struct LocalWorkspaceFilePreviewSheet: View {
             }
             .frame(maxWidth: .infinity)
         } else if kind == .csv, let text {
-            LocalWorkspaceCSVPreview(text: text)
-        } else if kind.isTextPreviewable, let text {
-            GeometryReader { proxy in
-                ScrollView {
-                    SourceCodeTextView(
-                        code: text,
-                        language: LocalWorkspaceFileKind.languageHint(for: item.name),
-                        maxHeight: max(280, proxy.size.height - 24),
-                        wrapLines: true
-                    )
-                    .background(theme.surfaceContainer.opacity(0.55))
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(theme.cardBorder.opacity(0.45), lineWidth: 0.5)
-                    )
-                    .padding(16)
+            VStack(spacing: 0) {
+                if isTextPreviewTruncated {
+                    textPreviewTruncationNotice
                 }
+                LocalWorkspaceCSVPreview(text: text)
+            }
+        } else if kind.isTextPreviewable, let text {
+            VStack(spacing: 0) {
+                if isTextPreviewTruncated {
+                    textPreviewTruncationNotice
+                }
+                LocalWorkspaceTextPreview(text: text)
             }
         } else {
             nativePreviewPrompt
         }
+    }
+
+    private var textPreviewTruncationNotice: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "text.page.badge.magnifyingglass")
+                .scaledFont(size: 13, weight: .semibold)
+                .foregroundStyle(theme.brandPrimary)
+            Text(textPreviewTruncationMessage)
+                .scaledFont(size: 12, weight: .medium)
+                .foregroundStyle(theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(theme.surfaceContainer.opacity(0.72))
+        .overlay(alignment: .bottom) {
+            Divider().foregroundStyle(theme.cardBorder.opacity(0.35))
+        }
+    }
+
+    private var textPreviewTruncationMessage: String {
+        let limit = Self.formattedBytes(Int64(Self.textPreviewByteLimit))
+        if let textPreviewFullSize {
+            return "仅显示前 \(limit)，完整文件 \(Self.formattedBytes(textPreviewFullSize))。系统预览和分享会按需读取原文件。"
+        }
+        return "仅显示前 \(limit)。系统预览和分享会按需读取原文件。"
     }
 
     private var nativePreviewPrompt: some View {
@@ -934,14 +961,20 @@ private struct LocalWorkspaceFilePreviewSheet: View {
     private func loadFile() async {
         isLoading = true
         errorMessage = nil
+        data = nil
+        text = nil
+        temporaryFileURL = nil
+        isTextPreviewTruncated = false
+        textPreviewFullSize = nil
         do {
-            let fileData = try await readCurrentFile()
-            data = fileData
             if kind.isTextPreviewable {
-                text = Self.decodeText(fileData)
-            }
-            if !kind.isTextPreviewable || kind == .spreadsheet {
-                temporaryFileURL = try Self.writeTemporaryFile(data: fileData, fileName: item.name)
+                let sample = try await readCurrentFileSample(maxBytes: Self.textPreviewByteLimit)
+                text = Self.decodeText(sample.data)
+                isTextPreviewTruncated = sample.isTruncated
+                textPreviewFullSize = sample.fullSize
+                if !sample.isTruncated {
+                    data = sample.data
+                }
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -1020,6 +1053,15 @@ private struct LocalWorkspaceFilePreviewSheet: View {
         }
     }
 
+    private func readCurrentFileSample(maxBytes: Int) async throws -> LocalAlpineFileSample {
+        switch location {
+        case .workspace:
+            return try await LocalAlpineTerminalService.shared.readFileSample(path: item.path, maxBytes: maxBytes)
+        case .rootfs:
+            return try await LocalAlpineTerminalService.shared.readRootFSFileSample(path: item.path, maxBytes: maxBytes)
+        }
+    }
+
     private func resetCopiedState() {
         Task {
             try? await Task.sleep(nanoseconds: 1_200_000_000)
@@ -1035,7 +1077,11 @@ private struct LocalWorkspaceFilePreviewSheet: View {
         if let text = String(data: data, encoding: .utf8) { return text }
         if let text = String(data: data, encoding: .utf16) { return text }
         if let text = String(data: data, encoding: .ascii) { return text }
-        return nil
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func formattedBytes(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     private static func writeTemporaryFile(data: Data, fileName: String) throws -> URL {
@@ -1047,6 +1093,78 @@ private struct LocalWorkspaceFilePreviewSheet: View {
         let url = directory.appendingPathComponent(safeName)
         try data.write(to: url, options: .atomic)
         return url
+    }
+}
+
+private struct LocalWorkspaceTextPreview: View {
+    private struct Row: Identifiable {
+        let id: Int
+        let lineNumber: Int?
+        let text: String
+    }
+
+    private let rows: [Row]
+
+    @Environment(\.theme) private var theme
+
+    init(text: String) {
+        rows = Self.previewRows(from: text)
+    }
+
+    var body: some View {
+        ScrollView([.vertical, .horizontal]) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(rows) { row in
+                    HStack(alignment: .top, spacing: 10) {
+                        Text(row.lineNumber.map { String($0) } ?? " ")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(theme.textTertiary)
+                            .frame(width: 46, alignment: .trailing)
+                            .textSelection(.disabled)
+
+                        Text(row.text.isEmpty ? " " : row.text)
+                            .font(.system(size: 12, weight: .regular, design: .monospaced))
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .padding(14)
+        }
+        .background(theme.surfaceContainer.opacity(0.55))
+    }
+
+    private static func previewRows(from text: String) -> [Row] {
+        let maxRows = 1_600
+        let maxColumns = 220
+        var output: [Row] = []
+        output.reserveCapacity(min(maxRows, 512))
+
+        for (lineIndex, rawLine) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+            if output.count >= maxRows { break }
+            let line = String(rawLine)
+            guard line.count > maxColumns else {
+                output.append(Row(id: output.count, lineNumber: lineIndex + 1, text: line))
+                continue
+            }
+
+            var cursor = line.startIndex
+            var firstChunk = true
+            while cursor < line.endIndex && output.count < maxRows {
+                let end = line.index(cursor, offsetBy: maxColumns, limitedBy: line.endIndex) ?? line.endIndex
+                output.append(Row(
+                    id: output.count,
+                    lineNumber: firstChunk ? lineIndex + 1 : nil,
+                    text: String(line[cursor..<end])
+                ))
+                cursor = end
+                firstChunk = false
+            }
+        }
+
+        return output
     }
 }
 
