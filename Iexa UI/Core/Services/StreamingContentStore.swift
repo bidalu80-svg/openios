@@ -138,6 +138,29 @@ final class StreamingContentStore {
     /// Keep disabled in production: this path runs on the display link.
     private static let isDrainDebugLoggingEnabled = false
 
+    private struct StreamStructure {
+        static let empty = StreamStructure(
+            hasVizStart: false,
+            vizEndOffset: nil,
+            hasUnclosedToolCallBlock: false,
+            lastClosedToolCallDetailsEnd: nil
+        )
+
+        let hasVizStart: Bool
+        let vizEndOffset: Int?
+        let hasUnclosedToolCallBlock: Bool
+        let lastClosedToolCallDetailsEnd: Int?
+
+        var hasClosedToolCallBlock: Bool {
+            lastClosedToolCallDetailsEnd != nil && !hasUnclosedToolCallBlock
+        }
+    }
+
+    private var contentStructureVersion: Int = 0
+    private var cachedStructureVersion: Int = -1
+    private var cachedStructureLength: Int = -1
+    private var cachedStructure: StreamStructure = .empty
+
     // MARK: - CADisplayLink (synchronous — no Task trampoline)
 
     private final class DisplayLinkTarget: NSObject {
@@ -174,6 +197,7 @@ final class StreamingContentStore {
         streamingModelId = modelId
         isActive = true
         isFinishing = false
+        resetContentStructureCache()
         startDisplayLink()
     }
 
@@ -190,6 +214,7 @@ final class StreamingContentStore {
         } else {
             presentationContent = nil
         }
+        contentStructureVersion &+= 1
 
         let displaySource = presentationContent ?? streamingContent
         if !displaySource.hasPrefix(displayContent) {
@@ -212,6 +237,7 @@ final class StreamingContentStore {
         guard !content.isEmpty else { return }
         if content.count > streamingContent.count {
             streamingContent = content
+            contentStructureVersion &+= 1
         }
         if content.count > displayContent.count {
             displayContent = content
@@ -332,6 +358,7 @@ final class StreamingContentStore {
         streamingModelId = nil
         isActive = false
         isFinishing = false
+        resetContentStructureCache()
         stopDisplayLink()
     }
 
@@ -370,6 +397,62 @@ final class StreamingContentStore {
         framesSinceLastBurst = 0
         isFirstBurst = true
         vizTransitionPending = false
+        cachedStructureVersion = -1
+        cachedStructureLength = -1
+        cachedStructure = .empty
+    }
+
+    private func resetContentStructureCache() {
+        contentStructureVersion &+= 1
+        cachedStructureVersion = -1
+        cachedStructureLength = -1
+        cachedStructure = .empty
+    }
+
+    private func streamStructure(for content: String, length: Int) -> StreamStructure {
+        if cachedStructureVersion == contentStructureVersion,
+           cachedStructureLength == length {
+            return cachedStructure
+        }
+        let structure = Self.analyzeStreamStructure(content)
+        cachedStructureVersion = contentStructureVersion
+        cachedStructureLength = length
+        cachedStructure = structure
+        return structure
+    }
+
+    private static func analyzeStreamStructure(_ content: String) -> StreamStructure {
+        let hasVizStart = content.contains("@@@VIZ-START")
+        let vizEndOffset: Int? = {
+            guard hasVizStart,
+                  let endRange = content.range(of: "\n@@@VIZ-END") else {
+                return nil
+            }
+            return content.distance(from: content.startIndex, to: endRange.upperBound)
+        }()
+
+        let hasToolCalls = content.range(of: "tool_calls", options: .caseInsensitive) != nil
+        guard hasToolCalls else {
+            return StreamStructure(
+                hasVizStart: hasVizStart,
+                vizEndOffset: vizEndOffset,
+                hasUnclosedToolCallBlock: false,
+                lastClosedToolCallDetailsEnd: nil
+            )
+        }
+
+        let hasUnclosed = hasUnclosedToolCallBlock(content)
+        let hasDetailsClose = content.range(of: "</details>", options: .caseInsensitive) != nil
+        let lastClosedEnd = (!hasUnclosed && hasDetailsClose)
+            ? lastToolCallDetailsEnd(in: content)
+            : nil
+
+        return StreamStructure(
+            hasVizStart: hasVizStart,
+            vizEndOffset: vizEndOffset,
+            hasUnclosedToolCallBlock: hasUnclosed,
+            lastClosedToolCallDetailsEnd: lastClosedEnd
+        )
     }
 
     /// Called once per display frame synchronously on the main RunLoop.
@@ -391,6 +474,7 @@ final class StreamingContentStore {
     private func drainTick() {
         let full = presentationContent ?? streamingContent
         let totalCount = full.count
+        let structure = streamStructure(for: full, length: totalCount)
 
         // `displayedCount` is read once here and kept in sync if the VIZ
         // fast-forward block mutates `displayContent` mid-tick, so the drain
@@ -422,23 +506,15 @@ final class StreamingContentStore {
         //     of @@@VIZ-END (so the viz is fully locked in), then let the normal EMA
         //     typewriter drain handle everything that follows. This restores the smooth
         //     character-by-character feel for any prose written after the viz block.
-        if full.contains("@@@VIZ-START") {
-            // IMPORTANT: search for "\n@@@VIZ-END" (newline-prefixed) so we only
-            // match the standalone end marker that appears on its own line.
-            // The VIZ HTML content itself may contain "@@@VIZ-END" as a JavaScript
-            // string literal (e.g. `var END_MARK = '@@@VIZ-END'`) — a bare
-            // `range(of: "@@@VIZ-END")` would find those embedded occurrences and
-            // set vizEndOffset to the wrong position, causing the drain to typewriter
-            // raw VIZ JS/HTML as plain message text.
-            let standaloneEndMarker = "\n@@@VIZ-END"
-            if let endRange = full.range(of: standaloneEndMarker) {
+        if structure.hasVizStart {
+            if let vizEndOffset = structure.vizEndOffset {
                 // Both markers present — fast-forward only through \n@@@VIZ-END.
-                let vizEndOffset = full.distance(from: full.startIndex, to: endRange.upperBound)
                 if displayedCount < vizEndOffset {
                     // displayContent hasn't reached VIZ-END yet — flush up to it.
                     // Only actually write to displayContent if it changed — avoids
                     // triggering a SwiftUI re-render every frame once VIZ-END is locked.
-                    let newDisplay = String(full[..<endRange.upperBound])
+                    let endIndex = full.index(full.startIndex, offsetBy: vizEndOffset)
+                    let newDisplay = String(full[..<endIndex])
                     if displayContent != newDisplay {
                         displayContent = newDisplay
                         if Self.isDrainDebugLoggingEnabled {
@@ -486,7 +562,7 @@ final class StreamingContentStore {
         // Strategy: if the number of tool_calls <details opens exceeds the number
         // of </details> closes (adjusted for reasoning blocks), there is at least
         // one unclosed tool_calls block — suppress displayContent updates.
-        if Self.hasUnclosedToolCallBlock(full) {
+        if structure.hasUnclosedToolCallBlock {
             // While an unclosed <details type="tool_calls"> block is streaming,
             // do NOT update displayContent at all. The ToolCallView renders tool
             // metadata independently; no visible UI depends on the incomplete
@@ -506,38 +582,37 @@ final class StreamingContentStore {
         // Reasoning blocks are NOT skipped here — their content has already been
         // streamed character-by-character via the normal typewriter drain above.
         // Only skip up to the end of the last tool_calls </details> close.
-        if Self.hasClosedToolCallBlock(full) {
-            if let lastToolCallCloseEnd = Self.lastToolCallDetailsEnd(in: full) {
-                if displayedCount < lastToolCallCloseEnd {
-                    // Jump displayContent to the end of the last tool_calls </details> instantly.
-                    let endIdx = full.index(full.startIndex, offsetBy: lastToolCallCloseEnd)
-                    let newDisplay = String(full[..<endIdx])
-                    if displayContent != newDisplay {
-                        displayContent = newDisplay
-                    }
-                    displayedCount = lastToolCallCloseEnd
-                    buffered = totalCount - displayedCount
-                    // Record the frozen boundary so views pass only liveTextTail to MarkdownView.
-                    if frozenToolBoundaryOffset != lastToolCallCloseEnd {
-                        frozenToolBoundaryOffset = lastToolCallCloseEnd
-                    }
-                    if Self.isDrainDebugLoggingEnabled {
-                        drainLog.debug("[TOOL_CALL] Skipped to lastToolCallEnd=\(lastToolCallCloseEnd) postBuffered=\(buffered) frozenBoundary=\(self.frozenToolBoundaryOffset) isFinishing=\(self.isFinishing)")
-                    }
-                    // Reset EMA drain state so post-tool prose starts fresh —
-                    // prevents the giant skipped buffer from inflating lastKnownTotal
-                    // and making subsequent prose appear as one enormous burst.
-                    lastKnownTotal = totalCount
-                    burstIntervalEMA = 8
-                    framesSinceLastBurst = 0
-                    isFirstBurst = true
-                    drainAccumulator = 0
-                    steadyRate = 0
-                    // Return so the next tick starts a clean typewriter drain for
-                    // whatever prose follows the tool block (buffered > 0), or lets
-                    // the finishing check at the top handle cleanup (buffered == 0).
-                    return
+        if structure.hasClosedToolCallBlock,
+           let lastToolCallCloseEnd = structure.lastClosedToolCallDetailsEnd {
+            if displayedCount < lastToolCallCloseEnd {
+                // Jump displayContent to the end of the last tool_calls </details> instantly.
+                let endIdx = full.index(full.startIndex, offsetBy: lastToolCallCloseEnd)
+                let newDisplay = String(full[..<endIdx])
+                if displayContent != newDisplay {
+                    displayContent = newDisplay
                 }
+                displayedCount = lastToolCallCloseEnd
+                buffered = totalCount - displayedCount
+                // Record the frozen boundary so views pass only liveTextTail to MarkdownView.
+                if frozenToolBoundaryOffset != lastToolCallCloseEnd {
+                    frozenToolBoundaryOffset = lastToolCallCloseEnd
+                }
+                if Self.isDrainDebugLoggingEnabled {
+                    drainLog.debug("[TOOL_CALL] Skipped to lastToolCallEnd=\(lastToolCallCloseEnd) postBuffered=\(buffered) frozenBoundary=\(self.frozenToolBoundaryOffset) isFinishing=\(self.isFinishing)")
+                }
+                // Reset EMA drain state so post-tool prose starts fresh —
+                // prevents the giant skipped buffer from inflating lastKnownTotal
+                // and making subsequent prose appear as one enormous burst.
+                lastKnownTotal = totalCount
+                burstIntervalEMA = 8
+                framesSinceLastBurst = 0
+                isFirstBurst = true
+                drainAccumulator = 0
+                steadyRate = 0
+                // Return so the next tick starts a clean typewriter drain for
+                // whatever prose follows the tool block (buffered > 0), or lets
+                // the finishing check at the top handle cleanup (buffered == 0).
+                return
             }
         }
 
