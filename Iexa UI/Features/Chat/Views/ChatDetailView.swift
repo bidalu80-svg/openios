@@ -1599,16 +1599,20 @@ struct ChatDetailView: View {
     }
 
     private var visibleAgentActivityWindowPreview: AgentActivityItem? {
-        guard !shouldHideAgentFloatingBarForKeyboard else { return nil }
-        if !(viewModel.isStreaming || viewModel.streamingStore.isActive),
-           let inactive = agentActivityWindowPreview(includeInactive: true)?
-                .limitingSteps(to: Self.agentFloatingPreviewStepLimit) {
-            return inactive
+        guard !hideAgentFloatingBarForKeyboard else { return nil }
+        if let snapshot = agentFloatingActivitySnapshot,
+           snapshot.hasConcreteSteps {
+            return snapshot
         }
-        if let live = agentActivityWindowPreview(includeInactive: false)?.limitingSteps(to: Self.agentFloatingPreviewStepLimit) {
-            return live
+        if hasActiveAgentFloatingActivity {
+            return agentActivityWindowPreview(includeInactive: false)?
+                .limitingSteps(to: Self.agentFloatingPreviewStepLimit)
         }
-        return agentFloatingActivitySnapshot
+        guard !suppressStaleAgentFloatingBarAfterKeyboard else {
+            return nil
+        }
+        return agentActivityWindowPreview(includeInactive: true)?
+            .limitingSteps(to: Self.agentFloatingPreviewStepLimit)
     }
 
     private var hasActiveAgentFloatingActivity: Bool {
@@ -1617,12 +1621,16 @@ struct ChatDetailView: View {
 
     private var shouldHideAgentFloatingBarForKeyboard: Bool {
         hideAgentFloatingBarForKeyboard
-            || (suppressStaleAgentFloatingBarAfterKeyboard && !hasActiveAgentFloatingActivity)
     }
 
     private func refreshAgentFloatingActivitySnapshot(includeInactive: Bool) {
-        guard !shouldHideAgentFloatingBarForKeyboard,
-              let item = agentActivityWindowPreview(includeInactive: includeInactive),
+        guard !hideAgentFloatingBarForKeyboard else { return }
+        if suppressStaleAgentFloatingBarAfterKeyboard,
+           includeInactive,
+           !hasActiveAgentFloatingActivity {
+            return
+        }
+        guard let item = agentActivityWindowPreview(includeInactive: includeInactive),
               item.hasConcreteSteps else { return }
         agentFloatingActivitySnapshot = item.limitingSteps(to: Self.agentFloatingPreviewStepLimit)
     }
@@ -3084,12 +3092,12 @@ struct ChatDetailView: View {
             let grew = newSize.width > oldContentHeight + 1
             if grew && viewModel.isStreaming && !isScrolledUp && !pinCurrentTurnStartForLatestTurn {
                 let now = Date()
-                if now.timeIntervalSince(lastProgrammaticScrollTime) > 0.2 {
+                if now.timeIntervalSince(lastProgrammaticScrollTime) > 0.32 {
                     lastProgrammaticScrollTime = now
                     if keyboard.height > 1 {
                         scrollToLatestMessageWithoutAnimation(anchor: .bottom)
                     } else {
-                        withAnimation(.easeOut(duration: 0.15)) {
+                        withAnimation(.easeOut(duration: 0.12)) {
                             scrollPosition.scrollTo(edge: .bottom)
                         }
                     }
@@ -3247,15 +3255,19 @@ struct ChatDetailView: View {
     }
 
     private func hideAgentFloatingBarForKeyboardWillShow() {
-        suppressStaleAgentFloatingBarAfterKeyboard = true
-        agentFloatingActivitySnapshot = nil
+        suppressStaleAgentFloatingBarAfterKeyboard = !hasActiveAgentFloatingActivity
+        if suppressStaleAgentFloatingBarAfterKeyboard {
+            agentFloatingActivitySnapshot = nil
+        }
         setAgentFloatingBarHiddenForKeyboard(true)
     }
 
     private func finishAgentFloatingBarKeyboardHide() {
         guard !keyboard.isVisible, keyboard.height <= 1 else { return }
-        guard hasActiveAgentFloatingActivity || !suppressStaleAgentFloatingBarAfterKeyboard else { return }
         setAgentFloatingBarHiddenForKeyboard(false)
+        if !suppressStaleAgentFloatingBarAfterKeyboard {
+            refreshAgentFloatingActivitySnapshot(includeInactive: true)
+        }
     }
 
     private func resumeAgentFloatingBarForNewTask() {
@@ -3289,6 +3301,7 @@ struct ChatDetailView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
             guard postSendWaitingUIDelayGeneration == generation else { return }
             keyboard.forceHidden(animated: false)
+            finishAgentFloatingBarKeyboardHide()
             releasePostSendWaitingUIDelayAfterKeyboardSettles()
         }
     }
@@ -8444,13 +8457,13 @@ private struct AgentStepFloatingBar: View {
             .padding(.trailing, 8)
             .frame(height: 36)
             .frame(maxWidth: 560)
-            .background(.ultraThinMaterial)
+            .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.86 : 0.94))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.28 : 0.42), lineWidth: 0.7)
             )
-            .shadow(color: .black.opacity(theme.isDark ? 0.18 : 0.08), radius: 8, x: 0, y: 3)
+            .shadow(color: .black.opacity(theme.isDark ? 0.12 : 0.05), radius: 4, x: 0, y: 2)
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .frame(maxHeight: .infinity, alignment: .bottom)
 

@@ -117,10 +117,10 @@ final class StreamingContentStore {
     private var isFinishing: Bool = false
 
     /// Hard cap on chars revealed per frame, regardless of server speed.
-    /// At 60fps: 6.0 chars/frame = 360 chars/sec — comfortable typewriter pace.
+    /// At 30fps: 10.0 chars/frame = 300 chars/sec — comfortable typewriter pace.
     /// Prevents fast models from dumping large bursts instantly, which destroys
     /// the character-by-character feel. The buffer simply grows and drains steadily.
-    private let maxCharsPerFrame: Double = 6.0
+    private let maxCharsPerFrame: Double = 10.0
 
     /// Once the server has finished, keeping a multi-KB buffer on CADisplayLink
     /// makes tool-heavy/code-heavy turns re-render for seconds after execution.
@@ -134,6 +134,9 @@ final class StreamingContentStore {
 
     /// Throttle counter for per-frame drain logs — logs every 30 frames (~0.5s).
     private var drainLogCounter: Int = 0
+
+    /// Keep disabled in production: this path runs on the display link.
+    private static let isDrainDebugLoggingEnabled = false
 
     // MARK: - CADisplayLink (synchronous — no Task trampoline)
 
@@ -347,6 +350,11 @@ final class StreamingContentStore {
         target.store = self
         displayLinkTarget = target
         let link = CADisplayLink(target: target, selector: #selector(DisplayLinkTarget.tick(_:)))
+        if #available(iOS 15.0, *) {
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 20, maximum: 30, preferred: 30)
+        } else {
+            link.preferredFramesPerSecond = 30
+        }
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
@@ -405,7 +413,7 @@ final class StreamingContentStore {
         //   Once @@@VIZ-START appears, `full.contains("@@@VIZ-START")` is permanently
         //   true for the rest of the stream. Every post-VIZ token got dumped instantly
         //   (no typewriter drain), causing choppy text AND forcing MarkdownView to
-        //   re-parse the entire multi-KB string at 60fps → 104% CPU.
+        //   re-parse the entire multi-KB string on every display tick → high CPU.
         //
         // New approach:
         //   - VIZ-START seen, VIZ-END not yet arrived → flush entire buffer (VIZ is
@@ -433,7 +441,9 @@ final class StreamingContentStore {
                     let newDisplay = String(full[..<endRange.upperBound])
                     if displayContent != newDisplay {
                         displayContent = newDisplay
-                        drainLog.debug("🎨 [VIZ] VIZ-END reached: vizEndOffset=\(vizEndOffset) totalCount=\(totalCount) postVizBuffered=\(totalCount - vizEndOffset) isFinishing=\(self.isFinishing)")
+                        if Self.isDrainDebugLoggingEnabled {
+                            drainLog.debug("[VIZ] VIZ-END reached: vizEndOffset=\(vizEndOffset) totalCount=\(totalCount) postVizBuffered=\(totalCount - vizEndOffset) isFinishing=\(self.isFinishing)")
+                        }
                     }
                     // Update local cursor so the drain arithmetic below is correct.
                     displayedCount = vizEndOffset
@@ -447,11 +457,13 @@ final class StreamingContentStore {
                 // @@@VIZ-START seen but standalone @@@VIZ-END not yet arrived —
                 // flush everything so InlineVisualizerView gets partial VIZ HTML.
                 // Only write to displayContent when it actually changes to avoid
-                // spurious SwiftUI re-renders on every display-link tick (60fps)
+                // spurious SwiftUI re-renders on every display-link tick
                 // while the VIZ block is rendering (can be 5-10 seconds of frames).
                 if displayContent.count != totalCount {
                     displayContent = full
-                    drainLog.debug("🎨 [VIZ] VIZ streaming: flushed to \(totalCount) chars (no VIZ-END yet)")
+                    if Self.isDrainDebugLoggingEnabled {
+                        drainLog.debug("[VIZ] VIZ streaming: flushed to \(totalCount) chars (no VIZ-END yet)")
+                    }
                 }
                 if isFinishing { completeCleanup() }
                 return
@@ -463,7 +475,7 @@ final class StreamingContentStore {
         // (i.e., still streaming), bypassing the typewriter drain prevents the
         // incomplete HTML from leaking into MarkdownView as raw text — which would
         // cause expensive CommonMark parsing + syntax highlighting on the entire
-        // block on every display-link tick (60fps). This is especially costly for
+        // block on every display-link tick. This is especially costly for
         // the Inline Visualizer tool which embeds thousands of characters of
         // HTML/JS in the arguments attribute.
         //
@@ -509,7 +521,9 @@ final class StreamingContentStore {
                     if frozenToolBoundaryOffset != lastToolCallCloseEnd {
                         frozenToolBoundaryOffset = lastToolCallCloseEnd
                     }
-                    drainLog.debug("⏩ [TOOL_CALL] Skipped to lastToolCallEnd=\(lastToolCallCloseEnd) postBuffered=\(buffered) frozenBoundary=\(self.frozenToolBoundaryOffset) isFinishing=\(self.isFinishing)")
+                    if Self.isDrainDebugLoggingEnabled {
+                        drainLog.debug("[TOOL_CALL] Skipped to lastToolCallEnd=\(lastToolCallCloseEnd) postBuffered=\(buffered) frozenBoundary=\(self.frozenToolBoundaryOffset) isFinishing=\(self.isFinishing)")
+                    }
                     // Reset EMA drain state so post-tool prose starts fresh —
                     // prevents the giant skipped buffer from inflating lastKnownTotal
                     // and making subsequent prose appear as one enormous burst.
@@ -536,10 +550,12 @@ final class StreamingContentStore {
         // Additionally, if the server already finished while VIZ was rendering
         // (isFinishing=true) and there's a large post-VIZ buffer, flush most of it
         // immediately so the user sees the text appear quickly rather than waiting
-        // minutes for a 360-char/sec drain to catch up.
+        // minutes for a 300-char/sec drain to catch up.
         if vizTransitionPending {
             vizTransitionPending = false
-            drainLog.debug("🔄 [VIZ→DRAIN] Transition fired: buffered=\(buffered) isFinishing=\(self.isFinishing) totalCount=\(totalCount)")
+            if Self.isDrainDebugLoggingEnabled {
+                drainLog.debug("[VIZ-DRAIN] Transition fired: buffered=\(buffered) isFinishing=\(self.isFinishing) totalCount=\(totalCount)")
+            }
             // Sync lastKnownTotal so newChars = 0 on this tick (clean slate).
             lastKnownTotal = totalCount
             // Fresh EMA seed — post-VIZ tokens are actively arriving.
@@ -551,7 +567,7 @@ final class StreamingContentStore {
 
             // Catch-up flush: if we're finishing (server done) and the post-VIZ
             // buffer is large, advance displayContent to leave only a small tail
-            // (~2 seconds worth at 360 chars/sec) for typewriter effect.
+            // (~2 seconds worth at 300 chars/sec) for typewriter effect.
             // Without this, a 5000-char post-VIZ story would take ~14 seconds to
             // drain even after the server finished sending it.
             let catchUpThreshold = 200
@@ -563,7 +579,9 @@ final class StreamingContentStore {
                 displayedCount = skipTo
                 buffered = keepForTypewriter
                 lastKnownTotal = totalCount
-                drainLog.debug("🔄 [VIZ→DRAIN] Catch-up flush: skipped to \(skipTo), leaving \(keepForTypewriter) chars for typewriter")
+                if Self.isDrainDebugLoggingEnabled {
+                    drainLog.debug("[VIZ-DRAIN] Catch-up flush: skipped to \(skipTo), leaving \(keepForTypewriter) chars for typewriter")
+                }
             }
             // Return — start normal drain on the next tick with clean state.
             return
@@ -595,7 +613,9 @@ final class StreamingContentStore {
             // across the EMA-estimated inter-burst gap. Floor of 0.3 lets
             // very small bursts over long gaps trickle out gradually.
             steadyRate = max(Double(buffered) / burstIntervalEMA, 0.3)
-            drainLog.debug("⚡️ [BURST] newChars=\(newChars) buffered=\(buffered) steadyRate=\(String(format: "%.2f", self.steadyRate)) ema=\(String(format: "%.1f", self.burstIntervalEMA)) isFinishing=\(self.isFinishing)")
+            if Self.isDrainDebugLoggingEnabled {
+                drainLog.debug("[BURST] newChars=\(newChars) buffered=\(buffered) steadyRate=\(String(format: "%.2f", self.steadyRate)) ema=\(String(format: "%.1f", self.burstIntervalEMA)) isFinishing=\(self.isFinishing)")
+            }
         }
 
         // Threshold-gated dual mode:
@@ -624,10 +644,12 @@ final class StreamingContentStore {
         guard reveal > 0 else { return }
         drainAccumulator -= Double(reveal)
 
-        drainLogCounter += 1
-        if drainLogCounter >= 30 {
-            drainLogCounter = 0
-            drainLog.debug("🖊 [DRAIN] reveal=\(reveal) buffered=\(buffered) steadyRate=\(String(format: "%.2f", self.steadyRate)) charsThisFrame=\(String(format: "%.2f", charsThisFrame)) isFinishing=\(self.isFinishing)")
+        if Self.isDrainDebugLoggingEnabled {
+            drainLogCounter += 1
+            if drainLogCounter >= 30 {
+                drainLogCounter = 0
+                drainLog.debug("[DRAIN] reveal=\(reveal) buffered=\(buffered) steadyRate=\(String(format: "%.2f", self.steadyRate)) charsThisFrame=\(String(format: "%.2f", charsThisFrame)) isFinishing=\(self.isFinishing)")
+            }
         }
 
         let endOffset = displayedCount + reveal
@@ -698,7 +720,7 @@ final class StreamingContentStore {
     /// excluded so their content streams via the normal typewriter drain.
     ///
     /// Uses simple substring counting (not regex) — O(n) and cheap enough
-    /// to run on every display-link tick (up to 60fps).
+    /// to run on every display-link tick.
     private static func hasUnclosedToolCallBlock(_ content: String) -> Bool {
         guard content.contains("tool_calls") else { return false }
 
@@ -808,7 +830,7 @@ final class StreamingContentStore {
     ///
     /// Used by `IsolatedAssistantMessage` to freeze settled prose paragraphs so that
     /// only the current in-progress paragraph (~100-200 chars) is sent to MarkdownView
-    /// on each display-link tick (60fps). The frozen portion is rendered once per new
+    /// on each display-link tick. The frozen portion is rendered once per new
     /// paragraph instead of re-parsing the whole multi-KB string every frame.
     static func lastParagraphBoundary(in text: String, minTailLength: Int = 200) -> Int {
         // Only trigger for messages long enough to benefit — short messages are cheap.
