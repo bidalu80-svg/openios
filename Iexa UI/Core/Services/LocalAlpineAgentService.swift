@@ -1516,7 +1516,7 @@ actor LocalAlpineAgentService {
                 previewLimit: LocalAlpineToolCall.outputPreviewLimit(for: context.name)
             )
         }
-        LocalAlpineToolCall(
+        return LocalAlpineToolCall(
             id: context.id,
             runId: context.runId,
             name: context.name,
