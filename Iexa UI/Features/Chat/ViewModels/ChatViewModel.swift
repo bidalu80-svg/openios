@@ -2966,6 +2966,20 @@ final class ChatViewModel {
             if !callTitles.isEmpty {
                 parts.append("steps: \(callTitles.joined(separator: " -> "))")
             }
+            let previewTargets = calls.suffix(3).compactMap { call -> String? in
+                let browserURL = call.browserURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let browserURL, !browserURL.isEmpty {
+                    return browserURL
+                }
+                let imageFilePath = call.imageFilePath?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let imageFilePath, !imageFilePath.isEmpty {
+                    return imageFilePath
+                }
+                return call.filePaths.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+            }.filter { !$0.isEmpty }
+            if !previewTargets.isEmpty {
+                parts.append("targets: \(previewTargets.joined(separator: ", "))")
+            }
             if !writtenFiles.isEmpty {
                 let fileList = writtenFiles.suffix(4).map { $0.path }.joined(separator: ", ")
                 parts.append("files: \(fileList)")
@@ -2992,6 +3006,43 @@ final class ChatViewModel {
 
         guard !lines.isEmpty else { return nil }
         return Self.indentForSystemContext(lines.joined(separator: "\n"))
+    }
+
+    private static func localAlpineToolCallSummaryText(_ calls: [LocalAlpineToolCall], limit: Int) -> String {
+        calls
+            .suffix(limit)
+            .map { call in
+                var parts: [String] = []
+                let title = call.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !title.isEmpty {
+                    parts.append("title: \(title)")
+                }
+                let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !name.isEmpty {
+                    parts.append("tool: \(name)")
+                }
+                let detail = call.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !detail.isEmpty {
+                    parts.append("detail: \(clippedForSystemContext(redactedLocalAlpineInternalPaths(in: detail), maxCharacters: 240))")
+                }
+                if let command = call.command?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !command.isEmpty {
+                    parts.append("command: \(clippedForSystemContext(redactedLocalAlpineInternalPaths(in: command), maxCharacters: 240))")
+                }
+                if let browserURL = call.browserURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !browserURL.isEmpty {
+                    parts.append("browser_url: \(browserURL)")
+                }
+                if let imageFilePath = call.imageFilePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !imageFilePath.isEmpty {
+                    parts.append("image_file_path: \(redactedLocalAlpineInternalPaths(in: imageFilePath))")
+                }
+                if !call.filePaths.isEmpty {
+                    parts.append("paths: \(call.filePaths.prefix(4).joined(separator: ", "))")
+                }
+                return "- " + parts.joined(separator: " | ")
+            }
+            .joined(separator: "\n")
     }
 
     private func inlineTextDisplayFile(for attachment: ChatAttachment, data: Data) -> ChatMessageFile {
@@ -17572,6 +17623,7 @@ final class ChatViewModel {
             ?? metadata["iexa_local_alpine_command_preview"]
             ?? ""
         let cwd = metadata["iexa_local_alpine_cwd"] ?? "/mnt/iexa"
+        let toolCalls = LocalAlpineToolCall.decodeMetadata(metadata["iexa_local_alpine_tool_calls"])
         let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata["iexa_local_alpine_command_results"])
         let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata["iexa_local_alpine_written_files"])
         let rawResult = metadata["iexa_local_alpine_raw_result"] ?? message.content
@@ -17584,6 +17636,10 @@ final class ChatViewModel {
         if !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lines.append("request/command:")
             lines.append(clippedForSystemContext(redactedLocalAlpineInternalPaths(in: command), maxCharacters: 4_000))
+        }
+        if !toolCalls.isEmpty {
+            lines.append("tool_calls_summary:")
+            lines.append(localAlpineToolCallSummaryText(toolCalls, limit: 6))
         }
         if !rawResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lines.append("raw_output:")
