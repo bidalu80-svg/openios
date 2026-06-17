@@ -569,10 +569,10 @@ final class ChatViewModel {
     @ObservationIgnored private var localAlpineLastToolEventFlushAtByMessageId: [String: Date] = [:]
     private let localAlpineAgentMaxSteps = 10
     private let localAlpineNoProgressRepeatLimit = 2
-    private let localAlpineToolEventFlushInterval: TimeInterval = 0.22
-    private let localAlpineLiveToolPreviewLimit = 480
-    private let localAlpineLiveToolDetailLimit = 360
-    private let localAlpineLiveToolCommandLimit = 900
+    private let localAlpineToolEventFlushInterval: TimeInterval = 0.45
+    private let localAlpineLiveToolPreviewLimit = 260
+    private let localAlpineLiveToolDetailLimit = 180
+    private let localAlpineLiveToolCommandLimit = 420
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     var localAlpinePendingOpenRequest: LocalAlpineOpenRequest?
@@ -797,7 +797,12 @@ final class ChatViewModel {
         localAlpinePendingOpenRequest = request
     }
 
-    private func postLocalAlpineLiveToolState(messageId: String, cleared: Bool = false) {
+    private func postLocalAlpineLiveToolState(
+        messageId: String,
+        cleared: Bool = false,
+        finalCalls: [LocalAlpineToolCall]? = nil,
+        finalStatus: ChatStatusUpdate? = nil
+    ) {
         var userInfo: [String: Any] = [
             "messageId": messageId,
             "cleared": cleared
@@ -805,16 +810,23 @@ final class ChatViewModel {
         if let chatId = conversationId ?? conversation?.id {
             userInfo["conversationId"] = chatId
         }
-        if !cleared {
-            userInfo["calls"] = localAlpineLiveToolCallsByMessageId[messageId] ?? []
-            if let status = localAlpineLastLiveToolStatusByMessageId[messageId] {
-                userInfo["status"] = status
-            }
+        let calls = finalCalls ?? localAlpineLiveToolCallsByMessageId[messageId] ?? []
+        let status = finalStatus ?? localAlpineLastLiveToolStatusByMessageId[messageId]
+        if !calls.isEmpty {
+            userInfo["calls"] = calls
+        }
+        if let status {
+            userInfo["status"] = status
         }
         NotificationCenter.default.post(name: .localAlpineLiveToolStateUpdated, object: self, userInfo: userInfo)
     }
 
     private func clearLocalAlpineLiveToolState(for messageId: String) {
+        let finalCalls = localAlpinePendingToolCallsByMessageId[messageId]
+            ?? localAlpineLiveToolCallsByMessageId[messageId]
+            ?? []
+        let finalStatus = localAlpinePendingToolStatusByMessageId[messageId]
+            ?? localAlpineLastLiveToolStatusByMessageId[messageId]
         localAlpineToolEventFlushTasks[messageId]?.cancel()
         localAlpineToolEventFlushTasks.removeValue(forKey: messageId)
         localAlpineActiveRunIdsByMessageId.removeValue(forKey: messageId)
@@ -823,7 +835,12 @@ final class ChatViewModel {
         localAlpinePendingToolCallsByMessageId.removeValue(forKey: messageId)
         localAlpinePendingToolStatusByMessageId.removeValue(forKey: messageId)
         localAlpineLastToolEventFlushAtByMessageId.removeValue(forKey: messageId)
-        postLocalAlpineLiveToolState(messageId: messageId, cleared: true)
+        postLocalAlpineLiveToolState(
+            messageId: messageId,
+            cleared: true,
+            finalCalls: finalCalls,
+            finalStatus: finalStatus
+        )
     }
 
     private func clearAllLocalAlpineLiveToolState() {
@@ -14274,7 +14291,7 @@ final class ChatViewModel {
         // Markdown fallback otherwise), so server search cannot race client
         // browser results.
         features.webSearch = false
-        if shouldEnableImageGeneration {
+        if shouldEnableImageGeneration && !selectedModelCanGenerateImages {
             features.imageGeneration = true
         }
         if codeInterpreterEnabled {
@@ -14316,6 +14333,7 @@ final class ChatViewModel {
 
     private func shouldEnableOpenAIResponsesImageGenerationTool(modelId: String) -> Bool {
         guard imageGenerationEnabled else { return false }
+        guard !selectedModelCanGenerateImages else { return false }
         if selectedModel?.supportsImageGeneration == true { return true }
         if selectedModel?.defaultFeatureIds.contains("image_generation") == true { return true }
         if selectedModel?.builtinTools["image_generation"] == true { return true }
@@ -22198,6 +22216,9 @@ final class ChatViewModel {
             clearLocalAlpineLiveToolState(for: messageId)
             return
         }
+        guard !Self.isReasoningLikeLocalAlpineToolCall(event.call) else {
+            return
+        }
 
         if let activeRunId = localAlpineActiveRunIdsByMessageId[messageId],
            activeRunId != event.runId {
@@ -22309,6 +22330,26 @@ final class ChatViewModel {
         }
         localAlpineLastToolEventFlushAtByMessageId[messageId] = Date()
         postLocalAlpineLiveToolState(messageId: messageId)
+    }
+
+    private static func isReasoningLikeLocalAlpineToolCall(_ call: LocalAlpineToolCall) -> Bool {
+        let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let title = call.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if ["thinking", "think", "reasoning", "reason", "thought"].contains(name)
+            || ["思考", "思考中", "分析", "分析中"].contains(title) {
+            return true
+        }
+
+        let detail = call.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let text = "\(title) \(detail.prefix(240)) \(output.prefix(240))".lowercased()
+        let markers = [
+            "<details", "</details>", "<think", "</think", "<thinking", "</thinking",
+            "<reasoning", "</reasoning", "<thought", "</thought",
+            "type=\"reasoning\"", "type='reasoning'",
+            "思考中", "正在思考", "思考下一步", "分析下一步"
+        ]
+        return markers.contains { text.contains($0.lowercased()) }
     }
 
     private static func sameLiveToolStatus(_ lhs: ChatStatusUpdate?, _ rhs: ChatStatusUpdate) -> Bool {

@@ -108,17 +108,19 @@ private struct AgentActivityStep: Identifiable, Hashable {
             && lhs.detail == rhs.detail
             && lhs.isRunning == rhs.isRunning
             && lhs.failed == rhs.failed
-            && lhs.outputPreview == rhs.outputPreview
             && lhs.outputReference == rhs.outputReference
             && lhs.outputByteCount == rhs.outputByteCount
             && lhs.outputLineCount == rhs.outputLineCount
-            && lhs.file == rhs.file
+            && lhs.file?.path == rhs.file?.path
+            && lhs.file?.byteCount == rhs.file?.byteCount
+            && lhs.file?.lineCount == rhs.file?.lineCount
             && lhs.filePaths == rhs.filePaths
             && lhs.command == rhs.command
             && lhs.cwd == rhs.cwd
             && lhs.previewThumbnailReference == rhs.previewThumbnailReference
             && lhs.previewOpenURL == rhs.previewOpenURL
-            && lhs.previewFile == rhs.previewFile
+            && lhs.previewFile?.url == rhs.previewFile?.url
+            && lhs.previewFile?.name == rhs.previewFile?.name
     }
 
     func hash(into hasher: inout Hasher) {
@@ -128,17 +130,19 @@ private struct AgentActivityStep: Identifiable, Hashable {
         hasher.combine(detail)
         hasher.combine(isRunning)
         hasher.combine(failed)
-        hasher.combine(outputPreview)
         hasher.combine(outputReference)
         hasher.combine(outputByteCount)
         hasher.combine(outputLineCount)
-        hasher.combine(file)
+        hasher.combine(file?.path)
+        hasher.combine(file?.byteCount)
+        hasher.combine(file?.lineCount)
         hasher.combine(filePaths)
         hasher.combine(command)
         hasher.combine(cwd)
         hasher.combine(previewThumbnailReference)
         hasher.combine(previewOpenURL)
-        hasher.combine(previewFile)
+        hasher.combine(previewFile?.url)
+        hasher.combine(previewFile?.name)
     }
 }
 
@@ -379,14 +383,43 @@ private struct AgentActivityItem: Identifiable, Hashable {
             outputReference: step.outputReference,
             outputByteCount: step.outputByteCount,
             outputLineCount: step.outputLineCount,
-            file: step.file,
+            file: step.file.map(lightweightFloatingFile),
             filePaths: step.filePaths,
             command: step.command.map { clippedFloatingText($0, limit: floatingCommandLimit) },
             cwd: step.cwd,
-            previewThumbnailReference: step.previewThumbnailReference,
+            previewThumbnailReference: lightweightThumbnailReference(step.previewThumbnailReference),
             previewOpenURL: step.previewOpenURL,
-            previewFile: step.previewFile
+            previewFile: step.previewFile.map(lightweightPreviewFile)
         )
+    }
+
+    private static func lightweightFloatingFile(_ file: LocalAlpineWrittenFile) -> LocalAlpineWrittenFile {
+        LocalAlpineWrittenFile(
+            path: file.path,
+            content: file.previewLines(limit: 8).joined(separator: "\n"),
+            source: file.source,
+            byteCount: file.byteCount,
+            lineCountValue: file.lineCount
+        )
+    }
+
+    private static func lightweightPreviewFile(_ file: ChatMessageFile) -> ChatMessageFile {
+        ChatMessageFile(
+            type: file.type,
+            url: file.url,
+            name: file.name,
+            contentType: file.contentType,
+            displayURL: nil
+        )
+    }
+
+    private static func lightweightThumbnailReference(_ reference: String?) -> String? {
+        let trimmed = reference?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.lowercased().hasPrefix("data:image/") {
+            return nil
+        }
+        return trimmed
     }
 
     private static func clippedFloatingText(_ text: String, limit: Int) -> String {
@@ -975,6 +1008,12 @@ private struct AgentActivityItem: Identifiable, Hashable {
             return fileName.map { "校验 \($0)" } ?? display.title
         case "verify_absent", "verify_missing", "ensure_absent":
             return fileName.map { "校验删除 \($0)" } ?? display.title
+        case "command", "shell", "bash", "exec", "shell_execute":
+            if let command = call.command?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !command.isEmpty {
+                return commandStepTitle(for: command, failed: call.failed)
+            }
+            return call.failed ? "\(display.title)失败" : display.title
         default:
             break
         }
@@ -1955,6 +1994,48 @@ struct ChatDetailView: View {
         agentFloatingActivitySnapshot = item.limitingSteps(to: Self.agentFloatingPreviewStepLimit)
     }
 
+    private func handleAgentFloatingLiveToolNotification(_ notification: Notification) {
+        guard matchesAgentFloatingConversation(notification.userInfo?["conversationId"] as? String),
+              let messageId = notification.userInfo?["messageId"] as? String else {
+            return
+        }
+        let calls = notification.userInfo?["calls"] as? [LocalAlpineToolCall] ?? []
+        let status = notification.userInfo?["status"] as? ChatStatusUpdate
+        guard !calls.isEmpty || status != nil else { return }
+
+        guard let item = AgentActivityItem.liveLocalAlpine(
+            messageId: messageId,
+            toolCalls: calls,
+            liveStatus: status
+        )?.limitingSteps(to: Self.agentFloatingPreviewStepLimit),
+              item.hasConcreteSteps else {
+            return
+        }
+
+        if keyboard.isVisible {
+            agentFloatingActivitySnapshot = nil
+            suppressStaleAgentFloatingBarAfterKeyboard = true
+            setAgentFloatingBarHiddenForKeyboard(true)
+            return
+        }
+
+        suppressStaleAgentFloatingBarAfterKeyboard = false
+        pendingAgentFloatingBarResumeAfterKeyboard = false
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            agentFloatingActivitySnapshot = item
+            hideAgentFloatingBarForKeyboard = false
+        }
+    }
+
+    private func matchesAgentFloatingConversation(_ incomingConversationId: String?) -> Bool {
+        let current = (viewModel.conversationId ?? viewModel.conversation?.id)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let incoming = incomingConversationId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return current.isEmpty || incoming.isEmpty || current == incoming
+    }
+
     private func collapseTransientAgentViewsForBackground() {
         agentFloatingFilePreview = nil
         agentFloatingStepPreview = nil
@@ -1967,15 +2048,20 @@ struct ChatDetailView: View {
             return
         }
         let clampedIndex = min(max(initialIndex, 0), max(item.steps.count - 1, 0))
-        let step = item.steps.indices.contains(clampedIndex) ? item.steps[clampedIndex] : item.currentStep
-        if openAgentPreviewResult(step: step, item: item) {
+        let lightweightStep = item.steps.indices.contains(clampedIndex) ? item.steps[clampedIndex] : item.currentStep
+        let fullItem = agentActivityWindowPreview(includeInactive: true) ?? item
+        let fullIndex = lightweightStep.flatMap { selected in
+            fullItem.steps.firstIndex(where: { $0.id == selected.id })
+        } ?? clampedIndex
+        let fullStep = fullItem.steps.indices.contains(fullIndex) ? fullItem.steps[fullIndex] : lightweightStep
+        if openAgentPreviewResult(step: fullStep, item: fullItem) {
             Haptics.play(.light)
             return
         }
         Haptics.play(.light)
         agentFloatingStepPreview = AgentFloatingStepPreviewItem(
-            activity: item,
-            initialIndex: initialIndex
+            activity: fullItem,
+            initialIndex: fullIndex
         )
     }
 
@@ -2398,20 +2484,24 @@ struct ChatDetailView: View {
                 releasePostSendWaitingUIDelayAfterKeyboardSettles()
             }
         }
-        .onChange(of: keyboard.height) { _, height in
-            if height <= 1 {
-                releasePostSendWaitingUIDelayAfterKeyboardSettles()
-            }
-        }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
             hideAgentFloatingBarForKeyboardWillShow()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidHideNotification)) { _ in
             finishAgentFloatingBarKeyboardHide()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateUpdated)) { notification in
+            handleAgentFloatingLiveToolNotification(notification)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateCleared)) { notification in
+            guard matchesAgentFloatingConversation(notification.userInfo?["conversationId"] as? String) else { return }
+            agentFloatingActivitySnapshot = nil
+            suppressStaleAgentFloatingBarAfterKeyboard = true
+            setAgentFloatingBarHiddenForKeyboard(true)
+        }
         .onAppear {
             viewModel.syncOnEntry()
-            setAgentFloatingBarHiddenForKeyboard(keyboard.isVisible || keyboard.height > 1)
+            setAgentFloatingBarHiddenForKeyboard(keyboard.isVisible)
         }
         .onDisappear {
             keyboard.stop()
@@ -2455,7 +2545,7 @@ struct ChatDetailView: View {
         .overlay(alignment: .bottom) {
             if let error = viewModel.errorMessage {
                 errorBannerView(error)
-                    .padding(.bottom, keyboard.height + 80)
+                    .padding(.bottom, 80)
             }
         }
         // Sheets & alerts
@@ -2957,7 +3047,7 @@ struct ChatDetailView: View {
             if !shouldHideAgentFloatingBarForKeyboard {
                 AgentStepFloatingBarHost(
                     conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
-                    fallbackItem: visibleAgentActivityWindowPreview,
+                    fallbackItem: agentFloatingActivitySnapshot,
                     stepLimit: Self.agentFloatingPreviewStepLimit,
                     onPreviewTap: { item, index in
                         openAgentFloatingPreview(item: item, initialIndex: index)
@@ -3249,12 +3339,6 @@ struct ChatDetailView: View {
                 refreshAgentFloatingActivitySnapshot(includeInactive: !viewModel.isStreaming && !viewModel.streamingStore.isActive)
             }
         }
-        .onChange(of: agentActivityRefreshSignature) { _, _ in
-            if pendingAgentFloatingBarResumeAfterKeyboard || hasActiveAgentFloatingActivity {
-                resumeAgentFloatingBarForNewTask()
-            }
-            refreshAgentFloatingActivitySnapshot(includeInactive: true)
-        }
         // Auto-scroll only when the rendered transcript changes. This avoids
         // scrolling to blank spacer space when hidden agent/tool messages are
         // appended or removed behind the visible conversation.
@@ -3448,7 +3532,7 @@ struct ChatDetailView: View {
                 let now = Date()
                 if now.timeIntervalSince(lastProgrammaticScrollTime) > 0.32 {
                     lastProgrammaticScrollTime = now
-                    if keyboard.height > 1 {
+                    if keyboard.isVisible {
                         scrollToLatestMessageWithoutAnimation(anchor: .bottom)
                     } else {
                         withAnimation(.easeOut(duration: 0.12)) {
@@ -3570,21 +3654,12 @@ struct ChatDetailView: View {
 
     private func beginPostSendWaitingUIDelayIfNeeded() {
         postSendWaitingUIDelayGeneration += 1
-        let generation = postSendWaitingUIDelayGeneration
-        guard keyboard.isVisible || keyboard.height > 1 else {
-            isPostSendWaitingUIDelayed = false
-            return
-        }
-
-        isPostSendWaitingUIDelayed = true
-        pendingAgentFloatingBarResumeAfterKeyboard = false
-        suppressStaleAgentFloatingBarAfterKeyboard = true
-        agentFloatingActivitySnapshot = nil
-        setAgentFloatingBarHiddenForKeyboard(true)
-        let fallbackDelay = max(0.24, min(keyboard.animationDuration + 0.18, 0.72))
-        DispatchQueue.main.asyncAfter(deadline: .now() + fallbackDelay) {
-            guard postSendWaitingUIDelayGeneration == generation else { return }
-            isPostSendWaitingUIDelayed = false
+        isPostSendWaitingUIDelayed = false
+        if keyboard.isVisible {
+            pendingAgentFloatingBarResumeAfterKeyboard = false
+            suppressStaleAgentFloatingBarAfterKeyboard = true
+            agentFloatingActivitySnapshot = nil
+            setAgentFloatingBarHiddenForKeyboard(true)
         }
     }
 
@@ -3614,7 +3689,7 @@ struct ChatDetailView: View {
     }
 
     private func finishAgentFloatingBarKeyboardHide() {
-        guard !keyboard.isVisible, keyboard.height <= 1 else { return }
+        guard !keyboard.isVisible else { return }
         agentFloatingKeyboardHideGeneration += 1
         pendingAgentFloatingBarResumeAfterKeyboard = false
         suppressStaleAgentFloatingBarAfterKeyboard = true
@@ -3625,7 +3700,7 @@ struct ChatDetailView: View {
     private func resumeAgentFloatingBarForNewTask() {
         suppressStaleAgentFloatingBarAfterKeyboard = false
         agentFloatingActivitySnapshot = nil
-        if keyboard.isVisible || keyboard.height > 1 {
+        if keyboard.isVisible {
             pendingAgentFloatingBarResumeAfterKeyboard = false
             setAgentFloatingBarHiddenForKeyboard(true)
         } else {
@@ -3644,7 +3719,7 @@ struct ChatDetailView: View {
     }
 
     private func forceDismissInputAfterSend() {
-        if keyboard.isVisible || keyboard.height > 1 {
+        if keyboard.isVisible {
             pendingAgentFloatingBarResumeAfterKeyboard = false
             suppressStaleAgentFloatingBarAfterKeyboard = true
             agentFloatingActivitySnapshot = nil
@@ -7708,19 +7783,24 @@ private struct IsolatedAssistantMessage: View {
                 let dc = streamingStore.displayContent
                 let frozenContent: String = {
                     guard dc.count >= frozenBoundary else { return dc }
-                    return String(dc[..<dc.index(dc.startIndex, offsetBy: frozenBoundary)])
+                    return Self.safeAssistantRenderableContent(
+                        String(dc[..<dc.index(dc.startIndex, offsetBy: frozenBoundary)])
+                    )
                 }()
 
                 VStack(alignment: .leading, spacing: 0) {
-                    // Frozen tool-call / reasoning segments — hash is stable, cache always hits.
-                    AssistantMessageContent(
-                        content: frozenContent,
-                        isStreaming: false,
-                        messageEmbeds: message.embeds,
-                        authToken: authToken,
-                        serverBaseURL: serverBaseURL,
-                        apiClient: apiClient
-                    )
+                    // Frozen tool-call segments are stable; reasoning/details are stripped
+                    // before rendering so provider HTML never leaks into the transcript.
+                    if !frozenContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        AssistantMessageContent(
+                            content: frozenContent,
+                            isStreaming: false,
+                            messageEmbeds: message.embeds,
+                            authToken: authToken,
+                            serverBaseURL: serverBaseURL,
+                            apiClient: apiClient
+                        )
+                    }
                     // Live tail — split further at the prose freeze boundary if available,
                     // so post-tool prose also benefits from paragraph-boundary freezing.
                     if !liveTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -8681,60 +8761,15 @@ private struct AgentStepFloatingBarHost: View {
     let stepLimit: Int
     let onPreviewTap: (AgentActivityItem, Int) -> Void
 
-    @State private var liveCallsByMessageId: [String: [LocalAlpineToolCall]] = [:]
-    @State private var liveStatusByMessageId: [String: ChatStatusUpdate] = [:]
-    @State private var liveMessageOrder: [String] = []
-    @State private var cachedDisplayItem: AgentActivityItem?
-
-    private var liveItem: AgentActivityItem? {
-        let items = liveMessageOrder.compactMap { messageId -> AgentActivityItem? in
-            AgentActivityItem.liveLocalAlpine(
-                messageId: messageId,
-                toolCalls: liveCallsByMessageId[messageId] ?? [],
-                liveStatus: liveStatusByMessageId[messageId]
-            )
-        }
-        guard !items.isEmpty else { return nil }
-        return AgentActivityItem.mergedTurn(id: "live-local-alpine-floating", items: items)?
-            .limitingSteps(to: stepLimit)
-    }
-
     private var displayItem: AgentActivityItem? {
-        if let liveItem,
-           liveItem.hasConcreteSteps {
-            if liveItem.isActive {
-                return liveItem
-            }
-            if let fallbackItem,
-               fallbackItem.hasConcreteSteps,
-               fallbackItem.totalStepCount >= liveItem.totalStepCount {
-                return fallbackItem
-            }
-            return liveItem
-        }
-        guard fallbackItem?.hasConcreteSteps == true else { return nil }
-        return fallbackItem
-    }
-
-    private var renderItem: AgentActivityItem? {
-        displayItem ?? cachedDisplayItem
-    }
-
-    private var displayItemSignature: Int {
-        guard let item = displayItem else { return 0 }
-        var signature = item.id.hashValue
-        signature &+= item.steps.count &* 31
-        signature &+= item.currentStep?.id.hashValue ?? 0
-        signature &+= item.isActive ? 17 : 3
-        signature &+= item.hasFailure ? 23 : 5
-        signature &+= item.currentStep?.outputPreview.utf8.count ?? 0
-        signature &+= item.currentPreviewText.utf8.count &* 7
-        return signature
+        fallbackItem?.hasConcreteSteps == true
+            ? fallbackItem?.limitingSteps(to: stepLimit)
+            : nil
     }
 
     var body: some View {
         Group {
-            if let item = renderItem {
+            if let item = displayItem {
                 AgentStepFloatingBar(
                     item: item,
                     taskCount: item.totalStepCount,
@@ -8744,70 +8779,6 @@ private struct AgentStepFloatingBarHost: View {
                 .padding(.bottom, 2)
             }
         }
-        .onAppear {
-            updateCachedDisplayItem()
-        }
-        .onChange(of: displayItemSignature) { _, _ in
-            updateCachedDisplayItem()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateUpdated)) { notification in
-            applyLiveToolNotification(notification)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateCleared)) { notification in
-            guard matchesConversation(notification.userInfo?["conversationId"] as? String) else { return }
-            clearLiveState()
-        }
-        .onChange(of: conversationId) { _, _ in
-            clearLiveState()
-            cachedDisplayItem = nil
-        }
-    }
-
-    private func updateCachedDisplayItem() {
-        guard let displayItem,
-              displayItem.hasConcreteSteps else {
-            return
-        }
-        cachedDisplayItem = displayItem
-    }
-
-    private func applyLiveToolNotification(_ notification: Notification) {
-        guard matchesConversation(notification.userInfo?["conversationId"] as? String),
-              let messageId = notification.userInfo?["messageId"] as? String else {
-            return
-        }
-
-        let cleared = notification.userInfo?["cleared"] as? Bool ?? false
-        let calls = notification.userInfo?["calls"] as? [LocalAlpineToolCall] ?? []
-        let status = notification.userInfo?["status"] as? ChatStatusUpdate
-        if cleared || (calls.isEmpty && status == nil) {
-            liveCallsByMessageId.removeValue(forKey: messageId)
-            liveStatusByMessageId.removeValue(forKey: messageId)
-            liveMessageOrder.removeAll { $0 == messageId }
-            return
-        }
-
-        liveCallsByMessageId[messageId] = calls
-        if let status {
-            liveStatusByMessageId[messageId] = status
-        } else {
-            liveStatusByMessageId.removeValue(forKey: messageId)
-        }
-        if !liveMessageOrder.contains(messageId) {
-            liveMessageOrder.append(messageId)
-        }
-    }
-
-    private func matchesConversation(_ incomingConversationId: String?) -> Bool {
-        let current = conversationId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let incoming = incomingConversationId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return current.isEmpty || incoming.isEmpty || current == incoming
-    }
-
-    private func clearLiveState() {
-        liveCallsByMessageId.removeAll()
-        liveStatusByMessageId.removeAll()
-        liveMessageOrder.removeAll()
     }
 }
 
@@ -9189,6 +9160,7 @@ private struct AgentActivityStepPill: View, Equatable {
         .padding(.trailing, 12)
         .frame(height: hasDetail ? 36 : 30)
         .background(fill, in: Capsule(style: .continuous))
+        .fixedSize(horizontal: true, vertical: false)
         .frame(maxWidth: 315, alignment: .leading)
     }
 }
