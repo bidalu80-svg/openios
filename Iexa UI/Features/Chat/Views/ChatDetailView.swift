@@ -75,6 +75,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
     let filePaths: [String]
     let command: String?
     let cwd: String?
+    let durationText: String?
     let previewThumbnailReference: String?
     let previewOpenURL: String?
     let previewFile: ChatMessageFile?
@@ -117,6 +118,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
             && lhs.filePaths == rhs.filePaths
             && lhs.command == rhs.command
             && lhs.cwd == rhs.cwd
+            && lhs.durationText == rhs.durationText
             && lhs.previewThumbnailReference == rhs.previewThumbnailReference
             && lhs.previewOpenURL == rhs.previewOpenURL
             && lhs.previewFile?.url == rhs.previewFile?.url
@@ -139,6 +141,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
         hasher.combine(filePaths)
         hasher.combine(command)
         hasher.combine(cwd)
+        hasher.combine(durationText)
         hasher.combine(previewThumbnailReference)
         hasher.combine(previewOpenURL)
         hasher.combine(previewFile?.url)
@@ -387,6 +390,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             filePaths: step.filePaths,
             command: step.command.map { clippedFloatingText($0, limit: floatingCommandLimit) },
             cwd: step.cwd,
+            durationText: step.durationText,
             previewThumbnailReference: lightweightThumbnailReference(step.previewThumbnailReference),
             previewOpenURL: step.previewOpenURL,
             previewFile: step.previewFile.map(lightweightPreviewFile)
@@ -478,6 +482,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 filePaths: call.filePaths,
                 command: call.command,
                 cwd: call.cwd,
+                durationText: durationText(for: call),
                 previewThumbnailReference: nil,
                 previewOpenURL: nil,
                 previewFile: nil
@@ -503,6 +508,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     filePaths: [file.path],
                     command: nil,
                     cwd: nil,
+                    durationText: nil,
                     previewThumbnailReference: nil,
                     previewOpenURL: nil,
                     previewFile: nil
@@ -539,6 +545,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     filePaths: [],
                     command: command,
                     cwd: result.cwd,
+                    durationText: nil,
                     previewThumbnailReference: nil,
                     previewOpenURL: nil,
                     previewFile: nil
@@ -677,6 +684,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 filePaths: [],
                 command: nil,
                 cwd: nil,
+                durationText: nil,
                 previewThumbnailReference: previewThumbnail,
                 previewOpenURL: previewURL,
                 previewFile: previewFile
@@ -715,11 +723,30 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 filePaths: [],
                 command: nil,
                 cwd: nil,
+                durationText: nil,
                 previewThumbnailReference: nil,
                 previewOpenURL: nil,
                 previewFile: nil
             )
         }
+    }
+
+    private static func durationText(for call: LocalAlpineToolCall) -> String? {
+        guard let completedAtMs = call.completedAtMs,
+              call.startedAtMs > 0,
+              completedAtMs >= call.startedAtMs else {
+            return nil
+        }
+        let seconds = Double(completedAtMs - call.startedAtMs) / 1_000
+        guard seconds >= 0.05 else { return nil }
+        if seconds < 10 {
+            return String(format: "%.1fs", seconds)
+        }
+        if seconds < 60 {
+            return "\(Int(seconds.rounded()))s"
+        }
+        let total = Int(seconds.rounded())
+        return "\(total / 60)m \(total % 60)s"
     }
 
     private static func isConcreteLocalStatus(_ status: ChatStatusUpdate, action: String) -> Bool {
@@ -8982,10 +9009,9 @@ private struct AgentActivityStepPill: View, Equatable {
         lhs.step.id == rhs.step.id
             && lhs.step.kind == rhs.step.kind
             && lhs.step.title == rhs.step.title
-            && lhs.step.detail == rhs.step.detail
             && lhs.step.isRunning == rhs.step.isRunning
             && lhs.step.failed == rhs.step.failed
-            && lhs.step.command == rhs.step.command
+            && lhs.step.durationText == rhs.step.durationText
     }
 
     private var tint: Color {
@@ -8996,6 +9022,19 @@ private struct AgentActivityStepPill: View, Equatable {
     private var iconName: String {
         if step.failed { return "exclamationmark.circle.fill" }
         if step.isRunning { return "clock.fill" }
+        let title = step.title.lowercased()
+        if title.contains("搜索") || title.contains("网页") || title.contains("browse") || title.contains("search") {
+            return "globe"
+        }
+        if title.contains("读取") || title.contains("read") {
+            return "doc.text"
+        }
+        if title.contains("编辑") || title.contains("写入") || title.contains("创建") {
+            return "square.and.pencil"
+        }
+        if title.contains("命令") || title.contains("脚本") || title.contains("shell") || title.contains("terminal") || title.contains("run") {
+            return "terminal.fill"
+        }
         switch step.kind {
         case .file:
             return "doc.text"
@@ -9009,36 +9048,40 @@ private struct AgentActivityStepPill: View, Equatable {
     }
 
     var body: some View {
-        let hasDetail = !step.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let fill = theme.surfaceContainerHighest.opacity(theme.isDark ? 0.30 : 0.64)
+        let fill = theme.surfaceContainerHighest.opacity(theme.isDark ? 0.22 : 0.58)
+        let duration = step.durationText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
-        HStack(spacing: 7) {
+        HStack(spacing: 8) {
             Image(systemName: iconName)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(tint)
                 .frame(width: 17, height: 17)
 
-            VStack(alignment: .leading, spacing: 0) {
-                Text(step.title)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(theme.textPrimary)
+            Text(step.title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(1)
+
+            if !duration.isEmpty {
+                Text(duration)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(theme.textTertiary)
+                    .monospacedDigit()
                     .lineLimit(1)
-                    .truncationMode(.tail)
-                if hasDetail {
-                    Text(step.detail)
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(theme.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
             }
         }
-        .padding(.leading, 9)
+        .padding(.leading, 10)
         .padding(.trailing, 12)
-        .frame(height: hasDetail ? 36 : 30)
+        .frame(height: 34)
         .background(fill, in: Capsule(style: .continuous))
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.20 : 0.24), lineWidth: 0.6)
+        )
         .fixedSize(horizontal: true, vertical: false)
-        .frame(maxWidth: 315, alignment: .leading)
+        .frame(maxWidth: 360, alignment: .leading)
     }
 }
 
