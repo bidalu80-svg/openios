@@ -8821,7 +8821,7 @@ private struct AgentStepFloatingBar: View {
             .padding(.trailing, 10)
             .frame(height: 42)
             .frame(maxWidth: .infinity)
-            .background(theme.surface.opacity(theme.isDark ? 0.88 : 0.98))
+            .background(theme.cardBackground.opacity(theme.isDark ? 0.88 : 0.98))
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
