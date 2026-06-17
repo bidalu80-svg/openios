@@ -21854,6 +21854,28 @@ final class ChatViewModel {
                     node.error = error
                 }
             }
+            let structuredContentSource = Self.contentByInjectingLocalReasoning(
+                into: conversation?.messages[index].content ?? renderedDisplayContent,
+                reasoningContent: reasoningContent,
+                reasoningDone: reasoningDone
+            )
+            let structuredPartsJSON = AssistantStructuredContentCodec.metadataString(for: structuredContentSource)
+            var metadataForParts = conversation?.messages[index].metadata ?? [:]
+            if let structuredPartsJSON {
+                metadataForParts["iexa_local_content_parts"] = structuredPartsJSON
+            } else {
+                metadataForParts.removeValue(forKey: "iexa_local_content_parts")
+            }
+            conversation?.messages[index].metadata = metadataForParts
+            conversation?.history.updateNode(id: id) { node in
+                var metadata = node.metadata ?? [:]
+                if let structuredPartsJSON {
+                    metadata["iexa_local_content_parts"] = structuredPartsJSON
+                } else {
+                    metadata.removeValue(forKey: "iexa_local_content_parts")
+                }
+                node.metadata = metadata
+            }
             if let trimmedReasoning = reasoningContent?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
                !trimmedReasoning.isEmpty {
@@ -22012,6 +22034,32 @@ final class ChatViewModel {
                 cleanedAssistantInlineImagePayloads(prose)
             )
         }
+    }
+
+    private static func contentByInjectingLocalReasoning(
+        into content: String,
+        reasoningContent: String?,
+        reasoningDone: Bool?
+    ) -> String {
+        let trimmedReasoning = reasoningContent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmedReasoning.isEmpty else { return content }
+
+        let lowercasedContent = content.lowercased()
+        if lowercasedContent.contains("type=\"reasoning\"")
+            || lowercasedContent.contains("type='reasoning'")
+            || lowercasedContent.contains("<think")
+            || lowercasedContent.contains("<thinking")
+            || lowercasedContent.contains("<reasoning")
+            || lowercasedContent.contains("<thought") {
+            return content
+        }
+
+        let summary = (reasoningDone ?? false) ? "思考" : "思考中..."
+        let block = """
+        <details type="reasoning" done="\((reasoningDone ?? false) ? "true" : "false")"><summary>\(summary)</summary>\(trimmedReasoning)</details>
+        """
+        guard !content.isEmpty else { return block }
+        return block + "\n\n" + content
     }
 
     private static func shouldShowInlineImageReceiveState(for text: String) -> Bool {

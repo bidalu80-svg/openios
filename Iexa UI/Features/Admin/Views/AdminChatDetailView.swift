@@ -264,7 +264,8 @@ struct AdminChatDetailView: View {
                 content: processed,
                 isStreaming: false,
                 localReasoningContent: message.metadata?["iexa_local_reasoning_content"],
-                localReasoningDone: message.metadata?["iexa_local_reasoning_done"] == "true"
+                localReasoningDone: message.metadata?["iexa_local_reasoning_done"] == "true",
+                localStructuredPartsJSON: message.metadata?["iexa_local_content_parts"]
             )
         }
     }

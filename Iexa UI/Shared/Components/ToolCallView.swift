@@ -135,6 +135,167 @@ enum ContentSegment: Identifiable {
     }
 }
 
+enum AssistantStructuredContentCodec {
+    private struct Payload: Codable {
+        let sourceHash: String
+        let segments: [StoredSegment]
+    }
+
+    private enum StoredSegment: Codable {
+        case text(String)
+        case toolCall(StoredToolCall)
+        case reasoning(StoredReasoning)
+
+        private enum CodingKeys: String, CodingKey {
+            case type, text, toolCall, reasoning
+        }
+
+        private enum SegmentType: String, Codable {
+            case text
+            case toolCall
+            case reasoning
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            switch try container.decode(SegmentType.self, forKey: .type) {
+            case .text:
+                self = .text(try container.decode(String.self, forKey: .text))
+            case .toolCall:
+                self = .toolCall(try container.decode(StoredToolCall.self, forKey: .toolCall))
+            case .reasoning:
+                self = .reasoning(try container.decode(StoredReasoning.self, forKey: .reasoning))
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            switch self {
+            case .text(let text):
+                try container.encode(SegmentType.text, forKey: .type)
+                try container.encode(text, forKey: .text)
+            case .toolCall(let toolCall):
+                try container.encode(SegmentType.toolCall, forKey: .type)
+                try container.encode(toolCall, forKey: .toolCall)
+            case .reasoning(let reasoning):
+                try container.encode(SegmentType.reasoning, forKey: .type)
+                try container.encode(reasoning, forKey: .reasoning)
+            }
+        }
+    }
+
+    private struct StoredToolCall: Codable {
+        let id: String
+        let name: String
+        let arguments: String?
+        let result: String?
+        let isDone: Bool
+        let embeds: [String]
+    }
+
+    private struct StoredReasoning: Codable {
+        let summary: String
+        let content: String
+        let duration: String?
+        let isDone: Bool
+    }
+
+    static func metadataString(for content: String) -> String? {
+        guard !content.isEmpty, !content.contains("@@@VIZ-START") else { return nil }
+        let ordered = ToolCallParser.parseOrdered(content)
+        let hasStructuredSegments = ordered.segments.contains {
+            switch $0 {
+            case .text: return false
+            case .toolCall, .reasoning: return true
+            }
+        }
+        guard hasStructuredSegments else { return nil }
+
+        let payload = Payload(
+            sourceHash: stableHash(content),
+            segments: ordered.segments.map(storedSegment(from:))
+        )
+        guard let data = try? JSONEncoder().encode(payload) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func orderedParseResult(
+        from metadataString: String?,
+        currentContent: String
+    ) -> ToolCallParser.OrderedParseResult? {
+        guard let metadataString,
+              !currentContent.isEmpty,
+              !currentContent.contains("@@@VIZ-START"),
+              let data = metadataString.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(Payload.self, from: data),
+              payload.sourceHash == stableHash(currentContent) else {
+            return nil
+        }
+
+        let segments = payload.segments.map(contentSegment(from:))
+        let toolCalls = segments.compactMap { segment -> ToolCallData? in
+            guard case .toolCall(let toolCall) = segment else { return nil }
+            return toolCall
+        }
+        return ToolCallParser.OrderedParseResult(segments: segments, allToolCalls: toolCalls)
+    }
+
+    private static func storedSegment(from segment: ContentSegment) -> StoredSegment {
+        switch segment {
+        case .text(let text):
+            return .text(text)
+        case .toolCall(let call):
+            return .toolCall(StoredToolCall(
+                id: call.id,
+                name: call.name,
+                arguments: call.arguments,
+                result: call.result,
+                isDone: call.isDone,
+                embeds: call.embeds
+            ))
+        case .reasoning(let reasoning):
+            return .reasoning(StoredReasoning(
+                summary: reasoning.summary,
+                content: reasoning.content,
+                duration: reasoning.duration,
+                isDone: reasoning.isDone
+            ))
+        }
+    }
+
+    private static func contentSegment(from stored: StoredSegment) -> ContentSegment {
+        switch stored {
+        case .text(let text):
+            return .text(text)
+        case .toolCall(let call):
+            return .toolCall(ToolCallData(
+                id: call.id,
+                name: call.name,
+                arguments: call.arguments,
+                result: call.result,
+                isDone: call.isDone,
+                embeds: call.embeds
+            ))
+        case .reasoning(let reasoning):
+            return .reasoning(ReasoningData(
+                summary: reasoning.summary,
+                content: reasoning.content,
+                duration: reasoning.duration,
+                isDone: reasoning.isDone
+            ))
+        }
+    }
+
+    private static func stableHash(_ text: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
+    }
+}
+
 // MARK: - Tool Call Parser
 
 /// Parses `<details>` blocks from Iexa native server assistant message content,
@@ -2668,6 +2829,7 @@ struct AssistantMessageContent: View {
     var messageEmbeds: [String] = []
     var localReasoningContent: String? = nil
     var localReasoningDone: Bool? = nil
+    var localStructuredPartsJSON: String? = nil
     /// Passed down to Rich UI embeds for auth token injection and base URL resolution.
     var authToken: String? = nil
     var serverBaseURL: String? = nil
@@ -2693,7 +2855,7 @@ struct AssistantMessageContent: View {
                 reasoningContent: localReasoningContent,
                 reasoningDone: localReasoningDone
             )
-            let inputHash = sourceContent.hashValue
+            let inputHash = sourceContent.hashValue ^ (localStructuredPartsJSON?.hashValue ?? 0)
             if inputHash == parseCache.lastInputHash {
                 return parseCache.lastRenderableContent
             }
@@ -2713,12 +2875,17 @@ struct AssistantMessageContent: View {
         // content.utf8.count caused stale isDone=false results to be returned
         // after streaming completed, keeping the spinner running indefinitely
         // and blocking embed rendering (which is guarded by isDone == true).
-        let cacheKey = renderableContent.hashValue
+        let cacheKey = renderableContent.hashValue ^ (localStructuredPartsJSON?.hashValue ?? 0)
         let ordered: ToolCallParser.OrderedParseResult = {
             if cacheKey == parseCache.lastLength, let cached = parseCache.lastResult {
                 return cached
             }
-            let result = ToolCallParser.parseOrdered(renderableContent)
+            let result = (!isStreaming
+                ? AssistantStructuredContentCodec.orderedParseResult(
+                    from: localStructuredPartsJSON,
+                    currentContent: renderableContent
+                )
+                : nil) ?? ToolCallParser.parseOrdered(renderableContent)
             parseCache.lastLength = cacheKey
             parseCache.lastResult = result
             // Log segment count and VIZ presence once per parse
