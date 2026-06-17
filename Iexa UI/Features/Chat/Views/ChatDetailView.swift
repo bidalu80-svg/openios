@@ -9088,8 +9088,8 @@ private struct AgentStepFloatingBar: View {
         .black.opacity(theme.isDark ? 0.18 : 0.08)
     }
 
-    private var statusDot: some View {
-        ZStack {
+    private var statusDot: AnyView {
+        AnyView(ZStack {
             Circle()
                 .fill(tint.opacity(theme.isDark ? 0.16 : 0.12))
                 .frame(width: 18, height: 18)
@@ -9097,11 +9097,11 @@ private struct AgentStepFloatingBar: View {
                 .scaledFont(size: 10, weight: .bold)
                 .foregroundStyle(tint)
                 .frame(width: 14, height: 14)
-        }
+        })
     }
 
-    private var pageControls: some View {
-        HStack(spacing: 1) {
+    private var pageControls: AnyView {
+        AnyView(HStack(spacing: 1) {
             Button {
                 movePage(-1)
             } label: {
@@ -9131,11 +9131,11 @@ private struct AgentStepFloatingBar: View {
             }
             .buttonStyle(.plain)
             .disabled(!canMoveForward)
-        }
+        })
     }
 
-    private var floatingBarBody: some View {
-        HStack(spacing: 6) {
+    private var floatingBarBody: AnyView {
+        AnyView(HStack(spacing: 6) {
             statusDot
 
             Text(selectedTitle)
@@ -9161,25 +9161,27 @@ private struct AgentStepFloatingBar: View {
                 .strokeBorder(barStroke, lineWidth: 0.8)
         )
         .shadow(color: barShadow, radius: 7, x: 0, y: 3)
-        .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous)))
     }
 
-    private var previewCardButton: some View {
-        Button {
-            onPreviewTap(item, clampedIndex)
-        } label: {
-            AgentToolPreviewPop(
-                previewTitle: previewTitle,
-                previewSubtitle: previewSubtitle,
-                previewText: previewText,
-                thumbnailReference: previewThumbnailReference
-            )
-            .frame(width: 64, height: 36, alignment: .topLeading)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .offset(x: 6, y: -6)
+    private var previewCardButton: AnyView {
+        AnyView(
+            Button {
+                onPreviewTap(item, clampedIndex)
+            } label: {
+                AgentToolPreviewPop(
+                    previewTitle: previewTitle,
+                    previewSubtitle: previewSubtitle,
+                    previewText: previewText,
+                    thumbnailReference: previewThumbnailReference
+                )
+                .frame(width: 64, height: 36, alignment: .topLeading)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .offset(x: 6, y: -6)
+        )
     }
 
     private func movePage(_ delta: Int) {
