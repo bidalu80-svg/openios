@@ -8723,43 +8723,53 @@ private struct AgentStepFloatingBar: View {
                     .truncationMode(.tail)
                     .minimumScaleFactor(0.82)
                     .layoutPriority(1)
+                    .frame(maxWidth: 190, alignment: .leading)
 
-                Spacer(minLength: 6)
+                if item.steps.count > 1 {
+                    Button {
+                        movePage(-1)
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .scaledFont(size: 12, weight: .bold)
+                            .foregroundStyle(clampedIndex > 0 ? theme.textPrimary : theme.textTertiary.opacity(0.45))
+                            .frame(width: 20, height: 22)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(clampedIndex == 0)
 
-                Button {
-                    movePage(-1)
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .scaledFont(size: 12, weight: .bold)
-                        .foregroundStyle(clampedIndex > 0 ? theme.textPrimary : theme.textTertiary.opacity(0.45))
-                        .frame(width: 20, height: 22)
+                    Text(pageText)
+                        .scaledFont(size: 10.5, weight: .semibold, design: .rounded)
+                        .foregroundStyle(theme.textSecondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .frame(width: 36, alignment: .center)
+
+                    Button {
+                        movePage(1)
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .scaledFont(size: 12, weight: .bold)
+                            .foregroundStyle(clampedIndex < item.steps.count - 1 ? theme.textPrimary : theme.textTertiary.opacity(0.45))
+                            .frame(width: 20, height: 22)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(clampedIndex >= item.steps.count - 1)
+                } else {
+                    Text(pageText)
+                        .scaledFont(size: 10.5, weight: .semibold, design: .rounded)
+                        .foregroundStyle(theme.textSecondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .frame(width: 32, alignment: .center)
                 }
-                .buttonStyle(.plain)
-                .disabled(clampedIndex == 0)
-
-                Text(pageText)
-                    .scaledFont(size: 10.5, weight: .semibold, design: .rounded)
-                    .foregroundStyle(theme.textSecondary)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .frame(width: 36, alignment: .center)
-
-                Button {
-                    movePage(1)
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .scaledFont(size: 12, weight: .bold)
-                        .foregroundStyle(clampedIndex < item.steps.count - 1 ? theme.textPrimary : theme.textTertiary.opacity(0.45))
-                        .frame(width: 20, height: 22)
-                }
-                .buttonStyle(.plain)
-                .disabled(clampedIndex >= item.steps.count - 1)
             }
             .padding(.leading, 104)
             .padding(.trailing, 8)
             .frame(height: 36)
             .frame(maxWidth: 560)
+            .fixedSize(horizontal: true, vertical: false)
             .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.86 : 0.94))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
