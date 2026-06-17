@@ -23261,7 +23261,10 @@ final class ContentAccumulator: @unchecked Sendable {
     /// when it executes — no need to create another one.
     private nonisolated(unsafe) var _pendingUpdate: Bool = false
 
-    private static let updateIntervalNanos: UInt64 = 33_000_000
+    /// Tracks the last fully delivered body length so we can smooth dispatch
+    /// cadence more like Minis: short bursts flush sooner, larger turns coalesce
+    /// into slightly wider UI ticks instead of hammering the main actor.
+    private nonisolated(unsafe) var _lastDispatchedBodyCount: Int = 0
 
     /// Callback invoked on the main actor with the latest accumulated
     /// content. Set by the view model when socket handlers are registered.
@@ -23312,6 +23315,7 @@ final class ContentAccumulator: @unchecked Sendable {
     nonisolated private func completeScheduledDispatch(sentSnapshot: ContentAccumulatorSnapshot) -> Bool {
         lock.lock()
         let latest = snapshotLocked()
+        _lastDispatchedBodyCount = latest.bodyContent.count
         let shouldScheduleNext = latest.renderedContent != sentSnapshot.renderedContent
             || latest.reasoningContent != sentSnapshot.reasoningContent
             || latest.reasoningDone != sentSnapshot.reasoningDone
@@ -23340,9 +23344,14 @@ final class ContentAccumulator: @unchecked Sendable {
         let needsDispatch = !_pendingUpdate
         if needsDispatch { _pendingUpdate = true }
         let callback = _onUpdate
+        let delayNanos = Self.adaptiveDispatchDelayNanos(
+            totalBodyCount: _content.count,
+            deltaSinceLastDispatch: max(0, _content.count - _lastDispatchedBodyCount),
+            recentText: text
+        )
         lock.unlock()
 
-        dispatchIfNeeded(needsDispatch, callback: callback)
+        dispatchIfNeeded(needsDispatch, delayNanos: delayNanos, callback: callback)
     }
 
     nonisolated func appendReasoning(_ text: String) {
@@ -23363,9 +23372,14 @@ final class ContentAccumulator: @unchecked Sendable {
         let needsDispatch = !_pendingUpdate
         if needsDispatch { _pendingUpdate = true }
         let callback = _onUpdate
+        let delayNanos = Self.adaptiveDispatchDelayNanos(
+            totalBodyCount: _content.count + _reasoningContent.count,
+            deltaSinceLastDispatch: max(0, _content.count - _lastDispatchedBodyCount),
+            recentText: text
+        )
         lock.unlock()
 
-        dispatchIfNeeded(needsDispatch, callback: callback)
+        dispatchIfNeeded(needsDispatch, delayNanos: delayNanos, callback: callback)
     }
 
     nonisolated func replace(_ text: String) {
@@ -23374,9 +23388,14 @@ final class ContentAccumulator: @unchecked Sendable {
         let needsDispatch = !_pendingUpdate
         if needsDispatch { _pendingUpdate = true }
         let callback = _onUpdate
+        let delayNanos = Self.adaptiveDispatchDelayNanos(
+            totalBodyCount: _content.count,
+            deltaSinceLastDispatch: max(0, _content.count - _lastDispatchedBodyCount),
+            recentText: text
+        )
         lock.unlock()
 
-        dispatchIfNeeded(needsDispatch, callback: callback)
+        dispatchIfNeeded(needsDispatch, delayNanos: delayNanos, callback: callback)
     }
 
     nonisolated func markReasoningDone() {
@@ -23391,16 +23410,17 @@ final class ContentAccumulator: @unchecked Sendable {
         let callback = _onUpdate
         lock.unlock()
 
-        dispatchIfNeeded(needsDispatch, callback: callback)
+        dispatchIfNeeded(needsDispatch, delayNanos: 60_000_000, callback: callback)
     }
 
     private nonisolated func dispatchIfNeeded(
         _ needsDispatch: Bool,
+        delayNanos: UInt64,
         callback: (@MainActor @Sendable (_ snapshot: ContentAccumulatorSnapshot) -> Void)?
     ) {
         guard needsDispatch else { return }
         Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.updateIntervalNanos)
+            try? await Task.sleep(nanoseconds: delayNanos)
             guard let self else { return }
             let shouldScheduleNext = await MainActor.run {
                 let latest = self.snapshot
@@ -23408,9 +23428,44 @@ final class ContentAccumulator: @unchecked Sendable {
                 return self.completeScheduledDispatch(sentSnapshot: latest)
             }
             if shouldScheduleNext {
-                self.dispatchIfNeeded(true, callback: self.onUpdate)
+                let nextSnapshot = self.snapshot
+                let nextDelay = Self.adaptiveDispatchDelayNanos(
+                    totalBodyCount: nextSnapshot.bodyContent.count + nextSnapshot.reasoningContent.count,
+                    deltaSinceLastDispatch: max(0, nextSnapshot.bodyContent.count - self._lastDispatchedBodyCount),
+                    recentText: nextSnapshot.bodyContent.suffix(64).description
+                )
+                self.dispatchIfNeeded(true, delayNanos: nextDelay, callback: self.onUpdate)
             }
         }
+    }
+
+    private nonisolated static func adaptiveDispatchDelayNanos(
+        totalBodyCount: Int,
+        deltaSinceLastDispatch: Int,
+        recentText: String
+    ) -> UInt64 {
+        let normalizedRecent = recentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasLineBreak = recentText.contains("\n")
+        let baseMillis: UInt64
+        switch totalBodyCount {
+        case ..<500:
+            baseMillis = 90
+        case ..<2_000:
+            baseMillis = 120
+        case ..<32_000:
+            baseMillis = 170
+        case ..<128_000:
+            baseMillis = 230
+        default:
+            baseMillis = 300
+        }
+        if hasLineBreak && deltaSinceLastDispatch >= 48 {
+            return 60_000_000
+        }
+        if normalizedRecent.count >= 180 {
+            return min(baseMillis, 80) * 1_000_000
+        }
+        return baseMillis * 1_000_000
     }
 
     nonisolated var snapshot: ContentAccumulatorSnapshot {
