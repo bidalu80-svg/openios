@@ -271,6 +271,9 @@ struct ChatCompletionRequest: Sendable {
     var tools: [[String: Any]]?
     /// OpenAI-compatible native tool choice (`"auto"` or `"none"`).
     var toolChoice: String?
+    /// Whether OpenAI-compatible providers may execute multiple tool calls
+    /// in parallel within one assistant turn.
+    var parallelToolCalls: Bool?
     /// OpenAI Responses hosted tools selected from the normal chat tool toggles
     /// (web_search, image_generation, and code_interpreter).
     ///
@@ -412,6 +415,9 @@ struct ChatCompletionRequest: Sendable {
         if let toolChoice {
             data["tool_choice"] = toolChoice
         }
+        if let parallelToolCalls {
+            data["parallel_tool_calls"] = parallelToolCalls
+        }
 
         // Pass common generation controls through to OpenAI-compatible endpoints.
         // Many providers (OpenAI-shims, Gemini shims, Ollama-compatible gateways,
@@ -501,6 +507,9 @@ struct ChatCompletionRequest: Sendable {
         }
         if let responsesToolChoice {
             data["tool_choice"] = responsesToolChoice
+        }
+        if let parallelToolCalls {
+            data["parallel_tool_calls"] = parallelToolCalls
         }
 
         if let params, !params.isEmpty {

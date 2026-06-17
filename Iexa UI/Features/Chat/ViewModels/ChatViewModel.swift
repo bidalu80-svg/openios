@@ -14475,6 +14475,7 @@ final class ChatViewModel {
             if shouldUseLocalAlpineNativeTools(for: request.model), request.tools == nil, !nativeToolsDisabled {
                 request.tools = Self.localAlpineNativeToolSchemas(includeMemoryTools: memoryEnabled)
                 request.toolChoice = "auto"
+                request.parallelToolCalls = true
             }
             if var modelItem = request.modelItem,
                var info = modelItem["info"] as? [String: Any],
@@ -14524,6 +14525,7 @@ final class ChatViewModel {
                 includeMemoryTools: shouldExposeMemoryTools
             )
             request.toolChoice = "auto"
+            request.parallelToolCalls = true
         }
 
         if let fc = selectedModel?.functionCallingMode, fc == "native", !localAlpineClientSideTask {
@@ -14595,6 +14597,7 @@ final class ChatViewModel {
         request.toolChoice = "none"
         request.responsesTools = nil
         request.responsesToolChoice = "none"
+        request.parallelToolCalls = nil
         request.toolIds = []
         request.skillIds = []
         request.toolServers = []
@@ -14706,6 +14709,7 @@ final class ChatViewModel {
         if request.responsesToolChoice == nil {
             request.responsesToolChoice = "auto"
         }
+        request.parallelToolCalls = true
     }
 
     private func shouldEnableOpenAIResponsesImageGenerationTool(modelId: String) -> Bool {
