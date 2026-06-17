@@ -1581,6 +1581,9 @@ actor LocalAlpineAgentService {
            let object = try? JSONSerialization.jsonObject(with: data, options: []) {
             let commands = parseCommands(from: object)
             if !commands.isEmpty { return commands }
+            if let validationError = Self.firstCompatibilityValidationError(in: object) {
+                throw LocalAlpineAgentError.invalidToolCall(validationError)
+            }
             throw LocalAlpineAgentError.noCommands
         }
 
@@ -1814,6 +1817,221 @@ actor LocalAlpineAgentService {
         }
 
         return nil
+    }
+
+    private nonisolated static func firstCompatibilityValidationError(in object: Any) -> String? {
+        if let array = object as? [Any] {
+            for item in array {
+                if let error = firstCompatibilityValidationError(in: item) {
+                    return error
+                }
+            }
+            return nil
+        }
+
+        guard let dict = object as? [String: Any] else { return nil }
+
+        if let error = compatibilityValidationError(in: dict) {
+            return error
+        }
+
+        if let nested = dict["iexa_alpine"],
+           let error = firstCompatibilityValidationError(in: nested) {
+            return error
+        }
+
+        for key in [
+            "toolUse", "tool_use", "toolCall", "tool_call",
+            "function_call", "functionCall", "tool_calls", "toolCalls", "calls",
+            "commands", "plan", "steps", "actions", "tasks", "run"
+        ] {
+            guard let value = dict[key],
+                  let error = firstCompatibilityValidationError(in: value) else {
+                continue
+            }
+            return error
+        }
+
+        return nil
+    }
+
+    private nonisolated static func compatibilityValidationError(in dict: [String: Any]) -> String? {
+        guard let invocation = normalizedCompatibilityInvocation(from: dict) else {
+            return nil
+        }
+        let missing = missingRequiredCompatibilityParameters(
+            for: invocation.canonicalTool,
+            arguments: invocation.arguments
+        )
+        guard !missing.isEmpty else { return nil }
+
+        let toolName = invocation.canonicalTool
+        let missingList = missing.joined(separator: ", ")
+        if invocation.arguments.isEmpty {
+            return "工具 `\(toolName)` 收到空 arguments {}，缺少必填参数：\(missingList)。"
+        }
+        return "工具 `\(toolName)` 缺少必填参数：\(missingList)。"
+    }
+
+    private nonisolated static func normalizedCompatibilityInvocation(
+        from dict: [String: Any]
+    ) -> (canonicalTool: String, arguments: [String: Any])? {
+        if let rawTool = stringValue(dict["tool"] ?? dict["function"] ?? dict["action"] ?? dict["name"])?
+            .trimmingCharacters(in: .whitespacesAndNewlines) {
+            let normalizedTool = normalizeCompatibleToolName(rawTool)
+            let canonicalTool = canonicalCompatibilityToolName(normalizedTool)
+            guard knownStructuredToolNames.contains(normalizedTool) else { return nil }
+
+            let rawArguments = dict["arguments"] ?? dict["args"] ?? dict["input"] ?? dict["parameters"] ?? dict
+            let arguments = repairedToolArguments(
+                dictionaryValue(rawArguments) ?? ["value": rawArguments],
+                for: normalizedTool
+            )
+            return (canonicalTool, arguments)
+        }
+
+        if let rawOperation = stringValue(dict["op"] ?? dict["operation"])?
+            .trimmingCharacters(in: .whitespacesAndNewlines) {
+            let normalizedTool = normalizeCompatibleToolName(rawOperation)
+            guard knownStructuredToolNames.contains(normalizedTool) else { return nil }
+            return (
+                canonicalCompatibilityToolName(normalizedTool),
+                repairedToolArguments(dict, for: normalizedTool)
+            )
+        }
+
+        for key in [
+            "read_file", "read_files", "read", "cat", "open_file", "file_read",
+            "read_image", "image_read", "inspect_image",
+            "write_file", "write_files", "write", "create_file", "create_files", "save_file", "save_files", "file_write",
+            "edit_file", "edit_files", "edit", "replace_file", "file_edit",
+            "patch_file", "patch_files", "apply_patch", "patch",
+            "delete_file", "delete_files", "delete", "remove_file", "remove_files", "rm", "rmdir", "file_delete",
+            "list_dir", "list", "ls", "file_list", "directory_list",
+            "glob", "find", "glob/find", "find_files",
+            "grep", "search", "search_files", "file_search",
+            "verify", "check",
+            "browser_use", "browser", "browse", "web_fetch", "fetch_url", "open_url",
+            "command", "cmd", "shell", "bash", "exec", "run", "shell_execute",
+            "move_file", "rename_file", "copy_file",
+            "append", "append_file", "append_and_read",
+            "mkdir", "delete_dir", "remove_dir"
+        ] where dict[key] != nil {
+            let normalizedTool = normalizeCompatibleToolName(key)
+            let rawArguments = dict[key]!
+            let arguments = repairedToolArguments(
+                dictionaryValue(rawArguments) ?? ["value": rawArguments],
+                for: normalizedTool
+            )
+            return (canonicalCompatibilityToolName(normalizedTool), arguments)
+        }
+
+        return nil
+    }
+
+    private nonisolated static func canonicalCompatibilityToolName(_ tool: String) -> String {
+        switch tool {
+        case "bash", "shell", "sh", "exec", "run", "command", "shell_execute":
+            return "shell_execute"
+        case "read", "read_file", "read_files", "cat", "open_file", "file_read":
+            return "file_read"
+        case "read_image", "image_read", "inspect_image":
+            return "read_image"
+        case "write", "write_file", "write_files", "create_file", "create_files", "save_file", "save_files", "file_write":
+            return "file_write"
+        case "edit", "edit_file", "edit_files", "replace_file", "file_edit":
+            return "file_edit"
+        case "patch", "patch_file", "patch_files", "apply_patch":
+            return "patch_file"
+        case "delete", "delete_file", "delete_files", "remove_file", "remove_files", "rm", "rmdir", "file_delete":
+            return "delete_file"
+        case "list", "list_dir", "ls", "file_list", "directory_list":
+            return "list_dir"
+        case "glob", "find", "glob/find", "find_files":
+            return "glob"
+        case "grep", "search", "search_files", "file_search":
+            return "grep"
+        case "verify", "check":
+            return "verify"
+        case "browser_use", "browser", "browse", "web_fetch", "fetch_url", "open_url":
+            return "browser_use"
+        case "move_file", "rename_file":
+            return "move_file"
+        case "copy_file":
+            return "copy_file"
+        case "append", "append_file", "append_and_read":
+            return "append_file"
+        case "mkdir":
+            return "mkdir"
+        case "delete_dir", "remove_dir":
+            return "delete_dir"
+        default:
+            return tool
+        }
+    }
+
+    private nonisolated static func missingRequiredCompatibilityParameters(
+        for tool: String,
+        arguments: [String: Any]
+    ) -> [String] {
+        let requiredGroups: [[String]]
+        switch tool {
+        case "shell_execute":
+            requiredGroups = [["command"]]
+        case "file_read", "read_image", "delete_file", "mkdir", "delete_dir":
+            requiredGroups = [["path"]]
+        case "file_write", "append_file":
+            requiredGroups = [
+                ["path"],
+                ["content", "text", "body", "line", "append", "rewrite", "content_lines", "code_lines", "lines", "append_lines", "rewrite_lines", "content_base64", "append_base64", "base64"]
+            ]
+        case "file_edit":
+            requiredGroups = [
+                ["path"],
+                ["old_string", "old_text", "old", "find", "search", "before", "from", "match", "replace", "old_text_base64", "old_base64"],
+                ["new_string", "new_text", "new", "with", "to", "replacement", "after", "replace", "text", "new_text_base64", "new_base64"]
+            ]
+        case "patch_file":
+            requiredGroups = [["patch", "patch_lines", "diff", "diff_lines"]]
+        case "glob", "grep":
+            requiredGroups = [["pattern"]]
+        case "browser_use":
+            requiredGroups = [["url"]]
+        case "move_file", "copy_file":
+            requiredGroups = [["from"], ["to"]]
+        default:
+            requiredGroups = []
+        }
+
+        return requiredGroups.compactMap { group in
+            group.contains { hasNonEmptyCompatibilityArgument($0, in: arguments) } ? nil : group.first
+        }
+    }
+
+    private nonisolated static func hasNonEmptyCompatibilityArgument(
+        _ key: String,
+        in arguments: [String: Any]
+    ) -> Bool {
+        guard let value = arguments[key] else { return false }
+        switch value {
+        case let string as String:
+            return !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case let array as [Any]:
+            return array.contains { element in
+                switch element {
+                case let string as String:
+                    return !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                default:
+                    return true
+                }
+            }
+        case let dict as [String: Any]:
+            return !dict.isEmpty
+        case is NSNull:
+            return false
+        default:
+            return true
+        }
     }
 
     private func parseCompatibleToolEnvelopeValue(_ value: Any) -> [LocalAlpineAgentCommand]? {
@@ -7299,11 +7517,14 @@ private enum LocalAlpineAgentEditError: LocalizedError {
 
 private enum LocalAlpineAgentError: LocalizedError {
     case noCommands
+    case invalidToolCall(String)
 
     var errorDescription: String? {
         switch self {
         case .noCommands:
             return "没有找到可执行的 Alpine 命令。"
+        case .invalidToolCall(let detail):
+            return detail
         }
     }
 }
