@@ -2118,9 +2118,9 @@ final class ChatViewModel {
 
     private static let localAlpineToolCapabilities: [LocalAlpineToolCapability] = [
         LocalAlpineToolCapability(
-            name: "read_file",
+            name: "file_read",
             description: "Read workspace/rootfs text files without shell parsing. Defaults to returning the whole file up to the app safety cap; use ranges only for very large files or targeted inspection.",
-            arguments: ["path", "start_line?/offset?", "line_count?/lines?", "max_bytes?/max_length?", "alias: file_read"]
+            arguments: ["path", "offset?/lines?/max_length?", "aliases: read_file/read_files"]
         ),
         LocalAlpineToolCapability(
             name: "read_image",
@@ -2128,9 +2128,9 @@ final class ChatViewModel {
             arguments: ["path", "aliases: image_read/inspect_image"]
         ),
         LocalAlpineToolCapability(
-            name: "edit_file",
+            name: "file_edit",
             description: "Modify an existing file by exact same-path replacements.",
-            arguments: ["path", "old_text/old_string", "new_text/new_string", "replacements?", "replace_all?", "expected_count?", "alias: file_edit"]
+            arguments: ["path", "old_text/old_string", "new_text/new_string", "replace_all?", "aliases: edit_file/edit_files"]
         ),
         LocalAlpineToolCapability(
             name: "patch_file",
@@ -2138,9 +2138,9 @@ final class ChatViewModel {
             arguments: ["path", "patch or patch_lines"]
         ),
         LocalAlpineToolCapability(
-            name: "write_files",
+            name: "file_write",
             description: "Create files or perform complete same-path rewrites.",
-            arguments: ["path/file_path", "content/code_lines/content_lines/content_base64", "aliases: write_file/create_file/create_files/file_write"]
+            arguments: ["path/file_path", "content/code_lines/content_lines/content_base64", "aliases: write_file/write_files/create_file/create_files"]
         ),
         LocalAlpineToolCapability(
             name: "delete_file",
@@ -2168,9 +2168,9 @@ final class ChatViewModel {
             arguments: ["path? or command/cmd", "cwd?"]
         ),
         LocalAlpineToolCapability(
-            name: "command",
+            name: "shell_execute",
             description: "Run one bounded shell command for list/search/run/install/build/test/verify.",
-            arguments: ["command/cmd/shell/bash/exec/run/shell_execute", "cwd/workdir/working_dir/directory/dir?", "delay/delay_seconds?"]
+            arguments: ["command/cmd/shell/bash/exec/run", "cwd/workdir/working_dir/directory/dir?", "delay/delay_seconds?"]
         ),
         LocalAlpineToolCapability(
             name: "browser_use",
