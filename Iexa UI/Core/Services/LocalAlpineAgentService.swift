@@ -1501,6 +1501,8 @@ actor LocalAlpineAgentService {
     }
 
     private nonisolated static func toolCallStart(_ context: LocalAlpineToolCallContext) -> LocalAlpineToolCall {
+        let browserURL = inferredBrowserURL(for: context)
+        let imageFilePath = inferredImageFilePath(for: context)
         return LocalAlpineToolCall(
             id: context.id,
             runId: context.runId,
@@ -1516,6 +1518,8 @@ actor LocalAlpineAgentService {
             lineDelta: nil,
             startedAtMs: context.startedAtMs,
             completedAtMs: nil,
+            browserURL: browserURL,
+            imageFilePath: imageFilePath,
             failed: false
         )
     }
@@ -1534,6 +1538,8 @@ actor LocalAlpineAgentService {
                 previewLimit: LocalAlpineToolCall.outputPreviewLimit(for: context.name)
             )
         }
+        let browserURL = inferredBrowserURL(for: context)
+        let imageFilePath = inferredImageFilePath(for: context)
         return LocalAlpineToolCall(
             id: context.id,
             runId: context.runId,
@@ -1552,8 +1558,45 @@ actor LocalAlpineAgentService {
             lineDelta: lineDelta?.isEmpty == true ? nil : lineDelta,
             startedAtMs: context.startedAtMs,
             completedAtMs: Self.nowMs(),
+            browserURL: browserURL,
+            imageFilePath: imageFilePath,
             failed: failed
         )
+    }
+
+    private nonisolated static func inferredBrowserURL(for context: LocalAlpineToolCallContext) -> String? {
+        let explicitCandidates = [
+            context.detail,
+            context.command ?? ""
+        ]
+        for candidate in explicitCandidates {
+            if let url = firstHTTPURL(in: candidate) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func inferredImageFilePath(for context: LocalAlpineToolCallContext) -> String? {
+        context.filePaths.first(where: pathLooksLikeImage(_:))
+    }
+
+    private nonisolated static func firstHTTPURL(in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"https?://[^\s"'`<>()\[\]{}]+"#,
+            options: [.caseInsensitive]
+        ) else {
+            return nil
+        }
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        guard let match = regex.firstMatch(in: text, range: range) else { return nil }
+        return nsText.substring(with: match.range)
+    }
+
+    private nonisolated static func pathLooksLikeImage(_ value: String) -> Bool {
+        let ext = (value as NSString).pathExtension.lowercased()
+        return ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "avif"].contains(ext)
     }
 
     private nonisolated static func nowMs() -> Int64 {
