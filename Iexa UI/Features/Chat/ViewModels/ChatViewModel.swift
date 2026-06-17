@@ -2296,6 +2296,7 @@ final class ChatViewModel {
         - Workspace: `/mnt/iexa`; relative paths resolve there.
         - Shell: Alpine Linux BusyBox/ash. Use `apk add --no-cache` for missing OS packages; never use apt/brew/sudo/systemctl/macOS/Windows commands.
         - Rootfs paths such as `/bin`, `/etc`, `/usr`, `/lib`, `/var`, `/tmp`, `/root`, and `/home` are inside Local Alpine. Search `/mnt/iexa` first for user files unless runtime inspection is requested.
+        - iOS background execution is limited. Keep long jobs resumable, write progress/results under `/mnt/iexa`, and do not promise Android-style foreground-service/WakeLock behavior. If the app is backgrounded for too long, continue from saved files/results when it returns.
 
         Tool rules:
         - Always fill `tool_title`, under 24 characters, user-facing, action-oriented, and in the user's language.
@@ -2725,6 +2726,17 @@ final class ChatViewModel {
         let earlierTurnHistory = Self.localAlpineCompactTurnHistory(
             selectedAlpineMessages.dropLast(detailedAlpineMessages.count)
         )
+        let priorTurnHistory: String? = {
+            guard currentTurnAlpineMessages.isEmpty,
+                  alpineMessages.count > detailedAlpineMessages.count else {
+                return nil
+            }
+            let priorCount = alpineMessages.count - detailedAlpineMessages.count
+            guard priorCount > 0 else { return nil }
+            return Self.localAlpineCompactTurnHistory(
+                alpineMessages.prefix(priorCount).suffix(8)
+            )
+        }()
 
         let blocks = detailedAlpineMessages.map { message -> String in
             let metadata = message.metadata ?? [:]
@@ -2840,11 +2852,15 @@ final class ChatViewModel {
         [Local Alpine execution state]
         The iOS host app simulates a Codex CLI tool loop. A fenced `iexa_alpine` block is the local tool_use, and each Local Alpine result below is the tool_result/observation. This state is real host-side execution state, even if the command block itself is no longer visible in chat.
 
+        \(priorTurnHistory.map { "Recent Local Alpine history from earlier user turns (compact):\n\($0)\n" } ?? "")
+
         \(earlierTurnHistory.map { "Earlier steps in the current user turn (compact):\n\($0)\n" } ?? "")
 
         \(blocks.joined(separator: "\n\n"))
 
         Rules for this state:
+        - This is the same chat, not a new conversation. Use the normal chat messages plus the Local Alpine observations above as memory. Never tell the user you cannot know which file, command, result, or task was just discussed when it is present here.
+        - If there are no current-turn Local Alpine observations yet, treat the recent earlier-turn history as context for follow-up questions such as "刚刚那个", "继续", "再跑", "你记得吗", or "读哪个文件". Continue from that state unless the user clearly starts a different task.
         - If state is running, tell the user the Local Alpine command is still running or ask whether to stop it; do not apologize that no executable block was emitted.
         - If result output is present, answer from that output as the source of truth.
         - Follow controller_verdict: `needs_next_tool_*` means continue with exactly one new `iexa_alpine` block; `ready_for_final_summary` means stop tool use and summarize; `tool_running` means wait or report running status.
@@ -16082,20 +16098,11 @@ final class ChatViewModel {
         includeShortcutsTools: Bool,
         includeMemoryTools: Bool
     ) -> String {
-        let calendar = Calendar.current
         let now = Date()
-        let startOfToday = calendar.startOfDay(for: now)
-        let endOfToday = calendar.date(byAdding: .day, value: 1, to: startOfToday)
-            ?? startOfToday.addingTimeInterval(86_400)
-        let exampleEventEnd = calendar.date(byAdding: .hour, value: 1, to: now)
-            ?? now.addingTimeInterval(3_600)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         formatter.timeZone = .current
         let nowText = formatter.string(from: now)
-        let todayStartText = formatter.string(from: startOfToday)
-        let todayEndText = formatter.string(from: endOfToday)
-        let exampleEndText = formatter.string(from: exampleEventEnd)
         let timezoneName = TimeZone.current.identifier
         let deviceToolDescriptions = includeDeviceTools
             ? ["device info", "clipboard", "local notifications", "location", "weather", "calendar"]
@@ -16168,106 +16175,28 @@ final class ChatViewModel {
 
         For memory actions, when real function tools are present, call `memory_write` to save a concise durable memory or `memory_get` to search stored memories. Use `memory_write` only for stable user preferences, recurring project context, reusable facts, or durable conventions. Use `memory_get` when the user asks what you remember or asks to recall prior context. Do not save secrets, passwords, tokens, or transient chat noise.
         """ : ""
-        let deviceActionExamples = includeDeviceTools ? """
-        ```iexa_native
-        {"action":"device.status"}
-        ```
-        ```iexa_native
-        {"action":"device.info"}
-        ```
-        ```iexa_native
-        {"action":"clipboard.read"}
-        ```
-        ```iexa_native
-        {"action":"clipboard.write","text":"要复制的文本"}
-        ```
-        ```iexa_native
-        {"action":"system.notify","title":"Iexa","body":"提醒内容"}
-        ```
-        ```iexa_native
-        {"action":"get_location"}
-        ```
-        ```iexa_native
-        {"action":"get_weather"}
-        ```
-        ```iexa_native
-        {"action":"list_calendar_events","start":"\(todayStartText)","end":"\(todayEndText)"}
-        ```
-        ```iexa_native
-        {"action":"create_calendar_event","title":"会议","start":"\(nowText)","end":"\(exampleEndText)","location":"办公室","description":"讨论项目","alert_minutes":10}
-        ```
-        ```iexa_native
-        {"action":"delete_calendar_event","id":"event-id-from-list"}
-        ```
-        """ : ""
-        let shortcutsActionExamples = includeShortcutsTools ? """
-        ```iexa_native
-        {"action":"shortcuts.run","name":"每日记账","input":"午餐 35 元"}
-        ```
-        ```iexa_native
-        {"action":"shortcuts.open","name":"每日记账"}
-        ```
-        ```iexa_native
-        {"action":"shortcuts.create"}
-        ```
-        """ : ""
-        let browserActionExamples = includeBrowserTools ? """
-        ```iexa_native
-        {"action":"web.search","query":"OpenAI 最新 Responses API 工具","limit":6,"screenshot":true}
-        ```
-        ```iexa_native
-        {"action":"browser.readable","url":"https://example.com/article","screenshot":true,"max_length":8000}
-        ```
-        ```iexa_native
-        {"action":"browser.screenshot","url":"https://example.com"}
-        ```
-        ```iexa_native
-        {"action":"browser.fetch","url":"https://example.com/file.pdf"}
-        ```
-        ```iexa_native
-        {"action":"browser_use","browser_use_action":"find_elements","url":"https://example.com","selector":"a, button, input"}
-        ```
-        ```iexa_native
-        {"action":"browser_use","browser_use_action":"click","selector":"button.primary"}
-        ```
-        """ : ""
-        let officeActionExamples = includeOfficeTools ? """
-        ```iexa_native
-        {"action":"office.create_excel","title":"销售周报","file_name":"销售周报.xlsx","sheets":[{"name":"汇总","headers":["指标","数值","备注"],"rows":[["销售额","128000","环比增长"],["订单数","342","本周新增"]]}]}
-        ```
-        ```iexa_native
-        {"action":"office.create_ppt","title":"产品介绍","file_name":"产品介绍.pptx","subtitle":"本地生成演示稿","theme":{"style":"deep_blue_tech","layout":"dashboard","decoration":"grid","background":"071326","background_2":"102A6B","surface":"12213D","accent":"22D3EE","text":"F8FAFC","subtle":"B6C6E3"},"slides":[{"layout":"cover","title":"产品介绍","subtitle":"2026 年规划"},{"layout":"dashboard","title":"核心能力","bullets":["本地自动化","多模型接入","文件生成"]},{"layout":"table","title":"计划","table":[["阶段","目标"],["MVP","生成并预览"],["增强","模板和图片"]]}]}
-        ```
-        ```iexa_native
-        {"action":"office.create_word","title":"产品方案","file_name":"产品方案.docx","subtitle":"本地生成文档","theme":{"style":"minimal","accent":"111827"},"sections":[{"heading":"背景","paragraphs":["目标用户需要一个本地优先的智能工作流。"]},{"heading":"核心能力","bullets":["多模型接入","本地文件生成","移动端预览和分享"]}]}
-        ```
-        ```iexa_native
-        {"action":"office.create_pdf","title":"项目汇报","file_name":"项目汇报.pdf","format":"slides","theme":{"style":"warm_business","layout":"split","decoration":"diagonal","background":"FFF7ED","background_2":"FED7AA","accent":"EA580C","text":"1F2937","subtle":"78716C"},"slides":[{"layout":"cover","title":"项目汇报","subtitle":"本地生成 PDF"},{"layout":"split","title":"关键进展","bullets":["目标清晰","风险可控","下一步明确"]}]}
-        ```
-        ```iexa_native
-        {"action":"office.delete","latest":true}
-        ```
-        """ : ""
-        let memoryActionExamples = includeMemoryTools ? """
-        ```iexa_native
-        {"action":"memory_write","content":"用户偏好用中文沟通，回答尽量简洁。"}
-        ```
-        ```iexa_native
-        {"action":"memory_get","keywords":"用户 偏好"}
-        ```
-        """ : ""
+        let deviceActionExamples = includeDeviceTools
+            ? "- device/status: `device.status`, `device.info`; clipboard: `clipboard.read`, `clipboard.write`; notification: `system.notify`; location/weather/calendar: `get_location`, `get_weather`, `list_calendar_events`, `create_calendar_event`, `delete_calendar_event`.\n"
+            : ""
+        let shortcutsActionExamples = includeShortcutsTools
+            ? "- Shortcuts: `shortcuts.run` with `name` and optional `input`; `shortcuts.open` with `name`; `shortcuts.create` only opens the system creation screen.\n"
+            : ""
+        let browserActionExamples = includeBrowserTools
+            ? "- Browser fallback actions: `web.search`, `browser.readable`, `browser.screenshot`, `browser.fetch`, and `browser_use` with `browser_use_action` plus fields such as `url`, `selector`, `text`, `script`, `tab_id`, `timeout`, `screenshot`, `max_length`.\n"
+            : ""
+        let officeActionExamples = includeOfficeTools
+            ? "- Office/PDF fallback actions: `office.create_excel`, `office.create_ppt`, `office.create_word`, `office.create_pdf`, `office.delete`. Include `title`, `file_name`, structured content (`sheets`, `slides`, or `sections`), optional `theme`, and for deletion `file_url` or `latest:true`.\n"
+            : ""
+        let memoryActionExamples = includeMemoryTools
+            ? "- Memory fallback actions: `memory_write` with `content`; `memory_get` with optional `keywords`.\n"
+            : ""
         let browserInstructions = includeBrowserTools ? """
 
-        For browser/web actions, when real function tools are present, call `web_search`, `browser_readable`, or `browser_use`; when using the Markdown fallback, emit `web.search`, `browser.readable`, or `browser_use` in the `iexa_native` JSON. Search before answering whenever the answer depends on information that may have changed after training or that you are not confident is still true: current/latest/recent facts, software/app/game versions, patch notes, releases, prices, stocks, laws/policies, schedules, sports, weather, news, rankings, product availability, official announcements, live website content, or "what is it now / has it changed / which version" style questions. If you are unsure whether your knowledge is stale, search first; do not wait for the user to literally say 搜、查、搜索, or 联网. Do not use the browser for stable writing, translation, math, coding, or brainstorming unless the user asks for current/source-backed information.
-        Use `web_search` / `web.search` when there is no exact URL. Use `browser_readable` / `browser.readable` when a URL is known or after search results need verification. Use `browser_use` for interactive page work: navigate, screenshot, click, type, hover, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, new_tab, close_tab, list_tabs, set_user_agent, set_viewport, get_cookies, wait_for_dom_stable, and execute_js. In Markdown fallback, keep the outer `action` as `browser_use` and put the real action in `browser_use_action`, for example `{"action":"browser_use","browser_use_action":"click","selector":"button"}`. Set `screenshot:true` when the user may benefit from seeing the page; Iexa will show a clickable webpage source card with thumbnail in the chat. Use `browser.screenshot` for visual page checks and `browser.fetch` for downloadable files. After Iexa appends the real browser result, answer from that result; cite page titles/URLs plainly and do not claim you cannot browse.
+        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when the answer depends on current/recent/external/source-backed facts or live website content. Use search when there is no exact URL, readable for a known URL or result verification, and `browser_use` for bounded interactive page work (navigate/screenshot/click/type/scroll/DOM/cookies/js). In Markdown fallback, keep `action:"browser_use"` and put the concrete action in `browser_use_action`. Set `screenshot:true` when visual evidence helps. Answer from the returned browser result and cite title/URL plainly.
         """ : ""
         let officeInstructions = includeOfficeTools ? """
 
-        For Office/PDF actions, when real function tools are present, call `office_create_excel`, `office_create_ppt`, `office_create_word`, `office_create_pdf`, or `office_delete`; when using the Markdown fallback, emit `office.create_excel`, `office.create_ppt`, `office.create_word`, `office.create_pdf`, or `office.delete` in the `iexa_native` JSON. For deletion/removal requests, call `office_delete` or emit `office.delete` with `file_url` from the latest Office context when available, or `latest:true` when the user says to delete the latest/刚刚那个; this deletes the generated Office/PDF artifact folder including previews and draft metadata. Build a concise structured draft from the user's natural language and attachments. Always translate visual requests into a concrete `theme`: `style`, `layout`, `decoration`, `background`, `background_2`, `surface`, `accent`, `text`, and `subtle`. Supported style/layout/decoration hints include `deep_blue_tech`, `minimal`, `dark`, `warm_business`, `green`, `violet`, `editorial`, `luxury`, `playful`, `split`, `centered`, `card`, `dashboard`, `poster`, `sidebar`, `diagonal`, `circle`, `grid`, `dots`, `frame`, and `wave`. For "黑金", "金色商务", "高级商务", "奢华", or "premium/luxury", use `style:"luxury"` with a near-black `background`, a second dark `background_2`, gold `accent`, light `text`, and `decoration:"frame"` or `layout:"poster"`/`card`; never output a white minimal Word/PPT/PDF for those requests. If the user attaches a screenshot/template image, inspect it and approximate its visual fingerprint: dominant colors, dark/light mood, title placement, card/sidebar/split/dashboard/poster composition, border/shape/grid/dot/circle/wave decoration, and typography density. Put that fingerprint into `theme` and per-slide `layout`; do not reuse the default blue template when a different visual style was requested. If exact screenshot replication is impossible, still generate the closest local approximation instead of saying the tool cannot do it.
-
-        If a `[Latest local Office document for revision]` context is present and the user asks to modify, regenerate, restyle, improve, rewrite, or "改方案/换方案/按这个改", you must call a fresh Office/PDF function tool or emit a fresh Office/PDF `iexa_native` block using the previous structured draft as the base. Preserve useful existing content, apply the requested changes, and generate a new file. Do not answer with only a plan, explanation, or promise.
-
-        For PDF, use `office.create_pdf`; use `format:"slides"` with `slides` for deck-like PDFs, `format:"document"` with `sections` for report-like PDFs, or sheets/rows for table PDFs. If the user asks to convert the latest generated Office file to PDF, emit `office.create_pdf`; include the latest file URL as `source_url` when it is visible in context, otherwise the app will use the most recent local Office result automatically. If a key requirement is missing, choose a safe default instead of asking many setup questions. After Iexa appends the native tool result, continue from that real result and answer normally. If permissions are denied, location is not ready, notification permission is disabled, WeatherKit entitlement is unavailable, or Office/PDF generation fails, explain the exact local permission/state issue.
+        For Office/PDF actions, call real function tools (`office_create_excel`, `office_create_ppt`, `office_create_word`, `office_create_pdf`, `office_delete`) when present, otherwise emit one `iexa_native` fallback action. For deletion/removal, use `file_url` from the latest Office context or `latest:true` for "刚刚那个/latest"; deletion removes the generated artifact folder, previews, and draft metadata. For create/regenerate/modify requests, build a concise structured draft with `title`, `file_name`, content (`sheets`, `slides`, or `sections`), and a concrete `theme` when visual style matters. Preserve prior draft content for revisions, apply the requested changes, and generate a new file instead of answering with only a plan. For luxury/black-gold/premium requests, use dark background plus gold accent; for screenshot/template requests, approximate colors, layout, density, and decoration. For PDF choose `format:"slides"` or `format:"document"`; use `source_url` when converting a visible latest Office file. After the tool result returns, answer from that result and explain exact local permission/state failures when any tool fails.
         """ : ""
         let shortcutsInstructions = includeShortcutsTools ? """
 
@@ -16311,6 +16240,7 @@ final class ChatViewModel {
         - Unsupported command families here: `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, and macOS-only utilities. Translate those intentions to Alpine/BusyBox equivalents.
         - Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, and `/var` are system paths. Inspect them when useful; do not edit them except through package-manager operations or explicit user requests.
         - Do not check `/mnt/iexa/rootfs` unless the user explicitly created that folder; the Local Alpine commands already execute inside the Alpine rootfs.
+        - iOS background execution is limited. Keep long jobs resumable, write progress/results under `/mnt/iexa`, and do not promise Android-style foreground-service/WakeLock behavior. If the app is backgrounded for too long, continue from saved files/results when it returns.
 
         Tool-selection policy:
         - Use the tool only for explicit operation requests that require current local state or mutation: read/list/search files, create/edit/delete/rename/move/copy files, install dependencies, run/test/build/compile/debug/fix code, inspect the Alpine environment, fetch/scrape a URL from the local shell, or verify real output.

@@ -1500,7 +1500,7 @@ struct ChatDetailView: View {
     @State private var agentFloatingLoadingPath: String?
     @State private var hideAgentFloatingBarForKeyboard = false
     @State private var suppressStaleAgentFloatingBarAfterKeyboard = false
-    @State private var pendingAgentFloatingBarResumeAfterKeyboard = false
+    @State private var pendingNewAgentFloatingSnapshotAfterKeyboard: AgentActivityItem?
     @State private var agentFloatingKeyboardHideGeneration = 0
 
     private var toolbarControlsMinWidth: CGFloat {
@@ -1662,37 +1662,6 @@ struct ChatDetailView: View {
         }
 
         return context
-    }
-
-    private var agentActivityRefreshSignature: Int {
-        if hideAgentFloatingBarForKeyboard,
-           !hasActiveAgentFloatingActivity,
-           !pendingAgentFloatingBarResumeAfterKeyboard {
-            return viewModel.messages.count
-        }
-        var signature = viewModel.messages.count
-        for message in viewModel.messages.suffix(12) {
-            guard AgentActivityItem.isActivityMessage(message) else { continue }
-            signature &+= message.id.hashValue
-            signature &+= message.isStreaming ? 31 : 7
-            signature &+= message.statusHistory.count &* 13
-            if let metadata = message.metadata {
-                for key in [
-                    "iexa_local_alpine_tool_calls",
-                    "iexa_local_alpine_command_results",
-                    "iexa_local_alpine_written_files"
-                ] {
-                    if let value = metadata[key] {
-                        signature &+= key.hashValue
-                        signature &+= value.isEmpty ? 0 : 1
-                        signature &+= value.utf8.count &* 17
-                        signature &+= value.prefix(192).hashValue
-                        signature &+= value.suffix(192).hashValue
-                    }
-                }
-            }
-        }
-        return signature
     }
 
     private func agentActivity(for message: ChatMessage) -> AgentActivityItem? {
@@ -1957,23 +1926,6 @@ struct ChatDetailView: View {
         return item
     }
 
-    private var visibleAgentActivityWindowPreview: AgentActivityItem? {
-        guard !hideAgentFloatingBarForKeyboard else { return nil }
-        if let snapshot = agentFloatingActivitySnapshot,
-           snapshot.hasConcreteSteps {
-            return snapshot
-        }
-        if hasActiveAgentFloatingActivity {
-            return agentActivityWindowPreview(includeInactive: false)?
-                .limitingSteps(to: Self.agentFloatingPreviewStepLimit)
-        }
-        guard !suppressStaleAgentFloatingBarAfterKeyboard else {
-            return nil
-        }
-        return agentActivityWindowPreview(includeInactive: true)?
-            .limitingSteps(to: Self.agentFloatingPreviewStepLimit)
-    }
-
     private var hasActiveAgentFloatingActivity: Bool {
         viewModel.isStreaming || viewModel.streamingStore.isActive
     }
@@ -1982,15 +1934,23 @@ struct ChatDetailView: View {
         hideAgentFloatingBarForKeyboard
     }
 
-    private func refreshAgentFloatingActivitySnapshot(includeInactive: Bool) {
-        guard !hideAgentFloatingBarForKeyboard else { return }
+    private func refreshAgentFloatingActivitySnapshotFromLatestMessage() {
+        guard !keyboard.isVisible,
+              !hideAgentFloatingBarForKeyboard,
+              let message = viewModel.messages.last,
+              AgentActivityItem.isActivityMessage(message) else {
+            return
+        }
+        guard let item = agentActivity(for: message),
+              item.hasConcreteSteps,
+              !item.hasOnlyWebSearchStatusSteps else {
+            return
+        }
         if suppressStaleAgentFloatingBarAfterKeyboard,
-           includeInactive,
+           !item.isActive,
            !hasActiveAgentFloatingActivity {
             return
         }
-        guard let item = agentActivityWindowPreview(includeInactive: includeInactive),
-              item.hasConcreteSteps else { return }
         agentFloatingActivitySnapshot = item.limitingSteps(to: Self.agentFloatingPreviewStepLimit)
     }
 
@@ -2013,14 +1973,14 @@ struct ChatDetailView: View {
         }
 
         if keyboard.isVisible {
-            agentFloatingActivitySnapshot = nil
+            pendingNewAgentFloatingSnapshotAfterKeyboard = item
             suppressStaleAgentFloatingBarAfterKeyboard = true
             setAgentFloatingBarHiddenForKeyboard(true)
             return
         }
 
+        pendingNewAgentFloatingSnapshotAfterKeyboard = nil
         suppressStaleAgentFloatingBarAfterKeyboard = false
-        pendingAgentFloatingBarResumeAfterKeyboard = false
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -2496,6 +2456,7 @@ struct ChatDetailView: View {
         .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateCleared)) { notification in
             guard matchesAgentFloatingConversation(notification.userInfo?["conversationId"] as? String) else { return }
             agentFloatingActivitySnapshot = nil
+            pendingNewAgentFloatingSnapshotAfterKeyboard = nil
             suppressStaleAgentFloatingBarAfterKeyboard = true
             setAgentFloatingBarHiddenForKeyboard(true)
         }
@@ -3331,12 +3292,13 @@ struct ChatDetailView: View {
             guard new > old else { return }
             if viewModel.messages.last?.role == .user {
                 agentFloatingActivitySnapshot = nil
+                pendingNewAgentFloatingSnapshotAfterKeyboard = nil
                 resumeAgentFloatingBarForNewTask()
             } else {
-                if pendingAgentFloatingBarResumeAfterKeyboard || hasActiveAgentFloatingActivity {
+                if hasActiveAgentFloatingActivity {
                     resumeAgentFloatingBarForNewTask()
                 }
-                refreshAgentFloatingActivitySnapshot(includeInactive: !viewModel.isStreaming && !viewModel.streamingStore.isActive)
+                refreshAgentFloatingActivitySnapshotFromLatestMessage()
             }
         }
         // Auto-scroll only when the rendered transcript changes. This avoids
@@ -3397,7 +3359,6 @@ struct ChatDetailView: View {
         .onChange(of: viewModel.isStreaming) { _, streaming in
             if streaming && !isScrolledUp {
                 resumeAgentFloatingBarForNewTask()
-                refreshAgentFloatingActivitySnapshot(includeInactive: false)
                 // Already following the turn. If the keyboard is visible, or
                 // the assistant placeholder has not become visible yet, keep
                 // the user-sent turn start pinned instead of jumping to the
@@ -3411,22 +3372,11 @@ struct ChatDetailView: View {
                 } else {
                     scrollToLatestMessageWithoutAnimation(anchor: .bottom)
                 }
-            } else if !streaming {
-                if pendingAgentFloatingBarResumeAfterKeyboard {
-                    resumeAgentFloatingBarForNewTask()
-                }
-                refreshAgentFloatingActivitySnapshot(includeInactive: true)
             }
         }
         .onChange(of: viewModel.streamingStore.isActive) { _, active in
             if active {
                 resumeAgentFloatingBarForNewTask()
-                refreshAgentFloatingActivitySnapshot(includeInactive: false)
-            } else {
-                if pendingAgentFloatingBarResumeAfterKeyboard {
-                    resumeAgentFloatingBarForNewTask()
-                }
-                refreshAgentFloatingActivitySnapshot(includeInactive: true)
             }
         }
         // Resume auto-scroll: when the user scrolls back to the bottom
@@ -3656,7 +3606,7 @@ struct ChatDetailView: View {
         postSendWaitingUIDelayGeneration += 1
         isPostSendWaitingUIDelayed = false
         if keyboard.isVisible {
-            pendingAgentFloatingBarResumeAfterKeyboard = false
+            pendingNewAgentFloatingSnapshotAfterKeyboard = nil
             suppressStaleAgentFloatingBarAfterKeyboard = true
             agentFloatingActivitySnapshot = nil
             setAgentFloatingBarHiddenForKeyboard(true)
@@ -3680,10 +3630,10 @@ struct ChatDetailView: View {
 
     private func hideAgentFloatingBarForKeyboardWillShow() {
         agentFloatingKeyboardHideGeneration += 1
-        pendingAgentFloatingBarResumeAfterKeyboard = false
         suppressStaleAgentFloatingBarAfterKeyboard = !hasActiveAgentFloatingActivity
         if suppressStaleAgentFloatingBarAfterKeyboard {
             agentFloatingActivitySnapshot = nil
+            pendingNewAgentFloatingSnapshotAfterKeyboard = nil
         }
         setAgentFloatingBarHiddenForKeyboard(true)
     }
@@ -3691,20 +3641,39 @@ struct ChatDetailView: View {
     private func finishAgentFloatingBarKeyboardHide() {
         guard !keyboard.isVisible else { return }
         agentFloatingKeyboardHideGeneration += 1
-        pendingAgentFloatingBarResumeAfterKeyboard = false
+        if let pending = pendingNewAgentFloatingSnapshotAfterKeyboard,
+           pending.hasConcreteSteps {
+            let generation = agentFloatingKeyboardHideGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                guard agentFloatingKeyboardHideGeneration == generation,
+                      !keyboard.isVisible,
+                      pendingNewAgentFloatingSnapshotAfterKeyboard?.id == pending.id else {
+                    return
+                }
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    agentFloatingActivitySnapshot = pending
+                    pendingNewAgentFloatingSnapshotAfterKeyboard = nil
+                    suppressStaleAgentFloatingBarAfterKeyboard = false
+                    hideAgentFloatingBarForKeyboard = false
+                }
+            }
+            return
+        }
         suppressStaleAgentFloatingBarAfterKeyboard = true
         agentFloatingActivitySnapshot = nil
+        pendingNewAgentFloatingSnapshotAfterKeyboard = nil
         setAgentFloatingBarHiddenForKeyboard(true)
     }
 
     private func resumeAgentFloatingBarForNewTask() {
         suppressStaleAgentFloatingBarAfterKeyboard = false
         agentFloatingActivitySnapshot = nil
+        pendingNewAgentFloatingSnapshotAfterKeyboard = nil
         if keyboard.isVisible {
-            pendingAgentFloatingBarResumeAfterKeyboard = false
             setAgentFloatingBarHiddenForKeyboard(true)
         } else {
-            pendingAgentFloatingBarResumeAfterKeyboard = false
             setAgentFloatingBarHiddenForKeyboard(false)
         }
     }
@@ -3720,7 +3689,7 @@ struct ChatDetailView: View {
 
     private func forceDismissInputAfterSend() {
         if keyboard.isVisible {
-            pendingAgentFloatingBarResumeAfterKeyboard = false
+            pendingNewAgentFloatingSnapshotAfterKeyboard = nil
             suppressStaleAgentFloatingBarAfterKeyboard = true
             agentFloatingActivitySnapshot = nil
             setAgentFloatingBarHiddenForKeyboard(true)
@@ -4128,38 +4097,14 @@ struct ChatDetailView: View {
     private func agentStepPreview(for message: ChatMessage, fallbackItem: AgentActivityItem? = nil) -> some View {
         let fallbackItem = fallbackItem ?? agentActivity(for: message)
         if isLocalAlpineResultMessage(message) || fallbackItem?.hasConcreteSteps == true {
-            if shouldUseLiveAgentStepHost(for: message, fallbackItem: fallbackItem) {
-                AgentInlineStepsHost(
-                    conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
-                    messageId: message.id,
-                    fallbackItem: fallbackItem,
-                    liveSnapshot: {
-                        (
-                            viewModel.localAlpineLiveToolCalls(for: message.id),
-                            viewModel.localAlpineLiveToolStatus(for: message.id)
-                        )
-                    }
-                )
-                .padding(.horizontal, Spacing.screenPadding)
-                .padding(.top, Spacing.xs)
-            } else if let fallbackItem,
-                      fallbackItem.hasConcreteSteps,
-                      !fallbackItem.hasOnlyWebSearchStatusSteps {
+            if let fallbackItem,
+               fallbackItem.hasConcreteSteps,
+               !fallbackItem.hasOnlyWebSearchStatusSteps {
                 AgentInlineStepsView(item: fallbackItem)
                     .padding(.horizontal, Spacing.screenPadding)
                     .padding(.top, Spacing.xs)
             }
         }
-    }
-
-    private func shouldUseLiveAgentStepHost(
-        for message: ChatMessage,
-        fallbackItem: AgentActivityItem?
-    ) -> Bool {
-        isMessageVisuallyStreaming(message)
-            || fallbackItem?.isActive == true
-            || viewModel.localAlpineLiveToolStatus(for: message.id) != nil
-            || !viewModel.localAlpineLiveToolCalls(for: message.id).isEmpty
     }
 
     private func isLocalNativeResultMessage(_ message: ChatMessage) -> Bool {
@@ -7914,6 +7859,11 @@ private struct IsolatedAssistantMessage: View {
 
     private static func requiresFullAssistantRouting(_ text: String) -> Bool {
         guard !text.isEmpty else { return false }
+        guard text.contains("@@@VIZ-START")
+            || text.contains("<")
+            || text.contains("◁") else {
+            return false
+        }
         let lower = text.lowercased()
         return lower.contains("@@@viz-start")
             || lower.contains("<details")
@@ -7962,6 +7912,12 @@ private struct IsolatedAssistantMessage: View {
 
     private static func mayContainReasoningMarkup(_ content: String) -> Bool {
         guard !content.isEmpty else { return false }
+        guard content.contains("<")
+            || content.contains("◁")
+            || content.contains("|begin_of_thought|")
+            || content.contains("|end_of_thought|") else {
+            return false
+        }
         let lower = content.lowercased()
         return lower.contains("<details")
             || lower.contains("<think")
@@ -8624,134 +8580,6 @@ private struct AgentInlineStepsView: View {
             transaction.animation = nil
         }
         .accessibilityLabel("步骤")
-    }
-}
-
-private struct AgentInlineStepsHost: View {
-    let conversationId: String?
-    let messageId: String
-    let fallbackItem: AgentActivityItem?
-    let liveSnapshot: () -> ([LocalAlpineToolCall], ChatStatusUpdate?)
-
-    @State private var liveCalls: [LocalAlpineToolCall] = []
-    @State private var liveStatus: ChatStatusUpdate?
-    @State private var hasLiveState = false
-    @State private var cachedDisplayItem: AgentActivityItem?
-
-    private var liveItem: AgentActivityItem? {
-        guard hasLiveState else { return nil }
-        return AgentActivityItem.liveLocalAlpine(
-            messageId: messageId,
-            toolCalls: liveCalls,
-            liveStatus: liveStatus
-        )
-    }
-
-    private var displayItem: AgentActivityItem? {
-        if let liveItem,
-           liveItem.hasConcreteSteps {
-            if liveItem.isActive {
-                return liveItem
-            }
-            if let fallbackItem,
-               fallbackItem.hasConcreteSteps,
-               fallbackItem.totalStepCount >= liveItem.totalStepCount {
-                return fallbackItem
-            }
-            return liveItem
-        }
-        guard fallbackItem?.hasConcreteSteps == true else { return nil }
-        return fallbackItem
-    }
-
-    private var renderItem: AgentActivityItem? {
-        displayItem ?? cachedDisplayItem
-    }
-
-    private var displayItemSignature: Int {
-        guard let item = displayItem else { return 0 }
-        var signature = item.id.hashValue
-        signature &+= item.steps.count &* 31
-        signature &+= item.currentStep?.id.hashValue ?? 0
-        signature &+= item.isActive ? 17 : 3
-        signature &+= item.hasFailure ? 23 : 5
-        signature &+= item.currentStep?.outputPreview.utf8.count ?? 0
-        signature &+= item.currentPreviewText.utf8.count &* 7
-        return signature
-    }
-
-    var body: some View {
-        Group {
-            if let item = renderItem,
-               item.hasConcreteSteps,
-               !item.hasOnlyWebSearchStatusSteps {
-                AgentInlineStepsView(item: item)
-            }
-        }
-        .onAppear {
-            refreshLiveStateFromSnapshot()
-            updateCachedDisplayItem()
-        }
-        .onChange(of: displayItemSignature) { _, _ in
-            updateCachedDisplayItem()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateUpdated)) { notification in
-            applyLiveToolNotification(notification)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateCleared)) { notification in
-            guard matchesConversation(notification.userInfo?["conversationId"] as? String) else { return }
-            clearLiveState()
-        }
-        .onChange(of: conversationId) { _, _ in
-            clearLiveState()
-            cachedDisplayItem = nil
-        }
-    }
-
-    private func updateCachedDisplayItem() {
-        guard let displayItem,
-              displayItem.hasConcreteSteps,
-              !displayItem.hasOnlyWebSearchStatusSteps else {
-            return
-        }
-        cachedDisplayItem = displayItem
-    }
-
-    private func refreshLiveStateFromSnapshot() {
-        let snapshot = liveSnapshot()
-        guard !snapshot.0.isEmpty || snapshot.1 != nil else { return }
-        liveCalls = snapshot.0
-        liveStatus = snapshot.1
-        hasLiveState = true
-    }
-
-    private func applyLiveToolNotification(_ notification: Notification) {
-        guard matchesConversation(notification.userInfo?["conversationId"] as? String),
-              notification.userInfo?["messageId"] as? String == messageId else {
-            return
-        }
-
-        let cleared = notification.userInfo?["cleared"] as? Bool ?? false
-        if cleared {
-            clearLiveState()
-            return
-        }
-
-        liveCalls = notification.userInfo?["calls"] as? [LocalAlpineToolCall] ?? []
-        liveStatus = notification.userInfo?["status"] as? ChatStatusUpdate
-        hasLiveState = !liveCalls.isEmpty || liveStatus != nil
-    }
-
-    private func matchesConversation(_ incomingConversationId: String?) -> Bool {
-        let current = conversationId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let incoming = incomingConversationId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return current.isEmpty || incoming.isEmpty || current == incoming
-    }
-
-    private func clearLiveState() {
-        liveCalls.removeAll()
-        liveStatus = nil
-        hasLiveState = false
     }
 }
 
