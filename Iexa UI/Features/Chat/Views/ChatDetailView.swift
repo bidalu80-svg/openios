@@ -1585,32 +1585,47 @@ struct ChatDetailView: View {
         for message in messages {
             signature &+= message.id.hashValue
             signature &+= message.role.rawValue.hashValue
-            signature &+= message.content.utf8.count &* 3
-            signature &+= message.content.prefix(192).hashValue
-            signature &+= message.content.suffix(192).hashValue
+            signature &+= Self.lightweightTranscriptTextSignature(message.content)
             signature &+= message.isStreaming ? 17 : 5
             signature &+= message.model?.hashValue ?? 0
             signature &+= message.statusHistory.count &* 13
             if let latestStatus = message.statusHistory.last {
                 signature &+= latestStatus.action?.hashValue ?? 0
-                signature &+= latestStatus.description?.utf8.count ?? 0
+                signature &+= Self.lightweightTranscriptTextSignature(latestStatus.description ?? "")
                 signature &+= latestStatus.done == true ? 11 : 3
                 signature &+= latestStatus.hidden == true ? 19 : 7
             }
             signature &+= message.files.count &* 17
-            signature &+= message.error?.content?.utf8.count ?? 0
+            signature &+= Self.lightweightTranscriptTextSignature(message.error?.content ?? "")
             if let metadata = message.metadata {
                 signature &+= metadata.count &* 19
                 for key in Self.transcriptMetadataSignatureKeys {
                     guard let value = metadata[key] else { continue }
                     signature &+= key.hashValue
                     signature &+= value.isEmpty ? 0 : 1
-                    signature &+= value.utf8.count &* 17
-                    signature &+= value.prefix(192).hashValue
-                    signature &+= value.suffix(192).hashValue
+                    signature &+= Self.lightweightTranscriptTextSignature(value)
                 }
             }
         }
+        return signature
+    }
+
+    private static func lightweightTranscriptTextSignature(
+        _ text: String,
+        sampleBytes: Int = 32
+    ) -> Int {
+        guard !text.isEmpty else { return 0 }
+        var signature = text.utf8.count &* 17
+        var head = 0
+        for byte in text.utf8.prefix(sampleBytes) {
+            head = (head &* 31) &+ Int(byte)
+        }
+        var tail = 0
+        for byte in text.utf8.suffix(sampleBytes) {
+            tail = (tail &* 31) &+ Int(byte)
+        }
+        signature &+= head
+        signature &+= tail &* 7
         return signature
     }
 

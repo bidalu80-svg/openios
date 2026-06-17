@@ -944,14 +944,74 @@ final class ChatViewModel {
     }
 
     /// Rehydrates the stream display after returning from the background.
-    func restoreLifecycleConversationSnapshot() {
-        guard streamingStore.isActive,
-              let messageId = streamingStore.streamingMessageId,
-              let message = conversation?.messages.first(where: { $0.id == messageId }),
-              !message.content.isEmpty
-        else { return }
+    func restoreLifecycleConversationSnapshot(backgroundDuration: TimeInterval? = nil) {
+        if streamingStore.isActive,
+           let messageId = streamingStore.streamingMessageId,
+           let message = conversation?.messages.first(where: { $0.id == messageId }),
+           !message.content.isEmpty {
+            streamingStore.restoreSnapshotContent(message.content)
+        }
 
-        streamingStore.restoreSnapshotContent(message.content)
+        recoverInterruptedLocalAlpineMessagesIfNeeded(backgroundDuration: backgroundDuration)
+    }
+
+    private func recoverInterruptedLocalAlpineMessagesIfNeeded(backgroundDuration: TimeInterval?) {
+        guard (backgroundDuration ?? 0) >= 10.0 else { return }
+        guard localAlpineAgentTask == nil,
+              localAlpineContinuationTask == nil,
+              conversation != nil else {
+            return
+        }
+
+        var recoveredMessageIds: [String] = []
+        let interruptedStatus = ChatStatusUpdate(
+            action: "local_alpine_agent",
+            description: "iOS 后台可能已暂停本地任务，可发送“继续”从已保存状态恢复。",
+            done: true,
+            occurredAt: .now
+        )
+
+        let indices = conversation?.messages.indices ?? 0..<0
+        for index in indices {
+            guard conversation?.messages.indices.contains(index) == true,
+                  var message = conversation?.messages[index],
+                  message.isStreaming,
+                  Self.isLocalAlpineAgentResult(message) else {
+                continue
+            }
+
+            var metadata = message.metadata ?? [:]
+            metadata["iexa_local_alpine_background_interrupted"] = "true"
+            message.isStreaming = false
+            message.metadata = metadata
+            message.statusHistory = [interruptedStatus]
+            if message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                message.content = "本地 Alpine 任务在后台期间已暂停。发送“继续”可以从已保存状态恢复。"
+            }
+            conversation?.messages[index] = message
+            conversation?.history.updateNode(id: message.id) { node in
+                node.content = message.content
+                node.done = true
+                node.statusHistory = [interruptedStatus]
+                node.metadata = metadata
+            }
+            recoveredMessageIds.append(message.id)
+        }
+
+        guard !recoveredMessageIds.isEmpty else { return }
+        for messageId in recoveredMessageIds {
+            clearLocalAlpineLiveToolState(for: messageId)
+        }
+        if conversation?.messages.contains(where: { $0.isStreaming }) != true {
+            isStreaming = false
+            isExternallyStreaming = false
+            selfInitiatedStream = false
+            activeTaskId = nil
+            endBackgroundTask()
+        }
+        Task { [weak self] in
+            await self?.persistLocalConversationIfNeeded()
+        }
     }
 
     @discardableResult
@@ -4673,7 +4733,7 @@ final class ChatViewModel {
                     self.logger.debug("Foreground sync skipped — background duration \(bgDuration)s < 10s")
                 }
 
-                self.restoreLifecycleConversationSnapshot()
+                self.restoreLifecycleConversationSnapshot(backgroundDuration: bgDuration)
 
                 // Auto-resume any transcriptions that were paused when the app
                 // went to background on iOS < 26 (where GPU access is forbidden
