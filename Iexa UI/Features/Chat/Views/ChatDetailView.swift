@@ -2380,6 +2380,7 @@ struct ChatDetailView: View {
 
         let metadata = message.metadata ?? [:]
         var cachedVisibleCleanedAssistantText: String?
+        var cachedRenderableAgentActivity: Bool?
         func hasVisibleCleanedAssistantText() -> Bool {
             guard message.role == .assistant else { return false }
             if let cachedVisibleCleanedAssistantText {
@@ -2389,9 +2390,17 @@ struct ChatDetailView: View {
             cachedVisibleCleanedAssistantText = visible
             return !visible.isEmpty
         }
+        func hasRenderableAgentActivityCached() -> Bool {
+            if let cachedRenderableAgentActivity {
+                return cachedRenderableAgentActivity
+            }
+            let value = hasRenderableAgentActivity(for: message)
+            cachedRenderableAgentActivity = value
+            return value
+        }
 
         if metadata["iexa_local_native_hidden_tool_parent"] == "true" {
-            return !hasVisibleCleanedAssistantText() && !hasRenderableAgentActivity(for: message)
+            return !hasVisibleCleanedAssistantText() && !hasRenderableAgentActivityCached()
         }
         if isLocalAlpineResultMessage(message) {
             if context.visibleFinalSummaryAfter.contains(message.id) {
@@ -2430,13 +2439,13 @@ struct ChatDetailView: View {
                 return false
             }
             if contentContainsLocalAlpineInstruction(message.content) {
-                return !hasRenderableAgentActivity(for: message)
+                return !hasRenderableAgentActivityCached()
             }
             return message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && messageHasProcessOnlyStatus(message)
         }
         if metadata["iexa_local_alpine_hidden_tool_parent"] == "true" {
-            return !hasVisibleCleanedAssistantText() && !hasRenderableAgentActivity(for: message)
+            return !hasVisibleCleanedAssistantText() && !hasRenderableAgentActivityCached()
         }
         if metadata["iexa_local_alpine_auto_verify"] != nil
             || metadata["iexa_local_alpine_missing_tool_correction"] != nil
@@ -2450,7 +2459,7 @@ struct ChatDetailView: View {
             if hasVisibleCleanedAssistantText() {
                 return false
             }
-            return !hasRenderableAgentActivity(for: message)
+            return !hasRenderableAgentActivityCached()
         }
         if message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            !isMessageVisuallyStreaming(message),
