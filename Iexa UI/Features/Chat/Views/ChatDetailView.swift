@@ -9068,6 +9068,120 @@ private struct AgentStepFloatingBar: View {
         selectedStep?.title ?? item.currentStepTitle
     }
 
+    private var canMoveBackward: Bool {
+        clampedIndex > 0
+    }
+
+    private var canMoveForward: Bool {
+        clampedIndex < item.steps.count - 1
+    }
+
+    private var barFill: Color {
+        theme.cardBackground.opacity(theme.isDark ? 0.90 : 0.98)
+    }
+
+    private var barStroke: Color {
+        theme.cardBorder.opacity(theme.isDark ? 0.18 : 0.18)
+    }
+
+    private var barShadow: Color {
+        .black.opacity(theme.isDark ? 0.18 : 0.08)
+    }
+
+    private var statusDot: some View {
+        ZStack {
+            Circle()
+                .fill(tint.opacity(theme.isDark ? 0.16 : 0.12))
+                .frame(width: 18, height: 18)
+            Image(systemName: icon)
+                .scaledFont(size: 10, weight: .bold)
+                .foregroundStyle(tint)
+                .frame(width: 14, height: 14)
+        }
+    }
+
+    private var pageControls: some View {
+        HStack(spacing: 1) {
+            Button {
+                movePage(-1)
+            } label: {
+                Image(systemName: "chevron.left")
+                    .scaledFont(size: 10, weight: .bold)
+                    .foregroundStyle(canMoveBackward ? theme.textPrimary : theme.textTertiary.opacity(0.42))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canMoveBackward)
+
+            Text(pageText)
+                .scaledFont(size: 10, weight: .semibold, design: .rounded)
+                .foregroundStyle(theme.textSecondary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(width: 34, alignment: .center)
+
+            Button {
+                movePage(1)
+            } label: {
+                Image(systemName: "chevron.right")
+                    .scaledFont(size: 10, weight: .bold)
+                    .foregroundStyle(canMoveForward ? theme.textPrimary : theme.textTertiary.opacity(0.42))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canMoveForward)
+        }
+    }
+
+    private var floatingBarBody: some View {
+        HStack(spacing: 6) {
+            statusDot
+
+            Text(selectedTitle)
+                .scaledFont(size: 11.5, weight: .semibold)
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .minimumScaleFactor(0.80)
+                .layoutPriority(1)
+
+            Spacer(minLength: 2)
+            pageControls
+        }
+        .padding(.leading, 68)
+        .padding(.trailing, 8)
+        .padding(.vertical, 3)
+        .frame(height: 40, alignment: .center)
+        .frame(maxWidth: .infinity)
+        .background(barFill)
+        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .strokeBorder(barStroke, lineWidth: 0.8)
+        )
+        .shadow(color: barShadow, radius: 7, x: 0, y: 3)
+        .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+    }
+
+    private var previewCardButton: some View {
+        Button {
+            onPreviewTap(item, clampedIndex)
+        } label: {
+            AgentToolPreviewPop(
+                previewTitle: previewTitle,
+                previewSubtitle: previewSubtitle,
+                previewText: previewText,
+                thumbnailReference: previewThumbnailReference
+            )
+            .frame(width: 64, height: 36, alignment: .topLeading)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .offset(x: 6, y: -6)
+    }
+
     private func movePage(_ delta: Int) {
         guard !item.steps.isEmpty else { return }
         let next = min(max(clampedIndex + delta, 0), item.steps.count - 1)
@@ -9080,88 +9194,8 @@ private struct AgentStepFloatingBar: View {
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            HStack(spacing: 6) {
-                ZStack {
-                    Circle()
-                        .fill(tint.opacity(theme.isDark ? 0.16 : 0.12))
-                        .frame(width: 18, height: 18)
-                    Image(systemName: icon)
-                        .scaledFont(size: 10, weight: .bold)
-                        .foregroundStyle(tint)
-                        .frame(width: 14, height: 14)
-                }
-
-                Text(selectedTitle)
-                    .scaledFont(size: 11.5, weight: .semibold)
-                    .foregroundStyle(theme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .minimumScaleFactor(0.80)
-                    .layoutPriority(1)
-
-                Spacer(minLength: 2)
-
-                HStack(spacing: 1) {
-                    Button {
-                        movePage(-1)
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .scaledFont(size: 10, weight: .bold)
-                            .foregroundStyle(clampedIndex > 0 ? theme.textPrimary : theme.textTertiary.opacity(0.42))
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(clampedIndex == 0)
-
-                    Text(pageText)
-                        .scaledFont(size: 10, weight: .semibold, design: .rounded)
-                        .foregroundStyle(theme.textSecondary)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .frame(width: 34, alignment: .center)
-
-                    Button {
-                        movePage(1)
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .scaledFont(size: 10, weight: .bold)
-                            .foregroundStyle(clampedIndex < item.steps.count - 1 ? theme.textPrimary : theme.textTertiary.opacity(0.42))
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(clampedIndex >= item.steps.count - 1)
-                }
-            }
-            .padding(.leading, 68)
-            .padding(.trailing, 8)
-            .padding(.vertical, 3)
-            .frame(height: 40, alignment: .center)
-            .frame(maxWidth: .infinity)
-            .background(theme.cardBackground.opacity(theme.isDark ? 0.90 : 0.98))
-            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 15, style: .continuous)
-                    .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.18 : 0.18), lineWidth: 0.8)
-            )
-            .shadow(color: .black.opacity(theme.isDark ? 0.18 : 0.08), radius: 7, x: 0, y: 3)
-            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-
-            Button {
-                onPreviewTap(item, clampedIndex)
-            } label: {
-                AgentToolPreviewPop(
-                    previewTitle: previewTitle,
-                    previewSubtitle: previewSubtitle,
-                    previewText: previewText,
-                    thumbnailReference: previewThumbnailReference
-                )
-                .frame(width: 64, height: 36, alignment: .topLeading)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .offset(x: 6, y: -6)
+            floatingBarBody
+            previewCardButton
         }
         .frame(height: 46, alignment: .bottom)
         .onAppear {
