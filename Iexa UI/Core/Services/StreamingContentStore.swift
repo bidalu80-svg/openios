@@ -921,7 +921,7 @@ final class StreamingContentStore {
 
     private static func firstRawToolMarkupStart(in content: String) -> Int? {
         guard let regex = try? NSRegularExpression(
-            pattern: #"(?im)^\s*(?:<\|\s*\|\s*DSML\s*\|\s*\||<\s*(?:tool_calls?|tool_use|tool_call|function_call|invoke|parameter)\b)"#,
+            pattern: #"(?is)(?:<\|\s*\|\s*DSML\s*\|\s*\||<\s*(?:tool_calls?|tool_use|tool_call|function_call|invoke|parameter)\b)"#,
             options: [.caseInsensitive]
         ) else {
             return nil

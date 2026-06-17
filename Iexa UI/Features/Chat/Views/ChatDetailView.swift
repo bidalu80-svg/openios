@@ -916,13 +916,14 @@ private struct AgentActivityItem: Identifiable, Hashable {
            let normalized = normalizedPreviewTarget(filePath) {
             return normalized
         }
+        if call.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return nil
+        }
         guard !["shell_execute", "bash", "shell", "sh", "run", "command", "exec"].contains(normalizedToolName) else {
             return nil
         }
         return call.filePaths
-            .compactMap {
-                normalizedPreviewTarget($0.trimmingCharacters(in: .whitespacesAndNewlines))
-            }
+            .compactMap(normalizedLocalPreviewPath(_:))
             .first
     }
 
@@ -967,6 +968,34 @@ private struct AgentActivityItem: Identifiable, Hashable {
             return trimmed
         }
         return nil
+    }
+
+    private static func normalizedLocalPreviewPath(_ value: String?) -> String? {
+        guard let normalized = normalizedPreviewTarget(value) else {
+            return nil
+        }
+        let lower = normalized.lowercased()
+        guard !lower.hasPrefix("http://"),
+              !lower.hasPrefix("https://"),
+              !lower.hasPrefix("iexa://"),
+              !lower.hasPrefix("file://") else {
+            return nil
+        }
+        if normalized.hasPrefix("/mnt/iexa/")
+            || normalized.hasPrefix("/tmp/")
+            || normalized.hasPrefix("/var/")
+            || normalized.hasPrefix("./")
+            || normalized.hasPrefix("../") {
+            return normalized
+        }
+        guard !normalized.contains(" "),
+              !normalized.contains("\t"),
+              !normalized.contains("\n"),
+              !normalized.contains("\r"),
+              !(normalized as NSString).pathExtension.isEmpty else {
+            return nil
+        }
+        return normalized
     }
 
     private static func firstRegexMatch(pattern: String, in text: String) -> String? {
@@ -2363,6 +2392,9 @@ struct ChatDetailView: View {
     @MainActor
     private func openAgentPreviewResult(step: AgentActivityStep?, item: AgentActivityItem) -> Bool {
         if let step {
+            if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                return false
+            }
             if let file = step.previewFile {
                 openMessageFile(file)
                 return true
@@ -9194,6 +9226,32 @@ private struct AgentStepFloatingBar: View {
         }
     }
 
+    var body: AgentStepFloatingBarLayout {
+        AgentStepFloatingBarLayout(
+            floatingBarBody: floatingBarBody,
+            previewCardButton: previewCardButton,
+            taskCount: taskCount,
+            itemId: item.id,
+            currentStepIndex: item.currentStepIndex,
+            stepCount: item.steps.count,
+            selectedIndex: $selectedIndex
+        )
+    }
+}
+
+private struct AgentStepFloatingBarLayout: View {
+    let floatingBarBody: AnyView
+    let previewCardButton: AnyView
+    let taskCount: Int
+    let itemId: String
+    let currentStepIndex: Int
+    let stepCount: Int
+    @Binding var selectedIndex: Int
+
+    private var syncedIndex: Int {
+        min(max(0, currentStepIndex - 1), max(0, stepCount - 1))
+    }
+
     var body: AnyView {
         AnyView(
             ZStack(alignment: .bottomLeading) {
@@ -9202,16 +9260,16 @@ private struct AgentStepFloatingBar: View {
             }
             .frame(height: 46, alignment: .bottom)
             .onAppear {
-                selectedIndex = max(0, item.currentStepIndex - 1)
+                selectedIndex = syncedIndex
             }
-            .onChange(of: item.id) { _, _ in
-                selectedIndex = max(0, item.currentStepIndex - 1)
+            .onChange(of: itemId) { _, _ in
+                selectedIndex = syncedIndex
             }
-            .onChange(of: item.currentStepIndex) { _, currentIndex in
-                selectedIndex = min(max(0, currentIndex - 1), max(0, item.steps.count - 1))
+            .onChange(of: currentStepIndex) { _, _ in
+                selectedIndex = syncedIndex
             }
-            .onChange(of: item.steps.count) { _, count in
-                selectedIndex = min(max(0, item.currentStepIndex - 1), max(0, count - 1))
+            .onChange(of: stepCount) { _, _ in
+                selectedIndex = syncedIndex
             }
             .accessibilityLabel("步骤 \(taskCount)")
         )
