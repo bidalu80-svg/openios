@@ -1505,6 +1505,25 @@ private final class TranscriptMessagesCache {
     }
 }
 
+private final class AssistantVisibleTextCache {
+    private var entries: [String: (signature: Int, value: String)] = [:]
+
+    func lookup(messageId: String, signature: Int) -> String? {
+        guard let entry = entries[messageId], entry.signature == signature else {
+            return nil
+        }
+        return entry.value
+    }
+
+    func store(messageId: String, signature: Int, value: String) {
+        entries[messageId] = (signature, value)
+        if entries.count > 160 {
+            entries.removeAll(keepingCapacity: true)
+            entries[messageId] = (signature, value)
+        }
+    }
+}
+
 private final class ChatScrollRuntimeState {
     var lastScrollOffset: CGFloat = 0
     var isNearBottom: Bool = true
@@ -1525,6 +1544,7 @@ struct ChatDetailView: View {
     @State private var viewModel: ChatViewModel
     @State private var agentActivityCache = AgentActivityItemCache()
     @State private var transcriptCache = TranscriptMessagesCache()
+    @State private var assistantVisibleTextCache = AssistantVisibleTextCache()
     @State private var scrollRuntime = ChatScrollRuntimeState()
 
     // MARK: Model selector sheet
@@ -1871,15 +1891,39 @@ struct ChatDetailView: View {
     }
 
     private func visibleAssistantTextAfterToolProtocolCleanup(for message: ChatMessage) -> String {
+        let signature = visibleAssistantTextCacheSignature(for: message)
+        if let cached = assistantVisibleTextCache.lookup(messageId: message.id, signature: signature) {
+            return cached
+        }
         let raw = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return "" }
+        guard !raw.isEmpty else {
+            assistantVisibleTextCache.store(messageId: message.id, signature: signature, value: "")
+            return ""
+        }
         let withoutAlpineProtocol = LocalAlpineAgentService.visibleContent(from: raw)
         let withoutNativeProtocol = stripNativeToolProtocolBlocks(from: withoutAlpineProtocol)
         let visible = withoutNativeProtocol.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard visible != "正在准备本地执行，结果会自动回来。" else {
-            return ""
+        let resolved = visible == "正在准备本地执行，结果会自动回来。" ? "" : visible
+        assistantVisibleTextCache.store(messageId: message.id, signature: signature, value: resolved)
+        return resolved
+    }
+
+    private func visibleAssistantTextCacheSignature(for message: ChatMessage) -> Int {
+        var signature = message.id.hashValue
+        signature &+= Self.lightweightTranscriptTextSignature(message.content)
+        if let metadata = message.metadata {
+            for key in [
+                "iexa_local_alpine_hidden_tool_parent",
+                "iexa_local_native_hidden_tool_parent",
+                "iexa_local_alpine_continuation"
+            ] {
+                if let value = metadata[key] {
+                    signature &+= key.hashValue
+                    signature &+= Self.lightweightTranscriptTextSignature(value)
+                }
+            }
         }
-        return visible
+        return signature
     }
 
     private func assistantContentOverrideForActivityParent(_ message: ChatMessage) -> String? {
