@@ -3782,14 +3782,6 @@ struct ChatDetailView: View {
             from: nil,
             for: nil
         )
-
-        let generation = postSendWaitingUIDelayGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-            guard postSendWaitingUIDelayGeneration == generation else { return }
-            keyboard.forceHidden(animated: false)
-            finishAgentFloatingBarKeyboardHide()
-            releasePostSendWaitingUIDelayAfterKeyboardSettles()
-        }
     }
 
     private func shouldDelayWaitingUI(for message: ChatMessage) -> Bool {
