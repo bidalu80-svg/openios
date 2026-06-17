@@ -1997,10 +1997,10 @@ struct ChatDetailView: View {
         hasLocalAlpineFinalSummary(after: message, requireRenderableContent: true)
     }
 
-    private func localAlpineFallbackContent(for message: ChatMessage) -> String {
+    private func localAlpineFallbackContent(for message: ChatMessage, activityItem: AgentActivityItem? = nil) -> String {
         guard isLocalAlpineResultMessage(message) else { return "" }
         guard !hasLocalAlpineFinalSummary(after: message, requireRenderableContent: false) else { return "" }
-        if activityItem(for: message)?.hasConcreteSteps == true {
+        if (activityItem ?? agentActivity(for: message))?.hasConcreteSteps == true {
             return ""
         }
         return message.content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2011,7 +2011,7 @@ struct ChatDetailView: View {
             return false
         }
         if isLocalAlpineResultMessage(message) {
-            return !localAlpineFallbackContent(for: message).isEmpty
+            return !localAlpineFallbackContent(for: message, activityItem: activityItem).isEmpty
         }
         return true
     }
@@ -2231,7 +2231,8 @@ struct ChatDetailView: View {
                 return true
             }
             let hasVisibleActivity = messageHasConcreteActivityMetadata(message)
-                || activityItem(for: message)?.hasConcreteSteps == true
+                || !viewModel.localAlpineLiveToolCalls(for: message.id).isEmpty
+                || viewModel.localAlpineLiveToolStatus(for: message.id) != nil
             if hasVisibleActivity {
                 return false
             }
@@ -3952,7 +3953,7 @@ struct ChatDetailView: View {
 
             // ── Message bubble / content ──
             if !userTextIsEmpty && !waitingUIIsDelayed && !suppressAssistantBubble {
-                messageBubble(for: message, isLastAssistant: isLastAssistant)
+                messageBubble(for: message, isLastAssistant: isLastAssistant, activityItem: rowAgentActivity)
                     .transition(.opacity)
             }
 
@@ -4098,9 +4099,9 @@ struct ChatDetailView: View {
     // MARK: - Message Bubble
 
     @ViewBuilder
-    private func messageBubble(for message: ChatMessage, isLastAssistant: Bool) -> some View {
+    private func messageBubble(for message: ChatMessage, isLastAssistant: Bool, activityItem: AgentActivityItem? = nil) -> some View {
         if isLocalAlpineResultMessage(message) {
-            let fallbackContent = localAlpineFallbackContent(for: message)
+            let fallbackContent = localAlpineFallbackContent(for: message, activityItem: activityItem)
             if !fallbackContent.isEmpty {
                 ChatMessageBubble(
                     role: .assistant,
