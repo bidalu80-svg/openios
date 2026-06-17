@@ -1479,6 +1479,8 @@ private struct TranscriptRenderSnapshot {
     let lastTurnGroupId: String?
     let lastVisibleMessageId: String?
     let latestUserMessageId: String?
+    let localAlpineAnyFinalSummaryAfter: Set<String>
+    let localAlpineVisibleFinalSummaryAfter: Set<String>
 }
 
 private struct TranscriptMessageTurnGroup: Identifiable {
@@ -1747,6 +1749,7 @@ struct ChatDetailView: View {
     }
 
     private struct TranscriptVisibilityContext {
+        var anyFinalSummaryAfter: Set<String> = []
         var visibleFinalSummaryAfter: Set<String> = []
         var laterLocalAlpineTurnMessageAfter: Set<String> = []
     }
@@ -1772,7 +1775,9 @@ struct ChatDetailView: View {
             ),
             lastTurnGroupId: turnGroups.last(where: { $0.containsUserMessage })?.id,
             lastVisibleMessageId: visibleMessages.last?.id,
-            latestUserMessageId: visibleMessages.last(where: { $0.role == .user })?.id
+            latestUserMessageId: visibleMessages.last(where: { $0.role == .user })?.id,
+            localAlpineAnyFinalSummaryAfter: context.anyFinalSummaryAfter,
+            localAlpineVisibleFinalSummaryAfter: context.visibleFinalSummaryAfter
         )
         transcriptCache.store(snapshot)
         return snapshot
@@ -1852,16 +1857,21 @@ struct ChatDetailView: View {
 
     private func transcriptVisibilityContext(for messages: [ChatMessage]) -> TranscriptVisibilityContext {
         var context = TranscriptVisibilityContext()
+        var seenAnyFinalSummaryInTurn = false
         var seenVisibleFinalSummaryInTurn = false
         var seenLaterLocalAlpineTurnMessage = false
 
         for message in messages.reversed() {
             if message.role == .user {
+                seenAnyFinalSummaryInTurn = false
                 seenVisibleFinalSummaryInTurn = false
                 seenLaterLocalAlpineTurnMessage = false
                 continue
             }
 
+            if seenAnyFinalSummaryInTurn {
+                context.anyFinalSummaryAfter.insert(message.id)
+            }
             if seenVisibleFinalSummaryInTurn {
                 context.visibleFinalSummaryAfter.insert(message.id)
             }
@@ -1870,6 +1880,9 @@ struct ChatDetailView: View {
             }
 
             let isFinalSummary = message.metadata?["iexa_local_alpine_final_summary"] != nil
+            if isFinalSummary {
+                seenAnyFinalSummaryInTurn = true
+            }
             let hasFinalSummaryContent = isFinalSummary
                 && (message.error != nil
                     || !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -2110,24 +2123,10 @@ struct ChatDetailView: View {
     }
 
     private func hasLocalAlpineFinalSummary(after message: ChatMessage, requireRenderableContent: Bool) -> Bool {
-        guard let index = viewModel.messages.firstIndex(where: { $0.id == message.id }) else {
-            return false
+        if requireRenderableContent {
+            return transcriptSnapshot.localAlpineVisibleFinalSummaryAfter.contains(message.id)
         }
-        let start = viewModel.messages.index(after: index)
-        guard start < viewModel.messages.endIndex else { return false }
-
-        for later in viewModel.messages[start...] {
-            if later.role == .user { return false }
-            guard later.metadata?["iexa_local_alpine_final_summary"] != nil else { continue }
-            if !requireRenderableContent {
-                return true
-            }
-            if later.error != nil
-                || !later.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return true
-            }
-        }
-        return false
+        return transcriptSnapshot.localAlpineAnyFinalSummaryAfter.contains(message.id)
     }
 
     private func hasVisibleLocalAlpineFinalSummary(after message: ChatMessage) -> Bool {
