@@ -3553,7 +3553,7 @@ struct ChatDetailView: View {
         let snapshotMessages = snapshot.messages
         let snapshotIds = snapshot.ids
 
-        ZStack {
+        return ZStack {
             scrollContent(snapshot: snapshot)
 
             // Welcome screen — shown when no messages and not loading

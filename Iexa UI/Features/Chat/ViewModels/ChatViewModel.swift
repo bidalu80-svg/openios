@@ -12165,16 +12165,15 @@ final class ChatViewModel {
         assistantMessageId: String
     ) async -> LocalAlpineAgentResult {
         let arguments = Self.localAlpineNativeToolArguments(for: call)
-        let target = ((arguments["target"] as? String)
-            ?? (arguments["url"] as? String)
-            ?? (arguments["path"] as? String)
-            ?? (arguments["file"] as? String)
-            ?? (arguments["href"] as? String)
-            ?? (arguments["link"] as? String)
-            ?? (arguments["open_preview_target"] as? String)
-            ?? (arguments["preview_target"] as? String)
-            ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawTarget = Self.firstNonEmptyString(
+            in: arguments,
+            keys: [
+                "target", "url", "path", "file",
+                "href", "link",
+                "open_preview_target", "preview_target"
+            ]
+        ) ?? ""
+        let target = rawTarget.trimmingCharacters(in: .whitespacesAndNewlines)
         let detail = target.isEmpty ? "打开预览" : String(target.prefix(96))
 
         guard !target.isEmpty else {
@@ -12320,6 +12319,19 @@ final class ChatViewModel {
         }
         let trimmed = call.arguments.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? [:] : ["value": trimmed]
+    }
+
+    private static func firstNonEmptyString(
+        in arguments: [String: Any],
+        keys: [String]
+    ) -> String? {
+        for key in keys {
+            if let value = arguments[key] as? String,
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return value
+            }
+        }
+        return nil
     }
 
     private static func localAlpineSyntheticToolFailed(_ output: String) -> Bool {
