@@ -3459,6 +3459,9 @@ struct ChatDetailView: View {
         .onChange(of: viewModel.isStreaming) { _, streaming in
             if streaming && !isScrolledUp {
                 resumeAgentFloatingBarForNewTask()
+                if keyboard.isVisible {
+                    return
+                }
                 // Already following the turn. If the keyboard is visible, or
                 // the assistant placeholder has not become visible yet, keep
                 // the user-sent turn start pinned instead of jumping to the
@@ -3475,7 +3478,7 @@ struct ChatDetailView: View {
             }
         }
         .onChange(of: viewModel.streamingStore.isActive) { _, active in
-            if active {
+            if active && !keyboard.isVisible {
                 resumeAgentFloatingBarForNewTask()
             }
         }
