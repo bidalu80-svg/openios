@@ -1548,6 +1548,30 @@ private final class CurrentTurnActivityItemsCache {
     }
 }
 
+private struct AssistantRenderableContentCacheEntry {
+    let signature: Int
+    let value: String
+}
+
+private final class AssistantRenderableContentCache {
+    private var entries: [String: AssistantRenderableContentCacheEntry] = [:]
+
+    func lookup(key: String, signature: Int) -> String? {
+        guard let entry = entries[key], entry.signature == signature else {
+            return nil
+        }
+        return entry.value
+    }
+
+    func store(key: String, signature: Int, value: String) {
+        entries[key] = AssistantRenderableContentCacheEntry(signature: signature, value: value)
+        if entries.count > 220 {
+            entries.removeAll(keepingCapacity: true)
+            entries[key] = AssistantRenderableContentCacheEntry(signature: signature, value: value)
+        }
+    }
+}
+
 private final class ChatScrollRuntimeState {
     var lastScrollOffset: CGFloat = 0
     var isNearBottom: Bool = true
@@ -7789,6 +7813,7 @@ private extension View {
 /// content grows in height. When streaming completes, the fixed height
 /// is removed and full content renders at its natural height.
 private struct IsolatedAssistantMessage: View {
+    private static let renderCache = AssistantRenderableContentCache()
     let streamingStore: StreamingContentStore
     let message: ChatMessage
     let activeVersionIndex: Int
@@ -7842,10 +7867,21 @@ private struct IsolatedAssistantMessage: View {
             if isActivelyStreaming {
                 return Self.safeAssistantRenderableContent(renderableRawContent)
             }
+            let signature = assistantRenderableContentSignature(
+                rawContent: renderableRawContent,
+                sources: effectiveSources,
+                baseURL: serverBaseURL
+            )
+            let cacheKey = message.id + "::" + String(activeVersionIndex)
+            if let cached = Self.renderCache.lookup(key: cacheKey, signature: signature) {
+                return cached
+            }
             let safeRawContent = Self.safeAssistantRenderableContent(renderableRawContent)
             let resolved = Self.resolveRelativeURLs(safeRawContent, baseURL: serverBaseURL)
             let preferDomain = UserDefaults.standard.object(forKey: "citationShowDomain") as? Bool ?? true
-            return Self.preprocessCitations(resolved, sources: effectiveSources, preferDomain: preferDomain)
+            let rendered = Self.preprocessCitations(resolved, sources: effectiveSources, preferDomain: preferDomain)
+            Self.renderCache.store(key: cacheKey, signature: signature, value: rendered)
+            return rendered
         }()
 
         let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
@@ -8051,6 +8087,38 @@ private struct IsolatedAssistantMessage: View {
             || lower.contains("<|end_of_thought|>")
             || text.contains("◁think▷")
             || text.contains("◁/think▷")
+    }
+
+    private func assistantRenderableContentSignature(
+        rawContent: String,
+        sources: [ChatSourceReference],
+        baseURL: String
+    ) -> Int {
+        var signature = Self.lightweightAssistantRenderSignature(rawContent)
+        signature &+= Self.lightweightAssistantRenderSignature(baseURL)
+        signature &+= sources.count &* 17
+        for source in sources {
+            signature &+= Self.lightweightAssistantRenderSignature(source.id ?? "")
+            signature &+= Self.lightweightAssistantRenderSignature(source.url ?? "")
+            signature &+= Self.lightweightAssistantRenderSignature(source.title ?? "")
+        }
+        return signature
+    }
+
+    private static func lightweightAssistantRenderSignature(_ text: String, sampleBytes: Int = 32) -> Int {
+        guard !text.isEmpty else { return 0 }
+        var signature = text.utf8.count &* 17
+        var head = 0
+        for byte in text.utf8.prefix(sampleBytes) {
+            head = (head &* 31) &+ Int(byte)
+        }
+        var tail = 0
+        for byte in text.utf8.suffix(sampleBytes) {
+            tail = (tail &* 31) &+ Int(byte)
+        }
+        signature &+= head
+        signature &+= tail &* 7
+        return signature
     }
 
     private static func safeAssistantRenderableContent(_ content: String) -> String {
