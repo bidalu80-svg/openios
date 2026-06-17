@@ -8763,73 +8763,71 @@ private struct AgentStepFloatingBar: View {
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            HStack(spacing: 7) {
-                Image(systemName: icon)
-                    .scaledFont(size: 13, weight: .bold)
-                    .foregroundStyle(tint)
-                    .frame(width: 18, height: 18)
+            HStack(spacing: 8) {
+                ZStack {
+                    Circle()
+                        .fill(tint.opacity(theme.isDark ? 0.16 : 0.12))
+                        .frame(width: 22, height: 22)
+                    Image(systemName: icon)
+                        .scaledFont(size: 12, weight: .bold)
+                        .foregroundStyle(tint)
+                        .frame(width: 18, height: 18)
+                }
 
                 Text(selectedTitle)
-                    .scaledFont(size: 12.5, weight: .semibold)
+                    .scaledFont(size: 13.5, weight: .semibold)
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .minimumScaleFactor(0.82)
                     .layoutPriority(1)
-                    .frame(maxWidth: 190, alignment: .leading)
+                    .frame(maxWidth: 210, alignment: .leading)
 
-                if item.steps.count > 1 {
+                Spacer(minLength: 2)
+
+                HStack(spacing: 2) {
                     Button {
                         movePage(-1)
                     } label: {
                         Image(systemName: "chevron.left")
                             .scaledFont(size: 12, weight: .bold)
-                            .foregroundStyle(clampedIndex > 0 ? theme.textPrimary : theme.textTertiary.opacity(0.45))
-                            .frame(width: 20, height: 22)
+                            .foregroundStyle(clampedIndex > 0 ? theme.textPrimary : theme.textTertiary.opacity(0.42))
+                            .frame(width: 24, height: 24)
                     }
                     .buttonStyle(.plain)
                     .disabled(clampedIndex == 0)
 
                     Text(pageText)
-                        .scaledFont(size: 10.5, weight: .semibold, design: .rounded)
+                        .scaledFont(size: 11.5, weight: .semibold, design: .rounded)
                         .foregroundStyle(theme.textSecondary)
                         .monospacedDigit()
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
-                        .frame(width: 36, alignment: .center)
+                        .frame(width: 42, alignment: .center)
 
                     Button {
                         movePage(1)
                     } label: {
                         Image(systemName: "chevron.right")
                             .scaledFont(size: 12, weight: .bold)
-                            .foregroundStyle(clampedIndex < item.steps.count - 1 ? theme.textPrimary : theme.textTertiary.opacity(0.45))
-                            .frame(width: 20, height: 22)
+                            .foregroundStyle(clampedIndex < item.steps.count - 1 ? theme.textPrimary : theme.textTertiary.opacity(0.42))
+                            .frame(width: 24, height: 24)
                     }
                     .buttonStyle(.plain)
                     .disabled(clampedIndex >= item.steps.count - 1)
-                } else {
-                    Text(pageText)
-                        .scaledFont(size: 10.5, weight: .semibold, design: .rounded)
-                        .foregroundStyle(theme.textSecondary)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .frame(width: 32, alignment: .center)
                 }
             }
-            .padding(.leading, 104)
-            .padding(.trailing, 8)
-            .frame(height: 36)
-            .frame(maxWidth: 560)
-            .fixedSize(horizontal: true, vertical: false)
-            .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.86 : 0.94))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .padding(.leading, 96)
+            .padding(.trailing, 10)
+            .frame(height: 42)
+            .frame(maxWidth: .infinity)
+            .background(theme.surface.opacity(theme.isDark ? 0.88 : 0.98))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.28 : 0.42), lineWidth: 0.7)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.18 : 0.18), lineWidth: 0.8)
             )
-            .shadow(color: .black.opacity(theme.isDark ? 0.12 : 0.05), radius: 4, x: 0, y: 2)
+            .shadow(color: .black.opacity(theme.isDark ? 0.18 : 0.08), radius: 10, x: 0, y: 4)
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .frame(maxHeight: .infinity, alignment: .bottom)
 
@@ -8842,16 +8840,15 @@ private struct AgentStepFloatingBar: View {
                     previewText: previewText,
                     thumbnailReference: previewThumbnailReference
                 )
-                .frame(width: 96, height: 54, alignment: .topLeading)
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .frame(width: 88, height: 50, alignment: .topLeading)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
             .padding(.leading, 8)
-            .padding(.bottom, 0)
+            .padding(.bottom, 2)
         }
-        .frame(height: 58, alignment: .bottom)
-        .frame(maxWidth: 560)
+        .frame(height: 56, alignment: .bottom)
         .onAppear {
             selectedIndex = max(0, item.currentStepIndex - 1)
         }
@@ -8871,8 +8868,8 @@ private struct AgentToolPreviewPop: View {
     let previewText: String
     let thumbnailReference: String?
 
-    private let previewSize = CGSize(width: 96, height: 54)
-    private let cornerRadius: CGFloat = 6
+    private let previewSize = CGSize(width: 88, height: 50)
+    private let cornerRadius: CGFloat = 8
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -8895,30 +8892,30 @@ private struct AgentToolPreviewPop: View {
                     )
             } else {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color.black.opacity(0.88))
+                    .fill(Color.black.opacity(0.90))
             }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(previewTitle)
-                    .font(.system(size: 8.2, weight: .bold, design: .monospaced))
+                    .font(.system(size: 7.8, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.88))
                     .lineLimit(1)
 
                 Text(previewSubtitle)
-                    .font(.system(size: 6.8, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 6.6, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.66))
                     .lineLimit(1)
 
                 if thumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                     Text(previewText)
-                        .font(.system(size: 7.0, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 6.8, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Color(red: 0.30, green: 0.63, blue: 1.0))
                         .lineLimit(3)
                         .truncationMode(.tail)
                 }
             }
             .padding(.horizontal, 7)
-            .padding(.vertical, 5)
+            .padding(.vertical, 4)
         }
         .frame(width: previewSize.width, height: previewSize.height, alignment: .topLeading)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
@@ -8926,6 +8923,7 @@ private struct AgentToolPreviewPop: View {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
         )
+        .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 3)
     }
 }
 
