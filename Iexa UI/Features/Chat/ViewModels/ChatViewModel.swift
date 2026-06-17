@@ -12081,6 +12081,8 @@ final class ChatViewModel {
             detail: detail,
             output: result.summary,
             openRequests: result.openRequests,
+            browserURL: result.browserDocument?.url,
+            imageFilePath: result.browserDocument?.items.compactMap(\.thumbnailURL).first,
             failed: failed
         )
     }
@@ -12134,6 +12136,8 @@ final class ChatViewModel {
             filePaths: target.hasPrefix("http://") || target.hasPrefix("https://") ? [] : [target],
             output: result.summary,
             openRequests: result.openRequests,
+            browserURL: target.hasPrefix("http://") || target.hasPrefix("https://") ? target : nil,
+            imageFilePath: Self.looksLikeImagePath(target) ? target : nil,
             failed: failed
         )
     }
@@ -12145,6 +12149,8 @@ final class ChatViewModel {
         filePaths: [String] = [],
         output: String,
         openRequests: [LocalAlpineOpenRequest] = [],
+        browserURL: String? = nil,
+        imageFilePath: String? = nil,
         failed: Bool
     ) -> LocalAlpineAgentResult {
         let arguments = Self.localAlpineNativeToolArguments(for: call)
@@ -12178,6 +12184,8 @@ final class ChatViewModel {
                     filePaths: filePaths,
                     startedAtMs: startedAtMs,
                     completedAtMs: nil,
+                    browserURL: browserURL,
+                    imageFilePath: imageFilePath,
                     failed: false
                 )
             ),
@@ -12207,6 +12215,8 @@ final class ChatViewModel {
             filePaths: filePaths,
             startedAtMs: startedAtMs,
             completedAtMs: completedAtMs,
+            browserURL: browserURL,
+            imageFilePath: imageFilePath,
             failed: failed
         )
         applyLocalAlpineToolEvent(
@@ -12250,6 +12260,11 @@ final class ChatViewModel {
             || normalized.contains("failed")
             || normalized.contains("unsupported")
             || normalized.contains("missing required")
+    }
+
+    private static func looksLikeImagePath(_ value: String) -> Bool {
+        let ext = (value as NSString).pathExtension.lowercased()
+        return ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "avif"].contains(ext)
     }
 
     private func mergeLocalAlpineNativeToolResultMetadata(messageId: String, result: LocalAlpineAgentResult) {
@@ -22618,6 +22633,8 @@ final class ChatViewModel {
             lineDelta: call.lineDelta,
             startedAtMs: call.startedAtMs,
             completedAtMs: call.completedAtMs,
+            browserURL: call.browserURL.map { Self.prefixForLiveUI($0, limit: localAlpineLiveToolDetailLimit) },
+            imageFilePath: call.imageFilePath.map { Self.prefixForLiveUI($0, limit: localAlpineLiveToolDetailLimit) },
             failed: call.failed
         )
     }

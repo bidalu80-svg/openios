@@ -466,6 +466,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let output = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let reference = call.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
             let hasReference = !(reference?.isEmpty ?? true)
+            let previewThumbnail = toolCallThumbnailReference(for: call, file: matchedFile)
+            let previewOpenURL = toolCallPreviewOpenTarget(for: call, file: matchedFile)
             return AgentActivityStep(
                 id: "tool-\(call.id)",
                 kind: .tool,
@@ -483,8 +485,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 command: call.command,
                 cwd: call.cwd,
                 durationText: durationText(for: call),
-                previewThumbnailReference: nil,
-                previewOpenURL: nil,
+                previewThumbnailReference: previewThumbnail,
+                previewOpenURL: previewOpenURL,
                 previewFile: nil
             )
         })
@@ -877,12 +879,55 @@ private struct AgentActivityItem: Identifiable, Hashable {
             .first { isHTTPURLString($0) }
     }
 
+    private static func toolCallThumbnailReference(
+        for call: LocalAlpineToolCall,
+        file: LocalAlpineWrittenFile?
+    ) -> String? {
+        if let imageFilePath = call.imageFilePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !imageFilePath.isEmpty {
+            return imageFilePath
+        }
+        if let file,
+           isImagePath(file.path) {
+            return file.path
+        }
+        return call.filePaths
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: isImagePath(_:))
+    }
+
+    private static func toolCallPreviewOpenTarget(
+        for call: LocalAlpineToolCall,
+        file: LocalAlpineWrittenFile?
+    ) -> String? {
+        if let browserURL = call.browserURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !browserURL.isEmpty {
+            return browserURL
+        }
+        if let imageFilePath = call.imageFilePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !imageFilePath.isEmpty {
+            return imageFilePath
+        }
+        if let filePath = file?.path.trimmingCharacters(in: .whitespacesAndNewlines),
+           !filePath.isEmpty {
+            return filePath
+        }
+        return call.filePaths
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty })
+    }
+
     private static func isHTTPURLString(_ value: String) -> Bool {
         guard let url = URL(string: value),
               let scheme = url.scheme?.lowercased() else {
             return false
         }
         return scheme == "http" || scheme == "https"
+    }
+
+    private static func isImagePath(_ value: String) -> Bool {
+        let ext = (value as NSString).pathExtension.lowercased()
+        return ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "avif"].contains(ext)
     }
 
     private static func officePreviewReferences(from files: [ChatMessageFile]) -> [String] {
@@ -2114,15 +2159,20 @@ struct ChatDetailView: View {
 
     @MainActor
     private func openPreviewURLString(_ urlString: String) -> Bool {
-        guard !urlString.isEmpty,
-              let url = URL(string: urlString) else {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
             return false
         }
-        if Self.canPreviewInApp(url) {
-            previewWebURL = WebPreviewURL(url: url)
-        } else {
-            UIApplication.shared.open(url)
+        if let url = URL(string: trimmed),
+           url.scheme != nil || url.isFileURL {
+            if Self.canPreviewInApp(url) {
+                previewWebURL = WebPreviewURL(url: url)
+            } else {
+                UIApplication.shared.open(url)
+            }
+            return true
         }
+        handleLocalAlpineOpenRequest(LocalAlpineOpenRequest(target: trimmed))
         return true
     }
 

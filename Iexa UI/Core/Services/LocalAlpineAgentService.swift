@@ -528,12 +528,14 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
     let lineDelta: LocalAlpineLineDelta?
     let startedAtMs: Int64
     let completedAtMs: Int64?
+    let browserURL: String?
+    let imageFilePath: String?
     let failed: Bool
 
     private enum CodingKeys: String, CodingKey {
         case id, runId, name, phase, title, detail, cwd, command, exitCode, outputPreview
         case outputReference, outputByteCount, outputLineCount
-        case filePaths, lineDelta, startedAtMs, completedAtMs, failed
+        case filePaths, lineDelta, startedAtMs, completedAtMs, browserURL, imageFilePath, failed
     }
 
     init(
@@ -554,6 +556,8 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
         lineDelta: LocalAlpineLineDelta? = nil,
         startedAtMs: Int64,
         completedAtMs: Int64?,
+        browserURL: String? = nil,
+        imageFilePath: String? = nil,
         failed: Bool
     ) {
         self.id = id
@@ -573,6 +577,8 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
         self.lineDelta = lineDelta
         self.startedAtMs = startedAtMs
         self.completedAtMs = completedAtMs
+        self.browserURL = browserURL
+        self.imageFilePath = imageFilePath
         self.failed = failed
     }
 
@@ -595,6 +601,8 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
         lineDelta = try? container.decode(LocalAlpineLineDelta.self, forKey: .lineDelta)
         startedAtMs = (try? container.decode(Int64.self, forKey: .startedAtMs)) ?? 0
         completedAtMs = try? container.decode(Int64.self, forKey: .completedAtMs)
+        browserURL = try? container.decode(String.self, forKey: .browserURL)
+        imageFilePath = try? container.decode(String.self, forKey: .imageFilePath)
         failed = (try? container.decode(Bool.self, forKey: .failed)) ?? false
     }
 
@@ -648,6 +656,8 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
                 lineDelta: call.lineDelta,
                 startedAtMs: call.startedAtMs,
                 completedAtMs: call.completedAtMs,
+                browserURL: call.browserURL.map { String($0.prefix(800)) },
+                imageFilePath: call.imageFilePath.map { String($0.prefix(800)) },
                 failed: call.failed
             )
         }
