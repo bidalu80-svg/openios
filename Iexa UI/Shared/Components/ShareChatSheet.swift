@@ -478,7 +478,9 @@ struct SharedChatReadOnlyView: View {
                 } else {
                     AssistantMessageContent(
                         content: message.content,
-                        isStreaming: false
+                        isStreaming: false,
+                        localReasoningContent: message.metadata?["iexa_local_reasoning_content"],
+                        localReasoningDone: message.metadata?["iexa_local_reasoning_done"] == "true"
                     )
                 }
             }

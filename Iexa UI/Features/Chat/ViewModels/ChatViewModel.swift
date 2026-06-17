@@ -6680,7 +6680,7 @@ final class ChatViewModel {
                         )
                         self.updateAssistantMessage(
                             id: assistantMessageId,
-                            content: acc.content,
+                            accumulator: acc,
                             isStreaming: false,
                             error: ChatMessageError(content: Self.localizedGenerationError(error))
                         )
@@ -6705,7 +6705,7 @@ final class ChatViewModel {
                     return
                 }
 
-                self.updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+                self.updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: false)
                 self.normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
                 let normalizedContent = self.conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? acc.content
                 self.applyUsage(exactUsage, toMessageId: assistantMessageId)
@@ -6946,7 +6946,7 @@ final class ChatViewModel {
                         if !Task.isCancelled {
                             self.updateAssistantMessage(
                                 id: assistantMessageId,
-                                content: acc.content.isEmpty ? "" : acc.content,
+                                accumulator: acc,
                                 isStreaming: false,
                                 error: ChatMessageError(content: error.localizedDescription)
                             )
@@ -9394,12 +9394,12 @@ final class ChatViewModel {
                     }
                 } catch {
                     if !Task.isCancelled {
-                        self.updateAssistantMessage(
-                            id: capturedNewAssistantId,
-                            content: acc.content,
-                            isStreaming: false,
-                            error: ChatMessageError(content: Self.localizedGenerationError(error))
-                        )
+                            self.updateAssistantMessage(
+                                id: capturedNewAssistantId,
+                                accumulator: acc,
+                                isStreaming: false,
+                                error: ChatMessageError(content: Self.localizedGenerationError(error))
+                            )
                         self.cleanupStreaming()
                         await self.persistLocalConversationIfNeeded()
                         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
@@ -9422,7 +9422,7 @@ final class ChatViewModel {
                     return
                 }
 
-                self.updateAssistantMessage(id: capturedNewAssistantId, content: acc.content, isStreaming: false)
+                self.updateAssistantMessage(id: capturedNewAssistantId, accumulator: acc, isStreaming: false)
                 self.normalizeAssistantGeneratedMedia(messageId: capturedNewAssistantId)
                 let normalizedContent = self.conversation?.messages
                     .first(where: { $0.id == capturedNewAssistantId })?.content ?? acc.content
@@ -9558,7 +9558,7 @@ final class ChatViewModel {
                         if !Task.isCancelled {
                             self.updateAssistantMessage(
                                 id: capturedNewAssistantId,
-                                content: acc.content.isEmpty ? "" : acc.content,
+                                accumulator: acc,
                                 isStreaming: false,
                                 error: ChatMessageError(content: error.localizedDescription))
                             self.cleanupStreaming()
@@ -10068,12 +10068,18 @@ final class ChatViewModel {
         // pending MainActor Task — preventing main actor flooding while still
         // delivering each token as fast as Swift's task scheduler allows.
         let msgId = assistantMessageId
-        acc.onUpdate = { [weak self] content in
+        acc.onUpdate = { [weak self] snapshot in
             // Guard: if streaming already finished (done:true processed),
             // ignore late-arriving accumulated content dispatches.
             guard let self, !self.hasFinishedStreaming else { return }
             self.socketHasReceivedContent = true
-            self.updateAssistantMessage(id: msgId, content: content, isStreaming: true)
+            self.updateAssistantMessage(
+                id: msgId,
+                content: snapshot.renderedContent,
+                isStreaming: true,
+                reasoningContent: snapshot.reasoningContent,
+                reasoningDone: snapshot.reasoningDone
+            )
         }
 
         chatSubscription = socket.addChatEventHandler(
@@ -10171,9 +10177,15 @@ final class ChatViewModel {
     ) {
         guard acc.onUpdate == nil else { return }
         let messageId = assistantMessageId
-        acc.onUpdate = { [weak self] content in
+        acc.onUpdate = { [weak self] snapshot in
             guard let self, !self.hasFinishedStreaming else { return }
-            self.updateAssistantMessage(id: messageId, content: content, isStreaming: true)
+            self.updateAssistantMessage(
+                id: messageId,
+                content: snapshot.renderedContent,
+                isStreaming: true,
+                reasoningContent: snapshot.reasoningContent,
+                reasoningDone: snapshot.reasoningDone
+            )
         }
     }
 
@@ -11112,12 +11124,12 @@ final class ChatViewModel {
                     }
                 } catch {
                     acc.replace(fallback)
-                    updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                    updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
                     return exactUsage
                 }
                 if acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     acc.replace(fallback)
-                    updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                    updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
                 }
                 return exactUsage
             }
@@ -11150,12 +11162,12 @@ final class ChatViewModel {
             }
         } catch {
             acc.replace(fallback)
-            updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+            updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
             return exactUsage
         }
         if acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             acc.replace(fallback)
-            updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+            updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
         }
         return exactUsage
     }
@@ -11204,7 +11216,7 @@ final class ChatViewModel {
                 if let resolvedFallback,
                    !resolvedFallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     acc.replace(resolvedFallback)
-                    updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                    updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
                     return exactUsage
                 }
                 throw error
@@ -11213,7 +11225,7 @@ final class ChatViewModel {
                let resolvedFallback,
                !resolvedFallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 acc.replace(resolvedFallback)
-                updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
             }
             return exactUsage
         }
@@ -12738,7 +12750,7 @@ final class ChatViewModel {
                     didUpdate = true
                 }
                 if didUpdate {
-                    updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                    updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
                 }
 
             case "chat:message", "replace":
@@ -12758,7 +12770,7 @@ final class ChatViewModel {
                     didUpdate = true
                 }
                 if didUpdate {
-                    updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                    updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
                 }
 
             case "status", "event:status":
@@ -12769,12 +12781,12 @@ final class ChatViewModel {
 
             case "chat:message:error":
                 let errContent = extractErrorContent(from: payload ?? data)
-                updateAssistantMessage(id: assistantMessageId, content: acc.content,
+                updateAssistantMessage(id: assistantMessageId, accumulator: acc,
                                         isStreaming: false, error: ChatMessageError(content: errContent))
                 cleanupStreaming()
 
             case "chat:tasks:cancel":
-                updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+                updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: false)
                 cleanupStreaming()
 
             case "request:chat:completion":
@@ -12814,7 +12826,7 @@ final class ChatViewModel {
                 didUpdate = true
             }
             if didUpdate {
-                updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
             }
             if let toolCalls = delta["tool_calls"] as? [[String: Any]] {
                 for call in toolCalls {
@@ -12845,7 +12857,7 @@ final class ChatViewModel {
         if payload["choices"] == nil,
            let reasoning = Self.reasoningDelta(from: payload) {
             acc.appendReasoning(reasoning)
-            updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+            updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
         }
 
         // Direct content field
@@ -12856,7 +12868,7 @@ final class ChatViewModel {
                 incoming: content
             ) ? localBody : content
             acc.replace(protectedContent)
-            updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+            updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
         }
 
         // Top-level tool_calls
@@ -12894,7 +12906,7 @@ final class ChatViewModel {
 
         // Error in completion payload
         if let err = payload["error"] as? String, !err.isEmpty {
-            updateAssistantMessage(id: assistantMessageId, content: acc.content,
+            updateAssistantMessage(id: assistantMessageId, accumulator: acc,
                                     isStreaming: false, error: ChatMessageError(content: err))
             cleanupStreaming()
         }
@@ -12922,7 +12934,7 @@ final class ChatViewModel {
                 didUpdate = true
             }
             if didUpdate {
-                updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: true)
+                updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
             }
         }
     }
@@ -12961,7 +12973,9 @@ final class ChatViewModel {
                     assistantMessageId: assistantMessageId,
                     modelId: modelId,
                     content: acc.content,
-                    usage: usage
+                    usage: usage,
+                    reasoningContent: acc.reasoningContent,
+                    reasoningDone: acc.reasoningDone
                 )
             }
             return
@@ -12970,7 +12984,7 @@ final class ChatViewModel {
         // Finalize the message — mark as not streaming but DON'T dispose
         // socket subscriptions yet. Follow-ups, title, and tags arrive
         // AFTER done:true via socket events, so we need to keep listening.
-        updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+        updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: false)
         normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
         let finalAssistantContent = conversation?.messages
             .first(where: { $0.id == assistantMessageId })?.content ?? acc.content
@@ -13273,11 +13287,13 @@ final class ChatViewModel {
                     assistantMessageId: assistantMessageId,
                     modelId: modelId,
                     content: acc.content,
-                    usage: usage
+                    usage: usage,
+                    reasoningContent: acc.reasoningContent,
+                    reasoningDone: acc.reasoningDone
                 )
                 return
             }
-            updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+            updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: false)
             cleanupStreaming()
             return
         }
@@ -13315,12 +13331,14 @@ final class ChatViewModel {
                 assistantMessageId: assistantMessageId,
                 modelId: modelId,
                 content: acc.content,
-                usage: usage
+                usage: usage,
+                reasoningContent: acc.reasoningContent,
+                reasoningDone: acc.reasoningDone
             )
             return
         }
 
-        updateAssistantMessage(id: assistantMessageId, content: acc.content, isStreaming: false)
+        updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: false)
         normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
         var finalAssistantContent = conversation?.messages
             .first(where: { $0.id == assistantMessageId })?.content ?? acc.content
@@ -18528,7 +18546,9 @@ final class ChatViewModel {
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
                         content: acc.content,
-                        usage: exactUsage
+                        usage: exactUsage,
+                        reasoningContent: acc.reasoningContent,
+                        reasoningDone: acc.reasoningDone
                     )
                     return
                 }
@@ -18549,7 +18569,9 @@ final class ChatViewModel {
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
                         content: acc.content,
-                        usage: exactUsage
+                        usage: exactUsage,
+                        reasoningContent: acc.reasoningContent,
+                        reasoningDone: acc.reasoningDone
                     )
                     return
                 }
@@ -18591,7 +18613,7 @@ final class ChatViewModel {
                     let message = Self.localizedGenerationError(error)
                     self.updateAssistantMessage(
                         id: assistantMessageId,
-                        content: acc.content,
+                        accumulator: acc,
                         isStreaming: false,
                         error: ChatMessageError(content: message)
                     )
@@ -19351,7 +19373,9 @@ final class ChatViewModel {
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
                         content: acc.content,
-                        usage: exactUsage
+                        usage: exactUsage,
+                        reasoningContent: acc.reasoningContent,
+                        reasoningDone: acc.reasoningDone
                     )
                     return
                 }
@@ -19372,7 +19396,9 @@ final class ChatViewModel {
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
                         content: acc.content,
-                        usage: exactUsage
+                        usage: exactUsage,
+                        reasoningContent: acc.reasoningContent,
+                        reasoningDone: acc.reasoningDone
                     )
                     return
                 }
@@ -19424,7 +19450,7 @@ final class ChatViewModel {
                     let message = Self.localizedGenerationError(error)
                     self.updateAssistantMessage(
                         id: assistantMessageId,
-                        content: acc.content,
+                        accumulator: acc,
                         isStreaming: false,
                         error: ChatMessageError(content: message)
                     )
@@ -19440,7 +19466,9 @@ final class ChatViewModel {
         assistantMessageId: String,
         modelId: String,
         content: String,
-        usage: [String: Any]? = nil
+        usage: [String: Any]? = nil,
+        reasoningContent: String? = nil,
+        reasoningDone: Bool? = nil
     ) async {
         let finalContent = content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "本地 iOS 工具已执行完成。"
@@ -19468,7 +19496,9 @@ final class ChatViewModel {
             id: assistantMessageId,
             content: finalContent,
             isStreaming: false,
-            statusHistory: finalStatusHistory
+            statusHistory: finalStatusHistory,
+            reasoningContent: reasoningContent,
+            reasoningDone: reasoningDone
         )
         attachLocalNativeGeneratedFiles(to: assistantMessageId)
         normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
@@ -20687,7 +20717,9 @@ final class ChatViewModel {
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
                         content: acc.content,
-                        usage: exactUsage
+                        usage: exactUsage,
+                        reasoningContent: acc.reasoningContent,
+                        reasoningDone: acc.reasoningDone
                     )
                     return
                 }
@@ -20708,7 +20740,9 @@ final class ChatViewModel {
                         assistantMessageId: assistantMessageId,
                         modelId: modelId,
                         content: acc.content,
-                        usage: exactUsage
+                        usage: exactUsage,
+                        reasoningContent: acc.reasoningContent,
+                        reasoningDone: acc.reasoningDone
                     )
                     return
                 }
@@ -20765,7 +20799,7 @@ final class ChatViewModel {
                     let message = Self.localizedGenerationError(error)
                     self.updateAssistantMessage(
                         id: assistantMessageId,
-                        content: acc.content,
+                        accumulator: acc,
                         isStreaming: false,
                         statusHistory: continuationStatus,
                         error: ChatMessageError(content: message)
@@ -20882,7 +20916,9 @@ final class ChatViewModel {
         assistantMessageId: String,
         modelId: String,
         content: String,
-        usage: [String: Any]?
+        usage: [String: Any]?,
+        reasoningContent: String? = nil,
+        reasoningDone: Bool? = nil
     ) async {
         let isFinalSummary = conversation?.messages.first(where: { $0.id == assistantMessageId })?
             .metadata?["iexa_local_alpine_final_summary"] != nil
@@ -20965,7 +21001,9 @@ final class ChatViewModel {
             id: assistantMessageId,
             content: rawContent,
             isStreaming: false,
-            statusHistory: [doneStatus]
+            statusHistory: [doneStatus],
+            reasoningContent: reasoningContent,
+            reasoningDone: reasoningDone
         )
         normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
         finalContent = conversation?.messages.first(where: { $0.id == assistantMessageId })?.content ?? rawContent
@@ -21599,10 +21637,32 @@ final class ChatViewModel {
     }
 
     private func updateAssistantMessage(
-        id: String, content: String, isStreaming: Bool,
+        id: String,
+        accumulator: ContentAccumulator,
+        isStreaming: Bool,
         sources: [ChatSourceReference]? = nil,
         statusHistory: [ChatStatusUpdate]? = nil,
         error: ChatMessageError? = nil
+    ) {
+        updateAssistantMessage(
+            id: id,
+            content: accumulator.content,
+            isStreaming: isStreaming,
+            sources: sources,
+            statusHistory: statusHistory,
+            error: error,
+            reasoningContent: accumulator.reasoningContent,
+            reasoningDone: accumulator.reasoningDone
+        )
+    }
+
+    private func updateAssistantMessage(
+        id: String, content: String, isStreaming: Bool,
+        sources: [ChatSourceReference]? = nil,
+        statusHistory: [ChatStatusUpdate]? = nil,
+        error: ChatMessageError? = nil,
+        reasoningContent: String? = nil,
+        reasoningDone: Bool? = nil
     ) {
         let showInlineImageReceiveState = isStreaming
             && Self.shouldShowInlineImageReceiveState(for: content)
@@ -21792,6 +21852,31 @@ final class ChatViewModel {
                 conversation?.messages[index].error = error
                 conversation?.history.updateNode(id: id) { node in
                     node.error = error
+                }
+            }
+            if let trimmedReasoning = reasoningContent?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !trimmedReasoning.isEmpty {
+                var metadata = conversation?.messages[index].metadata ?? [:]
+                metadata["iexa_local_reasoning_content"] = trimmedReasoning
+                metadata["iexa_local_reasoning_done"] = (reasoningDone ?? false) ? "true" : "false"
+                conversation?.messages[index].metadata = metadata
+                conversation?.history.updateNode(id: id) { node in
+                    var metadata = node.metadata ?? [:]
+                    metadata["iexa_local_reasoning_content"] = trimmedReasoning
+                    metadata["iexa_local_reasoning_done"] = (reasoningDone ?? false) ? "true" : "false"
+                    node.metadata = metadata
+                }
+            } else if reasoningContent != nil {
+                var metadata = conversation?.messages[index].metadata ?? [:]
+                metadata.removeValue(forKey: "iexa_local_reasoning_content")
+                metadata.removeValue(forKey: "iexa_local_reasoning_done")
+                conversation?.messages[index].metadata = metadata
+                conversation?.history.updateNode(id: id) { node in
+                    var metadata = node.metadata ?? [:]
+                    metadata.removeValue(forKey: "iexa_local_reasoning_content")
+                    metadata.removeValue(forKey: "iexa_local_reasoning_done")
+                    node.metadata = metadata
                 }
             }
         }
@@ -22858,12 +22943,19 @@ final class ChatViewModel {
 /// single string and dispatches at a fixed cadence. This keeps streaming smooth
 /// while preventing token bursts from flooding SwiftUI with hundreds of updates
 /// per second.
+struct ContentAccumulatorSnapshot: Sendable {
+    let renderedContent: String
+    let bodyContent: String
+    let reasoningContent: String
+    let reasoningDone: Bool
+}
+
 final class ContentAccumulator: @unchecked Sendable {
     private let lock = NSLock()
     private nonisolated(unsafe) var _content: String = ""
     private nonisolated(unsafe) var _reasoningContent: String = ""
     private nonisolated(unsafe) var _reasoningDone: Bool = false
-    private nonisolated(unsafe) var _onUpdate: (@MainActor @Sendable (_ content: String) -> Void)?
+    private nonisolated(unsafe) var _onUpdate: (@MainActor @Sendable (_ snapshot: ContentAccumulatorSnapshot) -> Void)?
 
     /// Guards against flooding the main actor with redundant Tasks.
     /// When true, a Task is already queued and will read the latest content
@@ -22874,7 +22966,7 @@ final class ContentAccumulator: @unchecked Sendable {
 
     /// Callback invoked on the main actor with the latest accumulated
     /// content. Set by the view model when socket handlers are registered.
-    nonisolated var onUpdate: (@MainActor @Sendable (_ content: String) -> Void)? {
+    nonisolated var onUpdate: (@MainActor @Sendable (_ snapshot: ContentAccumulatorSnapshot) -> Void)? {
         get {
             lock.lock()
             defer { lock.unlock() }
@@ -22889,7 +22981,7 @@ final class ContentAccumulator: @unchecked Sendable {
 
     nonisolated var content: String {
         lock.lock()
-        let value = renderedContentLocked()
+        let value = snapshotLocked().renderedContent
         lock.unlock()
         return value
     }
@@ -22901,13 +22993,29 @@ final class ContentAccumulator: @unchecked Sendable {
         return value
     }
 
+    nonisolated var reasoningContent: String {
+        lock.lock()
+        let value = _reasoningContent
+        lock.unlock()
+        return value
+    }
+
+    nonisolated var reasoningDone: Bool {
+        lock.lock()
+        let value = _reasoningDone
+        lock.unlock()
+        return value
+    }
+
     /// Marks one scheduled update as complete. If new content arrived while the
     /// main actor was applying this update, keep `_pendingUpdate` true and let
     /// the caller schedule the next tick so no tail content gets stranded.
-    nonisolated private func completeScheduledDispatch(sentContent: String) -> Bool {
+    nonisolated private func completeScheduledDispatch(sentSnapshot: ContentAccumulatorSnapshot) -> Bool {
         lock.lock()
-        let latest = renderedContentLocked()
-        let shouldScheduleNext = latest != sentContent
+        let latest = snapshotLocked()
+        let shouldScheduleNext = latest.renderedContent != sentSnapshot.renderedContent
+            || latest.reasoningContent != sentSnapshot.reasoningContent
+            || latest.reasoningDone != sentSnapshot.reasoningDone
         _pendingUpdate = shouldScheduleNext
         lock.unlock()
         return shouldScheduleNext
@@ -22953,7 +23061,12 @@ final class ContentAccumulator: @unchecked Sendable {
         } else {
             _reasoningContent += text
         }
+        let needsDispatch = !_pendingUpdate
+        if needsDispatch { _pendingUpdate = true }
+        let callback = _onUpdate
         lock.unlock()
+
+        dispatchIfNeeded(needsDispatch, callback: callback)
     }
 
     nonisolated func replace(_ text: String) {
@@ -22974,21 +23087,26 @@ final class ContentAccumulator: @unchecked Sendable {
             return
         }
         _reasoningDone = true
+        let needsDispatch = !_pendingUpdate
+        if needsDispatch { _pendingUpdate = true }
+        let callback = _onUpdate
         lock.unlock()
+
+        dispatchIfNeeded(needsDispatch, callback: callback)
     }
 
     private nonisolated func dispatchIfNeeded(
         _ needsDispatch: Bool,
-        callback: (@MainActor @Sendable (_ content: String) -> Void)?
+        callback: (@MainActor @Sendable (_ snapshot: ContentAccumulatorSnapshot) -> Void)?
     ) {
         guard needsDispatch else { return }
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: Self.updateIntervalNanos)
             guard let self else { return }
             let shouldScheduleNext = await MainActor.run {
-                let latest = self.content
+                let latest = self.snapshot
                 callback?(latest)
-                return self.completeScheduledDispatch(sentContent: latest)
+                return self.completeScheduledDispatch(sentSnapshot: latest)
             }
             if shouldScheduleNext {
                 self.dispatchIfNeeded(true, callback: self.onUpdate)
@@ -22996,7 +23114,40 @@ final class ContentAccumulator: @unchecked Sendable {
         }
     }
 
+    nonisolated var snapshot: ContentAccumulatorSnapshot {
+        lock.lock()
+        let value = snapshotLocked()
+        lock.unlock()
+        return value
+    }
+
+    private nonisolated func snapshotLocked() -> ContentAccumulatorSnapshot {
+        ContentAccumulatorSnapshot(
+            renderedContent: renderedContentLocked(),
+            bodyContent: _content,
+            reasoningContent: _reasoningContent,
+            reasoningDone: _reasoningDone
+        )
+    }
+
     private nonisolated func renderedContentLocked() -> String {
-        _content
+        let trimmedReasoning = _reasoningContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedReasoning.isEmpty else { return _content }
+        let lowercasedContent = _content.lowercased()
+        if lowercasedContent.contains("type=\"reasoning\"")
+            || lowercasedContent.contains("type='reasoning'")
+            || lowercasedContent.contains("<think")
+            || lowercasedContent.contains("<thinking")
+            || lowercasedContent.contains("<reasoning")
+            || lowercasedContent.contains("<thought") {
+            return _content
+        }
+
+        let summary = _reasoningDone ? "思考" : "思考中..."
+        let block = """
+        <details type="reasoning" done="\(_reasoningDone ? "true" : "false")"><summary>\(summary)</summary>\(trimmedReasoning)</details>
+        """
+        guard !_content.isEmpty else { return block }
+        return block + "\n\n" + _content
     }
 }

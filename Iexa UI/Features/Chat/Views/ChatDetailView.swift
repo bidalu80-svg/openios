@@ -4069,6 +4069,8 @@ struct ChatDetailView: View {
                         content: fallbackContent,
                         isStreaming: isMessageVisuallyStreaming(message),
                         messageEmbeds: message.embeds,
+                        localReasoningContent: message.metadata?["iexa_local_reasoning_content"],
+                        localReasoningDone: message.metadata?["iexa_local_reasoning_done"] == "true",
                         authToken: viewModel.serverAuthToken,
                         serverBaseURL: viewModel.serverBaseURL,
                         apiClient: dependencies.apiClient
@@ -7771,6 +7773,8 @@ private struct IsolatedAssistantMessage: View {
                             content: frozenContent,
                             isStreaming: false,
                             messageEmbeds: message.embeds,
+                            localReasoningContent: message.metadata?["iexa_local_reasoning_content"],
+                            localReasoningDone: message.metadata?["iexa_local_reasoning_done"] == "true",
                             authToken: authToken,
                             serverBaseURL: serverBaseURL,
                             apiClient: apiClient
@@ -7878,6 +7882,8 @@ private struct IsolatedAssistantMessage: View {
                         content: displayContent,
                         isStreaming: effectiveIsStreaming,
                         messageEmbeds: message.embeds,
+                        localReasoningContent: message.metadata?["iexa_local_reasoning_content"],
+                        localReasoningDone: message.metadata?["iexa_local_reasoning_done"] == "true",
                         authToken: authToken,
                         serverBaseURL: serverBaseURL,
                         apiClient: apiClient

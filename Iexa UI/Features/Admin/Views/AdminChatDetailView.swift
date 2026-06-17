@@ -262,7 +262,9 @@ struct AdminChatDetailView: View {
             let processed = preprocessAssistantContent(message.content, sources: message.sources)
             AssistantMessageContent(
                 content: processed,
-                isStreaming: false
+                isStreaming: false,
+                localReasoningContent: message.metadata?["iexa_local_reasoning_content"],
+                localReasoningDone: message.metadata?["iexa_local_reasoning_done"] == "true"
             )
         }
     }

@@ -2666,6 +2666,8 @@ struct AssistantMessageContent: View {
     let content: String
     let isStreaming: Bool
     var messageEmbeds: [String] = []
+    var localReasoningContent: String? = nil
+    var localReasoningDone: Bool? = nil
     /// Passed down to Rich UI embeds for auth token injection and base URL resolution.
     var authToken: String? = nil
     var serverBaseURL: String? = nil
@@ -2686,11 +2688,16 @@ struct AssistantMessageContent: View {
 
     var body: some View {
         let renderableContent: String = {
-            let inputHash = content.hashValue
+            let sourceContent = Self.contentByInjectingLocalReasoning(
+                into: content,
+                reasoningContent: localReasoningContent,
+                reasoningDone: localReasoningDone
+            )
+            let inputHash = sourceContent.hashValue
             if inputHash == parseCache.lastInputHash {
                 return parseCache.lastRenderableContent
             }
-            var value = content
+            var value = sourceContent
             if InlineDataPayloadSanitizer.mayContainLargeInlinePayload(value) {
                 value = InlineDataPayloadSanitizer.sanitizedDisplayText(value)
                 value = InlineDataPayloadSanitizer.removingHiddenPayloadArtifacts(from: value)
@@ -2919,6 +2926,32 @@ struct AssistantMessageContent: View {
         case reasoningBlocks([ReasoningData])
         /// Message-level embeds with no associated tool call to attach to.
         case standaloneEmbeds([String])
+    }
+
+    private static func contentByInjectingLocalReasoning(
+        into content: String,
+        reasoningContent: String?,
+        reasoningDone: Bool?
+    ) -> String {
+        let trimmedReasoning = reasoningContent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmedReasoning.isEmpty else { return content }
+
+        let lowercasedContent = content.lowercased()
+        if lowercasedContent.contains("type=\"reasoning\"")
+            || lowercasedContent.contains("type='reasoning'")
+            || lowercasedContent.contains("<think")
+            || lowercasedContent.contains("<thinking")
+            || lowercasedContent.contains("<reasoning")
+            || lowercasedContent.contains("<thought") {
+            return content
+        }
+
+        let summary = (reasoningDone ?? false) ? "思考" : "思考中..."
+        let block = """
+        <details type="reasoning" done="\((reasoningDone ?? false) ? "true" : "false")"><summary>\(summary)</summary>\(trimmedReasoning)</details>
+        """
+        guard !content.isEmpty else { return block }
+        return block + "\n\n" + content
     }
 
     private static func hasRenderableContent(in groups: [SegmentGroup]) -> Bool {
