@@ -10285,10 +10285,28 @@ final class ChatViewModel {
         }
     }
 
-    private struct LocalAlpineNativeToolCall {
+    private struct LocalAlpineNativeToolCall: Codable, Hashable {
         let id: String
         let name: String
         let arguments: String
+
+        static func metadataString(for calls: [LocalAlpineNativeToolCall]) -> String? {
+            let limitedCalls = Array(calls.suffix(16))
+            guard !limitedCalls.isEmpty,
+                  let data = try? JSONEncoder().encode(limitedCalls) else {
+                return nil
+            }
+            return String(data: data, encoding: .utf8)
+        }
+
+        static func decodeMetadata(_ value: String?) -> [LocalAlpineNativeToolCall] {
+            guard let value,
+                  let data = value.data(using: .utf8),
+                  let calls = try? JSONDecoder().decode([LocalAlpineNativeToolCall].self, from: data) else {
+                return []
+            }
+            return calls
+        }
     }
 
     private static let nativeToolSilentFailureDomain = "Iexa.NativeToolSilentFailure"
@@ -12058,7 +12076,11 @@ final class ChatViewModel {
             }
         )
         let result = toolResult.result
-        mergeLocalAlpineNativeToolResultMetadata(messageId: assistantMessageId, result: result)
+        mergeLocalAlpineNativeToolResultMetadata(
+            messageId: assistantMessageId,
+            result: result,
+            executedCalls: [call]
+        )
         recordLocalAlpineFailures(from: result)
         recordLocalAlpineCompletedCommands(from: result)
         await attachLocalAlpineGeneratedMediaIfNeeded(messageId: assistantMessageId)
@@ -12318,7 +12340,11 @@ final class ChatViewModel {
         return ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "avif"].contains(ext)
     }
 
-    private func mergeLocalAlpineNativeToolResultMetadata(messageId: String, result: LocalAlpineAgentResult) {
+    private func mergeLocalAlpineNativeToolResultMetadata(
+        messageId: String,
+        result: LocalAlpineAgentResult,
+        executedCalls: [LocalAlpineNativeToolCall]
+    ) {
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
         var metadata = conversation?.messages[index].metadata ?? [:]
         let incomingRaw = Self.localAlpineStoredRawResult(
@@ -12336,6 +12362,15 @@ final class ChatViewModel {
         }
         if let toolRunId = result.toolRunId {
             metadata["iexa_local_alpine_tool_run_id"] = toolRunId
+        }
+        let existingNativeCalls = LocalAlpineNativeToolCall.decodeMetadata(
+            metadata["iexa_local_alpine_native_calls"]
+        )
+        let mergedNativeCalls = existingNativeCalls + executedCalls.filter { incoming in
+            !existingNativeCalls.contains(where: { $0.id == incoming.id })
+        }
+        if let nativeCalls = LocalAlpineNativeToolCall.metadataString(for: mergedNativeCalls) {
+            metadata["iexa_local_alpine_native_calls"] = nativeCalls
         }
 
         let existingCalls = LocalAlpineToolCall.decodeMetadata(metadata["iexa_local_alpine_tool_calls"])
@@ -12380,6 +12415,30 @@ final class ChatViewModel {
                 ]
             }
         ]
+    }
+
+    private static func localAlpineOpenAIToolHistoryMessages(for message: ChatMessage) -> [[String: Any]]? {
+        let nativeCalls = LocalAlpineNativeToolCall.decodeMetadata(
+            message.metadata?["iexa_local_alpine_native_calls"]
+        )
+        guard !nativeCalls.isEmpty else { return nil }
+        let rawResult = (message.metadata?["iexa_local_alpine_raw_result"] ?? message.content)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let toolResultContent = rawResult.isEmpty
+            ? "Local Alpine native tool completed."
+            : clippedForSystemContext(
+                redactedLocalAlpineInternalPaths(in: rawResult),
+                maxCharacters: 16_000
+            )
+        var messages: [[String: Any]] = [openAIToolCallAssistantMessage(for: nativeCalls)]
+        messages.append(contentsOf: nativeCalls.map { call in
+            [
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": toolResultContent
+            ]
+        })
+        return messages
     }
 
     private static func localAlpineNativeToolEnvelopeContent(for call: LocalAlpineNativeToolCall) -> String {
@@ -18147,6 +18206,13 @@ final class ChatViewModel {
                 continue
             }
             if isLocalAlpineResult && Self.isLocalAlpineProtocolCorrectionMessage(message) {
+                continue
+            }
+            if isLocalAlpineResult,
+               shouldIncludeLocalAlpineContext,
+               isOpenAICompatibleProvider,
+               let exactToolHistory = Self.localAlpineOpenAIToolHistoryMessages(for: message) {
+                apiMessages.append(contentsOf: exactToolHistory)
                 continue
             }
             let modelContent = contentForModel(
