@@ -142,6 +142,7 @@ final class StreamingContentStore {
         static let empty = StreamStructure(
             hasVizStart: false,
             vizEndOffset: nil,
+            rawToolMarkupStart: nil,
             hasUnclosedToolCallBlock: false,
             lastClosedToolCallDetailsEnd: nil,
             unclosedReasoningDetailsStart: nil,
@@ -150,6 +151,7 @@ final class StreamingContentStore {
 
         let hasVizStart: Bool
         let vizEndOffset: Int?
+        let rawToolMarkupStart: Int?
         let hasUnclosedToolCallBlock: Bool
         let lastClosedToolCallDetailsEnd: Int?
         let unclosedReasoningDetailsStart: Int?
@@ -439,6 +441,7 @@ final class StreamingContentStore {
             return content.distance(from: content.startIndex, to: endRange.upperBound)
         }()
 
+        let rawToolMarkupStart = firstRawToolMarkupStart(in: content)
         let hasToolCalls = content.range(of: "tool_calls", options: .caseInsensitive) != nil
         let unclosedReasoningStart = unclosedReasoningDetailsStart(in: content)
         let lastClosedReasoningEnd = unclosedReasoningStart == nil
@@ -448,6 +451,7 @@ final class StreamingContentStore {
             return StreamStructure(
                 hasVizStart: hasVizStart,
                 vizEndOffset: vizEndOffset,
+                rawToolMarkupStart: rawToolMarkupStart,
                 hasUnclosedToolCallBlock: false,
                 lastClosedToolCallDetailsEnd: nil,
                 unclosedReasoningDetailsStart: unclosedReasoningStart,
@@ -464,6 +468,7 @@ final class StreamingContentStore {
         return StreamStructure(
             hasVizStart: hasVizStart,
             vizEndOffset: vizEndOffset,
+            rawToolMarkupStart: rawToolMarkupStart,
             hasUnclosedToolCallBlock: hasUnclosed,
             lastClosedToolCallDetailsEnd: lastClosedEnd,
             unclosedReasoningDetailsStart: unclosedReasoningStart,
@@ -560,6 +565,20 @@ final class StreamingContentStore {
                 if isFinishing { completeCleanup() }
                 return
             }
+        }
+
+        if let rawToolMarkupStart = structure.rawToolMarkupStart {
+            let startIdx = full.index(full.startIndex, offsetBy: rawToolMarkupStart)
+            let prefix = String(full[..<startIdx])
+            if displayContent != prefix {
+                displayContent = prefix
+            }
+            lastKnownTotal = totalCount
+            framesSinceLastBurst = 0
+            if isFinishing {
+                completeCleanup()
+            }
+            return
         }
 
         // Tool call block fast-forward:
@@ -898,6 +917,21 @@ final class StreamingContentStore {
     private static func hasClosedToolCallBlock(_ content: String) -> Bool {
         guard content.contains("tool_calls") && content.contains("</details>") else { return false }
         return !hasUnclosedToolCallBlock(content)
+    }
+
+    private static func firstRawToolMarkupStart(in content: String) -> Int? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?im)^\s*(?:<\|\s*\|\s*DSML\s*\|\s*\||<\s*(?:tool_calls?|tool_use|tool_call|function_call|invoke|parameter)\b)"#,
+            options: [.caseInsensitive]
+        ) else {
+            return nil
+        }
+        let nsContent = content as NSString
+        let range = NSRange(location: 0, length: nsContent.length)
+        guard let match = regex.firstMatch(in: content, range: range) else {
+            return nil
+        }
+        return match.range.location
     }
 
     /// Finds the character offset immediately after the last closing `</details>`

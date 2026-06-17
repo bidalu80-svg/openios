@@ -7080,7 +7080,124 @@ actor LocalAlpineAgentService {
         for range in pseudoToolCallRangesWithPayload(in: content, includeIncomplete: false) {
             blocks.append(nsContent.substring(with: range.payload).trimmingCharacters(in: .newlines))
         }
+        blocks.append(contentsOf: dsmlToolInstructionBodies(in: content))
         return blocks
+    }
+
+    nonisolated private static func dsmlToolInstructionBodies(in content: String) -> [String] {
+        var seen: Set<String> = []
+        return dsmlToolCallObjects(in: content).compactMap { call in
+            guard JSONSerialization.isValidJSONObject(call),
+                  let data = try? JSONSerialization.data(withJSONObject: call, options: []),
+                  let text = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty, !seen.contains(normalized) else { return nil }
+            seen.insert(normalized)
+            return normalized
+        }
+    }
+
+    nonisolated private static func dsmlToolCallObjects(in content: String) -> [[String: Any]] {
+        let lines = content.components(separatedBy: .newlines)
+        var calls: [[String: Any]] = []
+        var currentCall: [String: Any]?
+        var currentParameterName: String?
+        var currentParameterLines: [String] = []
+
+        func finalizeParameter() {
+            guard let name = currentParameterName else { return }
+            let value = currentParameterLines.joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                currentCall?[name] = value
+            }
+            currentParameterName = nil
+            currentParameterLines.removeAll(keepingCapacity: true)
+        }
+
+        func finalizeCall() {
+            finalizeParameter()
+            guard let call = currentCall, !call.isEmpty else {
+                currentCall = nil
+                return
+            }
+            calls.append(call)
+            currentCall = nil
+        }
+
+        for line in lines {
+            guard let marker = dsmlMarkerBody(from: line) else {
+                if currentParameterName != nil {
+                    currentParameterLines.append(line)
+                }
+                continue
+            }
+
+            let lowered = marker.lowercased()
+            if lowered.hasPrefix("tool_calls") {
+                continue
+            }
+            if lowered.hasPrefix("invoke") {
+                finalizeCall()
+                if let name = firstDSMLAttribute(named: "name", in: marker) {
+                    currentCall = ["name": name]
+                }
+                continue
+            }
+            if lowered.hasPrefix("parameter") {
+                finalizeParameter()
+                guard currentCall != nil,
+                      let name = firstDSMLAttribute(named: "name", in: marker) else {
+                    continue
+                }
+                currentParameterName = name
+                if let inlineValue = marker
+                    .split(separator: ">", maxSplits: 1, omittingEmptySubsequences: false)
+                    .dropFirst()
+                    .first {
+                    let text = String(inlineValue).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !text.isEmpty {
+                        currentParameterLines.append(text)
+                    }
+                }
+            }
+        }
+
+        finalizeCall()
+        return calls
+    }
+
+    nonisolated private static func dsmlMarkerBody(from line: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"^\s*<\|\s*\|\s*DSML\s*\|\s*\|\s*(.+?)\s*$"#,
+            options: [.caseInsensitive]
+        ) else {
+            return nil
+        }
+        let nsLine = line as NSString
+        let range = NSRange(location: 0, length: nsLine.length)
+        guard let match = regex.firstMatch(in: line, range: range),
+              match.numberOfRanges > 1 else {
+            return nil
+        }
+        return nsLine.substring(with: match.range(at: 1))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func firstDSMLAttribute(named name: String, in text: String) -> String? {
+        let pattern = #"\b"# + NSRegularExpression.escapedPattern(for: name) + #"="([^"]+)""#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        guard let match = regex.firstMatch(in: text, range: range),
+              match.numberOfRanges > 1 else {
+            return nil
+        }
+        return nsText.substring(with: match.range(at: 1))
     }
 
     nonisolated private static func taggedToolInstructionBodies(in content: String) -> [String] {

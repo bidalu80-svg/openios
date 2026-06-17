@@ -22539,7 +22539,11 @@ final class ChatViewModel {
         let normalized = text.lowercased()
         guard normalized.contains("local alpine")
             || normalized.contains("iexa_alpine")
-            || normalized.contains("[current model capability]") else {
+            || normalized.contains("[current model capability]")
+            || normalized.contains("dsml")
+            || normalized.contains("tool_calls")
+            || normalized.contains("invoke name=")
+            || normalized.contains("parameter name=") else {
             return false
         }
 
@@ -22564,7 +22568,11 @@ final class ChatViewModel {
             "pure prose means final answer",
             "call exactly one fenced markdown block",
             "read the next observation before continuing",
-            "controller_verdict"
+            "controller_verdict",
+            "dsml",
+            "invoke name=",
+            "parameter name=",
+            "tool_calls>"
         ]
         return strongMarkers.contains { normalized.contains($0) }
     }
@@ -22589,6 +22597,25 @@ final class ChatViewModel {
                 cleaned = regex.stringByReplacingMatches(
                     in: cleaned,
                     range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                    withTemplate: ""
+                )
+            }
+        }
+        let lowerCleaned = cleaned.lowercased()
+        if lowerCleaned.contains("dsml")
+            || lowerCleaned.contains("tool_calls>")
+            || lowerCleaned.contains("invoke name=")
+            || lowerCleaned.contains("parameter name=") {
+            let truncationPatterns = [
+                #"(?is)<\|\s*\|\s*dsml\s*\|\s*\|[\s\S]*$"#,
+                #"(?is)<\s*(?:tool_calls?|tool_use|tool_call|function_call|invoke|parameter)\b[\s\S]*$"#
+            ]
+            for pattern in truncationPatterns {
+                guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+                let range = NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned)
+                cleaned = regex.stringByReplacingMatches(
+                    in: cleaned,
+                    range: range,
                     withTemplate: ""
                 )
             }

@@ -261,7 +261,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
     var firstPreviewOpenURL: String? {
         steps.compactMap { step in
             let value = step.previewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines)
-            return value?.isEmpty == false ? value : nil
+            return normalizedPreviewTarget(value)
         }.last
     }
 
@@ -900,21 +900,83 @@ private struct AgentActivityItem: Identifiable, Hashable {
         for call: LocalAlpineToolCall,
         file: LocalAlpineWrittenFile?
     ) -> String? {
+        let normalizedToolName = call.name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
         if let browserURL = call.browserURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !browserURL.isEmpty {
-            return browserURL
+           let normalized = normalizedPreviewTarget(browserURL) {
+            return normalized
         }
         if let imageFilePath = call.imageFilePath?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !imageFilePath.isEmpty {
-            return imageFilePath
+           let normalized = normalizedPreviewTarget(imageFilePath) {
+            return normalized
         }
         if let filePath = file?.path.trimmingCharacters(in: .whitespacesAndNewlines),
-           !filePath.isEmpty {
-            return filePath
+           let normalized = normalizedPreviewTarget(filePath) {
+            return normalized
+        }
+        guard !["shell_execute", "bash", "shell", "sh", "run", "command", "exec"].contains(normalizedToolName) else {
+            return nil
         }
         return call.filePaths
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first(where: { !$0.isEmpty })
+            .compactMap {
+                normalizedPreviewTarget($0.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            .first
+    }
+
+    static func normalizedPreviewTarget(_ value: String?) -> String? {
+        guard var trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty,
+              !trimmed.contains("\n"),
+              !trimmed.contains("\r") else {
+            return nil
+        }
+
+        if let httpURL = firstRegexMatch(
+            pattern: #"https?://[^\s"'`<>()\[\]{}]+"#,
+            in: trimmed
+        ) {
+            return httpURL
+        }
+        if let workspacePath = firstRegexMatch(
+            pattern: #"/mnt/iexa/[^\s"'`<>()\[\]{}]+"#,
+            in: trimmed
+        ) {
+            return workspacePath
+        }
+
+        trimmed = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`.,;:!?)[]{}"))
+        guard !trimmed.isEmpty else { return nil }
+
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("iexa://") || lower.hasPrefix("file://") {
+            return trimmed
+        }
+        if trimmed.hasPrefix("/mnt/iexa/") || trimmed.hasPrefix("/tmp/") || trimmed.hasPrefix("/var/") {
+            return trimmed
+        }
+        if (trimmed.hasPrefix("./") || trimmed.hasPrefix("../"))
+            && !trimmed.contains(" ")
+            && !trimmed.contains("\t") {
+            return trimmed
+        }
+        let ext = (trimmed as NSString).pathExtension.lowercased()
+        if !ext.isEmpty && !trimmed.contains(" ") && !trimmed.contains("\t") {
+            return trimmed
+        }
+        return nil
+    }
+
+    private static func firstRegexMatch(pattern: String, in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        guard let match = regex.firstMatch(in: text, range: range) else { return nil }
+        return nsText.substring(with: match.range)
     }
 
     private static func isHTTPURLString(_ value: String) -> Bool {
@@ -2301,14 +2363,16 @@ struct ChatDetailView: View {
 
     @MainActor
     private func openAgentPreviewResult(step: AgentActivityStep?, item: AgentActivityItem) -> Bool {
-        if let file = step?.previewFile {
-            openMessageFile(file)
-            return true
-        }
-
-        if let urlString = step?.previewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-           openPreviewURLString(urlString) {
-            return true
+        if let step {
+            if let file = step.previewFile {
+                openMessageFile(file)
+                return true
+            }
+            if let urlString = step.previewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+               openPreviewURLString(urlString) {
+                return true
+            }
+            return false
         }
 
         if let file = item.firstPreviewFile {
@@ -2326,8 +2390,7 @@ struct ChatDetailView: View {
 
     @MainActor
     private func openPreviewURLString(_ urlString: String) -> Bool {
-        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        guard let trimmed = AgentActivityItem.normalizedPreviewTarget(urlString) else {
             return false
         }
         if let url = URL(string: trimmed),
@@ -8982,10 +9045,7 @@ private struct AgentStepFloatingBar: View {
 
     private var previewThumbnailReference: String? {
         let selected = selectedStep?.previewThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if selected?.isEmpty == false {
-            return selected
-        }
-        return item.firstPreviewThumbnailReference
+        return selected?.isEmpty == false ? selected : nil
     }
 
     private var selectedTitle: String {
@@ -9003,7 +9063,7 @@ private struct AgentStepFloatingBar: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Button {
                 onPreviewTap(item, clampedIndex)
             } label: {
@@ -9013,25 +9073,25 @@ private struct AgentStepFloatingBar: View {
                     previewText: previewText,
                     thumbnailReference: previewThumbnailReference
                 )
-                .frame(width: 88, height: 50, alignment: .topLeading)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .frame(width: 72, height: 40, alignment: .topLeading)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             }
             .buttonStyle(.plain)
 
-            HStack(spacing: 8) {
+            HStack(spacing: 7) {
                 ZStack {
                     Circle()
                         .fill(tint.opacity(theme.isDark ? 0.16 : 0.12))
-                        .frame(width: 22, height: 22)
+                        .frame(width: 20, height: 20)
                     Image(systemName: icon)
-                        .scaledFont(size: 12, weight: .bold)
+                        .scaledFont(size: 11, weight: .bold)
                         .foregroundStyle(tint)
-                        .frame(width: 18, height: 18)
+                        .frame(width: 16, height: 16)
                 }
 
                 Text(selectedTitle)
-                    .scaledFont(size: 13.5, weight: .semibold)
+                    .scaledFont(size: 12.5, weight: .semibold)
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -9045,28 +9105,28 @@ private struct AgentStepFloatingBar: View {
                         movePage(-1)
                     } label: {
                         Image(systemName: "chevron.left")
-                            .scaledFont(size: 12, weight: .bold)
+                            .scaledFont(size: 11, weight: .bold)
                             .foregroundStyle(clampedIndex > 0 ? theme.textPrimary : theme.textTertiary.opacity(0.42))
-                            .frame(width: 24, height: 24)
+                            .frame(width: 22, height: 22)
                     }
                     .buttonStyle(.plain)
                     .disabled(clampedIndex == 0)
 
                     Text(pageText)
-                        .scaledFont(size: 11.5, weight: .semibold, design: .rounded)
+                        .scaledFont(size: 10.5, weight: .semibold, design: .rounded)
                         .foregroundStyle(theme.textSecondary)
                         .monospacedDigit()
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
-                        .frame(width: 42, alignment: .center)
+                        .frame(width: 36, alignment: .center)
 
                     Button {
                         movePage(1)
                     } label: {
                         Image(systemName: "chevron.right")
-                            .scaledFont(size: 12, weight: .bold)
+                            .scaledFont(size: 11, weight: .bold)
                             .foregroundStyle(clampedIndex < item.steps.count - 1 ? theme.textPrimary : theme.textTertiary.opacity(0.42))
-                            .frame(width: 24, height: 24)
+                            .frame(width: 22, height: 22)
                     }
                     .buttonStyle(.plain)
                     .disabled(clampedIndex >= item.steps.count - 1)
@@ -9074,19 +9134,19 @@ private struct AgentStepFloatingBar: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.leading, 8)
-        .padding(.trailing, 10)
-        .padding(.vertical, 4)
-        .frame(height: 58, alignment: .center)
+        .padding(.leading, 7)
+        .padding(.trailing, 8)
+        .padding(.vertical, 3)
+        .frame(height: 48, alignment: .center)
         .frame(maxWidth: .infinity)
         .background(theme.cardBackground.opacity(theme.isDark ? 0.88 : 0.98))
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.18 : 0.18), lineWidth: 0.8)
         )
-        .shadow(color: .black.opacity(theme.isDark ? 0.18 : 0.08), radius: 10, x: 0, y: 4)
-        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: .black.opacity(theme.isDark ? 0.18 : 0.08), radius: 8, x: 0, y: 3)
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .onAppear {
             selectedIndex = max(0, item.currentStepIndex - 1)
         }
@@ -9106,8 +9166,8 @@ private struct AgentToolPreviewPop: View {
     let previewText: String
     let thumbnailReference: String?
 
-    private let previewSize = CGSize(width: 88, height: 50)
-    private let cornerRadius: CGFloat = 8
+    private let previewSize = CGSize(width: 72, height: 40)
+    private let cornerRadius: CGFloat = 7
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -9135,25 +9195,25 @@ private struct AgentToolPreviewPop: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(previewTitle)
-                    .font(.system(size: 7.8, weight: .bold, design: .monospaced))
+                    .font(.system(size: 6.8, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.88))
                     .lineLimit(1)
 
                 Text(previewSubtitle)
-                    .font(.system(size: 6.6, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 5.8, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.66))
                     .lineLimit(1)
 
                 if thumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                     Text(previewText)
-                        .font(.system(size: 6.8, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 5.9, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Color(red: 0.30, green: 0.63, blue: 1.0))
                         .lineLimit(3)
                         .truncationMode(.tail)
                 }
             }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
         }
         .frame(width: previewSize.width, height: previewSize.height, alignment: .topLeading)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
