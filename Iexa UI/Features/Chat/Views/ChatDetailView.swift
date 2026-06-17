@@ -9194,25 +9194,27 @@ private struct AgentStepFloatingBar: View {
         }
     }
 
-    var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            floatingBarBody
-            previewCardButton
-        }
-        .frame(height: 46, alignment: .bottom)
-        .onAppear {
-            selectedIndex = max(0, item.currentStepIndex - 1)
-        }
-        .onChange(of: item.id) { _, _ in
-            selectedIndex = max(0, item.currentStepIndex - 1)
-        }
-        .onChange(of: item.currentStepIndex) { _, currentIndex in
-            selectedIndex = min(max(0, currentIndex - 1), max(0, item.steps.count - 1))
-        }
-        .onChange(of: item.steps.count) { _, count in
-            selectedIndex = min(max(0, item.currentStepIndex - 1), max(0, count - 1))
-        }
-        .accessibilityLabel("步骤 \(taskCount)")
+    var body: AnyView {
+        AnyView(
+            ZStack(alignment: .bottomLeading) {
+                floatingBarBody
+                previewCardButton
+            }
+            .frame(height: 46, alignment: .bottom)
+            .onAppear {
+                selectedIndex = max(0, item.currentStepIndex - 1)
+            }
+            .onChange(of: item.id) { _, _ in
+                selectedIndex = max(0, item.currentStepIndex - 1)
+            }
+            .onChange(of: item.currentStepIndex) { _, currentIndex in
+                selectedIndex = min(max(0, currentIndex - 1), max(0, item.steps.count - 1))
+            }
+            .onChange(of: item.steps.count) { _, count in
+                selectedIndex = min(max(0, item.currentStepIndex - 1), max(0, count - 1))
+            }
+            .accessibilityLabel("步骤 \(taskCount)")
+        )
     }
 }
 
