@@ -1719,11 +1719,11 @@ struct ChatDetailView: View {
 
     private func agentActivityCacheSignature(for message: ChatMessage) -> Int {
         var signature = message.id.hashValue
-        signature &+= message.content.utf8.count &* 3
+        signature &+= Self.lightweightTranscriptTextSignature(message.content)
         signature &+= message.isStreaming ? 31 : 7
         signature &+= message.statusHistory.count &* 13
         signature &+= message.files.count &* 17
-        signature &+= message.error?.content?.utf8.count ?? 0
+        signature &+= Self.lightweightTranscriptTextSignature(message.error?.content ?? "")
         if let metadata = message.metadata {
             signature &+= metadata.count &* 19
             for key in [
@@ -1736,9 +1736,7 @@ struct ChatDetailView: View {
                 if let value = metadata[key] {
                     signature &+= key.hashValue
                     signature &+= value.isEmpty ? 0 : 1
-                    signature &+= value.utf8.count &* 17
-                    signature &+= value.prefix(192).hashValue
-                    signature &+= value.suffix(192).hashValue
+                    signature &+= Self.lightweightTranscriptTextSignature(value)
                 }
             }
         }
