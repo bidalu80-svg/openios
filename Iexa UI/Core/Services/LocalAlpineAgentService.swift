@@ -453,7 +453,7 @@ enum LocalAlpineToolDisplayRegistry {
             return LocalAlpineToolDisplay(icon: "doc.text", title: "读取文件")
         case "read_image", "image_read", "inspect_image":
             return LocalAlpineToolDisplay(icon: "photo", title: "读取图片")
-        case "edit_file", "edit_files", "replace_file", "edit":
+        case "edit_file", "edit_files", "replace_file", "edit", "file_edit":
             return LocalAlpineToolDisplay(icon: "square.and.pencil", title: "编辑文件")
         case "patch_file", "patch_files", "apply_patch", "patch":
             return LocalAlpineToolDisplay(icon: "doc.on.doc", title: "应用补丁")

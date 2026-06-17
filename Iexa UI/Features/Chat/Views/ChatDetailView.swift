@@ -2373,10 +2373,20 @@ struct ChatDetailView: View {
         }
         let clampedIndex = min(max(initialIndex, 0), max(item.steps.count - 1, 0))
         let lightweightStep = item.steps.indices.contains(clampedIndex) ? item.steps[clampedIndex] : item.currentStep
-        let fullItem = agentActivityWindowPreview(includeInactive: true) ?? item
-        let fullIndex = lightweightStep.flatMap { selected in
-            fullItem.steps.firstIndex(where: { $0.id == selected.id })
-        } ?? clampedIndex
+        let candidateFullItem = agentActivityWindowPreview(includeInactive: true)
+        let resolvedFullItem: AgentActivityItem
+        let resolvedFullIndex: Int
+        if let candidateFullItem,
+           let lightweightStep,
+           let matchedIndex = candidateFullItem.steps.firstIndex(where: { $0.id == lightweightStep.id }) {
+            resolvedFullItem = candidateFullItem
+            resolvedFullIndex = matchedIndex
+        } else {
+            resolvedFullItem = item
+            resolvedFullIndex = clampedIndex
+        }
+        let fullItem = resolvedFullItem
+        let fullIndex = min(max(resolvedFullIndex, 0), max(fullItem.steps.count - 1, 0))
         let fullStep = fullItem.steps.indices.contains(fullIndex) ? fullItem.steps[fullIndex] : lightweightStep
         if openAgentPreviewResult(step: fullStep, item: fullItem) {
             Haptics.play(.light)
@@ -3679,7 +3689,8 @@ struct ChatDetailView: View {
                 pendingNewAgentFloatingSnapshotAfterKeyboard = nil
                 resumeAgentFloatingBarForNewTask()
             } else {
-                if hasActiveAgentFloatingActivity {
+                if hasActiveAgentFloatingActivity
+                    || viewModel.messages.last.map({ AgentActivityItem.isActivityMessage($0) }) == true {
                     resumeAgentFloatingBarForNewTask()
                 }
                 refreshAgentFloatingActivitySnapshotFromLatestMessage()
