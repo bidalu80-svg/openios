@@ -1548,6 +1548,30 @@ private final class CurrentTurnActivityItemsCache {
     }
 }
 
+private struct CurrentTurnMergedActivityCacheEntry {
+    let signature: Int
+    let item: AgentActivityItem?
+}
+
+private final class CurrentTurnMergedActivityCache {
+    private var entries: [String: CurrentTurnMergedActivityCacheEntry] = [:]
+
+    func lookup(key: String, signature: Int) -> AgentActivityItem?? {
+        guard let entry = entries[key], entry.signature == signature else {
+            return nil
+        }
+        return entry.item
+    }
+
+    func store(key: String, signature: Int, item: AgentActivityItem?) {
+        entries[key] = CurrentTurnMergedActivityCacheEntry(signature: signature, item: item)
+        if entries.count > 8 {
+            entries.removeAll(keepingCapacity: true)
+            entries[key] = CurrentTurnMergedActivityCacheEntry(signature: signature, item: item)
+        }
+    }
+}
+
 private struct AssistantRenderableContentCacheEntry {
     let signature: Int
     let value: String
@@ -1594,6 +1618,7 @@ struct ChatDetailView: View {
     @State private var transcriptCache = TranscriptMessagesCache()
     @State private var assistantVisibleTextCache = AssistantVisibleTextCache()
     @State private var currentTurnActivityCache = CurrentTurnActivityItemsCache()
+    @State private var currentTurnMergedActivityCache = CurrentTurnMergedActivityCache()
     @State private var scrollRuntime = ChatScrollRuntimeState()
 
     // MARK: Model selector sheet
@@ -2131,10 +2156,20 @@ struct ChatDetailView: View {
     private func agentActivityWindowPreview(includeInactive: Bool) -> AgentActivityItem? {
         let turnItems = currentTurnAgentActivityItems(includeInactive: includeInactive)
         let isLive = viewModel.isStreaming || viewModel.streamingStore.isActive
-        if let merged = AgentActivityItem.mergedTurn(
-            id: "turn-\(viewModel.messages.last?.id ?? "latest")",
-            items: turnItems
-        ), merged.hasConcreteSteps {
+        let cacheKey = includeInactive ? "window-preview-include-inactive" : "window-preview-live-only"
+        let signature = currentTurnMergedActivitySignature(items: turnItems, includeInactive: includeInactive, isLive: isLive)
+        let merged: AgentActivityItem? = {
+            if let cached = currentTurnMergedActivityCache.lookup(key: cacheKey, signature: signature) {
+                return cached
+            }
+            let computed = AgentActivityItem.mergedTurn(
+                id: "turn-\(viewModel.messages.last?.id ?? "latest")",
+                items: turnItems
+            )
+            currentTurnMergedActivityCache.store(key: cacheKey, signature: signature, item: computed)
+            return computed
+        }()
+        if let merged, merged.hasConcreteSteps {
             guard includeInactive || merged.isActive || isLive else { return nil }
             return merged
         }
@@ -2142,6 +2177,30 @@ struct ChatDetailView: View {
         guard let item = turnItems.reversed().first(where: { $0.hasConcreteSteps }) ?? turnItems.last else { return nil }
         guard includeInactive || item.isActive || isLive else { return nil }
         return item
+    }
+
+    private func currentTurnMergedActivitySignature(
+        items: [AgentActivityItem],
+        includeInactive: Bool,
+        isLive: Bool
+    ) -> Int {
+        var signature = items.count &* 31
+        signature &+= includeInactive ? 17 : 5
+        signature &+= isLive ? 29 : 11
+        for item in items {
+            signature &+= item.id.hashValue
+            signature &+= item.steps.count &* 13
+            signature &+= item.fileCount &* 7
+            signature &+= item.commandCount &* 11
+            signature &+= item.isStreaming ? 19 : 3
+            signature &+= item.hasFailure ? 23 : 5
+            if let lastStep = item.steps.last {
+                signature &+= lastStep.id.hashValue
+                signature &+= lastStep.title.hashValue
+                signature &+= lastStep.isRunning ? 31 : 7
+            }
+        }
+        return signature
     }
 
     private var hasActiveAgentFloatingActivity: Bool {
