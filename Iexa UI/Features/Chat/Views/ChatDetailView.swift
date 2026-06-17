@@ -2065,6 +2065,9 @@ struct ChatDetailView: View {
               let messageId = notification.userInfo?["messageId"] as? String else {
             return
         }
+        guard !keyboard.isVisible else {
+            return
+        }
         let calls = notification.userInfo?["calls"] as? [LocalAlpineToolCall] ?? []
         let status = notification.userInfo?["status"] as? ChatStatusUpdate
         guard !calls.isEmpty || status != nil else { return }
@@ -2075,14 +2078,6 @@ struct ChatDetailView: View {
             liveStatus: status
         )?.limitingSteps(to: Self.agentFloatingPreviewStepLimit),
               item.hasConcreteSteps else {
-            return
-        }
-
-        if keyboard.isVisible {
-            suppressStaleAgentFloatingBarAfterKeyboard = true
-            pendingNewAgentFloatingSnapshotAfterKeyboard = nil
-            agentFloatingActivitySnapshot = nil
-            setAgentFloatingBarHiddenForKeyboard(true)
             return
         }
 
