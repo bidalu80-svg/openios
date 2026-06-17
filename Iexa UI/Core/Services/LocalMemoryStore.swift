@@ -22,6 +22,14 @@ actor LocalMemoryStore {
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 
+    func listUpdatedSince(_ date: Date, serverURL: String) async -> [LocalMemory] {
+        await loadAll(serverURL: serverURL)
+            .filter { memory in
+                memory.updatedAt >= date || memory.createdAt >= date
+            }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
     func add(content: String, serverURL: String) async -> LocalMemory {
         var memories = await loadAll(serverURL: serverURL)
         let memory = LocalMemory(content: content)

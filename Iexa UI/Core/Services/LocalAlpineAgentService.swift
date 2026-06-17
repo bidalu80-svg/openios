@@ -489,6 +489,14 @@ enum LocalAlpineToolDisplayRegistry {
             return LocalAlpineToolDisplay(icon: "shippingbox", title: "安装依赖")
         case "network_fetch", "fetch", "browser_use", "web_fetch":
             return LocalAlpineToolDisplay(icon: "network", title: "网络请求")
+        case "web_search", "search_web", "browser_search":
+            return LocalAlpineToolDisplay(icon: "globe", title: "搜索网页")
+        case "iexa_open", "open_preview":
+            return LocalAlpineToolDisplay(icon: "eye", title: "打开预览")
+        case "memory_write":
+            return LocalAlpineToolDisplay(icon: "square.and.arrow.down", title: "写入记忆")
+        case "memory_get":
+            return LocalAlpineToolDisplay(icon: "brain", title: "读取记忆")
         case "command", "shell", "bash", "exec", "shell_execute":
             return LocalAlpineToolDisplay(icon: "terminal.fill", title: "运行命令")
         case "diagnostic":
@@ -1955,6 +1963,10 @@ actor LocalAlpineAgentService {
             return "verify"
         case "browser_use", "browser", "browse", "web_fetch", "fetch_url", "open_url":
             return "browser_use"
+        case "web.search", "web_search", "search_web", "browser.search", "browser_search":
+            return "web_search"
+        case "iexa_open", "open_preview":
+            return "iexa_open"
         case "move_file", "rename_file":
             return "move_file"
         case "copy_file":
@@ -1997,6 +2009,10 @@ actor LocalAlpineAgentService {
             requiredGroups = [["pattern"]]
         case "browser_use":
             requiredGroups = [["url"]]
+        case "web_search":
+            requiredGroups = [["query"]]
+        case "iexa_open":
+            requiredGroups = [["target"]]
         case "move_file", "copy_file":
             requiredGroups = [["from"], ["to"]]
         default:
@@ -2192,6 +2208,17 @@ actor LocalAlpineAgentService {
         case "browser_use", "browser", "browse", "web_fetch", "fetch_url", "open_url":
             return [
                 "url": ["href", "link", "uri", "address", "value"]
+            ]
+        case "web.search", "web_search", "search_web", "browser.search", "browser_search":
+            return [
+                "query": ["keywords", "search", "text", "value", "q"]
+            ]
+        case "iexa_open", "open_preview":
+            return [
+                "target": [
+                    "url", "href", "link", "path", "file", "filepath", "file_path",
+                    "preview_target", "open_preview_target", "value"
+                ]
             ]
         case "move_file", "rename_file", "copy_file":
             return [
@@ -2403,7 +2430,14 @@ actor LocalAlpineAgentService {
 
     private func parseTopLevelSpecialToolCommands(from dict: [String: Any]) -> [LocalAlpineAgentCommand] {
         var commands: [LocalAlpineAgentCommand] = []
-        for tool in ["mkdir", "append_file", "append", "append_and_read", "delete_dir", "remove_dir", "move_file", "rename_file", "copy_file"] {
+        for tool in [
+            "mkdir",
+            "append_file", "append", "append_and_read",
+            "delete_dir", "remove_dir",
+            "move_file", "rename_file", "copy_file",
+            "iexa_open", "open_preview",
+            "web_search", "search_web", "browser_search"
+        ] {
             guard let raw = dict[tool] else { continue }
             let items = (raw as? [Any]) ?? [raw]
             for item in items {
@@ -2432,7 +2466,9 @@ actor LocalAlpineAgentService {
         "move_file", "rename_file", "copy_file", "mkdir",
         "glob", "find", "glob/find", "find_files",
         "verify", "check",
-        "browser_use", "browser", "browse", "web_fetch", "fetch_url", "open_url"
+        "browser_use", "browser", "browse", "web_fetch", "fetch_url", "open_url",
+        "web.search", "web_search", "search_web", "browser.search", "browser_search",
+        "iexa_open", "open_preview"
     ]
 
     private func parseSpecialToolShape(
@@ -2558,6 +2594,74 @@ actor LocalAlpineAgentService {
                 command: command,
                 cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa",
                 delaySeconds: Self.delaySeconds(from: arguments)
+            )]
+
+        case "iexa_open", "open_preview":
+            guard let target = Self.stringValue(
+                arguments["target"]
+                    ?? arguments["url"]
+                    ?? arguments["href"]
+                    ?? arguments["link"]
+                    ?? arguments["path"]
+                    ?? arguments["file"]
+                    ?? arguments["preview_target"]
+                    ?? arguments["open_preview_target"]
+                    ?? arguments["value"]
+            )?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !target.isEmpty else {
+                return []
+            }
+            return [LocalAlpineAgentCommand(
+                command: "iexa-open \(Self.shellSingleQuotedStatic(target))",
+                cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa",
+                delaySeconds: Self.delaySeconds(from: arguments),
+                shellToolName: "iexa_open",
+                shellToolDetail: target,
+                shellToolFilePaths: target.hasPrefix("http://") || target.hasPrefix("https://") ? [] : [target]
+            )]
+
+        case "web.search", "web_search", "search_web", "browser.search", "browser_search":
+            guard let query = Self.stringValue(
+                arguments["query"]
+                    ?? arguments["keywords"]
+                    ?? arguments["search"]
+                    ?? arguments["text"]
+                    ?? arguments["value"]
+                    ?? arguments["q"]
+            )?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !query.isEmpty else {
+                return []
+            }
+            let timeoutSeconds = max(
+                5,
+                min(
+                    Self.intValue(arguments["timeout"] ?? arguments["timeout_seconds"] ?? arguments["max_time"]) ?? 25,
+                    120
+                )
+            )
+            let lineCount = max(
+                20,
+                min(
+                    Self.intValue(arguments["max_lines"] ?? arguments["line_count"] ?? arguments["lines"] ?? arguments["limit"]) ?? 160,
+                    360
+                )
+            )
+            let command = """
+            if command -v curl >/dev/null 2>&1 || apk add --no-cache curl >/dev/null 2>&1; then
+              curl -G -L --max-time \(timeoutSeconds) --silent --show-error --data-urlencode q=\(Self.shellSingleQuotedStatic(query)) https://html.duckduckgo.com/html/ | sed -n '1,\(lineCount)p'
+            elif command -v wget >/dev/null 2>&1; then
+              wget -qO- \(Self.shellSingleQuotedStatic("https://duckduckgo.com/html/?q=\(query)")) | sed -n '1,\(lineCount)p'
+            else
+              printf 'web_search unavailable: curl/wget not installed\\n' >&2
+              exit 127
+            fi
+            """
+            return [LocalAlpineAgentCommand(
+                command: command,
+                cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa",
+                delaySeconds: Self.delaySeconds(from: arguments),
+                shellToolName: "web_search",
+                shellToolDetail: query
             )]
 
         default:

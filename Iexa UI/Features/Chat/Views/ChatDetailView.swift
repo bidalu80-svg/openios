@@ -1037,6 +1037,12 @@ private struct AgentActivityItem: Identifiable, Hashable {
             return fileName.map { "校验 \($0)" } ?? display.title
         case "verify_absent", "verify_missing", "ensure_absent":
             return fileName.map { "校验删除 \($0)" } ?? display.title
+        case "memory_write":
+            return display.title
+        case "memory_get":
+            return display.title
+        case "iexa_open", "open_preview":
+            return fileName.map { "打开 \($0)" } ?? display.title
         case "command", "shell", "bash", "exec", "shell_execute":
             if let command = call.command?.trimmingCharacters(in: .whitespacesAndNewlines),
                !command.isEmpty {
@@ -1068,9 +1074,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             || haystack.contains("browser search")
             || haystack.contains("search query")
             || haystack.contains("搜索") {
-            return call.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? "搜索网页"
-                : call.detail
+            return display.title
         }
         if actionHaystack.contains("fetch ")
             || actionHaystack.contains("navigate ")
@@ -2030,8 +2034,9 @@ struct ChatDetailView: View {
         }
 
         if keyboard.isVisible {
-            pendingNewAgentFloatingSnapshotAfterKeyboard = item
             suppressStaleAgentFloatingBarAfterKeyboard = true
+            pendingNewAgentFloatingSnapshotAfterKeyboard = nil
+            agentFloatingActivitySnapshot = nil
             setAgentFloatingBarHiddenForKeyboard(true)
             return
         }
@@ -3377,13 +3382,7 @@ struct ChatDetailView: View {
             if latestVisibleRole == .user {
                 pinCurrentTurnStartForLatestTurn = true
                 if keyboard.isVisible {
-                    if oldIds.isEmpty {
-                        repinToCurrentTurnStartIfFollowing(after: 0.06)
-                        repinToCurrentTurnStartIfFollowing(after: 0.18)
-                    } else {
-                        repinToCurrentTurnStartIfFollowing(after: 0.06)
-                        repinToCurrentTurnStartIfFollowing(after: 0.18)
-                    }
+                    repinToCurrentTurnStartIfFollowing(after: 0.06)
                 } else {
                     withAnimation(.easeOut(duration: 0.28)) {
                         scrollToCurrentTurnStart(anchor: .top)
@@ -3400,7 +3399,6 @@ struct ChatDetailView: View {
                 // ScrollView edge, so the viewport cannot land on spacer-only
                 // space while the input bar is settling.
                 repinToCurrentTurnStartIfFollowing(after: 0.06)
-                repinToCurrentTurnStartIfFollowing(after: 0.18)
             } else if pinCurrentTurnStartForLatestTurn {
                 smoothRepinToCurrentTurnStartIfFollowing(after: 0.04)
             } else {
@@ -3687,37 +3685,15 @@ struct ChatDetailView: View {
 
     private func hideAgentFloatingBarForKeyboardWillShow() {
         agentFloatingKeyboardHideGeneration += 1
-        suppressStaleAgentFloatingBarAfterKeyboard = !hasActiveAgentFloatingActivity
-        if suppressStaleAgentFloatingBarAfterKeyboard {
-            agentFloatingActivitySnapshot = nil
-            pendingNewAgentFloatingSnapshotAfterKeyboard = nil
-        }
+        suppressStaleAgentFloatingBarAfterKeyboard = true
+        agentFloatingActivitySnapshot = nil
+        pendingNewAgentFloatingSnapshotAfterKeyboard = nil
         setAgentFloatingBarHiddenForKeyboard(true)
     }
 
     private func finishAgentFloatingBarKeyboardHide() {
         guard !keyboard.isVisible else { return }
         agentFloatingKeyboardHideGeneration += 1
-        if let pending = pendingNewAgentFloatingSnapshotAfterKeyboard,
-           pending.hasConcreteSteps {
-            let generation = agentFloatingKeyboardHideGeneration
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                guard agentFloatingKeyboardHideGeneration == generation,
-                      !keyboard.isVisible,
-                      pendingNewAgentFloatingSnapshotAfterKeyboard?.id == pending.id else {
-                    return
-                }
-                var transaction = Transaction(animation: nil)
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    agentFloatingActivitySnapshot = pending
-                    pendingNewAgentFloatingSnapshotAfterKeyboard = nil
-                    suppressStaleAgentFloatingBarAfterKeyboard = false
-                    hideAgentFloatingBarForKeyboard = false
-                }
-            }
-            return
-        }
         suppressStaleAgentFloatingBarAfterKeyboard = true
         agentFloatingActivitySnapshot = nil
         pendingNewAgentFloatingSnapshotAfterKeyboard = nil
@@ -8762,7 +8738,22 @@ private struct AgentStepFloatingBar: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
+        HStack(spacing: 10) {
+            Button {
+                onPreviewTap(item, clampedIndex)
+            } label: {
+                AgentToolPreviewPop(
+                    previewTitle: previewTitle,
+                    previewSubtitle: previewSubtitle,
+                    previewText: previewText,
+                    thumbnailReference: previewThumbnailReference
+                )
+                .frame(width: 88, height: 50, alignment: .topLeading)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
             HStack(spacing: 8) {
                 ZStack {
                     Circle()
@@ -8781,7 +8772,6 @@ private struct AgentStepFloatingBar: View {
                     .truncationMode(.tail)
                     .minimumScaleFactor(0.82)
                     .layoutPriority(1)
-                    .frame(maxWidth: 210, alignment: .leading)
 
                 Spacer(minLength: 2)
 
@@ -8817,38 +8807,21 @@ private struct AgentStepFloatingBar: View {
                     .disabled(clampedIndex >= item.steps.count - 1)
                 }
             }
-            .padding(.leading, 96)
-            .padding(.trailing, 10)
-            .frame(height: 42)
-            .frame(maxWidth: .infinity)
-            .background(theme.cardBackground.opacity(theme.isDark ? 0.88 : 0.98))
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.18 : 0.18), lineWidth: 0.8)
-            )
-            .shadow(color: .black.opacity(theme.isDark ? 0.18 : 0.08), radius: 10, x: 0, y: 4)
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .frame(maxHeight: .infinity, alignment: .bottom)
-
-            Button {
-                onPreviewTap(item, clampedIndex)
-            } label: {
-                AgentToolPreviewPop(
-                    previewTitle: previewTitle,
-                    previewSubtitle: previewSubtitle,
-                    previewText: previewText,
-                    thumbnailReference: previewThumbnailReference
-                )
-                .frame(width: 88, height: 50, alignment: .topLeading)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .padding(.leading, 8)
-            .padding(.bottom, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(height: 56, alignment: .bottom)
+        .padding(.leading, 8)
+        .padding(.trailing, 10)
+        .padding(.vertical, 4)
+        .frame(height: 58, alignment: .center)
+        .frame(maxWidth: .infinity)
+        .background(theme.cardBackground.opacity(theme.isDark ? 0.88 : 0.98))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.18 : 0.18), lineWidth: 0.8)
+        )
+        .shadow(color: .black.opacity(theme.isDark ? 0.18 : 0.08), radius: 10, x: 0, y: 4)
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onAppear {
             selectedIndex = max(0, item.currentStepIndex - 1)
         }
@@ -8923,7 +8896,6 @@ private struct AgentToolPreviewPop: View {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
         )
-        .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 3)
     }
 }
 
@@ -9029,6 +9001,9 @@ private struct AgentActivityStepPill: View, Equatable {
         }
         if title.contains("编辑") || title.contains("写入") || title.contains("创建") {
             return "square.and.pencil"
+        }
+        if title.contains("打开") || title.contains("预览") || title.contains("open") {
+            return "eye"
         }
         if title.contains("命令") || title.contains("脚本") || title.contains("shell") || title.contains("terminal") || title.contains("run") {
             return "terminal.fill"

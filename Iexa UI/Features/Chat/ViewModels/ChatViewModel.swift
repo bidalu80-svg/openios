@@ -2177,6 +2177,16 @@ final class ChatViewModel {
             description: "Fetch an HTTP/HTTPS URL from the Alpine shell with bounded output, or save it to a workspace file for preview/offload.",
             arguments: ["url/href/link", "save_to/output/path optional", "open_preview optional", "max_lines optional", "aliases: web_fetch/fetch_url/open_url"]
         ),
+        LocalAlpineToolCapability(
+            name: "web_search",
+            description: "Search the live web with the built-in browser and return source-backed results.",
+            arguments: ["query", "queries optional", "limit optional", "screenshot optional", "aliases: search_web/browser_search"]
+        ),
+        LocalAlpineToolCapability(
+            name: "iexa_open",
+            description: "Open a local file, preview resource, or URL inside Iexa.",
+            arguments: ["target/url/path/file", "aliases: open_preview"]
+        ),
     ]
 
     private static let localAlpineBusyBoxCompatibilityNotes = """
@@ -2234,6 +2244,24 @@ final class ChatViewModel {
             [
                 "type": "function",
                 "function": [
+                    "name": "web_search",
+                    "description": "Search the live web with the built-in browser and return source-backed results.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
+                            "query": ["type": "string", "description": "Search query."],
+                            "queries": ["type": "array", "items": ["type": "string"], "description": "Optional alternate queries."],
+                            "limit": ["type": "integer", "description": "Maximum result count, 1-8."],
+                            "screenshot": ["type": "boolean", "description": "Capture a thumbnail for the top result when helpful."]
+                        ],
+                        "required": ["tool_title", "query"]
+                    ]
+                ]
+            ],
+            [
+                "type": "function",
+                "function": [
                     "name": "read_image",
                     "description": "Read an image file and return host-decoded metadata for inspection.",
                     "parameters": [
@@ -2279,6 +2307,23 @@ final class ChatViewModel {
                             "replace_all": ["type": "boolean", "description": "Replace all matches instead of exactly one."]
                         ],
                         "required": ["tool_title", "path", "old_string", "new_string"]
+                    ]
+                ]
+            ],
+            [
+                "type": "function",
+                "function": [
+                    "name": "iexa_open",
+                    "description": "Open a local file, preview resource, or URL inside Iexa.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [
+                            "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
+                            "target": ["type": "string", "description": "Local path, iexa:// URL, file URL, or http/https URL to preview."],
+                            "url": ["type": "string", "description": "Compatibility alias for target."],
+                            "path": ["type": "string", "description": "Compatibility alias for target."]
+                        ],
+                        "required": ["tool_title", "target"]
                     ]
                 ]
             ],
@@ -2331,7 +2376,7 @@ final class ChatViewModel {
                         "properties": [
                             "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
                             "keywords": ["type": "string", "description": "Optional space-separated keywords. All keywords must match a memory."],
-                            "scope": ["type": "string", "enum": ["all"], "description": "Reserved for compatibility; Iexa local memories are stored per provider server URL."]
+                            "scope": ["type": "string", "enum": ["daily", "all"], "description": "Compatibility scope. `daily` returns today's local memories; `all` returns the full per-server memory store."]
                         ],
                         "required": ["tool_title"]
                     ]
@@ -2355,7 +2400,7 @@ final class ChatViewModel {
         - Workspace `/mnt/iexa`; relative paths resolve there. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
         - Shell is Alpine BusyBox/ash. Install OS packages with `apk add --no-cache`; never use apt/brew/sudo/systemctl/macOS/Windows commands.
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
-        - Use `browser_use` for bounded HTTP fetch/save/open-preview. Use `shell_execute` for bounded list/search/run/install/build/test/verify.
+        - Use `web_search` for live search, `browser_use` for bounded HTTP fetch/save/open-preview, `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
         - Website/app changes require a localhost preview: start `python3 -m http.server <port> --bind 127.0.0.1` or a framework dev server, verify it, run `iexa-open http://localhost:<port>/`, and give that URL.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed.
         - One meaningful step per decision. A write plus one direct verification may share a step when validating the same change. Stop when the tool result completes the user goal.
@@ -11638,12 +11683,23 @@ final class ChatViewModel {
             ?? (arguments["query"] as? String)
             ?? (arguments["value"] as? String)
             ?? ""
+        let scope = ((arguments["scope"] as? String) ?? "all")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
         let keywords = rawKeywords
             .split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == "，" })
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
-        let memories = await LocalMemoryStore.shared.list(serverURL: manager.baseURL)
+        let memories: [LocalMemory]
+        if scope == "daily" {
+            memories = await LocalMemoryStore.shared.listUpdatedSince(
+                Calendar.current.startOfDay(for: .now),
+                serverURL: manager.baseURL
+            )
+        } else {
+            memories = await LocalMemoryStore.shared.list(serverURL: manager.baseURL)
+        }
         let filtered = keywords.isEmpty
             ? memories
             : memories.filter { memory in
@@ -11662,6 +11718,7 @@ final class ChatViewModel {
             "ok": true,
             "count": items.count,
             "keywords": keywords,
+            "scope": scope,
             "items": items,
             "summary": items.isEmpty ? "没有找到匹配的记忆。" : "找到了 \(items.count) 条记忆。"
         ]
@@ -11928,57 +11985,13 @@ final class ChatViewModel {
         let trimmedName = call.name.trimmingCharacters(in: .whitespacesAndNewlines)
         switch trimmedName {
         case "memory_write":
-            let execution = await executeLocalMemoryWriteToolCall(call)
-            let output = execution.toolContent
-            let failed = output.localizedCaseInsensitiveContains("disabled")
-                || output.localizedCaseInsensitiveContains("requires")
-                || output.localizedCaseInsensitiveContains("failed")
-            return LocalAlpineAgentResult(
-                didExecute: true,
-                summary: output,
-                interactiveRequest: nil,
-                commandResults: [
-                    LocalAlpineAgentCommandResult.compact(
-                        command: trimmedName,
-                        cwd: "/mnt/iexa",
-                        exitCode: failed ? 1 : 0,
-                        output: output
-                    )
-                ],
-                writtenFiles: [],
-                openRequests: [],
-                toolRunId: nil,
-                toolCalls: [],
-                executedCommandCount: 1,
-                editedFileCount: 0,
-                hadFailure: failed
-            )
+            return await executeLocalAlpineMemoryWriteToolCall(call, assistantMessageId: assistantMessageId)
         case "memory_get":
-            let execution = await executeLocalMemoryGetToolCall(call)
-            let output = execution.toolContent
-            let failed = output.localizedCaseInsensitiveContains("disabled")
-                || output.localizedCaseInsensitiveContains("requires")
-                || output.localizedCaseInsensitiveContains("failed")
-            return LocalAlpineAgentResult(
-                didExecute: true,
-                summary: output,
-                interactiveRequest: nil,
-                commandResults: [
-                    LocalAlpineAgentCommandResult.compact(
-                        command: trimmedName,
-                        cwd: "/mnt/iexa",
-                        exitCode: failed ? 1 : 0,
-                        output: output
-                    )
-                ],
-                writtenFiles: [],
-                openRequests: [],
-                toolRunId: nil,
-                toolCalls: [],
-                executedCommandCount: 1,
-                editedFileCount: 0,
-                hadFailure: failed
-            )
+            return await executeLocalAlpineMemoryGetToolCall(call, assistantMessageId: assistantMessageId)
+        case "web_search":
+            return await executeLocalAlpineWebSearchToolCall(call, assistantMessageId: assistantMessageId)
+        case "iexa_open":
+            return await executeLocalAlpineOpenToolCall(call, assistantMessageId: assistantMessageId)
         default:
             break
         }
@@ -11999,6 +12012,244 @@ final class ChatViewModel {
         recordLocalAlpineCompletedCommands(from: result)
         await attachLocalAlpineGeneratedMediaIfNeeded(messageId: assistantMessageId)
         return result
+    }
+
+    private func executeLocalAlpineMemoryWriteToolCall(
+        _ call: LocalAlpineNativeToolCall,
+        assistantMessageId: String
+    ) async -> LocalAlpineAgentResult {
+        let arguments = Self.localAlpineNativeToolArguments(for: call)
+        let execution = await executeLocalMemoryWriteToolCall(call)
+        let content = ((arguments["content"] as? String) ?? (arguments["text"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = content.isEmpty ? "写入本地记忆" : String(content.prefix(72))
+        return executeLocalAlpineSyntheticToolCall(
+            call,
+            assistantMessageId: assistantMessageId,
+            detail: detail,
+            output: execution.toolContent,
+            failed: Self.localAlpineSyntheticToolFailed(execution.toolContent)
+        )
+    }
+
+    private func executeLocalAlpineMemoryGetToolCall(
+        _ call: LocalAlpineNativeToolCall,
+        assistantMessageId: String
+    ) async -> LocalAlpineAgentResult {
+        let arguments = Self.localAlpineNativeToolArguments(for: call)
+        let execution = await executeLocalMemoryGetToolCall(call)
+        let keywords = ((arguments["keywords"] as? String) ?? (arguments["query"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let scope = ((arguments["scope"] as? String) ?? "all")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail: String
+        if !keywords.isEmpty {
+            detail = String(keywords.prefix(72))
+        } else if scope.caseInsensitiveCompare("daily") == .orderedSame {
+            detail = "查看今日记忆"
+        } else {
+            detail = "查看本地记忆"
+        }
+        return executeLocalAlpineSyntheticToolCall(
+            call,
+            assistantMessageId: assistantMessageId,
+            detail: detail,
+            output: execution.toolContent,
+            failed: Self.localAlpineSyntheticToolFailed(execution.toolContent)
+        )
+    }
+
+    private func executeLocalAlpineWebSearchToolCall(
+        _ call: LocalAlpineNativeToolCall,
+        assistantMessageId: String
+    ) async -> LocalAlpineAgentResult {
+        let arguments = Self.localAlpineNativeToolArguments(for: call)
+        let query = ((arguments["query"] as? String)
+            ?? (arguments["queries"] as? [String])?.first
+            ?? (arguments["keywords"] as? String)
+            ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = query.isEmpty ? "搜索网页" : String(query.prefix(96))
+        let content = Self.localNativeFunctionToolEnvelopeContent(for: call)
+        let result = await LocalNativeToolService.shared.executeBlocks(in: content)
+        enqueueLocalAlpineOpenRequests(result.openRequests)
+        let failed = result.browserDocument?.ok == false
+            || Self.localAlpineSyntheticToolFailed(result.summary)
+        return executeLocalAlpineSyntheticToolCall(
+            call,
+            assistantMessageId: assistantMessageId,
+            detail: detail,
+            output: result.summary,
+            openRequests: result.openRequests,
+            failed: failed
+        )
+    }
+
+    private func executeLocalAlpineOpenToolCall(
+        _ call: LocalAlpineNativeToolCall,
+        assistantMessageId: String
+    ) async -> LocalAlpineAgentResult {
+        let arguments = Self.localAlpineNativeToolArguments(for: call)
+        let target = ((arguments["target"] as? String)
+            ?? (arguments["url"] as? String)
+            ?? (arguments["path"] as? String)
+            ?? (arguments["file"] as? String)
+            ?? (arguments["href"] as? String)
+            ?? (arguments["link"] as? String)
+            ?? (arguments["open_preview_target"] as? String)
+            ?? (arguments["preview_target"] as? String)
+            ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = target.isEmpty ? "打开预览" : String(target.prefix(96))
+
+        guard !target.isEmpty else {
+            return executeLocalAlpineSyntheticToolCall(
+                call,
+                assistantMessageId: assistantMessageId,
+                detail: detail,
+                output: "iexa_open requires a non-empty target field.",
+                failed: true
+            )
+        }
+
+        var openPayload: [String: Any] = ["action": "browser.open"]
+        if target.contains("://") || target.hasPrefix("/") {
+            openPayload["url"] = target
+        } else {
+            openPayload["path"] = target
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: openPayload, options: [.sortedKeys])) ?? Data()
+        let openBlock = """
+        ```iexa_native
+        \(String(data: data, encoding: .utf8) ?? #"{"action":"browser.open"}"#)
+        ```
+        """
+        let result = await LocalNativeToolService.shared.executeBlocks(in: openBlock)
+        enqueueLocalAlpineOpenRequests(result.openRequests)
+        let failed = result.openRequests.isEmpty || Self.localAlpineSyntheticToolFailed(result.summary)
+        return executeLocalAlpineSyntheticToolCall(
+            call,
+            assistantMessageId: assistantMessageId,
+            detail: detail,
+            filePaths: target.hasPrefix("http://") || target.hasPrefix("https://") ? [] : [target],
+            output: result.summary,
+            openRequests: result.openRequests,
+            failed: failed
+        )
+    }
+
+    private func executeLocalAlpineSyntheticToolCall(
+        _ call: LocalAlpineNativeToolCall,
+        assistantMessageId: String,
+        detail: String,
+        filePaths: [String] = [],
+        output: String,
+        openRequests: [LocalAlpineOpenRequest] = [],
+        failed: Bool
+    ) -> LocalAlpineAgentResult {
+        let arguments = Self.localAlpineNativeToolArguments(for: call)
+        let normalizedName = call.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = LocalAlpineToolDisplayRegistry.display(for: normalizedName)
+        let title = ((arguments["tool_title"] as? String)
+            ?? (arguments["toolTitle"] as? String)
+            ?? display.title)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedTitle = title.isEmpty ? display.title : title
+        let resolvedDetail = detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? resolvedTitle
+            : detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let runId = "local-native-\(UUID().uuidString)"
+        let startedAtMs = Int64((Date().timeIntervalSince1970 * 1_000).rounded())
+
+        applyLocalAlpineToolEvent(
+            LocalAlpineToolEvent(
+                runId: runId,
+                call: LocalAlpineToolCall(
+                    id: call.id,
+                    runId: runId,
+                    name: normalizedName,
+                    phase: .start,
+                    title: resolvedTitle,
+                    detail: resolvedDetail,
+                    cwd: "/mnt/iexa",
+                    command: nil,
+                    exitCode: nil,
+                    outputPreview: nil,
+                    filePaths: filePaths,
+                    startedAtMs: startedAtMs,
+                    completedAtMs: nil,
+                    failed: false
+                )
+            ),
+            messageId: assistantMessageId
+        )
+
+        let compact = LocalAlpineOutputOffloadStore.compactText(
+            output,
+            label: "local-alpine-\(normalizedName)-result",
+            previewLimit: LocalAlpineToolCall.outputPreviewLimit(for: normalizedName)
+        )
+        let completedAtMs = Int64((Date().timeIntervalSince1970 * 1_000).rounded())
+        let resultCall = LocalAlpineToolCall(
+            id: call.id,
+            runId: runId,
+            name: normalizedName,
+            phase: .result,
+            title: resolvedTitle,
+            detail: resolvedDetail,
+            cwd: "/mnt/iexa",
+            command: nil,
+            exitCode: failed ? 1 : 0,
+            outputPreview: compact.preview,
+            outputReference: compact.reference,
+            outputByteCount: compact.byteCount,
+            outputLineCount: compact.lineCount,
+            filePaths: filePaths,
+            startedAtMs: startedAtMs,
+            completedAtMs: completedAtMs,
+            failed: failed
+        )
+        applyLocalAlpineToolEvent(
+            LocalAlpineToolEvent(runId: runId, call: resultCall),
+            messageId: assistantMessageId
+        )
+
+        return LocalAlpineAgentResult(
+            didExecute: true,
+            summary: output,
+            modelObservation: output,
+            interactiveRequest: nil,
+            commandResults: [],
+            writtenFiles: [],
+            openRequests: openRequests,
+            toolRunId: runId,
+            toolCalls: [resultCall],
+            executedCommandCount: 1,
+            editedFileCount: 0,
+            hadFailure: failed
+        )
+    }
+
+    private static func localAlpineNativeToolArguments(for call: LocalAlpineNativeToolCall) -> [String: Any] {
+        if let data = call.arguments.data(using: .utf8),
+           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return dict
+        }
+        let trimmed = call.arguments.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? [:] : ["value": trimmed]
+    }
+
+    private static func localAlpineSyntheticToolFailed(_ output: String) -> Bool {
+        let normalized = output.lowercased()
+        return normalized.contains("\"ok\" : false")
+            || normalized.contains("\"ok\":false")
+            || normalized.contains("\"ok\": false")
+            || normalized.contains("\"error\"")
+            || normalized.contains(" requires ")
+            || normalized.contains("disabled")
+            || normalized.contains("failed")
+            || normalized.contains("unsupported")
+            || normalized.contains("missing required")
     }
 
     private func mergeLocalAlpineNativeToolResultMetadata(messageId: String, result: LocalAlpineAgentResult) {
