@@ -3036,6 +3036,21 @@ private extension UIResponder {
 }
 
 private enum SourceCodeHighlighter {
+    private final class HighlightCacheEntry: NSObject {
+        let value: NSAttributedString
+
+        init(value: NSAttributedString) {
+            self.value = value
+        }
+    }
+
+    private static let highlightCache: NSCache<NSString, HighlightCacheEntry> = {
+        let cache = NSCache<NSString, HighlightCacheEntry>()
+        cache.countLimit = 128
+        cache.totalCostLimit = 16 * 1_024 * 1_024
+        return cache
+    }()
+
     static func highlighted(
         _ code: String,
         language: String,
@@ -3045,6 +3060,20 @@ private enum SourceCodeHighlighter {
         lineSpacing: CGFloat,
         lineBreakMode: NSLineBreakMode
     ) -> NSAttributedString {
+        let cacheKey = [
+            language,
+            String(format: "%.2f", font.pointSize),
+            String(isDarkMode ? 1 : 0),
+            String(format: "%.2f", lineSpacing),
+            String(lineBreakMode.rawValue),
+            String(baseColor.hashValue),
+            String(code.utf8.count),
+            String(code.hashValue)
+        ].joined(separator: "|") as NSString
+        if let cached = highlightCache.object(forKey: cacheKey) {
+            return cached.value
+        }
+
         let startedAt = CFAbsoluteTimeGetCurrent()
         defer {
             let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1_000
@@ -3069,7 +3098,15 @@ private enum SourceCodeHighlighter {
         ]
         let output = NSMutableAttributedString(string: code, attributes: attributes)
         let fullRange = NSRange(code.startIndex..<code.endIndex, in: code)
-        guard fullRange.length > 0 else { return output }
+        guard fullRange.length > 0 else {
+            let frozen = NSAttributedString(attributedString: output)
+            highlightCache.setObject(
+                HighlightCacheEntry(value: frozen),
+                forKey: cacheKey,
+                cost: min(code.utf8.count, 262_144)
+            )
+            return frozen
+        }
 
         let keywords = keywordSet(for: language)
         apply(color: palette.comment, pattern: #"(?m)#.*$|//.*$"#, in: output)
@@ -3081,8 +3118,13 @@ private enum SourceCodeHighlighter {
         }
         apply(color: palette.type, pattern: #"\b([A-Z][A-Za-z0-9_]*)\b"#, in: output)
         apply(color: palette.function, pattern: #"\b([a-zA-Z_][A-Za-z0-9_]*)\s*(?=\()"#, in: output)
-
-        return output
+        let frozen = NSAttributedString(attributedString: output)
+        highlightCache.setObject(
+            HighlightCacheEntry(value: frozen),
+            forKey: cacheKey,
+            cost: min(code.utf8.count * 2, 1_048_576)
+        )
+        return frozen
     }
 
     private static func apply(color: UIColor, pattern: String, in output: NSMutableAttributedString) {
