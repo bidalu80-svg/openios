@@ -2547,15 +2547,12 @@ struct ChatDetailView: View {
             )
         }
         .onChange(of: keyboard.isVisible) { _, isVisible in
-            if !isVisible {
+            if isVisible {
+                hideAgentFloatingBarForKeyboardWillShow()
+            } else {
+                finishAgentFloatingBarKeyboardHide()
                 releasePostSendWaitingUIDelayAfterKeyboardSettles()
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            hideAgentFloatingBarForKeyboardWillShow()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidHideNotification)) { _ in
-            finishAgentFloatingBarKeyboardHide()
         }
         .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateUpdated)) { notification in
             handleAgentFloatingLiveToolNotification(notification)
