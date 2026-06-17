@@ -3367,11 +3367,15 @@ struct ChatDetailView: View {
     // MARK: - Message List Area
 
     private var messageListArea: some View {
+        let snapshot = transcriptSnapshot
+        let snapshotMessages = snapshot.messages
+        let snapshotIds = snapshot.ids
+
         ZStack {
-            scrollContent
+            scrollContent(snapshot: snapshot)
 
             // Welcome screen — shown when no messages and not loading
-            if !viewModel.isLoadingConversation && viewModel.messages.isEmpty {
+            if !viewModel.isLoadingConversation && snapshotMessages.isEmpty {
                 if let folder = _folderWorkspace {
                     folderWelcomeView(folder: folder)
                         .transition(.opacity.animation(.easeInOut(duration: 0.2)))
@@ -3408,7 +3412,7 @@ struct ChatDetailView: View {
         // Auto-scroll only when the rendered transcript changes. This avoids
         // scrolling to blank spacer space when hidden agent/tool messages are
         // appended or removed behind the visible conversation.
-        .onChange(of: transcriptMessageIds) { oldIds, newIds in
+        .onChange(of: snapshotIds) { oldIds, newIds in
             guard !newIds.isEmpty else { return }
             let tailChanged = oldIds.last != newIds.last || newIds.count > oldIds.count
             guard tailChanged else { return }
@@ -3420,7 +3424,7 @@ struct ChatDetailView: View {
             isScrolledUp = false
             lastProgrammaticScrollTime = Date()
 
-            let latestVisibleRole = transcriptMessages.last?.role
+            let latestVisibleRole = snapshotMessages.last?.role
             if latestVisibleRole == .user {
                 pinCurrentTurnStartForLatestTurn = true
                 if keyboard.isVisible {
@@ -3467,7 +3471,7 @@ struct ChatDetailView: View {
                     scrollToCurrentTurnStartWithoutAnimation(anchor: .top)
                 } else if viewModel.messages.count <= 2 {
                     scrollToLatestMessageWithoutAnimation(anchor: .bottom)
-                } else if keyboard.isVisible || transcriptMessages.last?.role == .user {
+                } else if keyboard.isVisible || snapshotMessages.last?.role == .user {
                     scrollToCurrentTurnStartWithoutAnimation(anchor: .top)
                 } else {
                     scrollToLatestMessageWithoutAnimation(anchor: .bottom)
@@ -3489,13 +3493,13 @@ struct ChatDetailView: View {
         }
     }
 
-    private var scrollContent: some View {
+    private func scrollContent(snapshot: TranscriptRenderSnapshot) -> some View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 if viewModel.isLoadingConversation {
                     loadingPlaceholders
                 } else {
-                    messagesList
+                    messagesList(snapshot: snapshot)
                 }
             }
             .padding(.top, 8)
@@ -3876,9 +3880,7 @@ struct ChatDetailView: View {
     /// response streams in below it.
     ///
     /// All earlier messages render at their natural height.
-    private var messagesList: some View {
-        let snapshot = transcriptSnapshot
-
+    private func messagesList(snapshot: TranscriptRenderSnapshot) -> some View {
         return ForEach(snapshot.turnGroups) { group in
             VStack(spacing: 0) {
                 ForEach(group.messages) { message in
