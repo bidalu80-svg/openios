@@ -1903,10 +1903,11 @@ struct ChatDetailView: View {
             return mergedLocalAlpineTurnActivity(through: message)
         }
         if isLocalAlpineResultMessage(message) {
+            let directItem = activityItem(for: message)
             if isMessageVisuallyStreaming(message) {
-                return activityItem(for: message)
+                return directItem
             }
-            return mergedLocalAlpineTurnActivity(through: message) ?? activityItem(for: message)
+            return mergedLocalAlpineTurnActivity(through: message) ?? directItem
         }
         return activityItem(for: message)
     }
@@ -2217,7 +2218,8 @@ struct ChatDetailView: View {
               AgentActivityItem.isActivityMessage(message) else {
             return
         }
-        guard let item = agentActivity(for: message),
+        let resolvedItem = agentActivityWindowPreview(includeInactive: false) ?? agentActivity(for: message)
+        guard let item = resolvedItem,
               item.hasConcreteSteps,
               !item.hasOnlyWebSearchStatusSteps else {
             return
