@@ -261,7 +261,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
     var firstPreviewOpenURL: String? {
         steps.compactMap { step in
             let value = step.previewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines)
-            return normalizedPreviewTarget(value)
+            return Self.normalizedPreviewTarget(value)
         }.last
     }
 
@@ -8973,8 +8973,8 @@ private struct AgentStepFloatingBarHost: View {
                     taskCount: item.totalStepCount,
                     onPreviewTap: onPreviewTap
                 )
-                .padding(.horizontal, 16)
-                .padding(.bottom, 2)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 1)
             }
         }
     }
@@ -9045,7 +9045,24 @@ private struct AgentStepFloatingBar: View {
 
     private var previewThumbnailReference: String? {
         let selected = selectedStep?.previewThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return selected?.isEmpty == false ? selected : nil
+        if selected?.isEmpty == false {
+            return selected
+        }
+        guard let selectedStep else {
+            return item.firstPreviewThumbnailReference
+        }
+        let hasLocalPayload =
+            selectedStep.file != nil
+            || selectedStep.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            || selectedStep.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        guard !hasLocalPayload else {
+            return nil
+        }
+        if let current = item.currentStep?.previewThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !current.isEmpty {
+            return current
+        }
+        return item.firstPreviewThumbnailReference
     }
 
     private var selectedTitle: String {
@@ -9063,7 +9080,74 @@ private struct AgentStepFloatingBar: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
+        ZStack(alignment: .bottomLeading) {
+            HStack(spacing: 6) {
+                ZStack {
+                    Circle()
+                        .fill(tint.opacity(theme.isDark ? 0.16 : 0.12))
+                        .frame(width: 18, height: 18)
+                    Image(systemName: icon)
+                        .scaledFont(size: 10, weight: .bold)
+                        .foregroundStyle(tint)
+                        .frame(width: 14, height: 14)
+                }
+
+                Text(selectedTitle)
+                    .scaledFont(size: 11.5, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .minimumScaleFactor(0.80)
+                    .layoutPriority(1)
+
+                Spacer(minLength: 2)
+
+                HStack(spacing: 1) {
+                    Button {
+                        movePage(-1)
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .scaledFont(size: 10, weight: .bold)
+                            .foregroundStyle(clampedIndex > 0 ? theme.textPrimary : theme.textTertiary.opacity(0.42))
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(clampedIndex == 0)
+
+                    Text(pageText)
+                        .scaledFont(size: 10, weight: .semibold, design: .rounded)
+                        .foregroundStyle(theme.textSecondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .frame(width: 34, alignment: .center)
+
+                    Button {
+                        movePage(1)
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .scaledFont(size: 10, weight: .bold)
+                            .foregroundStyle(clampedIndex < item.steps.count - 1 ? theme.textPrimary : theme.textTertiary.opacity(0.42))
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(clampedIndex >= item.steps.count - 1)
+                }
+            }
+            .padding(.leading, 68)
+            .padding(.trailing, 8)
+            .padding(.vertical, 3)
+            .frame(height: 40, alignment: .center)
+            .frame(maxWidth: .infinity)
+            .background(theme.cardBackground.opacity(theme.isDark ? 0.90 : 0.98))
+            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.18 : 0.18), lineWidth: 0.8)
+            )
+            .shadow(color: .black.opacity(theme.isDark ? 0.18 : 0.08), radius: 7, x: 0, y: 3)
+            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+
             Button {
                 onPreviewTap(item, clampedIndex)
             } label: {
@@ -9073,85 +9157,22 @@ private struct AgentStepFloatingBar: View {
                     previewText: previewText,
                     thumbnailReference: previewThumbnailReference
                 )
-                .frame(width: 72, height: 40, alignment: .topLeading)
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .frame(width: 64, height: 36, alignment: .topLeading)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
-
-            HStack(spacing: 7) {
-                ZStack {
-                    Circle()
-                        .fill(tint.opacity(theme.isDark ? 0.16 : 0.12))
-                        .frame(width: 20, height: 20)
-                    Image(systemName: icon)
-                        .scaledFont(size: 11, weight: .bold)
-                        .foregroundStyle(tint)
-                        .frame(width: 16, height: 16)
-                }
-
-                Text(selectedTitle)
-                    .scaledFont(size: 12.5, weight: .semibold)
-                    .foregroundStyle(theme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .minimumScaleFactor(0.82)
-                    .layoutPriority(1)
-
-                Spacer(minLength: 2)
-
-                HStack(spacing: 2) {
-                    Button {
-                        movePage(-1)
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .scaledFont(size: 11, weight: .bold)
-                            .foregroundStyle(clampedIndex > 0 ? theme.textPrimary : theme.textTertiary.opacity(0.42))
-                            .frame(width: 22, height: 22)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(clampedIndex == 0)
-
-                    Text(pageText)
-                        .scaledFont(size: 10.5, weight: .semibold, design: .rounded)
-                        .foregroundStyle(theme.textSecondary)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .frame(width: 36, alignment: .center)
-
-                    Button {
-                        movePage(1)
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .scaledFont(size: 11, weight: .bold)
-                            .foregroundStyle(clampedIndex < item.steps.count - 1 ? theme.textPrimary : theme.textTertiary.opacity(0.42))
-                            .frame(width: 22, height: 22)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(clampedIndex >= item.steps.count - 1)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .offset(x: 6, y: -6)
         }
-        .padding(.leading, 7)
-        .padding(.trailing, 8)
-        .padding(.vertical, 3)
-        .frame(height: 48, alignment: .center)
-        .frame(maxWidth: .infinity)
-        .background(theme.cardBackground.opacity(theme.isDark ? 0.88 : 0.98))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.18 : 0.18), lineWidth: 0.8)
-        )
-        .shadow(color: .black.opacity(theme.isDark ? 0.18 : 0.08), radius: 8, x: 0, y: 3)
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .frame(height: 46, alignment: .bottom)
         .onAppear {
             selectedIndex = max(0, item.currentStepIndex - 1)
         }
         .onChange(of: item.id) { _, _ in
             selectedIndex = max(0, item.currentStepIndex - 1)
+        }
+        .onChange(of: item.currentStepIndex) { _, currentIndex in
+            selectedIndex = min(max(0, currentIndex - 1), max(0, item.steps.count - 1))
         }
         .onChange(of: item.steps.count) { _, count in
             selectedIndex = min(max(0, item.currentStepIndex - 1), max(0, count - 1))
@@ -9166,8 +9187,8 @@ private struct AgentToolPreviewPop: View {
     let previewText: String
     let thumbnailReference: String?
 
-    private let previewSize = CGSize(width: 72, height: 40)
-    private let cornerRadius: CGFloat = 7
+    private let previewSize = CGSize(width: 64, height: 36)
+    private let cornerRadius: CGFloat = 8
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -9195,24 +9216,24 @@ private struct AgentToolPreviewPop: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(previewTitle)
-                    .font(.system(size: 6.8, weight: .bold, design: .monospaced))
+                    .font(.system(size: 6.2, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.88))
                     .lineLimit(1)
 
                 Text(previewSubtitle)
-                    .font(.system(size: 5.8, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 5.3, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.66))
                     .lineLimit(1)
 
                 if thumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                     Text(previewText)
-                        .font(.system(size: 5.9, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 5.4, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Color(red: 0.30, green: 0.63, blue: 1.0))
-                        .lineLimit(3)
+                        .lineLimit(2)
                         .truncationMode(.tail)
                 }
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 5)
             .padding(.vertical, 3)
         }
         .frame(width: previewSize.width, height: previewSize.height, alignment: .topLeading)
@@ -9860,7 +9881,19 @@ private struct AgentFloatingStepPreviewSheet: View {
 
     @ViewBuilder
     private func stepPreview(_ step: AgentActivityStep) -> some View {
-        if let file = step.file {
+        if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+           let outputReference = step.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !outputReference.isEmpty {
+            LocalAlpineLazyFilePreview(
+                path: outputReference,
+                fileName: (outputReference as NSString).lastPathComponent,
+                language: "text",
+                fallbackLines: outputText(for: step).components(separatedBy: .newlines),
+                byteCount: step.outputByteCount
+            )
+        } else if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            terminalPreview(step)
+        } else if let file = step.file {
             filePreview(file)
         } else if let outputReference = step.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !outputReference.isEmpty {
@@ -9879,8 +9912,6 @@ private struct AgentFloatingStepPreviewSheet: View {
                 fallbackLines: outputText(for: step).components(separatedBy: .newlines),
                 byteCount: nil
             )
-        } else if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-            terminalPreview(step)
         } else {
             textPreview(step)
         }
