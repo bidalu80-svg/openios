@@ -738,6 +738,15 @@ private struct AgentActivityItem: Identifiable, Hashable {
         return concreteMarkers.contains { text.localizedCaseInsensitiveContains($0) }
     }
 
+    private static let reasoningMarkupMarkers = [
+        "<details", "</details>", "<think", "</think", "<thinking", "</thinking",
+        "<reasoning", "</reasoning", "<thought", "</thought",
+        "type=\"reasoning\"", "type='reasoning'",
+        "思考中", "正在思考", "思考下一步", "分析下一步",
+        "正在检查下一步", "检查下一步", "整理回答",
+        "thinking", "reasoning", "thought"
+    ]
+
     private static func isReasoningOrThinkingStatus(_ status: ChatStatusUpdate) -> Bool {
         let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
         let text = statusText(status)
@@ -746,14 +755,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             || action.contains("thought") {
             return true
         }
-        let reasoningMarkers = [
-            "<details", "</details>", "<think", "</think", "<thinking", "</thinking",
-            "<reasoning", "</reasoning", "<thought", "</thought",
-            "思考中", "正在思考", "思考下一步", "分析下一步",
-            "正在检查下一步", "检查下一步", "整理回答",
-            "thinking", "reasoning", "thought"
-        ]
-        return reasoningMarkers.contains { text.localizedCaseInsensitiveContains($0) }
+        return reasoningMarkupMarkers.contains { text.localizedCaseInsensitiveContains($0) }
     }
 
     private static func statusText(_ status: ChatStatusUpdate) -> String {
@@ -1245,7 +1247,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
     }
 
     private static func uiToolCalls(_ calls: [LocalAlpineToolCall]) -> [LocalAlpineToolCall] {
-        calls.map { call in
+        calls.filter { !isReasoningOrMarkupToolCall($0) }.map { call in
             LocalAlpineToolCall(
                 id: call.id,
                 runId: call.runId,
@@ -1266,6 +1268,21 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 completedAtMs: call.completedAtMs,
                 failed: call.failed
             )
+        }
+    }
+
+    private static func isReasoningOrMarkupToolCall(_ call: LocalAlpineToolCall) -> Bool {
+        let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let title = call.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if ["thinking", "think", "reasoning", "reason", "thought"].contains(name)
+            || ["思考", "思考中", "分析", "分析中"].contains(title) {
+            return true
+        }
+        let detail = call.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let text = "\(title) \(detail.prefix(260)) \(output.prefix(260))"
+        return reasoningMarkupMarkers.contains {
+            text.localizedCaseInsensitiveContains($0)
         }
     }
 

@@ -2346,33 +2346,21 @@ final class ChatViewModel {
     private static func localAlpineNativeAgentSystemContext(includeMemoryTools: Bool) -> String {
         let memoryToolNames = includeMemoryTools ? ", `memory_write`, `memory_get`" : ""
         let memoryRule = includeMemoryTools
-            ? "- Use `memory_write` to save durable user preferences, recurring patterns, or project conventions, and `memory_get` to recall stored memories by keywords. Never save secrets, passwords, tokens, or one-off noise.\n        "
+            ? "- Memory: use `memory_write` only for durable preferences/context; use `memory_get` to recall it. Never save secrets.\n        "
             : ""
         return """
         [Local Alpine native tools]
-        Use the provided native tools for local work: `file_read`, `file_write`, `file_edit`, `read_image`, `browser_use`\(memoryToolNames), and `shell_execute`. Iexa executes them inside Local Alpine and returns real results. Do not fake results.
-
-        Environment:
-        - Workspace: `/mnt/iexa`; relative paths resolve there.
-        - Shell: Alpine Linux BusyBox/ash. Use `apk add --no-cache` for missing OS packages; never use apt/brew/sudo/systemctl/macOS/Windows commands.
-        - Rootfs paths such as `/bin`, `/etc`, `/usr`, `/lib`, `/var`, `/tmp`, `/root`, and `/home` are inside Local Alpine. Search `/mnt/iexa` first for user files unless runtime inspection is requested.
-        - iOS background execution is limited. Keep long jobs resumable, write progress/results under `/mnt/iexa`, and do not promise Android-style foreground-service/WakeLock behavior. If the app is backgrounded for too long, continue from saved files/results when it returns.
-
-        Tool rules:
-        - Always fill `tool_title`, under 24 characters, user-facing, action-oriented, and in the user's language.
-        - Use `file_read` for source inspection, `file_write` for new files/complete rewrites, and `file_edit` for exact same-path edits. Never write source code through shell heredocs/redirection/echo/cat/tee/printf.
-        - Treat writes/edits/deletes outside `/mnt/iexa` as advanced rootfs operations; only do them for explicit paths or package/runtime setup.
-        - Use `read_image` for generated charts, downloaded screenshots, or image artifacts that need host-decoded dimensions/type metadata. Use `iexa-open /mnt/iexa/<image>` when the user should preview the image in chat.
-        - Website preview is mandatory after creating or modifying a website/app page. Do not tell the user to open files manually and do not stop after listing files. For static HTML/CSS/JS/SVG output, start the real Alpine Python server as its own tool step:
-          `cd /mnt/iexa/<project-or-directory> || exit 1; python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/iexa-preview-8080.log 2>&1 & printf 'Preview URL: http://localhost:8080/\\n'`
-          Use another free port if 8080 is unavailable. Include the exact `http://localhost:<port>/` URL in your final answer so the app renders a yellow clickable link. Use the Python server command above; do not invent or call custom preview helper commands. For npm/Vite/React/etc. projects, start the dev server bound to `127.0.0.1`/`localhost`, verify it responds, then run `iexa-open http://localhost:<port>/` and give that exact URL.
-        \(memoryRule)- Use `browser_use` for bounded HTTP fetch/save/open-preview flows. Use `shell_execute` only for bounded list/search/run/install/build/test/verify commands.
-        - Commands must be POSIX sh/BusyBox ash compatible. Use tool `delay` for waits; avoid shell `sleep` and Python `time.sleep()`.
-        - Large outputs may include `output_reference`; use `file_read` on that path when full content is needed.
-        - One step should finish before the next decision. A file write plus one matching verification command is allowed; unrelated follow-up work waits for the returned result.
-        - Do not repeatedly read or edit the same file when a previous tool result already showed the same state. After two failed/no-op attempts, stop and explain the blocker or choose a different verification path.
-        - If a tool result shows success and the user goal is complete, stop tool use and answer normally with a concise real summary.
-        - If native tools are rejected by the provider, fallback is one fenced `iexa_alpine` block using the same structured JSON shape. If the provider cannot emit real tool_calls but can output JSON text, output exactly one JSON tool object/block and let Iexa execute it.
+        Tools: `file_read`, `file_write`, `file_edit`, `read_image`, `browser_use`\(memoryToolNames), `shell_execute`. Iexa executes them in Local Alpine and returns real results.
+        Rules:
+        - Workspace `/mnt/iexa`; relative paths resolve there. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
+        - Shell is Alpine BusyBox/ash. Install OS packages with `apk add --no-cache`; never use apt/brew/sudo/systemctl/macOS/Windows commands.
+        - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
+        - Use `browser_use` for bounded HTTP fetch/save/open-preview. Use `shell_execute` for bounded list/search/run/install/build/test/verify.
+        - Website/app changes require a localhost preview: start `python3 -m http.server <port> --bind 127.0.0.1` or a framework dev server, verify it, run `iexa-open http://localhost:<port>/`, and give that URL.
+        \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed.
+        - One meaningful step per decision. A write plus one direct verification may share a step when validating the same change. Stop when the tool result completes the user goal.
+        - iOS background time is limited; keep long jobs resumable and save progress/results under `/mnt/iexa`.
+        - If native tools are rejected, fallback to exactly one fenced `iexa_alpine` JSON block with the same tool shape.
         [/Local Alpine native tools]
         """
     }
@@ -2688,47 +2676,25 @@ final class ChatViewModel {
     }
 
     private static var localAlpineToolManifest: String {
-        let capabilities = localAlpineToolCapabilities
-            .map { capability in
-                "  - `\(capability.name)`: \(capability.description) Args: \(capability.arguments.joined(separator: ", "))."
-            }
-            .joined(separator: "\n")
+        let toolNames = localAlpineToolCapabilities
+            .map { "`\($0.name)`" }
+            .joined(separator: ", ")
         return """
-        Local Alpine tool manifest:
-        - Transport: emit exactly one fenced Markdown block with language `iexa_alpine`. The app parses that block, runs it locally, and appends the real result as a later Local Alpine observation.
-        - This is a client-side Markdown tool bridge, not a provider/native function. Do not check provider tool availability. Never call `iexa_alpine` through function-call syntax and never say the provider tool does not exist.
-        - Valid call shape:
+        Local Alpine tool bridge:
+        - Emit one fenced Markdown block with language `iexa_alpine`; Iexa runs it locally and returns the real observation in the next turn. Do not fake output or say the tool is unavailable.
+        - Valid shape:
           ```iexa_alpine
           {"tool_title":"列出目录","command":"pwd && ls -la","cwd":"/mnt/iexa"}
           ```
-        - Invalid call shapes: `<tool iexa_alpine ...>`, `tool iexa_alpine`, function-call JSON outside a fenced block, or any sentence saying `iexa_alpine` is missing.
-        - Execution boundary: every command is executed by the embedded Local Alpine/iSH runtime only, not by Open Terminal, a remote server terminal, iOS/macOS shell, Windows shell, Debian, or Ubuntu. Use Alpine/BusyBox/POSIX commands.
-        - Workspace: `/mnt/iexa`. Relative paths resolve there unless the user names an absolute rootfs path.
-        - Shell fallback: accepted command keys are `command`, `cmd`, `shell`, `bash`, `exec`, `run`, or `shell_execute`; accepted cwd keys are `cwd`, `workdir`, `working_dir`, `directory`, or `dir`; accepted delay keys are `delay`, `delay_seconds`, or `delaySeconds`.
-        - Dependency install pattern: this runtime is Alpine. Check first with `command -v <tool>` or `apk info -e <pkg>`, then install missing OS packages with `apk add --no-cache <pkg>`.
-        - Step titles: every tool step must include a short `tool_title`, `step_title`, `display_title`, or `label` string to name the visible execution capsule. Keep it under 24 characters, use the user's language, and make it action-oriented, such as `读取目录`, `写入配置`, `校验脚本`, or `删除旧文件`.
-        - Compatibility aliases inside the `iexa_alpine` JSON are accepted: `file_read` -> `read_file`, `file_write` -> `write_files`, `file_edit` -> `edit_file`, `read_image`/`image_read` -> host-decoded image metadata, `shell_execute` -> `command`, and `browser_use`/`web_fetch` -> bounded HTTP fetch. Keep the outer Markdown fence as `iexa_alpine`.
-        - Structured shell wrappers: use top-level `list_dir`, `glob`, `grep`, `verify`, and `browser_use` for common list/search/check/fetch work. `browser_use` can save large responses under `/mnt/iexa` and open preview.
-        - In-app preview bridge: after creating a user-viewable non-website file, run `iexa-open /mnt/iexa/<file>` or `iexa-open iexa://workspace/<file>`. HTTP/HTTPS opens in the built-in browser; HTML/SVG workspace files open in WebView with relative resources; other files open through native preview.
-        - Website preview rule: after creating or changing any website/app page, start a localhost preview and give the user the clickable URL. For static HTML/CSS/JS/SVG, run the real Alpine Python server as its own tool step:
-          `cd /mnt/iexa/<project-or-directory> || exit 1; python3 -m http.server 8080 --bind 127.0.0.1 >/tmp/iexa-preview-8080.log 2>&1 & printf 'Preview URL: http://localhost:8080/\\n'`
-          Use another free port if 8080 is unavailable. Include the exact `http://localhost:<port>/` in the final answer. Use the Python server command above; do not invent or call custom preview helper commands. For npm/Vite/React/etc., start the dev server on `127.0.0.1`/`localhost`, verify with a bounded fetch/curl/wget, run `iexa-open http://localhost:<port>/`, and give the same URL. Never answer "open index.html manually" as the final preview path for a website project.
-        - Command dialect: Alpine BusyBox/ash, not Ubuntu/Debian/macOS/bash.
-        \(localAlpineBusyBoxCompatibilityNotes)
-        - Rootfs/environment/dependency checks: if the user asks whether Python/Lua/Node/C++ or dependencies exist, inspect the running Alpine rootfs/runtime/toolchain directly with bounded `command -v`, `--version`, `apk info`, `python3 -m pip list`, `find /usr/lib /usr/local/lib`, or small module-list commands. Do not invent `/mnt/iexa/rootfs`; `/mnt/iexa` is only the workspace mount. Do not only search `/mnt/iexa` project dependency files unless the user specifically asks for project dependency files.
-        - Service/process commands: prefer foreground commands and bounded verification. The exception is website preview servers: use `python3 -m http.server <port> --bind 127.0.0.1` for static sites or a framework dev server bound to localhost, then verify and share the localhost URL. Do not assume OpenRC/system services are available unless a prior command proves it.
-        - `command`/`shell_execute` is shell text only. For structured tools, use top-level keys such as `read_file`, `file_read`, `write_files`, `file_write`, `edit_file`, `patch_file`, `delete_file`, `delete_files`, `list_dir`, `glob`, `grep`, `verify`, or `browser_use`.
-        - Hard protocol rule: for any intermediate local-work step, pure prose means "stop and answer normally"; it will not be auto-upgraded into execution. Emit a real tool block only when you are intentionally requesting local execution.
-        - JSON tool capabilities:
-        \(capabilities)
-        - Source file writes: never write code through shell redirection/heredocs/echo/cat/tee/printf. Use structured `write_files`/`file_write`, `edit_file`/`file_edit`, or `patch_file`.
-        - Website project creation: write files with structured tools, then start/verify a localhost preview and share the printed URL.
-        - Generated scripts must be runtime-compatible before execution: Python should avoid `time.sleep()`; shell scripts must be BusyBox ash/POSIX, not bash. If a delay is needed, set `delay` on the next command step.
-        - Code write validation: source files must be written as exact UTF-8 bytes through structured tools. Python additionally gets AST/compile validation, but the structured-write rule applies to every programming language, not only `.py`.
-        - Markdown hygiene: when showing code to the user, put the closing ``` fence alone on its own line. Never append headings, bullets, or prose to the same line as a closing fence.
-        - Tool loop: one assistant turn emits at most one `iexa_alpine` block for one meaningful bounded step; the next turn must read the returned stdout/stderr/exit code before deciding whether to continue. For code creation, a structured file write plus one bounded syntax/run verification may share the same block only when they validate the same change.
-        - Tool-call turn output: when emitting an `iexa_alpine` block, do not append success claims, guessed stdout, file contents, or final summaries after the block. The host will return the real Local Alpine observation in the next turn.
-        - Visible preface: prefer no prose before the block. If needed, write one short progress sentence only. Never ask the user to send back local execution results; the host app returns results automatically.
+        - Workspace `/mnt/iexa`; relative paths resolve there. Execution is embedded Local Alpine/iSH, not Open Terminal, iOS/macOS/Windows, Debian, or Ubuntu.
+        - Shell is Alpine BusyBox/ash. Use `apk add --no-cache` for missing OS packages after `command -v` or `apk info -e`; never use apt/brew/sudo/systemctl or bash/GNU-only syntax.
+        - Tools: \(toolNames). Compatibility aliases are accepted: `file_read`, `file_write`, `file_edit`, `shell_execute`, `browser_use`, `web_fetch`, `read_image`.
+        - Every step needs a short user-language `tool_title`/`step_title`/`label`.
+        - Prefer structured read/write/edit/patch/delete/list/glob/grep/verify/browser tools. Do not write source code with shell heredocs/redirection/echo/cat/tee/printf.
+        - Large outputs may provide `output_reference`; read that path only when the full content is needed.
+        - Website/app changes require localhost preview: start a Python/static or framework dev server bound to `127.0.0.1`, verify it, run `iexa-open http://localhost:<port>/`, and give that exact URL.
+        - Use one meaningful bounded step per turn, then wait for the returned observation. A write plus one direct verification may share a block if it validates the same change.
+        - When emitting a tool block, do not append guessed stdout, success claims, file contents, or a final summary after it.
         """
     }
 

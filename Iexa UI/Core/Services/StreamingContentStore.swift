@@ -143,16 +143,24 @@ final class StreamingContentStore {
             hasVizStart: false,
             vizEndOffset: nil,
             hasUnclosedToolCallBlock: false,
-            lastClosedToolCallDetailsEnd: nil
+            lastClosedToolCallDetailsEnd: nil,
+            unclosedReasoningDetailsStart: nil,
+            lastClosedReasoningDetailsEnd: nil
         )
 
         let hasVizStart: Bool
         let vizEndOffset: Int?
         let hasUnclosedToolCallBlock: Bool
         let lastClosedToolCallDetailsEnd: Int?
+        let unclosedReasoningDetailsStart: Int?
+        let lastClosedReasoningDetailsEnd: Int?
 
         var hasClosedToolCallBlock: Bool {
             lastClosedToolCallDetailsEnd != nil && !hasUnclosedToolCallBlock
+        }
+
+        var hasClosedReasoningBlock: Bool {
+            lastClosedReasoningDetailsEnd != nil && unclosedReasoningDetailsStart == nil
         }
     }
 
@@ -432,12 +440,18 @@ final class StreamingContentStore {
         }()
 
         let hasToolCalls = content.range(of: "tool_calls", options: .caseInsensitive) != nil
+        let unclosedReasoningStart = unclosedReasoningDetailsStart(in: content)
+        let lastClosedReasoningEnd = unclosedReasoningStart == nil
+            ? lastDetailsEnd(in: content, matching: "reasoning")
+            : nil
         guard hasToolCalls else {
             return StreamStructure(
                 hasVizStart: hasVizStart,
                 vizEndOffset: vizEndOffset,
                 hasUnclosedToolCallBlock: false,
-                lastClosedToolCallDetailsEnd: nil
+                lastClosedToolCallDetailsEnd: nil,
+                unclosedReasoningDetailsStart: unclosedReasoningStart,
+                lastClosedReasoningDetailsEnd: lastClosedReasoningEnd
             )
         }
 
@@ -451,7 +465,9 @@ final class StreamingContentStore {
             hasVizStart: hasVizStart,
             vizEndOffset: vizEndOffset,
             hasUnclosedToolCallBlock: hasUnclosed,
-            lastClosedToolCallDetailsEnd: lastClosedEnd
+            lastClosedToolCallDetailsEnd: lastClosedEnd,
+            unclosedReasoningDetailsStart: unclosedReasoningStart,
+            lastClosedReasoningDetailsEnd: lastClosedReasoningEnd
         )
     }
 
@@ -570,6 +586,45 @@ final class StreamingContentStore {
             // eliminates the ~25 KB/tick re-render cost that was causing lag during
             // Inline Visualizer and other tool responses.
             if isFinishing { completeCleanup() }
+            return
+        }
+
+        // Reasoning/details blocks are expensive if drained character-by-character:
+        // every frame would re-tokenize the HTML and re-layout markdown. Keep the
+        // visible stream parked before the in-progress block, then reveal the
+        // completed collapsible reasoning block in one jump.
+        if let reasoningStart = structure.unclosedReasoningDetailsStart {
+            if isFinishing {
+                displayContent = full
+                completeCleanup()
+                return
+            }
+            let startIdx = full.index(full.startIndex, offsetBy: reasoningStart)
+            let prefix = String(full[..<startIdx])
+            if displayContent != prefix {
+                displayContent = prefix
+            }
+            lastKnownTotal = totalCount
+            framesSinceLastBurst = 0
+            return
+        }
+
+        if structure.hasClosedReasoningBlock,
+           let lastReasoningCloseEnd = structure.lastClosedReasoningDetailsEnd,
+           displayedCount < lastReasoningCloseEnd {
+            let endIdx = full.index(full.startIndex, offsetBy: lastReasoningCloseEnd)
+            let newDisplay = String(full[..<endIdx])
+            if displayContent != newDisplay {
+                displayContent = newDisplay
+            }
+            displayedCount = lastReasoningCloseEnd
+            buffered = totalCount - displayedCount
+            lastKnownTotal = totalCount
+            burstIntervalEMA = 8
+            framesSinceLastBurst = 0
+            isFirstBurst = true
+            drainAccumulator = 0
+            steadyRate = 0
             return
         }
 
@@ -854,8 +909,13 @@ final class StreamingContentStore {
     ///
     /// Returns `nil` if no closed tool_calls block is found.
     private static func lastToolCallDetailsEnd(in content: String) -> Int? {
+        lastDetailsEnd(in: content, matching: "tool_calls")
+    }
+
+    private static func lastDetailsEnd(in content: String, matching marker: String) -> Int? {
         let closeTag = "</details>"
-        guard content.contains("tool_calls"), content.contains(closeTag) else { return nil }
+        guard content.range(of: marker, options: .caseInsensitive) != nil,
+              content.contains(closeTag) else { return nil }
 
         // Collect all </details> close positions (end offsets) in forward order
         var closeEnds: [String.Index] = []
@@ -887,7 +947,7 @@ final class StreamingContentStore {
             // Extract the opening tag text to check its type attribute
             if let tagEnd = content.range(of: ">", range: openIdx..<content.endIndex) {
                 let tagText = String(content[openIdx..<tagEnd.upperBound])
-                if tagText.lowercased().contains("tool_calls") {
+                if tagText.range(of: marker, options: .caseInsensitive) != nil {
                     lastToolCallEnd = closeIdx
                 }
             }
@@ -895,6 +955,42 @@ final class StreamingContentStore {
 
         guard let endIdx = lastToolCallEnd else { return nil }
         return content.distance(from: content.startIndex, to: endIdx)
+    }
+
+    private static func unclosedReasoningDetailsStart(in content: String) -> Int? {
+        guard let openStart = lastReasoningDetailsOpenStart(in: content) else { return nil }
+        let closeStart = lastCaseInsensitiveRange(of: "</details>", in: content)?.lowerBound
+        if let closeStart, closeStart > openStart {
+            return nil
+        }
+        return content.distance(from: content.startIndex, to: openStart)
+    }
+
+    private static func lastReasoningDetailsOpenStart(in content: String) -> String.Index? {
+        guard content.range(of: "reasoning", options: .caseInsensitive) != nil else { return nil }
+        var last: String.Index?
+        var searchRange = content.startIndex..<content.endIndex
+        while let open = content.range(of: "<details", options: .caseInsensitive, range: searchRange) {
+            guard let tagEnd = content.range(of: ">", range: open.upperBound..<content.endIndex) else {
+                break
+            }
+            let tagText = String(content[open.lowerBound..<tagEnd.upperBound])
+            if tagText.range(of: "reasoning", options: .caseInsensitive) != nil {
+                last = open.lowerBound
+            }
+            searchRange = tagEnd.upperBound..<content.endIndex
+        }
+        return last
+    }
+
+    private static func lastCaseInsensitiveRange(of needle: String, in content: String) -> Range<String.Index>? {
+        var last: Range<String.Index>?
+        var searchRange = content.startIndex..<content.endIndex
+        while let range = content.range(of: needle, options: .caseInsensitive, range: searchRange) {
+            last = range
+            searchRange = range.upperBound..<content.endIndex
+        }
+        return last
     }
 
     /// Returns the character offset of the end of the last completed paragraph
