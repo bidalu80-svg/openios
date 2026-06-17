@@ -2282,8 +2282,7 @@ struct ChatDetailView: View {
         }
         let resolvedItem = agentActivityWindowPreview(includeInactive: false) ?? agentActivity(for: message)
         guard let item = resolvedItem,
-              item.hasConcreteSteps,
-              !item.hasOnlyWebSearchStatusSteps else {
+              item.hasConcreteSteps else {
             return
         }
         if suppressStaleAgentFloatingBarAfterKeyboard,
