@@ -22956,12 +22956,7 @@ final class ContentAccumulator: @unchecked Sendable {
         } else {
             _reasoningContent += text
         }
-        let needsDispatch = !_pendingUpdate
-        if needsDispatch { _pendingUpdate = true }
-        let callback = _onUpdate
         lock.unlock()
-
-        dispatchIfNeeded(needsDispatch, callback: callback)
     }
 
     nonisolated func replace(_ text: String) {
@@ -22982,12 +22977,7 @@ final class ContentAccumulator: @unchecked Sendable {
             return
         }
         _reasoningDone = true
-        let needsDispatch = !_pendingUpdate
-        if needsDispatch { _pendingUpdate = true }
-        let callback = _onUpdate
         lock.unlock()
-
-        dispatchIfNeeded(needsDispatch, callback: callback)
     }
 
     private nonisolated func dispatchIfNeeded(
@@ -23010,25 +23000,6 @@ final class ContentAccumulator: @unchecked Sendable {
     }
 
     private nonisolated func renderedContentLocked() -> String {
-        let reasoning = _reasoningContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !reasoning.isEmpty else { return _content }
-
-        let escaped = Self.escapeReasoningHTML(reasoning)
-        let block = """
-        <details type="reasoning" done="\(_reasoningDone ? "true" : "false")"><summary>\(_reasoningDone ? "思考" : "思考中…")</summary>
-        \(escaped)
-        </details>
-        """
-        if _content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return block
-        }
-        return block + "\n\n" + _content
-    }
-
-    private nonisolated static func escapeReasoningHTML(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
+        _content
     }
 }

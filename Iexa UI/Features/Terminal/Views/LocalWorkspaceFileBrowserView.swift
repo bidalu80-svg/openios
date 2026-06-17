@@ -1112,7 +1112,7 @@ private struct LocalWorkspaceTextPreview: View {
     }
 
     var body: some View {
-        ScrollView([.vertical, .horizontal]) {
+        ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(rows) { row in
                     HStack(alignment: .top, spacing: 10) {
@@ -1125,20 +1125,23 @@ private struct LocalWorkspaceTextPreview: View {
                         Text(row.text.isEmpty ? " " : row.text)
                             .font(.system(size: 12, weight: .regular, design: .monospaced))
                             .foregroundStyle(theme.textPrimary)
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(theme.surfaceContainer.opacity(0.55))
     }
 
     private static func previewRows(from text: String) -> [Row] {
         let maxRows = 1_600
-        let maxColumns = 220
+        let maxColumns = 120
         var output: [Row] = []
         output.reserveCapacity(min(maxRows, 512))
 
