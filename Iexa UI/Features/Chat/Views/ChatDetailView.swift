@@ -1524,6 +1524,30 @@ private final class AssistantVisibleTextCache {
     }
 }
 
+private struct CurrentTurnActivityItemsCacheEntry {
+    let signature: Int
+    let items: [AgentActivityItem]
+}
+
+private final class CurrentTurnActivityItemsCache {
+    private var entries: [String: CurrentTurnActivityItemsCacheEntry] = [:]
+
+    func lookup(key: String, signature: Int) -> [AgentActivityItem]? {
+        guard let entry = entries[key], entry.signature == signature else {
+            return nil
+        }
+        return entry.items
+    }
+
+    func store(key: String, signature: Int, items: [AgentActivityItem]) {
+        entries[key] = CurrentTurnActivityItemsCacheEntry(signature: signature, items: items)
+        if entries.count > 8 {
+            entries.removeAll(keepingCapacity: true)
+            entries[key] = CurrentTurnActivityItemsCacheEntry(signature: signature, items: items)
+        }
+    }
+}
+
 private final class ChatScrollRuntimeState {
     var lastScrollOffset: CGFloat = 0
     var isNearBottom: Bool = true
@@ -1545,6 +1569,7 @@ struct ChatDetailView: View {
     @State private var agentActivityCache = AgentActivityItemCache()
     @State private var transcriptCache = TranscriptMessagesCache()
     @State private var assistantVisibleTextCache = AssistantVisibleTextCache()
+    @State private var currentTurnActivityCache = CurrentTurnActivityItemsCache()
     @State private var scrollRuntime = ChatScrollRuntimeState()
 
     // MARK: Model selector sheet
@@ -1632,25 +1657,44 @@ struct ChatDetailView: View {
     }
 
     private func currentTurnAgentActivityItems(includeInactive: Bool) -> [AgentActivityItem] {
-        guard viewModel.isStreaming || viewModel.streamingStore.isActive else {
-            if !includeInactive { return [] }
-            let messages = viewModel.messages
-            guard !messages.isEmpty else { return [] }
-            let lastUserIndex = messages.lastIndex(where: { $0.role == .user })
-            let startIndex = lastUserIndex.map { messages.index(after: $0) } ?? messages.startIndex
-            guard startIndex < messages.endIndex else { return [] }
-            return messages[startIndex...]
-                .compactMap { activityItem(for: $0) }
-                .filter { $0.hasConcreteSteps || $0.isActive }
-        }
+        let isLive = viewModel.isStreaming || viewModel.streamingStore.isActive
+        guard isLive || includeInactive else { return [] }
         let messages = viewModel.messages
-        guard !messages.isEmpty else { return [] }
-        let lastUserIndex = messages.lastIndex(where: { $0.role == .user })
-        let startIndex = lastUserIndex.map { messages.index(after: $0) } ?? messages.startIndex
-        guard startIndex < messages.endIndex else { return [] }
-        return messages[startIndex...]
+        guard let turnMessages = currentTurnAgentActivityMessages(in: messages) else { return [] }
+
+        let cacheKey = includeInactive ? "current-turn-include-inactive" : "current-turn-live-only"
+        let signature = currentTurnAgentActivitySignature(messages: turnMessages, includeInactive: includeInactive, isLive: isLive)
+        if let cached = currentTurnActivityCache.lookup(key: cacheKey, signature: signature) {
+            return cached
+        }
+
+        let items = turnMessages
             .compactMap { activityItem(for: $0) }
             .filter { $0.hasConcreteSteps || $0.isActive }
+        currentTurnActivityCache.store(key: cacheKey, signature: signature, items: items)
+        return items
+    }
+
+    private func currentTurnAgentActivityMessages(in messages: [ChatMessage]) -> ArraySlice<ChatMessage>? {
+        guard !messages.isEmpty else { return nil }
+        let lastUserIndex = messages.lastIndex(where: { $0.role == .user })
+        let startIndex = lastUserIndex.map { messages.index(after: $0) } ?? messages.startIndex
+        guard startIndex < messages.endIndex else { return nil }
+        return messages[startIndex...]
+    }
+
+    private func currentTurnAgentActivitySignature(
+        messages: ArraySlice<ChatMessage>,
+        includeInactive: Bool,
+        isLive: Bool
+    ) -> Int {
+        var signature = messages.count &* 31
+        signature &+= includeInactive ? 17 : 5
+        signature &+= isLive ? 29 : 11
+        for message in messages {
+            signature &+= agentActivityCacheSignature(for: message)
+        }
+        return signature
     }
 
     private struct TranscriptVisibilityContext {
