@@ -1926,9 +1926,9 @@ struct ChatDetailView: View {
         return signature
     }
 
-    private func assistantContentOverrideForActivityParent(_ message: ChatMessage) -> String? {
+    private func assistantContentOverrideForActivityParent(_ message: ChatMessage, activityItem: AgentActivityItem? = nil) -> String? {
         guard message.role == .assistant,
-              hasRenderableAgentActivity(for: message),
+              hasRenderableAgentActivity(for: message, cachedItem: activityItem),
               !isMessageVisuallyStreaming(message) else {
             return nil
         }
@@ -4179,7 +4179,7 @@ struct ChatDetailView: View {
                 showTimestamp: activeActionMessageId == message.id,
                 timestamp: message.timestamp
             ) {
-                messageContent(for: message)
+                messageContent(for: message, activityItem: activityItem)
             }
             // Only apply tap gesture to user bubbles — assistant content contains
             // interactive elements (links, text selection) that onTapGesture would block.
@@ -4281,7 +4281,7 @@ struct ChatDetailView: View {
     // MARK: - Message Content
 
     @ViewBuilder
-    private func messageContent(for message: ChatMessage) -> some View {
+    private func messageContent(for message: ChatMessage, activityItem: AgentActivityItem? = nil) -> some View {
         if message.role == .user {
             let displayContent = activeUserDisplayContent(for: message)
             VStack(alignment: .trailing, spacing: Spacing.sm) {
@@ -4303,7 +4303,7 @@ struct ChatDetailView: View {
                 message: message,
                 activeVersionIndex: activeVersionIndex[message.id] ?? -1,
                 contentOverride: assistantContentOverride[message.id]
-                    ?? assistantContentOverrideForActivityParent(message),
+                    ?? assistantContentOverrideForActivityParent(message, activityItem: activityItem),
                 showEmptyThinkingCapsule: true,
                 serverBaseURL: viewModel.serverBaseURL,
                 authToken: viewModel.serverAuthToken,
