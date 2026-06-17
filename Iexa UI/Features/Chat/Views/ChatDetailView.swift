@@ -601,6 +601,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
     ) -> [AgentActivityStep] {
         statusHistory.enumerated().compactMap { index, status in
             guard status.hidden != true else { return nil }
+            guard !isReasoningOrThinkingStatus(status) else { return nil }
             let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
             if action.contains("local_alpine_agent") || action.contains("local_alpine_tool") {
                 return nil
@@ -659,6 +660,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     || action == "local_alpine_tool" else {
                 return nil
             }
+            guard isConcreteLocalStatus(status, action: action) else { return nil }
 
             let title = title(for: status, action: action)
             let detail = status.description?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -685,6 +687,53 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 previewFile: nil
             )
         }
+    }
+
+    private static func isConcreteLocalStatus(_ status: ChatStatusUpdate, action: String) -> Bool {
+        guard !isReasoningOrThinkingStatus(status) else { return false }
+        if action == "local_alpine" || action == "local_alpine_tool" {
+            return true
+        }
+        let text = statusText(status)
+        guard !text.isEmpty else { return false }
+        let concreteMarkers = [
+            "准备执行", "正在执行", "执行本地", "运行本地", "本地命令",
+            "写入文件", "读取文件", "编辑文件", "删除文件", "创建文件",
+            "安装本地", "更新本地", "工具调用", "命令",
+            "executing", "calling", "running", "command", "tool"
+        ]
+        return concreteMarkers.contains { text.localizedCaseInsensitiveContains($0) }
+    }
+
+    private static func isReasoningOrThinkingStatus(_ status: ChatStatusUpdate) -> Bool {
+        let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let text = statusText(status)
+        if action.contains("reason")
+            || action.contains("think")
+            || action.contains("thought") {
+            return true
+        }
+        let reasoningMarkers = [
+            "<details", "</details>", "<think", "</think", "<thinking", "</thinking",
+            "<reasoning", "</reasoning", "<thought", "</thought",
+            "思考中", "正在思考", "思考下一步", "分析下一步",
+            "正在检查下一步", "检查下一步", "整理回答",
+            "thinking", "reasoning", "thought"
+        ]
+        return reasoningMarkers.contains { text.localizedCaseInsensitiveContains($0) }
+    }
+
+    private static func statusText(_ status: ChatStatusUpdate) -> String {
+        [
+            status.action,
+            status.status,
+            status.description,
+            status.query,
+            status.queries.joined(separator: " ")
+        ]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
     }
 
     private static func title(for status: ChatStatusUpdate, action: String) -> String {
@@ -1037,10 +1086,13 @@ private struct AgentActivityItem: Identifiable, Hashable {
         }
         return message.statusHistory.contains { status in
             let action = status.action?.lowercased() ?? ""
-            return action == "local_alpine"
+            if action == "local_alpine"
                 || action == "local_alpine_agent"
-                || action == "local_alpine_tool"
-                || action.contains("web_search")
+                || action == "local_alpine_tool" {
+                return Self.isConcreteLocalStatus(status, action: action)
+            }
+            guard !Self.isReasoningOrThinkingStatus(status) else { return false }
+            return action.contains("web_search")
                 || action.contains("browser_web_search")
                 || action.contains("code_interpreter")
                 || action.contains("get_readable")
@@ -2920,7 +2972,6 @@ struct ChatDetailView: View {
                 isEnabled: !vm.isStreaming || vm.canSendWhileStreaming,
                 onSend: {
                     beginPostSendWaitingUIDelayIfNeeded()
-                    forceDismissInputAfterSend()
                     Task { await viewModel.sendMessage() }
                 },
                 onStopGenerating: vm.isStreaming ? { viewModel.stopStreaming() } : nil,
@@ -3566,15 +3617,9 @@ struct ChatDetailView: View {
         guard !keyboard.isVisible, keyboard.height <= 1 else { return }
         agentFloatingKeyboardHideGeneration += 1
         pendingAgentFloatingBarResumeAfterKeyboard = false
-        if hasActiveAgentFloatingActivity {
-            suppressStaleAgentFloatingBarAfterKeyboard = false
-            setAgentFloatingBarHiddenForKeyboard(false)
-            refreshAgentFloatingActivitySnapshot(includeInactive: false)
-        } else {
-            suppressStaleAgentFloatingBarAfterKeyboard = true
-            agentFloatingActivitySnapshot = nil
-            setAgentFloatingBarHiddenForKeyboard(true)
-        }
+        suppressStaleAgentFloatingBarAfterKeyboard = true
+        agentFloatingActivitySnapshot = nil
+        setAgentFloatingBarHiddenForKeyboard(true)
     }
 
     private func resumeAgentFloatingBarForNewTask() {
@@ -7621,7 +7666,7 @@ private struct IsolatedAssistantMessage: View {
 
         let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
 
-        if effectiveIsStreaming && rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if effectiveIsStreaming && displayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if message.metadata?["iexa_local_alpine_result"] == "true"
                 || (message.model == "Local Alpine" && message.statusHistory.contains(where: {
                     $0.action?.lowercased() == "local_alpine"
@@ -7655,7 +7700,9 @@ private struct IsolatedAssistantMessage: View {
             // VIZ markers (@@@VIZ-START) and <details blocks require AssistantMessageContent's
             // full routing (InlineVisualizerView, tool-call renderer, embed injection).
             // When those are present, fall through to the normal full-content path below.
-            let liveTail = isActivelyStreaming ? streamingStore.liveTextTail : ""
+            let liveTail = isActivelyStreaming
+                ? Self.safeAssistantRenderableContent(streamingStore.liveTextTail)
+                : ""
             let liveTailHasSpecialContent = Self.requiresFullAssistantRouting(liveTail)
             if frozenBoundary > 0 && !liveTailHasSpecialContent {
                 let dc = streamingStore.displayContent
@@ -7807,11 +7854,112 @@ private struct IsolatedAssistantMessage: View {
     }
 
     private static func safeAssistantRenderableContent(_ content: String) -> String {
-        guard InlineDataPayloadSanitizer.mayContainLargeInlinePayload(content) else {
-            return content
+        let withoutReasoning = Self.removingReasoningArtifacts(from: content)
+        guard InlineDataPayloadSanitizer.mayContainLargeInlinePayload(withoutReasoning) else {
+            return withoutReasoning
         }
-        let cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(content)
+        let cleaned = InlineDataPayloadSanitizer.sanitizedDisplayText(withoutReasoning)
         return InlineDataPayloadSanitizer.removingHiddenPayloadArtifacts(from: cleaned)
+    }
+
+    private static func removingReasoningArtifacts(from content: String) -> String {
+        guard mayContainReasoningMarkup(content) else { return content }
+        var cleaned = removingReasoningDetailsBlocks(from: content)
+        cleaned = removingTaggedReasoningBlocks(from: cleaned, opening: "<thinking", closing: "</thinking>")
+        cleaned = removingTaggedReasoningBlocks(from: cleaned, opening: "<think", closing: "</think>")
+        cleaned = removingTaggedReasoningBlocks(from: cleaned, opening: "<reasoning", closing: "</reasoning>")
+        cleaned = removingTaggedReasoningBlocks(from: cleaned, opening: "<reason", closing: "</reason>")
+        cleaned = removingTaggedReasoningBlocks(from: cleaned, opening: "<thought", closing: "</thought>")
+        cleaned = removingTokenReasoningBlocks(from: cleaned, opening: "<|begin_of_thought|>", closing: "<|end_of_thought|>")
+        cleaned = removingTokenReasoningBlocks(from: cleaned, opening: "◁think▷", closing: "◁/think▷")
+        return cleaned
+            .replacingOccurrences(of: "<|begin_of_thought|>", with: "")
+            .replacingOccurrences(of: "<|end_of_thought|>", with: "")
+            .replacingOccurrences(of: "◁think▷", with: "")
+            .replacingOccurrences(of: "◁/think▷", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func mayContainReasoningMarkup(_ content: String) -> Bool {
+        guard !content.isEmpty else { return false }
+        let lower = content.lowercased()
+        return lower.contains("<details")
+            || lower.contains("<think")
+            || lower.contains("<reason")
+            || lower.contains("<thought")
+            || lower.contains("<|begin_of_thought|>")
+            || content.contains("◁think▷")
+    }
+
+    private static func removingReasoningDetailsBlocks(from text: String) -> String {
+        var result = ""
+        var cursor = text.startIndex
+        while let openRange = text.range(of: "<details", options: [.caseInsensitive], range: cursor..<text.endIndex) {
+            guard let tagEnd = text[openRange.lowerBound...].firstIndex(of: ">") else {
+                result += text[cursor..<openRange.lowerBound]
+                return result
+            }
+            let tag = String(text[openRange.lowerBound...tagEnd]).lowercased()
+            let isReasoning = tag.contains("reasoning")
+                || tag.contains("think")
+                || tag.contains("thought")
+            if !isReasoning {
+                result += text[cursor...tagEnd]
+                cursor = text.index(after: tagEnd)
+                continue
+            }
+
+            result += text[cursor..<openRange.lowerBound]
+            let afterTag = text.index(after: tagEnd)
+            if let closeRange = text.range(of: "</details>", options: [.caseInsensitive], range: afterTag..<text.endIndex) {
+                cursor = closeRange.upperBound
+            } else {
+                cursor = text.endIndex
+                break
+            }
+        }
+        result += text[cursor..<text.endIndex]
+        return result
+    }
+
+    private static func removingTaggedReasoningBlocks(
+        from text: String,
+        opening: String,
+        closing: String
+    ) -> String {
+        var result = ""
+        var cursor = text.startIndex
+        while let openRange = text.range(of: opening, options: [.caseInsensitive], range: cursor..<text.endIndex) {
+            result += text[cursor..<openRange.lowerBound]
+            if let closeRange = text.range(of: closing, options: [.caseInsensitive], range: openRange.upperBound..<text.endIndex) {
+                cursor = closeRange.upperBound
+            } else {
+                cursor = text.endIndex
+                break
+            }
+        }
+        result += text[cursor..<text.endIndex]
+        return result
+    }
+
+    private static func removingTokenReasoningBlocks(
+        from text: String,
+        opening: String,
+        closing: String
+    ) -> String {
+        var result = ""
+        var cursor = text.startIndex
+        while let openRange = text.range(of: opening, range: cursor..<text.endIndex) {
+            result += text[cursor..<openRange.lowerBound]
+            if let closeRange = text.range(of: closing, range: openRange.upperBound..<text.endIndex) {
+                cursor = closeRange.upperBound
+            } else {
+                cursor = text.endIndex
+                break
+            }
+        }
+        result += text[cursor..<text.endIndex]
+        return result
     }
 
     private static func localAlpineFinalSummaryDisplayContent(
