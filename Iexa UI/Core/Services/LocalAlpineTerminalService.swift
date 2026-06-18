@@ -77,7 +77,8 @@ struct LocalAlpineOpenRequest: Identifiable, Hashable, Sendable {
     let target: String
 
     var webURL: URL? {
-        guard let url = URL(string: target),
+        guard let normalizedTarget = Self.normalizedWebTarget(target),
+              let url = URL(string: normalizedTarget),
               let scheme = url.scheme?.lowercased(),
               ["http", "https", "about"].contains(scheme) else {
             return nil
@@ -86,6 +87,65 @@ struct LocalAlpineOpenRequest: Identifiable, Hashable, Sendable {
             return nil
         }
         return url
+    }
+
+    private static func normalizedWebTarget(_ rawTarget: String) -> String? {
+        var candidate = rawTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty,
+              candidate.rangeOfCharacter(from: .newlines) == nil else {
+            return nil
+        }
+
+        if let embeddedURL = firstHTTPURL(in: candidate) {
+            candidate = embeddedURL
+        }
+        candidate = stripTrailingPreviewPunctuation(candidate)
+        if isBareLoopbackTarget(candidate) {
+            candidate = "http://\(candidate)"
+        }
+
+        guard var components = URLComponents(string: candidate),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https", "about"].contains(scheme) else {
+            return nil
+        }
+        if components.host?.lowercased() == "0.0.0.0" {
+            components.host = "127.0.0.1"
+        }
+        return components.string ?? candidate
+    }
+
+    private static func firstHTTPURL(in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"https?://[^\s"'`<>()\[\]{}]+"#,
+            options: [.caseInsensitive]
+        ) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let matchRange = Range(match.range, in: text) else {
+            return nil
+        }
+        return String(text[matchRange])
+    }
+
+    private static func stripTrailingPreviewPunctuation(_ value: String) -> String {
+        var candidate = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trailingCharacters = CharacterSet(charactersIn: "\"'`*_~.,;:!?)[]{}<>，。！？；：、）】》」』")
+        while let scalar = candidate.unicodeScalars.last,
+              trailingCharacters.contains(scalar) {
+            candidate.removeLast()
+        }
+        return candidate
+    }
+
+    private static func isBareLoopbackTarget(_ value: String) -> Bool {
+        let lowercased = value.lowercased()
+        return lowercased.hasPrefix("localhost:")
+            || lowercased.hasPrefix("127.0.0.1:")
+            || lowercased.hasPrefix("0.0.0.0:")
+            || lowercased.hasPrefix("[::1]:")
     }
 }
 

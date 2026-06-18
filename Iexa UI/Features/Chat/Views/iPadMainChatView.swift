@@ -49,6 +49,8 @@ struct iPadMainChatView: View {
 
     /// Whether the local Alpine terminal is visible.
     @State private var showLocalAlpineTerminal = false
+    @State private var pendingLocalAlpineTerminalCommand: String?
+    @State private var pendingLocalAlpineTerminalCwd: String?
 
     /// Whether the local Alpine workspace file browser is visible.
     @State private var showLocalWorkspaceBrowser = false
@@ -254,8 +256,17 @@ struct iPadMainChatView: View {
             }
             router.presentVoiceCall(viewModel: voiceCallVM)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .openIexaTerminalBrowser)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .openIexaTerminalBrowser)) { notification in
             guard activeChannelId == nil else { return }
+            let prefill = localAlpineTerminalPrefill(from: notification)
+            if prefill.command != nil || prefill.cwd != nil {
+                pendingLocalAlpineTerminalCommand = prefill.command
+                pendingLocalAlpineTerminalCwd = prefill.cwd
+                showLocalAlpineTerminal = true
+                Haptics.play(.light)
+                return
+            }
+            clearLocalAlpineTerminalPrefill()
             configureTerminalBrowserIfNeeded()
             terminalBrowserVM.refresh()
             withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
@@ -354,9 +365,13 @@ struct iPadMainChatView: View {
         }
         // Local Alpine terminal
         .fullScreenCover(isPresented: $showLocalAlpineTerminal) {
-            LocalAlpineTerminalConsoleView {
+            LocalAlpineTerminalConsoleView(
+                initialCommand: pendingLocalAlpineTerminalCommand,
+                initialCwd: pendingLocalAlpineTerminalCwd
+            ) {
                 showLocalAlpineTerminal = false
             }
+            .id("\(pendingLocalAlpineTerminalCommand ?? "")|\(pendingLocalAlpineTerminalCwd ?? "")")
             .preferredColorScheme(.dark)
         }
         // Local Alpine workspace browser
@@ -412,6 +427,10 @@ struct iPadMainChatView: View {
             renameText: $renameText,
             dependencies: dependencies,
             onNewChat: { startNewChat() },
+            onOpenLocalAlpineTerminal: {
+                clearLocalAlpineTerminalPrefill()
+                showLocalAlpineTerminal = true
+            },
             onSelectFolder: { folderId in
                 let folderVM = listViewModel.folderViewModel
                 Task { await folderVM.setActiveFolder(folderId) }
@@ -615,6 +634,20 @@ struct iPadMainChatView: View {
         terminalBrowserVM.configure(apiClient: apiClient, serverId: server.id)
     }
 
+    private func localAlpineTerminalPrefill(from notification: Notification) -> (command: String?, cwd: String?) {
+        func stringValue(_ key: String) -> String? {
+            guard let value = notification.userInfo?[key] as? String else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return (stringValue("command"), stringValue("cwd"))
+    }
+
+    private func clearLocalAlpineTerminalPrefill() {
+        pendingLocalAlpineTerminalCommand = nil
+        pendingLocalAlpineTerminalCwd = nil
+    }
+
     // MARK: - Actions
 
     private func startNewChat() {
@@ -761,6 +794,7 @@ struct iPadSidebarContent: View {
     @Binding var renameText: String
     let dependencies: AppDependencyContainer
     let onNewChat: () -> Void
+    let onOpenLocalAlpineTerminal: () -> Void
     /// Called when the folder name/icon is tapped — opens folder workspace in the detail pane.
     var onSelectFolder: ((String) -> Void)?
     let onExport: (Conversation, iPadMainChatView.ExportFormat) -> Void
@@ -1687,7 +1721,7 @@ struct iPadSidebarContent: View {
                         Label("浏览文件", systemImage: "folder")
                     }
 
-                    Button { showLocalAlpineTerminal = true } label: {
+                    Button(action: onOpenLocalAlpineTerminal) {
                         Label("终端功能", systemImage: "terminal")
                     }
 

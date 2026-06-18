@@ -3217,10 +3217,14 @@ struct ChatDetailView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateCleared)) { notification in
             guard matchesAgentFloatingConversation(notification.userInfo?["conversationId"] as? String) else { return }
-            agentFloatingActivitySnapshot = nil
+            if let resolvedItem = agentActivityWindowPreview(includeInactive: true),
+               resolvedItem.hasConcreteSteps {
+                agentFloatingActivitySnapshot = resolvedItem
+            }
             pendingNewAgentFloatingSnapshotAfterKeyboard = nil
-            suppressStaleAgentFloatingBarAfterKeyboard = true
-            setAgentFloatingBarHiddenForKeyboard(true)
+            let hasResolvedSnapshot = agentFloatingActivitySnapshot?.hasConcreteSteps == true
+            suppressStaleAgentFloatingBarAfterKeyboard = !hasResolvedSnapshot
+            setAgentFloatingBarHiddenForKeyboard(keyboard.isVisible || !hasResolvedSnapshot)
         }
         .onAppear {
             viewModel.syncOnEntry()
@@ -4401,10 +4405,16 @@ struct ChatDetailView: View {
     private func finishAgentFloatingBarKeyboardHide() {
         guard !keyboard.isVisible else { return }
         agentFloatingKeyboardHideGeneration += 1
-        suppressStaleAgentFloatingBarAfterKeyboard = true
-        agentFloatingActivitySnapshot = nil
+        if let resolvedItem = agentActivityWindowPreview(includeInactive: true),
+           resolvedItem.hasConcreteSteps {
+            agentFloatingActivitySnapshot = resolvedItem
+            suppressStaleAgentFloatingBarAfterKeyboard = false
+        } else {
+            suppressStaleAgentFloatingBarAfterKeyboard = true
+            agentFloatingActivitySnapshot = nil
+        }
         pendingNewAgentFloatingSnapshotAfterKeyboard = nil
-        setAgentFloatingBarHiddenForKeyboard(true)
+        setAgentFloatingBarHiddenForKeyboard(agentFloatingActivitySnapshot?.hasConcreteSteps != true)
     }
 
     private func resumeAgentFloatingBarForNewTask() {

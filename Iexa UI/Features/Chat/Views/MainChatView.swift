@@ -41,6 +41,8 @@ struct MainChatView: View {
 
     /// Controls the local Alpine terminal presentation.
     @State private var showLocalAlpineTerminal = false
+    @State private var pendingLocalAlpineTerminalCommand: String?
+    @State private var pendingLocalAlpineTerminalCwd: String?
 
     /// Controls the local Alpine workspace file browser presentation.
     @State private var showLocalWorkspaceBrowser = false
@@ -846,11 +848,29 @@ struct MainChatView: View {
             .environment(router)
 
         case .localAlpineTerminal:
-            LocalAlpineTerminalConsoleView {
+            LocalAlpineTerminalConsoleView(
+                initialCommand: pendingLocalAlpineTerminalCommand,
+                initialCwd: pendingLocalAlpineTerminalCwd
+            ) {
                 showLocalAlpineTerminal = false
             }
+            .id("\(pendingLocalAlpineTerminalCommand ?? "")|\(pendingLocalAlpineTerminalCwd ?? "")")
             .preferredColorScheme(.dark)
         }
+    }
+
+    private func localAlpineTerminalPrefill(from notification: Notification) -> (command: String?, cwd: String?) {
+        func stringValue(_ key: String) -> String? {
+            guard let value = notification.userInfo?[key] as? String else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return (stringValue("command"), stringValue("cwd"))
+    }
+
+    private func clearLocalAlpineTerminalPrefill() {
+        pendingLocalAlpineTerminalCommand = nil
+        pendingLocalAlpineTerminalCwd = nil
     }
 
     @ViewBuilder
@@ -1239,7 +1259,7 @@ struct MainChatView: View {
                 }
                 router.presentVoiceCall(viewModel: voiceCallVM)
             }
-            .onReceive(NotificationCenter.default.publisher(for: .openIexaTerminalBrowser)) { _ in
+            .onReceive(NotificationCenter.default.publisher(for: .openIexaTerminalBrowser)) { notification in
                 guard activeChannelId == nil else { return }
                 showSettings = false
                 showNotes = false
@@ -1247,7 +1267,15 @@ struct MainChatView: View {
                 showCreateChannel = false
                 showCreateFolderSheet = false
                 showExportShareSheet = false
-                openFileBrowserAnimated()
+                let prefill = localAlpineTerminalPrefill(from: notification)
+                if prefill.command != nil || prefill.cwd != nil {
+                    pendingLocalAlpineTerminalCommand = prefill.command
+                    pendingLocalAlpineTerminalCwd = prefill.cwd
+                    showLocalAlpineTerminal = true
+                } else {
+                    clearLocalAlpineTerminalPrefill()
+                    openFileBrowserAnimated()
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: .conversationListNeedsRefresh)) { _ in
                 Task {
@@ -2868,6 +2896,7 @@ struct MainChatView: View {
 
                     Button {
                         closeDrawer()
+                        clearLocalAlpineTerminalPrefill()
                         showLocalAlpineTerminal = true
                     } label: {
                         Label("终端功能", systemImage: "terminal")

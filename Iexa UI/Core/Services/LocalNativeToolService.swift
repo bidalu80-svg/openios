@@ -853,8 +853,12 @@ final class LocalNativeToolService {
         if let relativeTarget = relativeWorkspacePreviewTarget(from: trimmed) {
             return relativeTarget
         }
+        let webCandidate = sanitizedWebPreviewCandidate(trimmed)
+        if let loopbackTarget = normalizedLoopbackWebPreviewTarget(webCandidate) {
+            return loopbackTarget
+        }
 
-        guard let url = URL(string: trimmed),
+        guard let url = URL(string: webCandidate),
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               (url.host ?? "").caseInsensitiveCompare("iexa.preview") == .orderedSame else {
             return nil
@@ -877,6 +881,69 @@ final class LocalNativeToolService {
             return "/" + String(decodedPath.dropFirst("/file/".count))
         }
         return nil
+    }
+
+    private static func normalizedLoopbackWebPreviewTarget(_ rawTarget: String) -> String? {
+        var candidate = rawTarget
+        if isBareLoopbackWebTarget(candidate) {
+            candidate = "http://\(candidate)"
+        }
+        guard var components = URLComponents(string: candidate),
+              ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
+              let host = components.host?.lowercased(),
+              isLoopbackPreviewHost(host) else {
+            return nil
+        }
+        if host == "0.0.0.0" {
+            components.host = "127.0.0.1"
+        }
+        return components.string ?? candidate
+    }
+
+    private static func sanitizedWebPreviewCandidate(_ rawTarget: String) -> String {
+        var candidate = rawTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let embedded = firstMatch(
+            pattern: #"https?://[^\s"'`<>()\[\]{}]+"#,
+            in: candidate
+        ) ?? firstMatch(
+            pattern: #"(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):\d{1,5}[^\s"'`<>()\[\]{}]*"#,
+            in: candidate
+        ) {
+            candidate = embedded
+        }
+        let trailingCharacters = CharacterSet(charactersIn: "\"'`*_~.,;:!?)[]{}<>，。！？；：、）】》」』")
+        while let scalar = candidate.unicodeScalars.last,
+              trailingCharacters.contains(scalar) {
+            candidate.removeLast()
+        }
+        return candidate
+    }
+
+    private static func isBareLoopbackWebTarget(_ value: String) -> Bool {
+        let lowercased = value.lowercased()
+        return lowercased.hasPrefix("localhost:")
+            || lowercased.hasPrefix("127.0.0.1:")
+            || lowercased.hasPrefix("0.0.0.0:")
+            || lowercased.hasPrefix("[::1]:")
+    }
+
+    private static func isLoopbackPreviewHost(_ host: String) -> Bool {
+        host == "localhost"
+            || host == "::1"
+            || host == "0.0.0.0"
+            || host.hasPrefix("127.")
+    }
+
+    private static func firstMatch(pattern: String, in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let matchRange = Range(match.range, in: text) else {
+            return nil
+        }
+        return String(text[matchRange])
     }
 
     private static func relativeWorkspacePreviewTarget(from rawTarget: String) -> String? {

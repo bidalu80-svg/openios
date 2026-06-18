@@ -54,6 +54,16 @@ struct LocalAlpineTerminalConsoleView: View {
     @State private var cwd = "/mnt/iexa"
     private let stateMarkerPrefix = "__IEXA_SHELL_STATE__"
 
+    init(
+        initialCommand: String? = nil,
+        initialCwd: String? = nil,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.onDismiss = onDismiss
+        _commandInput = State(initialValue: Self.normalizedInitialCommand(initialCommand))
+        _cwd = State(initialValue: Self.normalizedInitialCWD(initialCwd))
+    }
+
     private var prompt: String {
         "root@iexa:\(displayCWD)#"
     }
@@ -1074,7 +1084,7 @@ struct LocalAlpineTerminalConsoleView: View {
         )
     }
 
-    private func normalizedRuntimeCWD(_ rawPath: String) -> String {
+    private static func normalizedRuntimeCWD(_ rawPath: String) -> String {
         var path = rawPath.replacingOccurrences(of: "\\", with: "/")
         if path == "~" {
             path = "/root"
@@ -1137,7 +1147,7 @@ struct LocalAlpineTerminalConsoleView: View {
             let value = String(pieces[1])
             switch key {
             case "PWD":
-                cwd = normalizedRuntimeCWD(value)
+                cwd = Self.normalizedRuntimeCWD(value)
             case "PATH", "HOME":
                 shellEnvironment[key] = value
             default:
@@ -1155,6 +1165,32 @@ struct LocalAlpineTerminalConsoleView: View {
 
     private func shellSingleQuoted(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    private static func normalizedInitialCommand(_ value: String?) -> String {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private static func normalizedInitialCWD(_ value: String?) -> String {
+        var trimmed = value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/") ?? ""
+        guard !trimmed.isEmpty else { return "/mnt/iexa" }
+
+        if trimmed == "~" {
+            return "/root"
+        }
+        if trimmed.hasPrefix("~/") {
+            return "/root/" + String(trimmed.dropFirst(2))
+        }
+        if trimmed.hasPrefix("/") {
+            return Self.normalizedRuntimeCWD(trimmed)
+        }
+        while trimmed.hasPrefix("./") {
+            trimmed.removeFirst(2)
+        }
+        let relative = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return relative.isEmpty ? "/mnt/iexa" : "/mnt/iexa/\(relative)"
     }
 }
 
