@@ -1015,7 +1015,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             pattern: #"https?://[^\s"'`<>()\[\]{}]+"#,
             in: trimmed
         ) {
-            return httpURL
+            return trimmedPreviewURLCandidate(httpURL)
         }
         if let workspacePath = firstRegexMatch(
             pattern: #"/mnt/iexa/[^\s"'`<>()\[\]{}]+"#,
@@ -1044,6 +1044,16 @@ private struct AgentActivityItem: Identifiable, Hashable {
             return trimmed
         }
         return nil
+    }
+
+    private static func trimmedPreviewURLCandidate(_ value: String) -> String {
+        var candidate = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trailingMarkdownOrPunctuation = CharacterSet(charactersIn: "\"'`*_~.,;:!?)[]{}<>，。！？；：、）】》」』")
+        while let scalar = candidate.unicodeScalars.last,
+              trailingMarkdownOrPunctuation.contains(scalar) {
+            candidate.removeLast()
+        }
+        return candidate
     }
 
     private static func normalizedLocalPreviewPath(_ value: String?) -> String? {
