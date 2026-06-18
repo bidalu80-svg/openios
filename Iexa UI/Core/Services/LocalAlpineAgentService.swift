@@ -58,15 +58,33 @@ enum LocalAlpineOutputOffloadStore {
     static func compactText(_ text: String, label: String, previewLimit: Int) -> CompactText {
         let byteCount = text.data(using: .utf8)?.count ?? text.utf8.count
         let lineCount = Self.lineCount(in: text)
-        let preview = text.count > previewLimit ? String(text.prefix(previewLimit)) : text
         let shouldOffload = text.count > previewLimit || byteCount > previewLimit * 2
         let reference = shouldOffload ? write(label: label, text: text) : nil
+        let preview = shouldOffload
+            ? Self.headTailPreview(text, limit: previewLimit, reference: reference)
+            : text
         return CompactText(
             preview: preview,
             reference: reference,
             byteCount: byteCount,
             lineCount: lineCount
         )
+    }
+
+    private static func headTailPreview(_ text: String, limit: Int, reference: String?) -> String {
+        guard limit > 400, text.count > limit else { return text }
+        let headCount = max(160, limit / 2)
+        let tailCount = max(160, limit - headCount)
+        let head = String(text.prefix(headCount)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let tail = String(text.suffix(tailCount)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let referenceLine = reference.map { "\n完整输出已保存：\($0)\n需要全文时用 file_read 读取该路径。" } ?? ""
+        return """
+        \(head)
+
+        ...（中间省略，下面保留输出末尾。\(referenceLine)）
+
+        \(tail)
+        """
     }
 
     private static func write(label: String, text: String) -> String? {
@@ -372,11 +390,16 @@ struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
 
     static func metadataString(for results: [LocalAlpineAgentCommandResult]) -> String? {
         let limitedResults = results.prefix(12).map { result in
-            LocalAlpineAgentCommandResult(
+            let outputReference = result.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasOutputReference = outputReference.map { !$0.isEmpty } ?? false
+            let outputPreview = hasOutputReference
+                ? result.outputPreview
+                : String(result.outputPreview.prefix(previewLimit(for: result.command)))
+            return LocalAlpineAgentCommandResult(
                 command: result.command,
                 cwd: result.cwd,
                 exitCode: result.exitCode,
-                outputPreview: String(result.outputPreview.prefix(previewLimit(for: result.command))),
+                outputPreview: outputPreview,
                 outputReference: result.outputReference,
                 outputByteCount: result.outputByteCount,
                 outputLineCount: result.outputLineCount
@@ -531,11 +554,13 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
     let browserURL: String?
     let imageFilePath: String?
     let failed: Bool
+    let contentOffset: Int?
 
     private enum CodingKeys: String, CodingKey {
         case id, runId, name, phase, title, detail, cwd, command, exitCode, outputPreview
         case outputReference, outputByteCount, outputLineCount
         case filePaths, lineDelta, startedAtMs, completedAtMs, browserURL, imageFilePath, failed
+        case contentOffset
     }
 
     init(
@@ -558,7 +583,8 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
         completedAtMs: Int64?,
         browserURL: String? = nil,
         imageFilePath: String? = nil,
-        failed: Bool
+        failed: Bool,
+        contentOffset: Int? = nil
     ) {
         self.id = id
         self.runId = runId
@@ -580,6 +606,7 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
         self.browserURL = browserURL
         self.imageFilePath = imageFilePath
         self.failed = failed
+        self.contentOffset = contentOffset
     }
 
     init(from decoder: Decoder) throws {
@@ -604,6 +631,7 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
         browserURL = try? container.decode(String.self, forKey: .browserURL)
         imageFilePath = try? container.decode(String.self, forKey: .imageFilePath)
         failed = (try? container.decode(Bool.self, forKey: .failed)) ?? false
+        contentOffset = try? container.decode(Int.self, forKey: .contentOffset)
     }
 
     var isRunning: Bool {
@@ -634,9 +662,42 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
         return "\(title)完成"
     }
 
+    func withContentOffset(_ offset: Int?) -> LocalAlpineToolCall {
+        LocalAlpineToolCall(
+            id: id,
+            runId: runId,
+            name: name,
+            phase: phase,
+            title: title,
+            detail: detail,
+            cwd: cwd,
+            command: command,
+            exitCode: exitCode,
+            outputPreview: outputPreview,
+            outputReference: outputReference,
+            outputByteCount: outputByteCount,
+            outputLineCount: outputLineCount,
+            filePaths: filePaths,
+            lineDelta: lineDelta,
+            startedAtMs: startedAtMs,
+            completedAtMs: completedAtMs,
+            browserURL: browserURL,
+            imageFilePath: imageFilePath,
+            failed: failed,
+            contentOffset: offset ?? contentOffset
+        )
+    }
+
     static func metadataString(for calls: [LocalAlpineToolCall]) -> String? {
         let limitedCalls = calls.suffix(40).map { call in
-            LocalAlpineToolCall(
+            let outputReference = call.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasOutputReference = outputReference.map { !$0.isEmpty } ?? false
+            let outputPreview = call.outputPreview.map { preview in
+                hasOutputReference
+                    ? preview
+                    : String(preview.prefix(outputPreviewLimit(for: call.name)))
+            }
+            return LocalAlpineToolCall(
                 id: call.id,
                 runId: call.runId,
                 name: call.name,
@@ -646,9 +707,7 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
                 cwd: call.cwd,
                 command: call.command.map { String($0.prefix(1_000)) },
                 exitCode: call.exitCode,
-                outputPreview: call.outputPreview.map {
-                    String($0.prefix(outputPreviewLimit(for: call.name)))
-                },
+                outputPreview: outputPreview,
                 outputReference: call.outputReference,
                 outputByteCount: call.outputByteCount,
                 outputLineCount: call.outputLineCount,
@@ -658,7 +717,8 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
                 completedAtMs: call.completedAtMs,
                 browserURL: call.browserURL.map { String($0.prefix(800)) },
                 imageFilePath: call.imageFilePath.map { String($0.prefix(800)) },
-                failed: call.failed
+                failed: call.failed,
+                contentOffset: call.contentOffset
             )
         }
         guard !limitedCalls.isEmpty,
@@ -724,7 +784,7 @@ actor LocalAlpineAgentService {
         let writeResult = await writeFiles([file], cwd: cwd)
         var lines = [
             "Local Alpine 执行结果",
-            "环境：内置 Alpine Linux，工作目录默认 `/mnt/iexa`",
+            "环境：内置 Alpine Linux，工作区命名空间是 `/mnt/iexa`；保留目录：`/mnt/iexa/shared`（模型读写）、`/mnt/iexa/skills`、`/mnt/iexa/memory`、`/mnt/iexa/mounts/<name>`",
             writeResult.summary
         ]
         var commandResults: [LocalAlpineAgentCommandResult] = []
@@ -862,7 +922,7 @@ actor LocalAlpineAgentService {
             ?? .oneShot
 
         lines.insert("Local Alpine 执行结果", at: 0)
-        lines.append("环境：内置 Alpine Linux，工作目录默认 `/mnt/iexa`")
+        lines.append("环境：内置 Alpine Linux，工作区命名空间是 `/mnt/iexa`；保留目录：`/mnt/iexa/shared`（模型读写）、`/mnt/iexa/skills`、`/mnt/iexa/memory`、`/mnt/iexa/mounts/<name>`")
         var modelLines = lines
 
         func emitTool(_ call: LocalAlpineToolCall) async {
@@ -2609,10 +2669,22 @@ actor LocalAlpineAgentService {
                   ) else {
                 return []
             }
+            let cwd = Self.cwdString(from: arguments) ?? "/mnt/iexa"
+            let resolvedSource = resolvedFilePath(source, cwd: cwd)
+            let resolvedDestination = resolvedFilePath(destination, cwd: cwd)
+            if Self.isModelReadOnlySharedPath(resolvedSource) || Self.isModelReadOnlySharedPath(resolvedDestination) {
+                let protectedPath = Self.isModelReadOnlySharedPath(resolvedDestination) ? resolvedDestination : resolvedSource
+                return [Self.blockedModelReadOnlyCommand(
+                    path: protectedPath,
+                    operation: tool,
+                    cwd: cwd,
+                    delaySeconds: Self.delaySeconds(from: arguments)
+                )]
+            }
             let command = "mv \(Self.shellSingleQuotedStatic(source)) \(Self.shellSingleQuotedStatic(destination)) && test -e \(Self.shellSingleQuotedStatic(destination))"
             return [LocalAlpineAgentCommand(
                 command: command,
-                cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa",
+                cwd: cwd,
                 delaySeconds: Self.delaySeconds(from: arguments)
             )]
 
@@ -2639,19 +2711,39 @@ actor LocalAlpineAgentService {
                   ) else {
                 return []
             }
+            let cwd = Self.cwdString(from: arguments) ?? "/mnt/iexa"
+            let resolvedDestination = resolvedFilePath(destination, cwd: cwd)
+            if Self.isModelReadOnlySharedPath(resolvedDestination) {
+                return [Self.blockedModelReadOnlyCommand(
+                    path: resolvedDestination,
+                    operation: tool,
+                    cwd: cwd,
+                    delaySeconds: Self.delaySeconds(from: arguments)
+                )]
+            }
             let command = "cp \(Self.shellSingleQuotedStatic(source)) \(Self.shellSingleQuotedStatic(destination)) && test -e \(Self.shellSingleQuotedStatic(destination))"
             return [LocalAlpineAgentCommand(
                 command: command,
-                cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa",
+                cwd: cwd,
                 delaySeconds: Self.delaySeconds(from: arguments)
             )]
 
         case "mkdir":
             guard let path = Self.pathString(from: arguments) else { return [] }
+            let cwd = Self.cwdString(from: arguments) ?? "/mnt/iexa"
+            let resolvedTarget = resolvedFilePath(path, cwd: cwd)
+            if Self.isModelReadOnlySharedPath(resolvedTarget) {
+                return [Self.blockedModelReadOnlyCommand(
+                    path: resolvedTarget,
+                    operation: tool,
+                    cwd: cwd,
+                    delaySeconds: Self.delaySeconds(from: arguments)
+                )]
+            }
             let command = "mkdir -p \(Self.shellSingleQuotedStatic(path)) && test -d \(Self.shellSingleQuotedStatic(path))"
             return [LocalAlpineAgentCommand(
                 command: command,
-                cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa",
+                cwd: cwd,
                 delaySeconds: Self.delaySeconds(from: arguments)
             )]
 
@@ -4791,6 +4883,19 @@ actor LocalAlpineAgentService {
         for request in requests.prefix(maxCommandsPerResponse) {
             let target = resolvedFilePath(request.path, cwd: cwd)
             let command = request.recursive ? "delete_file --recursive \(target)" : "delete_file \(target)"
+            if Self.isModelReadOnlySharedPath(target) {
+                let output = Self.modelReadOnlyMessage(for: target, operation: "delete_file")
+                lines.append("- \(output)")
+                let result = LocalAlpineCommandResult(
+                    command: command,
+                    output: output,
+                    exitCode: 1,
+                    interactiveRequest: nil
+                )
+                commandResults.append(Self.commandResult(command: command, cwd: cwd, result: result))
+                hadFailure = true
+                continue
+            }
             do {
                 let deletedLineCount = await lineCountBeforeDelete(path: target)
                 let didDelete = try await LocalAlpineTerminalService.shared.deleteItem(
@@ -5068,6 +5173,17 @@ actor LocalAlpineAgentService {
 
     private func writeProtectedFile(_ file: LocalAlpineAgentFile, cwd: String) async -> LocalAlpineProtectedWriteOutcome {
         let target = resolvedFilePath(file.path, cwd: cwd)
+        if Self.isModelReadOnlySharedPath(target) {
+            return LocalAlpineProtectedWriteOutcome(
+                lines: [
+                    "- \(Self.modelReadOnlyMessage(for: target, operation: file.source.displayName))"
+                ],
+                writtenPath: nil,
+                writtenFile: nil,
+                lineDelta: nil,
+                hadFailure: true
+            )
+        }
         if Self.isPythonTarget(target), !file.source.isAllowedPythonWriteSource {
             return LocalAlpineProtectedWriteOutcome(
                 lines: [
@@ -5152,6 +5268,45 @@ actor LocalAlpineAgentService {
     private nonisolated static func isCodeTarget(_ path: String) -> Bool {
         let language = LocalCodeWriteGuard.language(forPath: path)
         return language != "text" && language != "markdown"
+    }
+
+    private nonisolated static func isModelReadOnlySharedPath(_ path: String) -> Bool {
+        var normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        if normalized.hasPrefix("/mnt/iexa/") {
+            normalized = "/" + String(normalized.dropFirst("/mnt/iexa/".count))
+        } else if normalized == "/mnt/iexa" {
+            normalized = "/"
+        }
+        while normalized.contains("//") {
+            normalized = normalized.replacingOccurrences(of: "//", with: "/")
+        }
+        return normalized == "/skills"
+            || normalized.hasPrefix("/skills/")
+            || normalized == "/memory"
+            || normalized.hasPrefix("/memory/")
+            || LocalAlpineMountStore.isModelReadOnlyPath(normalized)
+    }
+
+    private nonisolated static func modelReadOnlyMessage(for path: String, operation: String) -> String {
+        "`\(path)` 已拒绝：该目录对模型的结构化写入工具是只读的（\(operation)）。用户仍可在文件浏览器中管理这些文件。"
+    }
+
+    private nonisolated static func blockedModelReadOnlyCommand(
+        path: String,
+        operation: String,
+        cwd: String,
+        delaySeconds: Int?
+    ) -> LocalAlpineAgentCommand {
+        let message = modelReadOnlyMessage(for: path, operation: operation)
+        return LocalAlpineAgentCommand(
+            command: "printf '%s\\n' \(shellSingleQuotedStatic(message)) >&2; exit 1",
+            cwd: cwd,
+            delaySeconds: delaySeconds,
+            shellToolName: operation,
+            shellToolDetail: path,
+            shellToolFilePaths: [path]
+        )
     }
 
     private nonisolated func writeNotes(target: String) -> [String] {
@@ -5687,7 +5842,7 @@ actor LocalAlpineAgentService {
             replacement = "For localhost preview checks, use `nc -z 127.0.0.1 <port>` or inspect `/proc/net/tcp`."
         } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)(open|osascript|pbcopy|pbpaste|powershell|pwsh|cmd\.exe)\b"#) {
             issue = "This is a host desktop/Windows/macOS command, not an Alpine Linux command."
-            replacement = "Use Local Alpine tools only. For previews, create a file under `/mnt/iexa` and use `iexa-open /mnt/iexa/<file>` when appropriate."
+            replacement = "Use Local Alpine tools only. For previews, create a project file under `/mnt/iexa` or an explicitly shared file under `/mnt/iexa/shared`, then use `iexa-open <path>` when appropriate."
         } else if Self.commandMatches(normalized, pattern: #"\bfind\b[^;&|]*\s-printf\b"#) {
             issue = "`find -printf` is a GNU find extension; BusyBox find in this runtime does not support it."
             replacement = "Use `glob`/`list_dir`, or `find PATH -type f -print | sed -n '1,200p'`."
@@ -5708,7 +5863,7 @@ actor LocalAlpineAgentService {
             replacement = "Use `while IFS= read -r line; do ...; done`."
         } else if normalized.contains("<(") || normalized.contains(">(") {
             issue = "Process substitution `<(...)`/`>(...)` is Bash-only and is not available in BusyBox ash."
-            replacement = "Write a temporary file under `/mnt/iexa` or pipe commands directly."
+            replacement = "Write a temporary file under `/mnt/iexa` or explicitly under `/mnt/iexa/shared`, or pipe commands directly."
         } else if Self.commandMatches(normalized, pattern: #"\btime\.sleep\s*\("#) {
             issue = "`time.sleep()` can raise `OSError: [Errno 38] Function not implemented` in this iSH-backed Python runtime."
             replacement = "Avoid sleeps in generated scripts/tests; if a delay is truly required, set the JSON `delay` field on the next Local Alpine command step."
@@ -6054,7 +6209,7 @@ actor LocalAlpineAgentService {
         if isShell && (normalized.contains("<(") || normalized.contains(">(")) {
             return (
                 "Process substitution `<(...)`/`>(...)` is Bash-only.",
-                "Write a temporary file under `/mnt/iexa` or pipe commands directly."
+                "Write a temporary file under `/mnt/iexa` or explicitly under `/mnt/iexa/shared`, or pipe commands directly."
             )
         }
         return nil

@@ -858,12 +858,57 @@ final class ChatViewModel {
         flushLocalAlpineToolEvent(messageId: messageId)
     }
 
+    private func updateLocalAlpineToolCallMetadata(messageId: String, calls: [LocalAlpineToolCall]) {
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else {
+            return
+        }
+        var metadata = conversation?.messages[index].metadata ?? [:]
+        if let toolCalls = LocalAlpineToolCall.metadataString(for: calls) {
+            metadata["iexa_local_alpine_tool_calls"] = toolCalls
+        } else {
+            metadata.removeValue(forKey: "iexa_local_alpine_tool_calls")
+        }
+        if conversation?.messages[index].metadata != metadata {
+            conversation?.messages[index].metadata = metadata
+            conversation?.history.updateNode(id: messageId) { node in
+                node.metadata = metadata
+            }
+        }
+    }
+
+    private func localAlpineToolCallsPreservingContentOffsets(
+        _ calls: [LocalAlpineToolCall],
+        messageId: String
+    ) -> [LocalAlpineToolCall] {
+        let liveCalls = localAlpinePendingToolCallsByMessageId[messageId]
+            ?? localAlpineLiveToolCallsByMessageId[messageId]
+            ?? []
+        let metadataCalls = conversation?.messages
+            .first(where: { $0.id == messageId })
+            .map { LocalAlpineToolCall.decodeMetadata($0.metadata?["iexa_local_alpine_tool_calls"]) }
+            ?? []
+        var offsetsById: [String: Int] = [:]
+        for call in liveCalls + metadataCalls {
+            guard let offset = call.contentOffset else { continue }
+            offsetsById[call.id] = offsetsById[call.id] ?? offset
+        }
+        guard !offsetsById.isEmpty else { return calls }
+        return calls.map { call in
+            guard call.contentOffset == nil,
+                  let offset = offsetsById[call.id] else {
+                return call
+            }
+            return call.withContentOffset(offset)
+        }
+    }
+
     private func clearLocalAlpineLiveToolState(for messageId: String) {
         let finalCalls = localAlpinePendingToolCallsByMessageId[messageId]
             ?? localAlpineLiveToolCallsByMessageId[messageId]
             ?? []
         let finalStatus = localAlpinePendingToolStatusByMessageId[messageId]
             ?? localAlpineLastLiveToolStatusByMessageId[messageId]
+        updateLocalAlpineToolCallMetadata(messageId: messageId, calls: finalCalls)
         localAlpineToolEventFlushTasks[messageId]?.cancel()
         localAlpineToolEventFlushTasks.removeValue(forKey: messageId)
         localAlpineActiveRunIdsByMessageId.removeValue(forKey: messageId)
@@ -942,7 +987,8 @@ final class ChatViewModel {
                     completedAtMs: call.completedAtMs ?? nowMs,
                     browserURL: call.browserURL,
                     imageFilePath: call.imageFilePath,
-                    failed: true
+                    failed: true,
+                    contentOffset: call.contentOffset
                 )
             }
             let status = ChatStatusUpdate(
@@ -2317,11 +2363,11 @@ final class ChatViewModel {
     private static let localAlpineBusyBoxCompatibilityNotes = """
         Local Alpine rules:
         - Prefer `file_read`, `file_write`, `file_edit`, `list_dir`, `glob`, `grep`, `verify`, and `browser_use` over raw shell for common work.
-        - Raw shell must be POSIX sh/BusyBox ash. Use `/mnt/iexa` for user/project files.
+        - Raw shell must be POSIX sh/BusyBox ash. Use `/mnt/iexa` for project files; use `/mnt/iexa/shared` only when the user explicitly wants shared files.
         - Install OS packages with Alpine `apk` only: check `command -v <tool>` or `apk info -e <pkg>`, then `apk add --no-cache <pkg>`.
         - Do not use apt/brew/sudo/systemctl/macOS/Windows commands or bash/GNU-only syntax such as `find -printf`, `grep -P`, `[[ ... ]]`, `source`, process substitution, or `sed -i ''`.
         - Use the tool `delay` field for waits; avoid shell `sleep` and Python `time.sleep()` in generated tests.
-        - Large command/tool outputs are offloaded under `/mnt/iexa/.iexa-output-offload`; use `file_read` on an `output_reference` if full content is needed.
+        - Large command/tool outputs are offloaded under `/mnt/iexa/.iexa-output-offload`; use `file_read` on an `output_reference` if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
         """
 
     private static func localAlpineNativeToolSchemas(includeMemoryTools: Bool) -> [[String: Any]] {
@@ -2330,7 +2376,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "shell_execute",
-                    "description": "Run one bounded POSIX sh/BusyBox ash command in Local Alpine. Use `/mnt/iexa` for project work and `apk add --no-cache` for missing OS packages.",
+                    "description": "Run one bounded POSIX sh/BusyBox ash command in Local Alpine. Use `/mnt/iexa` for project work, `/mnt/iexa/shared` for explicitly shared files, and `apk add --no-cache` for missing OS packages.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2522,13 +2568,13 @@ final class ChatViewModel {
         [Local Alpine native tools]
         Tools: `file_read`, `file_write`, `file_edit`, `read_image`, `browser_use`\(memoryToolNames), `shell_execute`. Iexa executes them in Local Alpine and returns real results.
         Rules:
-        - Workspace `/mnt/iexa`; relative paths resolve there. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
+        - Workspace namespace `/mnt/iexa`; relative paths resolve there. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` and `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Use `/mnt/iexa` or project subfolders for project work; use `/mnt/iexa/shared` only when the user asks for shared files. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
         - Shell is Alpine BusyBox/ash. Install OS packages with `apk add --no-cache`; never use apt/brew/sudo/systemctl/macOS/Windows commands.
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
         - Use `web_search` for live search, `browser_use` for bounded HTTP fetch/save/open-preview, `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
         - Website/app changes require a localhost preview: for static files use `iexa-serve <directory-or-file> <port>`; for framework dev servers, start them in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
-        \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed.
+        \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
         - One meaningful step per decision. A write plus one direct verification may share a step when validating the same change. Stop when the tool result completes the user goal.
         - iOS background time is limited; keep long jobs resumable and save progress/results under `/mnt/iexa`.
         - If native tools are rejected, fallback to exactly one fenced `iexa_alpine` JSON block with the same tool shape.
@@ -2857,13 +2903,13 @@ final class ChatViewModel {
           ```iexa_alpine
           {"tool_title":"列出目录","command":"pwd && ls -la","cwd":"/mnt/iexa"}
           ```
-        - Workspace `/mnt/iexa`; relative paths resolve there. Execution is embedded Local Alpine/iSH, not Open Terminal, iOS/macOS/Windows, Debian, or Ubuntu.
+        - Workspace namespace `/mnt/iexa`; relative paths resolve there. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` and `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Use `/mnt/iexa` or project subfolders for project work; use `/mnt/iexa/shared` only when the user asks for shared files. Execution is embedded Local Alpine/iSH, not Open Terminal, iOS/macOS/Windows, Debian, or Ubuntu.
         - Shell is Alpine BusyBox/ash. Use `apk add --no-cache` for missing OS packages after `command -v` or `apk info -e`; never use apt/brew/sudo/systemctl or bash/GNU-only syntax.
         - Tools: \(toolNames). Compatibility aliases are accepted: `file_read`, `file_write`, `file_edit`, `shell_execute`, `browser_use`, `web_fetch`, `read_image`.
         - Every step needs a short user-language `tool_title`/`step_title`/`label`.
         - Prefer structured read/write/edit/patch/delete/list/glob/grep/verify/browser tools. Do not write source code with shell heredocs/redirection/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured JSON (`write_files.code_lines`/`content_lines`, `edit_file`, `patch_file`) plus bounded verification, not in a normal Markdown code fence. Normal code fences are only for pure explanation with no Local Alpine operation.
-        - Large outputs may provide `output_reference`; read that path only when the full content is needed.
+        - Large outputs may provide `output_reference`; read that path only when the full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
         - Website/app changes require localhost preview: for static files use `iexa-serve <directory-or-file> <port>`; for framework dev servers, start them in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that exact URL. Never run a foreground long-lived server as a normal shell step.
         - Use one meaningful bounded step per turn, then wait for the returned observation. A write plus one direct verification may share a block if it validates the same change.
         - When emitting a tool block, do not append guessed stdout, success claims, file contents, or a final summary after it.
@@ -2993,12 +3039,20 @@ final class ChatViewModel {
                         outputReferenceLine = ""
                     }
                     let outputSizeLine = result.outputByteCount.map { "\noutput_bytes: \($0)" } ?? ""
+                    let outputText = localAlpineOutputTextForModel(
+                        preview: result.outputPreview,
+                        outputReference: result.outputReference,
+                        outputByteCount: result.outputByteCount,
+                        outputLineCount: result.outputLineCount,
+                        command: result.command,
+                        label: "local-alpine-command-output"
+                    )
                     lines.append(indentForSystemContext("""
                     command: \(result.command)
                     cwd: \(result.cwd)
                     exit_code: \(exit)\(outputReferenceLine)\(outputSizeLine)
                     output:
-                    \(result.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "（无输出）" : contextTextForModel(redactedLocalAlpineInternalPaths(in: result.outputPreview), label: "local-alpine-command-output", maxInlineCharacters: localAlpineObservationOutputLimit(for: result.command)))
+                    \(outputText)
                     """))
                 }
             }
@@ -3156,6 +3210,19 @@ final class ChatViewModel {
                 if let command = call.command?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !command.isEmpty {
                     parts.append("command: \(clippedForSystemContext(redactedLocalAlpineInternalPaths(in: command), maxCharacters: 240))")
+                }
+                if let exitCode = call.exitCode {
+                    parts.append("exit_code: \(exitCode)")
+                }
+                if let outputReference = call.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !outputReference.isEmpty {
+                    parts.append("output_reference: \(outputReference)")
+                }
+                if let outputByteCount = call.outputByteCount {
+                    parts.append("output_bytes: \(outputByteCount)")
+                }
+                if let outputLineCount = call.outputLineCount {
+                    parts.append("output_lines: \(outputLineCount)")
                 }
                 if let browserURL = call.browserURL?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !browserURL.isEmpty {
@@ -12655,6 +12722,57 @@ final class ChatViewModel {
         LocalAlpineAgentCommandResult.isReadFileCommand(command) ? 220_000 : 4_000
     }
 
+    private static func localAlpineOutputTextForModel(
+        preview: String,
+        outputReference: String?,
+        outputByteCount: Int?,
+        outputLineCount: Int?,
+        command: String,
+        label: String
+    ) -> String {
+        let trimmedPreview = preview.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPreview.isEmpty else { return "（无输出）" }
+        let redactedPreview = redactedLocalAlpineInternalPaths(in: trimmedPreview)
+        let reference = outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let reference, !reference.isEmpty {
+            let bytes = outputByteCount.map { "\($0) bytes" } ?? "unknown bytes"
+            let lines = outputLineCount.map { "\($0) lines" } ?? "unknown lines"
+            let inlinePreview = localAlpineHeadTailExcerpt(
+                redactedPreview,
+                maxCharacters: min(12_000, max(2_000, localAlpineObservationOutputLimit(for: command)))
+            )
+            return """
+            [CONTEXT OFFLOADED]
+            full_output_saved_locally: \(reference)
+            original_size: \(bytes), \(lines)
+            Use file_read tool to retrieve the full output if needed.
+            inline_preview:
+            \(inlinePreview)
+            [/CONTEXT OFFLOADED]
+            """
+        }
+        return contextTextForModel(
+            redactedPreview,
+            label: label,
+            maxInlineCharacters: localAlpineObservationOutputLimit(for: command)
+        )
+    }
+
+    private static func localAlpineHeadTailExcerpt(_ text: String, maxCharacters: Int) -> String {
+        guard text.count > maxCharacters else { return text }
+        let headCount = max(800, maxCharacters / 2)
+        let tailCount = max(800, maxCharacters - headCount)
+        let head = String(text.prefix(headCount)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let tail = String(text.suffix(tailCount)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return """
+        \(head)
+
+        ...（中间省略）
+
+        \(tail)
+        """
+    }
+
     private static func localAlpineNativeLoopBlockedFallbackMessage(_ blockedMessage: String) -> String {
         let cleaned = blockedMessage
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
@@ -16837,7 +16955,8 @@ final class ChatViewModel {
         \(localAlpineToolManifest)
 
         Environment:
-        - Workspace: `/mnt/iexa`. Relative paths resolve there.
+        - Workspace root: `/mnt/iexa`. Relative paths resolve there.
+        - Reserved folders under `/mnt/iexa`: `/mnt/iexa/shared` is model read/write; `/mnt/iexa/skills` contains `SKILL.md` skill files and `/mnt/iexa/memory` contains user-maintained `GLOBAL.md` plus daily memory files. Skills and memory are model-read-only for structured write/edit/delete/move/copy/mkdir tools; use the `memory_write` tool for daily memory entries. `/mnt/iexa/mounts/<name>` contains user-mounted external folders; model structured write permission follows the user's file-browser setting for each mount.
         - Shell: Alpine Linux BusyBox/ash. Prefer portable POSIX `sh` syntax; avoid Bash-only arrays, process substitution, and Debian/macOS assumptions unless the needed tool is first proven installed.
         - Package manager: `apk`. Check first with `apk info -e <pkg>` or `command -v <tool>`; install only packages proven missing with `apk add --no-cache <pkg>`. When a task needs a missing OS tool/library, install it through Local Alpine `apk` and continue; do not tell the user to install it on iOS/macOS/Ubuntu and do not use `apt`/`brew`/`sudo`.
         - Unsupported command families here: `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, and macOS-only utilities. Translate those intentions to Alpine/BusyBox equivalents.
@@ -17901,13 +18020,14 @@ final class ChatViewModel {
                     outputReferenceLine = ""
                 }
                 let outputSizeLine = result.outputByteCount.map { "\n  output_bytes: \($0)" } ?? ""
-                let output = redactedOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? "（无输出）"
-                    : contextTextForModel(
-                        redactedOutput,
-                        label: "local-alpine-command-output",
-                        maxInlineCharacters: localAlpineObservationOutputLimit(for: result.command)
-                    )
+                let output = localAlpineOutputTextForModel(
+                    preview: redactedOutput,
+                    outputReference: result.outputReference,
+                    outputByteCount: result.outputByteCount,
+                    outputLineCount: result.outputLineCount,
+                    command: result.command,
+                    label: "local-alpine-command-output"
+                )
                 lines.append("""
                 - command: \(redactedCommand)
                   cwd: \(result.cwd)
@@ -20956,7 +21076,11 @@ final class ChatViewModel {
             if let toolRunId = result.toolRunId {
                 metadata["iexa_local_alpine_tool_run_id"] = toolRunId
             }
-            if let toolCalls = LocalAlpineToolCall.metadataString(for: result.toolCalls) {
+            let finalToolCalls = localAlpineToolCallsPreservingContentOffsets(
+                result.toolCalls,
+                messageId: resultMessageId
+            )
+            if let toolCalls = LocalAlpineToolCall.metadataString(for: finalToolCalls) {
                 metadata["iexa_local_alpine_tool_calls"] = toolCalls
             }
             if let writtenFiles = LocalAlpineWrittenFile.metadataString(for: result.writtenFiles) {
@@ -23019,7 +23143,11 @@ final class ChatViewModel {
         var calls = localAlpinePendingToolCallsByMessageId[messageId]
             ?? localAlpineLiveToolCallsByMessageId[messageId]
             ?? []
-        let uiCall = localAlpineLiveToolUICall(event.call)
+        let existingOffset = calls.first(where: { $0.id == event.call.id })?.contentOffset
+        let uiCall = localAlpineLiveToolUICall(
+            event.call,
+            contentOffset: existingOffset ?? localAlpineCurrentContentOffset(messageId: messageId)
+        )
         calls.removeAll { $0.id == Self.pendingLocalAlpineToolCallId(for: messageId) }
         if let existingIndex = calls.firstIndex(where: { $0.id == uiCall.id }) {
             calls[existingIndex] = uiCall
@@ -23050,7 +23178,17 @@ final class ChatViewModel {
         }
     }
 
-    private func localAlpineLiveToolUICall(_ call: LocalAlpineToolCall) -> LocalAlpineToolCall {
+    private func localAlpineCurrentContentOffset(messageId: String) -> Int? {
+        if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
+            return streamingStore.displayContent.count
+        }
+        return conversation?.messages.first(where: { $0.id == messageId })?.content.count
+    }
+
+    private func localAlpineLiveToolUICall(
+        _ call: LocalAlpineToolCall,
+        contentOffset: Int?
+    ) -> LocalAlpineToolCall {
         LocalAlpineToolCall(
             id: call.id,
             runId: call.runId,
@@ -23071,7 +23209,8 @@ final class ChatViewModel {
             completedAtMs: call.completedAtMs,
             browserURL: call.browserURL.map { Self.prefixForLiveUI($0, limit: localAlpineLiveToolDetailLimit) },
             imageFilePath: call.imageFilePath.map { Self.prefixForLiveUI($0, limit: localAlpineLiveToolDetailLimit) },
-            failed: call.failed
+            failed: call.failed,
+            contentOffset: contentOffset ?? call.contentOffset
         )
     }
 
@@ -23122,6 +23261,10 @@ final class ChatViewModel {
             }
         }
         localAlpineLastToolEventFlushAtByMessageId[messageId] = Date()
+        updateLocalAlpineToolCallMetadata(
+            messageId: messageId,
+            calls: localAlpineLiveToolCallsByMessageId[messageId] ?? []
+        )
         postLocalAlpineLiveToolState(messageId: messageId)
     }
 

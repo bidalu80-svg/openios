@@ -720,6 +720,7 @@ struct ChatSettingsView: View {
     @AppStorage("chatWebSearchEnabled") private var chatWebSearchEnabled = false
     @AppStorage("chatInput.codeEditingEnabled") private var codeEditingEnabled = false
     @AppStorage("chatInput.shortcutsEnabled") private var shortcutsEnabled = false
+    @AppStorage("localAlpineToolPreviewEnabled") private var localAlpineToolPreviewEnabled = true
     @AppStorage("quickPills") private var quickPillsData: String = ""
     @State private var availableTools: [ToolItem] = []
     @State private var isLoadingTools = false
@@ -782,10 +783,12 @@ struct ChatSettingsView: View {
                     .tint(theme.brandPrimary)
                 Toggle("代码编辑", isOn: $codeEditingEnabled)
                     .tint(theme.brandPrimary)
+                Toggle("本地工具预览浮条", isOn: $localAlpineToolPreviewEnabled)
+                    .tint(theme.brandPrimary)
             } header: {
                 Text("工具行为")
             } footer: {
-                Text("关闭对应开关后不会向模型注入该工具。快捷指令用于运行或打开用户已有的 iOS 快捷指令；系统不允许 App 静默创建或修改用户快捷指令。")
+                Text("关闭对应工具后不会向模型注入该工具。预览浮条只影响底部预览，不影响正文步骤胶囊。")
             }
 
             Section {

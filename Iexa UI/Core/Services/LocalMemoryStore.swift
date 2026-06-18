@@ -18,8 +18,10 @@ actor LocalMemoryStore {
     }
 
     func list(serverURL: String) async -> [LocalMemory] {
-        await loadAll(serverURL: serverURL)
+        let memories = await loadAll(serverURL: serverURL)
             .sorted { $0.updatedAt > $1.updatedAt }
+        exportFilesystemMirror(memories: memories)
+        return memories
     }
 
     func listUpdatedSince(_ date: Date, serverURL: String) async -> [LocalMemory] {
@@ -82,6 +84,12 @@ actor LocalMemoryStore {
         UserDefaults.standard.set(enabled, forKey: enabledKey(for: serverURL))
     }
 
+    func exportToLocalAlpineFileSystem(serverURL: String) async {
+        let memories = await loadAll(serverURL: serverURL)
+            .sorted { $0.updatedAt > $1.updatedAt }
+        exportFilesystemMirror(memories: memories)
+    }
+
     private func loadAll(serverURL: String) async -> [LocalMemory] {
         let url = storeURL(for: serverURL)
         guard let data = try? Data(contentsOf: url) else { return [] }
@@ -102,9 +110,68 @@ actor LocalMemoryStore {
             )
             let data = try encoder.encode(memories.sorted { $0.updatedAt > $1.updatedAt })
             try data.write(to: url, options: .atomic)
+            exportFilesystemMirror(memories: memories)
         } catch {
             logger.error("Failed to save local memories: \(error.localizedDescription)")
         }
+    }
+
+    private func exportFilesystemMirror(memories: [LocalMemory]) {
+        do {
+            let directory = try Self.localAlpineMemoryDirectory()
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try ensureGlobalMemoryDocument(in: directory)
+            try writeDailyMemoryDocuments(memories: memories, in: directory)
+        } catch {
+            logger.error("Failed to mirror local memories into Local Alpine files: \(error.localizedDescription)")
+        }
+    }
+
+    private func ensureGlobalMemoryDocument(in directory: URL) throws {
+        let globalURL = directory.appendingPathComponent("GLOBAL.md")
+        guard !fileManager.fileExists(atPath: globalURL.path) else { return }
+        try """
+        # Global Memory
+
+        User-maintained persistent memory for Local Alpine. The app does not overwrite this file during memory sync.
+        """.write(to: globalURL, atomically: true, encoding: .utf8)
+    }
+
+    private func writeDailyMemoryDocuments(memories: [LocalMemory], in directory: URL) throws {
+        let generatedPrefix = "20"
+        let existing = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        for url in existing ?? [] where url.lastPathComponent.hasPrefix(generatedPrefix) && url.pathExtension == "md" {
+            try? fileManager.removeItem(at: url)
+        }
+
+        let grouped = Dictionary(grouping: memories) { memory in
+            Self.dayString(from: memory.updatedAt)
+        }
+        for day in grouped.keys.sorted() {
+            let entries = grouped[day, default: []].sorted { $0.updatedAt > $1.updatedAt }
+            try dailyMemoryDocument(day: day, memories: entries).write(
+                to: directory.appendingPathComponent("\(day).md"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+    }
+
+    private func dailyMemoryDocument(day: String, memories: [LocalMemory]) -> String {
+        let body = memories.map { memory in
+            """
+            - [\(Self.iso8601String(from: memory.updatedAt))] \(memory.content.trimmingCharacters(in: .whitespacesAndNewlines))
+            """
+        }.joined(separator: "\n")
+        return """
+        # Memory \(day)
+
+        \(body.isEmpty ? "_No memories._" : body)
+        """
     }
 
     private func storeURL(for serverURL: String) -> URL {
@@ -112,6 +179,16 @@ actor LocalMemoryStore {
             ?? fileManager.temporaryDirectory
         let directory = base.appendingPathComponent("Iexa/LocalMemories", isDirectory: true)
         return directory.appendingPathComponent(safeFilename(for: serverURL) + ".json")
+    }
+
+    private static func localAlpineMemoryDirectory() throws -> URL {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return documents
+            .appendingPathComponent("Iexa Alpine", isDirectory: true)
+            .appendingPathComponent("shared", isDirectory: true)
+            .appendingPathComponent("memory", isDirectory: true)
     }
 
     private func enabledKey(for serverURL: String) -> String {
@@ -133,5 +210,20 @@ actor LocalMemoryStore {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .lowercased()
+    }
+
+    private static func iso8601String(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
+    private static func dayString(from date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
     }
 }

@@ -11,6 +11,7 @@ private func iexaLocalAlpineSessionStart(
     _ cwd: UnsafePointer<CChar>,
     _ rootArchivePath: UnsafePointer<CChar>,
     _ workspacePath: UnsafePointer<CChar>,
+    _ mountsConfiguration: UnsafePointer<CChar>,
     _ timeZone: UnsafePointer<CChar>
 ) -> Int32
 
@@ -42,6 +43,7 @@ private func iexaLocalAlpineExecute(
     _ cwd: UnsafePointer<CChar>,
     _ rootArchivePath: UnsafePointer<CChar>,
     _ workspacePath: UnsafePointer<CChar>,
+    _ mountsConfiguration: UnsafePointer<CChar>,
     _ timeZone: UnsafePointer<CChar>,
     _ exitCode: UnsafeMutablePointer<Int32>
 ) -> UnsafeMutablePointer<CChar>?
@@ -54,6 +56,7 @@ nonisolated struct LocalAlpineNativeCommand: Sendable {
     let cwd: String
     let rootArchiveURL: URL
     let workspaceURL: URL
+    let mountsConfiguration: String
     let timeZone: String
 
     init(
@@ -61,12 +64,14 @@ nonisolated struct LocalAlpineNativeCommand: Sendable {
         cwd: String,
         rootArchiveURL: URL,
         workspaceURL: URL,
+        mountsConfiguration: String = "",
         timeZone: String = LocalAlpineNativeRuntime.currentPOSIXTimeZone()
     ) {
         self.command = command
         self.cwd = cwd
         self.rootArchiveURL = rootArchiveURL
         self.workspaceURL = workspaceURL
+        self.mountsConfiguration = mountsConfiguration
         self.timeZone = timeZone
     }
 }
@@ -90,13 +95,16 @@ nonisolated struct LocalAlpineNativeRuntime: Sendable {
                 let sessionID = command.cwd.withCString { cwdCString in
                     command.rootArchiveURL.path.withCString { rootArchiveCString in
                         command.workspaceURL.path.withCString { workspaceCString in
-                            command.timeZone.withCString { timeZoneCString in
-                                iexaLocalAlpineSessionStart(
-                                    cwdCString,
-                                    rootArchiveCString,
-                                    workspaceCString,
-                                    timeZoneCString
-                                )
+                            command.mountsConfiguration.withCString { mountsCString in
+                                command.timeZone.withCString { timeZoneCString in
+                                    iexaLocalAlpineSessionStart(
+                                        cwdCString,
+                                        rootArchiveCString,
+                                        workspaceCString,
+                                        mountsCString,
+                                        timeZoneCString
+                                    )
+                                }
                             }
                         }
                     }
@@ -154,15 +162,18 @@ nonisolated struct LocalAlpineNativeRuntime: Sendable {
                     command.cwd.withCString { cwdCString in
                         command.rootArchiveURL.path.withCString { rootArchiveCString in
                             command.workspaceURL.path.withCString { workspaceCString in
-                                command.timeZone.withCString { timeZoneCString in
-                                    iexaLocalAlpineExecute(
-                                        commandCString,
-                                        cwdCString,
-                                        rootArchiveCString,
-                                        workspaceCString,
-                                        timeZoneCString,
-                                        &exitCode
-                                    )
+                                command.mountsConfiguration.withCString { mountsCString in
+                                    command.timeZone.withCString { timeZoneCString in
+                                        iexaLocalAlpineExecute(
+                                            commandCString,
+                                            cwdCString,
+                                            rootArchiveCString,
+                                            workspaceCString,
+                                            mountsCString,
+                                            timeZoneCString,
+                                            &exitCode
+                                        )
+                                    }
                                 }
                             }
                         }

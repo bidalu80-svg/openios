@@ -4,7 +4,7 @@ import QuickLook
 import UniformTypeIdentifiers
 import UIKit
 
-private enum LocalFileBrowserLocation: String, CaseIterable, Identifiable {
+enum LocalFileBrowserLocation: String, CaseIterable, Identifiable {
     case workspace
     case rootfs
 
@@ -46,6 +46,44 @@ private struct LocalFileBrowserDeleteTarget: Identifiable {
     var id: String { "\(location.rawValue):\(item.path)" }
 }
 
+private struct LocalWorkspaceFolderPicker: UIViewControllerRepresentable {
+    let onPick: (URL) -> Void
+    let onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPick: onPick, onCancel: onCancel)
+    }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
+        picker.allowsMultipleSelection = false
+        picker.shouldShowFileExtensions = true
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: (URL) -> Void
+        let onCancel: () -> Void
+
+        init(onPick: @escaping (URL) -> Void, onCancel: @escaping () -> Void) {
+            self.onPick = onPick
+            self.onCancel = onCancel
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            guard let url = urls.first else { return }
+            onPick(url)
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onCancel()
+        }
+    }
+}
+
 struct LocalWorkspaceFileBrowserView: View {
     var onDismiss: (() -> Void)? = nil
     var showDoneButton: Bool = true
@@ -60,9 +98,9 @@ struct LocalWorkspaceFileBrowserView: View {
         ".iexa_failed_writes",
     ]
 
-    @State private var location: LocalFileBrowserLocation = .workspace
-    @State private var currentPath = "/"
-    @State private var rootfsPath = "/"
+    @State private var location: LocalFileBrowserLocation
+    @State private var currentPath: String
+    @State private var rootfsPath: String
     @State private var pathHistory: [String] = []
     @State private var rootfsPathHistory: [String] = []
     @State private var items: [TerminalFileItem] = []
@@ -74,6 +112,23 @@ struct LocalWorkspaceFileBrowserView: View {
     @State private var confirmDeleteTarget: LocalFileBrowserDeleteTarget?
     @State private var confirmRootFSReset = false
     @State private var rootFSResetMessage: String?
+    @State private var externalMounts: [LocalAlpineExternalMount] = []
+    @State private var showMountFolderPicker = false
+
+    init(
+        onDismiss: (() -> Void)? = nil,
+        showDoneButton: Bool = true,
+        wrapInNavigationStack: Bool = true,
+        initialLocation: LocalFileBrowserLocation = .workspace,
+        initialPath: String = "/"
+    ) {
+        self.onDismiss = onDismiss
+        self.showDoneButton = showDoneButton
+        self.wrapInNavigationStack = wrapInNavigationStack
+        _location = State(initialValue: initialLocation)
+        _currentPath = State(initialValue: initialLocation == .workspace ? Self.normalizedWorkspacePath(initialPath) : "/")
+        _rootfsPath = State(initialValue: initialLocation == .rootfs ? Self.normalizedRootFSPath(initialPath) : "/")
+    }
 
     private var activePath: String {
         switch location {
@@ -134,7 +189,17 @@ struct LocalWorkspaceFileBrowserView: View {
             }
         }
         .task {
+            externalMounts = LocalAlpineMountStore.loadMounts()
+            LocalAlpineMountStore.ensureMountPlaceholdersForStoredMounts()
             await loadDirectory()
+        }
+        .sheet(isPresented: $showMountFolderPicker) {
+            LocalWorkspaceFolderPicker { url in
+                showMountFolderPicker = false
+                addExternalMount(from: url)
+            } onCancel: {
+                showMountFolderPicker = false
+            }
         }
         .sheet(item: $previewTarget) { target in
             LocalWorkspaceFilePreviewSheet(
@@ -417,6 +482,22 @@ struct LocalWorkspaceFileBrowserView: View {
         }
     }
 
+    private var currentExternalMount: LocalAlpineExternalMount? {
+        guard location == .workspace, currentPath.hasPrefix("/mounts/") else { return nil }
+        let remainder = String(currentPath.dropFirst("/mounts/".count))
+        guard let mountName = remainder.split(separator: "/", maxSplits: 1).first.map(String.init) else {
+            return nil
+        }
+        return externalMounts.first { $0.name == mountName }
+    }
+
+    private func externalMountRoot(for path: String) -> LocalAlpineExternalMount? {
+        guard path.hasPrefix("/mounts/") else { return nil }
+        let remainder = String(path.dropFirst("/mounts/".count))
+        guard !remainder.contains("/") else { return nil }
+        return externalMounts.first { $0.name == remainder }
+    }
+
     private func fileIcon(for item: TerminalFileItem) -> some View {
         Image(systemName: item.iconName)
             .scaledFont(size: 19, weight: .semibold)
@@ -519,6 +600,10 @@ struct LocalWorkspaceFileBrowserView: View {
         do {
             switch location {
             case .workspace:
+                if let mount = externalMountRoot(for: item.path) {
+                    removeExternalMount(mount)
+                    return
+                }
                 try await LocalAlpineTerminalService.shared.deleteItem(path: item.path)
             case .rootfs:
                 try await LocalAlpineTerminalService.shared.deleteRootFSItem(path: item.path)
@@ -567,6 +652,39 @@ struct LocalWorkspaceFileBrowserView: View {
         }
     }
 
+    private func addExternalMount(from url: URL) {
+        do {
+            let mount = try LocalAlpineMountStore.addMount(from: url)
+            externalMounts = LocalAlpineMountStore.loadMounts()
+            location = .workspace
+            currentPath = "/mounts/\(mount.name)"
+            pathHistory = ["/", "/mounts"]
+            searchText = ""
+            Haptics.notify(.success)
+            Task { await loadDirectory() }
+        } catch {
+            errorMessage = error.localizedDescription
+            Haptics.notify(.error)
+        }
+    }
+
+    private func removeExternalMount(_ mount: LocalAlpineExternalMount) {
+        LocalAlpineMountStore.removeMount(id: mount.id)
+        externalMounts = LocalAlpineMountStore.loadMounts()
+        if currentPath == "/mounts/\(mount.name)" || currentPath.hasPrefix("/mounts/\(mount.name)/") {
+            currentPath = "/mounts"
+            pathHistory = ["/"]
+        }
+        Haptics.notify(.success)
+        Task { await loadDirectory() }
+    }
+
+    private func updateMountWritePermission(_ mount: LocalAlpineExternalMount, allowWrites: Bool) {
+        LocalAlpineMountStore.setAllowWrites(id: mount.id, allowWrites: allowWrites)
+        externalMounts = LocalAlpineMountStore.loadMounts()
+        Haptics.play(.light)
+    }
+
     private func fileSubtitle(for item: TerminalFileItem) -> String {
         if item.isDirectory { return "文件夹" }
         let kind = LocalWorkspaceFileKind(fileName: item.name)
@@ -594,6 +712,22 @@ struct LocalWorkspaceFileBrowserView: View {
             normalized = String(normalized.dropFirst("/mnt/iexa".count))
         } else if normalized == "/mnt/iexa" {
             normalized = "/"
+        }
+        if !normalized.hasPrefix("/") {
+            normalized = "/" + normalized
+        }
+        while normalized.contains("//") {
+            normalized = normalized.replacingOccurrences(of: "//", with: "/")
+        }
+        return normalized
+    }
+
+    private static func normalizedRootFSPath(_ path: String) -> String {
+        var normalized = path
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        if normalized.isEmpty || normalized == "." || normalized == "~" {
+            return "/"
         }
         if !normalized.hasPrefix("/") {
             normalized = "/" + normalized
@@ -641,6 +775,45 @@ struct LocalWorkspaceFileBrowserView: View {
                         Haptics.play(.light)
                     } label: {
                         Label("重新加载", systemImage: "arrow.clockwise")
+                    }
+
+                    if location == .workspace {
+                        Divider()
+
+                        Button {
+                            showMountFolderPicker = true
+                        } label: {
+                            Label("挂载外部文件夹", systemImage: "folder.badge.plus")
+                        }
+                        .disabled(externalMounts.count >= LocalAlpineMountStore.maximumMounts)
+
+                        Button {
+                            navigateToPath("/mounts")
+                        } label: {
+                            Label("打开挂载点", systemImage: "externaldrive")
+                        }
+
+                        if let currentExternalMount {
+                            Divider()
+
+                            Button {
+                                updateMountWritePermission(
+                                    currentExternalMount,
+                                    allowWrites: !currentExternalMount.allowWrites
+                                )
+                            } label: {
+                                Label(
+                                    currentExternalMount.allowWrites ? "设为模型只读" : "允许模型结构化写入",
+                                    systemImage: currentExternalMount.allowWrites ? "lock" : "pencil"
+                                )
+                            }
+
+                            Button(role: .destructive) {
+                                removeExternalMount(currentExternalMount)
+                            } label: {
+                                Label("移除当前挂载", systemImage: "trash")
+                            }
+                        }
                     }
 
                     if location == .rootfs {

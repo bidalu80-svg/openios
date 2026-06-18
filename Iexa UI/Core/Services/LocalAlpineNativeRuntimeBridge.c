@@ -509,8 +509,89 @@ static void configure_dns(void) {
     write_file_in_fakefs("/etc/resolv.conf", resolv_conf);
 }
 
-static int boot_runtime(const char *root_archive_path, const char *workspace_path, char **error_out) {
+static bool valid_mount_name(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return false;
+    }
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        return false;
+    }
+    for (const char *p = name; *p != '\0'; p++) {
+        char c = *p;
+        if (!((c >= 'A' && c <= 'Z') ||
+              (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') ||
+              c == '.' || c == '_' || c == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void apply_external_mounts(const char *mounts_configuration) {
+    if (mounts_configuration == NULL || mounts_configuration[0] == '\0') {
+        return;
+    }
+
+    struct task *init = pid_get_task(1);
+    if (init != NULL) {
+        current = init;
+    }
+
+    generic_mkdirat(AT_PWD, "/mnt/iexa/mounts", 0755);
+
+    const char *cursor = mounts_configuration;
+    int mounted_count = 0;
+    while (*cursor != '\0' && mounted_count < 10) {
+        const char *line_end = strchr(cursor, '\n');
+        size_t line_length = line_end != NULL ? (size_t) (line_end - cursor) : strlen(cursor);
+        if (line_length > 0 && line_length < 8192) {
+            char line[8192];
+            memcpy(line, cursor, line_length);
+            line[line_length] = '\0';
+
+            char *first_tab = strchr(line, '\t');
+            if (first_tab != NULL) {
+                *first_tab = '\0';
+                char *mode = first_tab + 1;
+                char *second_tab = strchr(mode, '\t');
+                if (second_tab != NULL) {
+                    (void) mode;
+                    *second_tab = '\0';
+                    char *source_path = second_tab + 1;
+                    if (valid_mount_name(line) && source_path[0] == '/') {
+                        char target_path[4096];
+                        int written = snprintf(
+                            target_path,
+                            sizeof(target_path),
+                            "/mnt/iexa/mounts/%s",
+                            line
+                        );
+                        if (written > 0 && (size_t) written < sizeof(target_path)) {
+                            generic_mkdirat(AT_PWD, target_path, 0755);
+                            do_mount(&realfs, source_path, target_path, "", 0);
+                            mounted_count++;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (line_end == NULL) {
+            break;
+        }
+        cursor = line_end + 1;
+    }
+}
+
+static int boot_runtime(
+    const char *root_archive_path,
+    const char *workspace_path,
+    const char *mounts_configuration,
+    char **error_out
+) {
     if (runtime_booted) {
+        apply_external_mounts(mounts_configuration);
         return 0;
     }
 
@@ -555,6 +636,8 @@ static int boot_runtime(const char *root_archive_path, const char *workspace_pat
     generic_mkdirat(AT_PWD, "/mnt", 0755);
     generic_mkdirat(AT_PWD, "/mnt/iexa", 0755);
     do_mount(&realfs, shared_path, "/mnt/iexa", "", 0);
+    generic_mkdirat(AT_PWD, "/mnt/iexa/mounts", 0755);
+    apply_external_mounts(mounts_configuration);
 
     runtime_booted = true;
     return 0;
@@ -598,6 +681,7 @@ int32_t iexa_local_alpine_session_start(
     const char *cwd,
     const char *root_archive_path,
     const char *workspace_path,
+    const char *mounts_configuration,
     const char *time_zone
 ) {
     pthread_mutex_lock(&runtime_lock);
@@ -609,7 +693,7 @@ int32_t iexa_local_alpine_session_start(
     ensure_directory(workspace_path);
 
     char *error = NULL;
-    int err = boot_runtime(root_archive_path, workspace_path, &error);
+    int err = boot_runtime(root_archive_path, workspace_path, mounts_configuration, &error);
     if (err < 0) {
         free(error);
         pthread_mutex_unlock(&runtime_lock);
@@ -848,6 +932,7 @@ char *iexa_local_alpine_execute(
     const char *cwd,
     const char *root_archive_path,
     const char *workspace_path,
+    const char *mounts_configuration,
     const char *time_zone,
     int32_t *exit_code
 ) {
@@ -863,7 +948,7 @@ char *iexa_local_alpine_execute(
     ensure_directory(workspace_path);
 
     char *error = NULL;
-    int err = boot_runtime(root_archive_path, workspace_path, &error);
+    int err = boot_runtime(root_archive_path, workspace_path, mounts_configuration, &error);
     if (err < 0) {
         if (exit_code != NULL) {
             *exit_code = 127;
@@ -997,11 +1082,13 @@ int32_t iexa_local_alpine_session_start(
     const char *cwd,
     const char *root_archive_path,
     const char *workspace_path,
+    const char *mounts_configuration,
     const char *time_zone
 ) {
     (void) cwd;
     (void) root_archive_path;
     (void) workspace_path;
+    (void) mounts_configuration;
     (void) time_zone;
     return -1;
 }
@@ -1039,6 +1126,7 @@ char *iexa_local_alpine_execute(
     const char *cwd,
     const char *root_archive_path,
     const char *workspace_path,
+    const char *mounts_configuration,
     const char *time_zone,
     int32_t *exit_code
 ) {
@@ -1046,6 +1134,7 @@ char *iexa_local_alpine_execute(
     (void) cwd;
     (void) root_archive_path;
     (void) workspace_path;
+    (void) mounts_configuration;
     (void) time_zone;
     if (exit_code != NULL) {
         *exit_code = 126;

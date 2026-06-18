@@ -2,6 +2,247 @@ import Foundation
 import os.log
 import UIKit
 
+struct LocalAlpineExternalMount: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    var name: String
+    var displayName: String
+    var bookmarkData: Data
+    var allowWrites: Bool
+    var addedAt: Date
+}
+
+enum LocalAlpineMountStore {
+    static let maximumMounts = 10
+    private static let storageKey = "localAlpine.externalMounts.v1"
+    private static let workspaceFolderName = "Iexa Alpine"
+    private static let sharedFolderName = "shared"
+
+    static func loadMounts() -> [LocalAlpineExternalMount] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let mounts = try? JSONDecoder().decode([LocalAlpineExternalMount].self, from: data) else {
+            return []
+        }
+        return Array(mounts.prefix(maximumMounts))
+    }
+
+    @discardableResult
+    static func addMount(from url: URL, allowWrites: Bool = false) throws -> LocalAlpineExternalMount {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer {
+            if accessed {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        #if os(macOS)
+        let bookmarkOptions: URL.BookmarkCreationOptions = [.withSecurityScope]
+        #else
+        let bookmarkOptions: URL.BookmarkCreationOptions = []
+        #endif
+        let bookmarkData = try url.bookmarkData(
+            options: bookmarkOptions,
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+        var mounts = loadMounts()
+        guard mounts.count < maximumMounts else {
+            throw NSError(
+                domain: "LocalAlpineMountStore",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "最多只能挂载 \(maximumMounts) 个外部文件夹。"]
+            )
+        }
+
+        let baseName = sanitizedMountName(from: url.lastPathComponent)
+        let name = uniqueMountName(baseName, existing: mounts.map(\.name))
+        let mount = LocalAlpineExternalMount(
+            id: UUID().uuidString,
+            name: name,
+            displayName: url.lastPathComponent.isEmpty ? name : url.lastPathComponent,
+            bookmarkData: bookmarkData,
+            allowWrites: allowWrites,
+            addedAt: Date()
+        )
+        mounts.append(mount)
+        saveMounts(mounts)
+        ensureMountPlaceholders(for: mounts)
+        return mount
+    }
+
+    static func removeMount(id: String) {
+        var mounts = loadMounts()
+        mounts.removeAll { $0.id == id }
+        saveMounts(mounts)
+        ensureMountPlaceholders(for: mounts)
+    }
+
+    static func setAllowWrites(id: String, allowWrites: Bool) {
+        var mounts = loadMounts()
+        guard let index = mounts.firstIndex(where: { $0.id == id }) else { return }
+        mounts[index].allowWrites = allowWrites
+        saveMounts(mounts)
+    }
+
+    static func runtimeMountsConfiguration() -> String {
+        loadMounts().compactMap { mount in
+            guard let url = resolvedURL(for: mount, startAccessing: true) else { return nil }
+            let path = url.standardizedFileURL.path
+            guard !mount.name.isEmpty,
+                  !mount.name.contains("\t"),
+                  !mount.name.contains("\n"),
+                  !path.contains("\t"),
+                  !path.contains("\n") else {
+                return nil
+            }
+            return "\(mount.name)\t\(mount.allowWrites ? "rw" : "ro")\t\(path)"
+        }
+        .joined(separator: "\n")
+    }
+
+    static func isModelReadOnlyPath(_ rawPath: String) -> Bool {
+        let normalized = normalizedSharedPath(rawPath)
+        guard normalized == "/mounts" || normalized.hasPrefix("/mounts/") else { return false }
+        let remainder = normalized == "/mounts"
+            ? ""
+            : String(normalized.dropFirst("/mounts/".count))
+        guard let mountName = remainder.split(separator: "/", maxSplits: 1).first.map(String.init),
+              !mountName.isEmpty,
+              let mount = loadMounts().first(where: { $0.name == mountName }) else {
+            return true
+        }
+        return !mount.allowWrites
+    }
+
+    static func resolvedWorkspaceURL(for rawPath: String) -> URL? {
+        let normalized = normalizedSharedPath(rawPath)
+        guard normalized.hasPrefix("/mounts/") else { return nil }
+        let remainder = String(normalized.dropFirst("/mounts/".count))
+        let parts = remainder.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
+        guard let mountName = parts.first.map(String.init),
+              let mount = loadMounts().first(where: { $0.name == mountName }),
+              let rootURL = resolvedURL(for: mount, startAccessing: true)?.standardizedFileURL else {
+            return nil
+        }
+        let relativePath = parts.count > 1 ? String(parts[1]) : ""
+        let candidate = relativePath.isEmpty
+            ? rootURL
+            : rootURL.appendingPathComponent(relativePath).standardizedFileURL
+        guard candidate.path == rootURL.path || candidate.path.hasPrefix(rootURL.path + "/") else {
+            return nil
+        }
+        return candidate
+    }
+
+    static func ensureMountPlaceholdersForStoredMounts() {
+        ensureMountPlaceholders(for: loadMounts())
+    }
+
+    private static func saveMounts(_ mounts: [LocalAlpineExternalMount]) {
+        guard let data = try? JSONEncoder().encode(Array(mounts.prefix(maximumMounts))) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+    }
+
+    private static func resolvedURL(for mount: LocalAlpineExternalMount, startAccessing: Bool) -> URL? {
+        var isStale = false
+        #if os(macOS)
+        let resolutionOptions: URL.BookmarkResolutionOptions = [.withSecurityScope]
+        #else
+        let resolutionOptions: URL.BookmarkResolutionOptions = []
+        #endif
+        guard let url = try? URL(
+            resolvingBookmarkData: mount.bookmarkData,
+            options: resolutionOptions,
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        ) else {
+            return nil
+        }
+        if startAccessing {
+            _ = url.startAccessingSecurityScopedResource()
+        }
+        return url
+    }
+
+    private static func normalizedSharedPath(_ rawPath: String) -> String {
+        var normalized = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        if normalized.hasPrefix("/mnt/iexa/") {
+            normalized = "/" + String(normalized.dropFirst("/mnt/iexa/".count))
+        } else if normalized == "/mnt/iexa" {
+            normalized = "/"
+        }
+        while normalized.contains("//") {
+            normalized = normalized.replacingOccurrences(of: "//", with: "/")
+        }
+        var components: [String] = []
+        for component in normalized.split(separator: "/", omittingEmptySubsequences: true).map(String.init) {
+            if component == "." {
+                continue
+            }
+            if component == ".." {
+                if !components.isEmpty {
+                    components.removeLast()
+                }
+                continue
+            }
+            components.append(component)
+        }
+        return components.isEmpty ? "/" : "/" + components.joined(separator: "/")
+    }
+
+    private static func sanitizedMountName(from rawName: String) -> String {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        var result = ""
+        var lastWasDash = false
+        for scalar in rawName.unicodeScalars {
+            if allowed.contains(scalar) {
+                result.unicodeScalars.append(scalar)
+                lastWasDash = false
+            } else if !lastWasDash {
+                result.append("-")
+                lastWasDash = true
+            }
+        }
+        let trimmed = result.trimmingCharacters(in: CharacterSet(charactersIn: ".-_"))
+        return trimmed.isEmpty ? "mount" : String(trimmed.prefix(48))
+    }
+
+    private static func uniqueMountName(_ baseName: String, existing: [String]) -> String {
+        let existingNames = Set(existing)
+        if !existingNames.contains(baseName) {
+            return baseName
+        }
+        for index in 2...maximumMounts {
+            let candidate = "\(baseName)-\(index)"
+            if !existingNames.contains(candidate) {
+                return candidate
+            }
+        }
+        return "\(baseName)-\(UUID().uuidString.prefix(6))"
+    }
+
+    private static func ensureMountPlaceholders(for mounts: [LocalAlpineExternalMount]) {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return
+        }
+        let mountsURL = documents
+            .appendingPathComponent(workspaceFolderName, isDirectory: true)
+            .appendingPathComponent(sharedFolderName, isDirectory: true)
+            .appendingPathComponent("mounts", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: mountsURL, withIntermediateDirectories: true)
+            for mount in mounts {
+                try FileManager.default.createDirectory(
+                    at: mountsURL.appendingPathComponent(mount.name, isDirectory: true),
+                    withIntermediateDirectories: true
+                )
+            }
+        } catch {
+            // The runtime can still apply mounts even if the browser placeholder fails.
+        }
+    }
+}
+
 struct LocalAlpineStatus: Sendable {
     let isRuntimeLinked: Bool
     let isRootFSBundled: Bool
@@ -452,12 +693,14 @@ actor LocalAlpineTerminalService {
         }
 
         let runtimeCWD = cwdIsRuntimePath ? normalizedAbsoluteRuntimePath(cwd) : normalizedRuntimePath(cwd)
+        let mountsConfiguration = LocalAlpineMountStore.runtimeMountsConfiguration()
         let sessionID = await LocalAlpineNativeRuntime.shared.startSession(
             LocalAlpineNativeCommand(
                 command: "",
                 cwd: runtimeCWD,
                 rootArchiveURL: runtimeRootFSURL,
-                workspaceURL: workspaceURL
+                workspaceURL: workspaceURL,
+                mountsConfiguration: mountsConfiguration
             )
         )
         if sessionID != nil {
@@ -659,8 +902,11 @@ actor LocalAlpineTerminalService {
         let path = decodedPath.isEmpty ? "/" : decodedPath
 
         switch host {
-        case "", "workspace", "shared", "mnt", "iexa":
+        case "", "workspace", "mnt", "iexa":
             return normalizedRuntimePath(path)
+        case "shared", "skills", "memory", "mounts", "attachments":
+            let combined = path == "/" ? "/\(host)" : "/\(host)\(path)"
+            return normalizedRuntimePath(combined)
         case "root", "rootfs":
             return path.hasPrefix("/") ? path : "/\(path)"
         default:
@@ -690,6 +936,9 @@ actor LocalAlpineTerminalService {
             }
             if decodedPath.hasPrefix("/workspace/") {
                 return "/mnt/iexa/" + String(decodedPath.dropFirst("/workspace/".count))
+            }
+            for host in ["shared", "skills", "memory", "mounts", "attachments"] where decodedPath.hasPrefix("/\(host)/") {
+                return "/mnt/iexa" + decodedPath
             }
             if decodedPath.hasPrefix("/file/") {
                 return "/" + String(decodedPath.dropFirst("/file/".count))
@@ -880,13 +1129,15 @@ actor LocalAlpineTerminalService {
             wrappedCommandForInteractiveInput(command: bootstrappedCommand, stdinInput: $0)
         } ?? bootstrappedCommand
         let materialized = await materializedRuntimeCommandIfNeeded(runtimeCommand)
+        let mountsConfiguration = LocalAlpineMountStore.runtimeMountsConfiguration()
         await LocalAlpineBackgroundExecution.begin(reason: "command")
         let result = await LocalAlpineNativeRuntime.shared.execute(
             LocalAlpineNativeCommand(
                 command: materialized.command,
                 cwd: runtimeCWD,
                 rootArchiveURL: runtimeRootFSURL,
-                workspaceURL: workspaceURL
+                workspaceURL: workspaceURL,
+                mountsConfiguration: mountsConfiguration
             )
         )
         if let cleanupPath = materialized.cleanupPath {
@@ -1278,6 +1529,13 @@ actor LocalAlpineTerminalService {
         let root = try ensureWorkspaceDirectory()
         let shared = root.appendingPathComponent(sharedFolderName, isDirectory: true)
         try fileManager.createDirectory(at: shared, withIntermediateDirectories: true)
+        for directoryName in ["shared", "skills", "memory", "mounts"] {
+            try fileManager.createDirectory(
+                at: shared.appendingPathComponent(directoryName, isDirectory: true),
+                withIntermediateDirectories: true
+            )
+        }
+        LocalAlpineMountStore.ensureMountPlaceholdersForStoredMounts()
         return shared.standardizedFileURL
     }
 
@@ -1371,15 +1629,34 @@ actor LocalAlpineTerminalService {
           printf '%s]1337;IexaOpenURL=%s%s\\n' "$ESC" "$1" "$BEL"
         }
 
-        normalize_target() {
+        to_iexa_resource() {
           case "$1" in
-            http://*|https://*|about:*|file://*|iexa://*|/*)
+            http://*|https://*|about:*|file://*|iexa://*)
+              printf '%s\\n' "$1"
+              ;;
+            /mnt/iexa/*)
+              rel="${1#/mnt/iexa/}"
+              case "$rel" in
+                shared/*|skills/*|memory/*|mounts/*|attachments/*)
+                  host="${rel%%/*}"
+                  path="${rel#*/}"
+                  printf 'iexa://%s/%s\\n' "$host" "$path"
+                  ;;
+                *)
+                  printf 'iexa://workspace/%s\\n' "$rel"
+                  ;;
+              esac
+              ;;
+            /mnt/iexa)
+              printf 'iexa://workspace/\\n'
+              ;;
+            /*)
               printf '%s\\n' "$1"
               ;;
             *)
               resolved=$(readlink -f "$1" 2>/dev/null || true)
               if [ -n "$resolved" ]; then
-                printf '%s\\n' "$resolved"
+                to_iexa_resource "$resolved"
               else
                 printf '%s\\n' "$1"
               fi
@@ -1393,7 +1670,7 @@ actor LocalAlpineTerminalService {
         fi
 
         for arg in "$@"; do
-          target=$(normalize_target "$arg")
+          target=$(to_iexa_resource "$arg")
           case "$target" in
             http://*|https://*|about:*|file://*|iexa://*|/*)
               emit_open_marker "$target"
@@ -1632,6 +1909,10 @@ actor LocalAlpineTerminalService {
             return root
         }
 
+        if let mountedURL = LocalAlpineMountStore.resolvedWorkspaceURL(for: normalized) {
+            return mountedURL
+        }
+
         let relative = normalized.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let candidate = root.appendingPathComponent(relative).standardizedFileURL
         guard candidate.path == root.path || candidate.path.hasPrefix(root.path + "/") else {
@@ -1740,7 +2021,8 @@ actor LocalAlpineTerminalService {
                 command: "",
                 cwd: runtimeCWD,
                 rootArchiveURL: rootArchiveURL,
-                workspaceURL: workspaceURL
+                workspaceURL: workspaceURL,
+                mountsConfiguration: LocalAlpineMountStore.runtimeMountsConfiguration()
             )
         )
         guard let sessionID else { return nil }
@@ -2342,7 +2624,7 @@ actor LocalAlpineTerminalService {
         export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
-          _iexa_bootstrap_version=2026-06-18.2
+          _iexa_bootstrap_version=2026-06-18.3
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
           if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
             export PATH="$_iexa_bootstrap_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
@@ -2361,20 +2643,43 @@ actor LocalAlpineTerminalService {
           printf 'Usage: iexa-open <url-or-path>\\n' >&2
           exit 1
         fi
+        to_iexa_resource() {
+          case "$1" in
+            http://*|https://*|about:*|file://*|iexa://*) printf '%s\\n' "$1" ;;
+            /mnt/iexa/*)
+              rel="${1#/mnt/iexa/}"
+              case "$rel" in
+                shared/*|skills/*|memory/*|mounts/*|attachments/*)
+                  host="${rel%%/*}"
+                  path="${rel#*/}"
+                  printf 'iexa://%s/%s\\n' "$host" "$path"
+                  ;;
+                *)
+                  printf 'iexa://workspace/%s\\n' "$rel"
+                  ;;
+              esac
+              ;;
+            /mnt/iexa) printf 'iexa://workspace/\\n' ;;
+            /*) printf '%s\\n' "$1" ;;
+            *)
+              resolved=$(readlink -f "$1" 2>/dev/null || true)
+              if [ -n "$resolved" ]; then
+                to_iexa_resource "$resolved"
+              else
+                printf '%s\\n' "$1"
+              fi
+              ;;
+          esac
+        }
         for target in "$@"; do
-          case "$target" in
+          normalized=$(to_iexa_resource "$target")
+          case "$normalized" in
             http://*|https://*|about:*|file://*|iexa://*|/*)
-              emit_open_marker "$target"
-              printf 'Opened in Iexa preview: %s\\n' "$target"
+              emit_open_marker "$normalized"
+              printf 'Opened in Iexa preview: %s\\n' "$normalized"
               ;;
             *)
-              resolved=$(readlink -f "$target" 2>/dev/null || true)
-              if [ -n "$resolved" ]; then
-                emit_open_marker "$resolved"
-                printf 'Opened in Iexa preview: %s\\n' "$resolved"
-              else
-                printf 'iexa-open: not a URL or path: %s\\n' "$target" >&2
-              fi
+              printf 'iexa-open: not a URL or path: %s\\n' "$target" >&2
               ;;
           esac
         done

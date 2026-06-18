@@ -1827,6 +1827,7 @@ struct ChatDetailView: View {
     @State private var isShowingModelSelectorSheet = false
     @State private var isShowingChatParams = false
     @AppStorage("chatWebSearchEnabled") private var chatWebSearchEnabled = false
+    @AppStorage("localAlpineToolPreviewEnabled") private var localAlpineToolPreviewEnabled = true
     @State private var editingModelDetail: ModelDetail? = nil
     @State private var isLoadingModelDetail = false
 
@@ -1887,6 +1888,7 @@ struct ChatDetailView: View {
     @State private var agentFloatingFilePreview: LocalAlpineWrittenFilePreviewItem?
     @State private var agentFloatingStepPreview: AgentFloatingStepPreviewItem?
     @State private var agentFloatingLoadingPath: String?
+    @State private var localAlpineLiveToolRenderRevision = 0
     @State private var hideAgentFloatingBarForKeyboard = false
     @State private var suppressStaleAgentFloatingBarAfterKeyboard = false
     @State private var pendingNewAgentFloatingSnapshotAfterKeyboard: AgentActivityItem?
@@ -2041,6 +2043,7 @@ struct ChatDetailView: View {
 
     private func transcriptRenderSignature(for messages: [ChatMessage]) -> Int {
         var signature = messages.count &* 31
+        signature &+= localAlpineLiveToolRenderRevision &* 41
         for message in messages {
             signature &+= message.id.hashValue
             signature &+= message.role.rawValue.hashValue
@@ -2868,7 +2871,12 @@ struct ChatDetailView: View {
         }
 
         let spans = localAlpineInstructionSpans(in: message.content)
-        guard !spans.isEmpty else { return nil }
+        guard !spans.isEmpty else {
+            return orderedLocalAlpineTranscriptBlocksFromToolOffsets(
+                for: message,
+                activityItem: activityItem
+            )
+        }
 
         let stepGroups = localAlpineStepGroups(activityItem.steps, for: spans)
         var blocks: [OrderedAgentTranscriptBlock] = []
@@ -2910,6 +2918,86 @@ struct ChatDetailView: View {
         if cursor < message.content.endIndex {
             appendTextBlock(String(message.content[cursor..<message.content.endIndex]), ordinal: blocks.count)
         }
+
+        let hasText = blocks.contains { block in
+            if case .text = block.content { return true }
+            return false
+        }
+        let hasSteps = blocks.contains { block in
+            if case .steps = block.content { return true }
+            return false
+        }
+        guard hasText && hasSteps else { return nil }
+        return blocks
+    }
+
+    private func orderedLocalAlpineTranscriptBlocksFromToolOffsets(
+        for message: ChatMessage,
+        activityItem: AgentActivityItem
+    ) -> [OrderedAgentTranscriptBlock]? {
+        let content = stripNativeToolProtocolBlocks(
+            from: LocalAlpineAgentService.visibleContent(from: message.content)
+        )
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        var stepsByToolId: [String: AgentActivityStep] = [:]
+        for step in activityItem.steps where step.id.hasPrefix("tool-") {
+            let toolId = String(step.id.dropFirst("tool-".count))
+            stepsByToolId[toolId] = stepsByToolId[toolId] ?? step
+        }
+        let orderedPairs = activityItem.toolCalls
+            .compactMap { call -> (offset: Int, step: AgentActivityStep)? in
+                guard let rawOffset = call.contentOffset,
+                      let step = stepsByToolId[call.id] else {
+                    return nil
+                }
+                return (max(0, min(rawOffset, content.count)), step)
+            }
+            .sorted {
+                if $0.offset != $1.offset { return $0.offset < $1.offset }
+                return $0.step.id < $1.step.id
+            }
+        guard !orderedPairs.isEmpty else { return nil }
+
+        var blocks: [OrderedAgentTranscriptBlock] = []
+        var cursorOffset = 0
+
+        func stringIndex(for offset: Int) -> String.Index {
+            content.index(
+                content.startIndex,
+                offsetBy: max(0, min(offset, content.count)),
+                limitedBy: content.endIndex
+            ) ?? content.endIndex
+        }
+
+        func appendTextRange(from startOffset: Int, to endOffset: Int, ordinal: Int) {
+            guard endOffset > startOffset else { return }
+            let text = String(content[stringIndex(for: startOffset)..<stringIndex(for: endOffset)])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return }
+            blocks.append(
+                OrderedAgentTranscriptBlock(
+                    id: "\(message.id)-offset-text-\(ordinal)",
+                    content: .text(text)
+                )
+            )
+        }
+
+        for (index, pair) in orderedPairs.enumerated() {
+            appendTextRange(from: cursorOffset, to: pair.offset, ordinal: blocks.count)
+            if let item = activityItem.retainingSteps([pair.step], idSuffix: "offset-\(index)") {
+                blocks.append(
+                    OrderedAgentTranscriptBlock(
+                        id: "\(message.id)-offset-steps-\(index)",
+                        content: .steps(item)
+                    )
+                )
+            }
+            cursorOffset = max(cursorOffset, pair.offset)
+        }
+        appendTextRange(from: cursorOffset, to: content.count, ordinal: blocks.count)
 
         let hasText = blocks.contains { block in
             if case .text = block.content { return true }
@@ -3277,10 +3365,12 @@ struct ChatDetailView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateUpdated)) { notification in
+            localAlpineLiveToolRenderRevision &+= 1
             handleAgentFloatingLiveToolNotification(notification)
         }
         .onReceive(NotificationCenter.default.publisher(for: .localAlpineLiveToolStateCleared)) { notification in
             guard matchesAgentFloatingConversation(notification.userInfo?["conversationId"] as? String) else { return }
+            localAlpineLiveToolRenderRevision &+= 1
             if let resolvedItem = agentActivityWindowPreview(includeInactive: true),
                resolvedItem.hasConcreteSteps {
                 agentFloatingActivitySnapshot = resolvedItem
@@ -3835,15 +3925,12 @@ struct ChatDetailView: View {
                 ))
             }
 
-            if !shouldHideAgentFloatingBarForKeyboard {
+            if localAlpineToolPreviewEnabled && !shouldHideAgentFloatingBarForKeyboard {
                 AgentStepFloatingBarHost(
                     conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
                     fallbackItem: agentFloatingDisplayItem,
                     onPreviewTap: { item, index in
                         openAgentFloatingPreview(item: item, initialIndex: index)
-                    },
-                    onStopRunningStep: {
-                        viewModel.stopStreaming()
                     }
                 )
             }
@@ -4207,16 +4294,19 @@ struct ChatDetailView: View {
                 }
             }
         }
-        .onChange(of: viewModel.streamingStore.isActive) { _, active in
+        .onChange(of: viewModel.streamingStore.isActive) { wasActive, active in
             if active && !keyboard.isVisible {
                 resumeAgentFloatingBarForNewTask()
+            } else if wasActive && !active {
+                repinToBottomAfterStreamingIfFollowing(after: 0.04)
             }
         }
         // Resume auto-scroll: when the user scrolls back to the bottom
         // (or taps the FAB) during an active stream, re-pin so new
         // tokens keep the view anchored at the bottom.
         .onChange(of: isScrolledUp) { oldValue, newValue in
-            if oldValue == true && newValue == false && viewModel.isStreaming {
+            if oldValue == true && newValue == false && isAnyMessageVisuallyStreaming {
+                lastProgrammaticScrollTime = Date()
                 scrollPosition.scrollTo(edge: .bottom)
             }
         }
@@ -4270,7 +4360,7 @@ struct ChatDetailView: View {
                 // immediately so the scroll pump can't fight the user's finger.
                 // Outside of streaming, require a small but intentional drag (8pt)
                 // to avoid accidental break-out from bounce/inertia.
-                let threshold: CGFloat = viewModel.isStreaming ? 2 : 8
+                let threshold: CGFloat = isAnyMessageVisuallyStreaming ? 2 : 8
                 let previousOffset = scrollRuntime.lastScrollOffset
                 let upwardDelta = previousOffset - newOffset.y
                 if upwardDelta > threshold {
@@ -4278,7 +4368,7 @@ struct ChatDetailView: View {
                     if !isStrongDrag {
                         // Avoid allocating/checking time on every downward scroll tick.
                         let timeSinceProgrammatic = Date().timeIntervalSince(lastProgrammaticScrollTime)
-                        let suppressionWindow: TimeInterval = viewModel.isStreaming ? 0.15 : 0.6
+                        let suppressionWindow: TimeInterval = isAnyMessageVisuallyStreaming ? 0.15 : 0.6
                         guard timeSinceProgrammatic > suppressionWindow else {
                             if abs(newOffset.y - previousOffset) > 2 {
                                 scrollRuntime.lastScrollOffset = newOffset.y
@@ -4311,7 +4401,7 @@ struct ChatDetailView: View {
             // and the user hasn't scrolled up, animate to the bottom so new
             // content slides in smoothly instead of snapping.
             let grew = newSize.width > oldContentHeight + 1
-            if grew && viewModel.isStreaming && !isScrolledUp && !pinCurrentTurnStartForLatestTurn {
+            if grew && isAnyMessageVisuallyStreaming && !isScrolledUp && !pinCurrentTurnStartForLatestTurn {
                 let now = Date()
                 if now.timeIntervalSince(lastProgrammaticScrollTime) > 0.32 {
                     lastProgrammaticScrollTime = now
@@ -4577,6 +4667,19 @@ struct ChatDetailView: View {
         }
     }
 
+    private func repinToBottomAfterStreamingIfFollowing(after delay: TimeInterval = 0) {
+        let action = {
+            guard !isScrolledUp, !pinCurrentTurnStartForLatestTurn, !transcriptMessages.isEmpty else { return }
+            lastProgrammaticScrollTime = Date()
+            scrollToBottomWithoutAnimation()
+        }
+        if delay <= 0 {
+            DispatchQueue.main.async(execute: action)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
+        }
+    }
+
     private func smoothRepinToCurrentTurnStartIfFollowing(after delay: TimeInterval = 0) {
         let action = {
             guard pinCurrentTurnStartForLatestTurn, !transcriptMessages.isEmpty, !isScrolledUp else { return }
@@ -4594,7 +4697,7 @@ struct ChatDetailView: View {
 
     private func repinToCurrentTurnStartIfFollowing(after delay: TimeInterval = 0) {
         let action = {
-            guard !transcriptMessages.isEmpty, !isScrolledUp else { return }
+            guard pinCurrentTurnStartForLatestTurn, !transcriptMessages.isEmpty, !isScrolledUp else { return }
             lastProgrammaticScrollTime = Date()
             scrollToCurrentTurnStartWithoutAnimation(anchor: .top)
         }
@@ -9591,7 +9694,6 @@ private struct AgentStepFloatingBarHost: View {
     let conversationId: String?
     let fallbackItem: AgentActivityItem?
     let onPreviewTap: (AgentActivityItem, Int) -> Void
-    let onStopRunningStep: () -> Void
 
     private var displayItem: AgentActivityItem? {
         fallbackItem?.hasConcreteSteps == true ? fallbackItem : nil
@@ -9603,8 +9705,7 @@ private struct AgentStepFloatingBarHost: View {
                 AgentStepFloatingBar(
                     item: item,
                     taskCount: item.totalStepCount,
-                    onPreviewTap: onPreviewTap,
-                    onStopRunningStep: onStopRunningStep
+                    onPreviewTap: onPreviewTap
                 )
                 .padding(.horizontal, 18)
                 .padding(.bottom, 4)
@@ -9627,7 +9728,6 @@ private struct AgentStepFloatingBar: View {
     let item: AgentActivityItem
     let taskCount: Int
     let onPreviewTap: (AgentActivityItem, Int) -> Void
-    let onStopRunningStep: () -> Void
 
     @Environment(\.theme) private var theme
     @State private var selectedIndex: Int = 0
@@ -9735,9 +9835,9 @@ private struct AgentStepFloatingBar: View {
 
     private var statusDot: AnyView {
         let isRunning = selectedStep?.isRunning == true
-        let dotTint: Color = isRunning ? .red : tint
-        let dotIcon = isRunning ? "stop.fill" : icon
-        let content = ZStack {
+        let dotTint: Color = tint
+        let dotIcon = isRunning ? "progress.indicator" : icon
+        return AnyView(ZStack {
             Circle()
                 .fill(dotTint.opacity(theme.isDark ? 0.16 : 0.12))
                 .frame(width: 17, height: 17)
@@ -9746,19 +9846,7 @@ private struct AgentStepFloatingBar: View {
                 .foregroundStyle(dotTint)
                 .frame(width: 13, height: 13)
         }
-        if isRunning {
-            return AnyView(
-                Button {
-                    Haptics.play(.medium)
-                    onStopRunningStep()
-                } label: {
-                    content
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("停止当前步骤")
-            )
-        }
-        return AnyView(content)
+        .accessibilityHidden(true))
     }
 
     private var pageControls: AnyView {

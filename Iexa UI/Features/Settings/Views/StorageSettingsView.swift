@@ -227,7 +227,7 @@ struct StorageSettingsView: View {
                         Text("浏览 Local Alpine 文件")
                             .scaledFont(size: 15, weight: .medium)
                             .foregroundStyle(theme.textPrimary)
-                        Text("/mnt/iexa 工作区和本地 Alpine rootfs")
+                        Text("/mnt/iexa 工作区、本地 Alpine rootfs、共享目录和挂载点")
                             .scaledFont(size: 12, weight: .medium)
                             .foregroundStyle(theme.textTertiary)
                     }

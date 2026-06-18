@@ -97,9 +97,125 @@ final class LocalSkillsService {
         """
     }
 
+    func exportToLocalAlpineFileSystem() {
+        exportSkillsToLocalAlpineFileSystem()
+    }
+
     private func save() {
         guard let data = try? JSONEncoder().encode(skills) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
+        exportSkillsToLocalAlpineFileSystem()
+    }
+
+    private func exportSkillsToLocalAlpineFileSystem() {
+        do {
+            let directory = try Self.localAlpineSkillsDirectory()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try removeStaleGeneratedSkillDirectories(in: directory)
+
+            for skill in skills {
+                let folderName = Self.safePathComponent(skill.id, fallback: "skill")
+                let folderURL = directory.appendingPathComponent(folderName, isDirectory: true)
+                try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+                try markdownDocument(for: skill).write(
+                    to: folderURL.appendingPathComponent("SKILL.md"),
+                    atomically: true,
+                    encoding: .utf8
+                )
+                try markerDocument(for: skill).write(
+                    to: folderURL.appendingPathComponent(".iexa-skill.json"),
+                    atomically: true,
+                    encoding: .utf8
+                )
+            }
+        } catch {
+            // The runtime can still use UserDefaults-backed skills if the file mirror fails.
+        }
+    }
+
+    private func removeStaleGeneratedSkillDirectories(in directory: URL) throws {
+        let activeFolderNames = Set(skills.map { Self.safePathComponent($0.id, fallback: "skill") })
+        let children = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        for child in children {
+            guard !activeFolderNames.contains(child.lastPathComponent),
+                  FileManager.default.fileExists(
+                    atPath: child.appendingPathComponent(".iexa-skill.json").path
+                  ) else {
+                continue
+            }
+            try FileManager.default.removeItem(at: child)
+        }
+    }
+
+    private func markdownDocument(for skill: LocalSkill) -> String {
+        let content = skill.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return """
+        ---
+        id: \(Self.yamlScalar(skill.id))
+        name: \(Self.yamlScalar(skill.name))
+        description: \(Self.yamlScalar(skill.description))
+        enabled: \(skill.isEnabled ? "true" : "false")
+        builtin: \(skill.isBuiltin ? "true" : "false")
+        updated_at: \(Self.iso8601String(from: skill.updatedAt))
+        ---
+
+        \(content)
+        """
+    }
+
+    private func markerDocument(for skill: LocalSkill) -> String {
+        """
+        {"id":"\(Self.jsonEscaped(skill.id))","generated_by":"iexa","file":"SKILL.md"}
+        """
+    }
+
+    private static func localAlpineSkillsDirectory() throws -> URL {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return documents
+            .appendingPathComponent("Iexa Alpine", isDirectory: true)
+            .appendingPathComponent("shared", isDirectory: true)
+            .appendingPathComponent("skills", isDirectory: true)
+    }
+
+    private static func safePathComponent(_ value: String, fallback: String) -> String {
+        var result = ""
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_ ."))
+        for scalar in value.unicodeScalars {
+            if allowed.contains(scalar) {
+                result.append(Character(scalar))
+            } else if result.last != "-" {
+                result.append("-")
+            }
+        }
+        let trimmed = result.trimmingCharacters(in: CharacterSet(charactersIn: " .-_"))
+        return trimmed.isEmpty ? fallback : String(trimmed.prefix(80))
+    }
+
+    private static func yamlScalar(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        return "\"\(escaped)\""
+    }
+
+    private static func jsonEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+    }
+
+    private static func iso8601String(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
     }
 
     private static func mergeBuiltinSkills(into stored: [LocalSkill]) -> [LocalSkill] {
