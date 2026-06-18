@@ -185,8 +185,10 @@ enum LocalAlpineBackgroundExecution {
     }
 
     private static func expire() {
+        let interrupted = LocalAlpineTerminalService.shared.interruptRunningCommand()
+        let interruptedText = interrupted ? "true" : "false"
         Logger(subsystem: "com.openui", category: "LocalAlpine")
-            .warning("Local Alpine background execution expired")
+            .warning("Local Alpine background execution expired; interrupt sent: \(interruptedText, privacy: .public)")
         depth = 0
         endLocked()
     }

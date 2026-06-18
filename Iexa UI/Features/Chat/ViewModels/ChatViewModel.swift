@@ -8853,6 +8853,7 @@ final class ChatViewModel {
     }
 
     private func resetLocalAlpineAgentLoopForNewTurn() {
+        interruptLocalAlpineCommand(reason: "new turn")
         localAlpineAgentTask?.cancel()
         localAlpineAgentTask = nil
         localAlpineContinuationTask?.cancel()
@@ -8878,6 +8879,7 @@ final class ChatViewModel {
     }
 
     private func cancelLocalAlpineAgentLoop() {
+        interruptLocalAlpineCommand(reason: "stop")
         localAlpineAgentStopRequested = true
         localAlpineAutoExecutionPaused = true
         localAlpineAgentTask?.cancel()
@@ -8894,6 +8896,7 @@ final class ChatViewModel {
     }
 
     private func pauseLocalAlpineAgentLoopForUserInterjection() {
+        interruptLocalAlpineCommand(reason: "user interjection")
         localAlpineAgentStopRequested = true
         localAlpineAutoExecutionPaused = true
         localAlpineAgentTask?.cancel()
@@ -8907,6 +8910,13 @@ final class ChatViewModel {
         localAlpineContinuationRetryCounts.removeAll()
         localAlpineMissingToolCorrectionParentIds.removeAll()
         clearAllLocalAlpineLiveToolState()
+    }
+
+    private func interruptLocalAlpineCommand(reason: String) {
+        let interrupted = LocalAlpineTerminalService.shared.interruptRunningCommand()
+        if interrupted {
+            logger.info("Local Alpine command interrupted: \(reason, privacy: .public)")
+        }
     }
 
     private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
