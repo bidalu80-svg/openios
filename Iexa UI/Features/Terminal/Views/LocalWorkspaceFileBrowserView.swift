@@ -48,6 +48,8 @@ private struct LocalFileBrowserDeleteTarget: Identifiable {
 
 struct LocalWorkspaceFileBrowserView: View {
     var onDismiss: (() -> Void)? = nil
+    var showDoneButton: Bool = true
+    var wrapInNavigationStack: Bool = true
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
@@ -124,48 +126,11 @@ struct LocalWorkspaceFileBrowserView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                theme.background.ignoresSafeArea()
-                VStack(spacing: 0) {
-                    locationPicker
-                    workspaceHeader
-                    breadcrumbBar
-                    Divider().foregroundStyle(theme.cardBorder.opacity(0.35))
-                    content
-                }
-            }
-            .navigationTitle("浏览文件")
-            .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索文件")
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("完成") { close() }
-                        .fontWeight(.semibold)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button {
-                            Task { await loadDirectory() }
-                            Haptics.play(.light)
-                        } label: {
-                            Label("重新加载", systemImage: "arrow.clockwise")
-                        }
-
-                        if location == .rootfs {
-                            Divider()
-
-                            Button(role: .destructive) {
-                                confirmRootFSReset = true
-                            } label: {
-                                Label("重置 rootfs", systemImage: "arrow.counterclockwise.circle")
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .scaledFont(size: 18, weight: .semibold)
-                    }
-                }
+        Group {
+            if wrapInNavigationStack {
+                NavigationStack { browserContent }
+            } else {
+                browserContent
             }
         }
         .task {
@@ -645,6 +610,53 @@ struct LocalWorkspaceFileBrowserView: View {
             return "这个操作会从当前 /mnt/iexa 工作区移除该项目，无法撤销。"
         case .rootfs:
             return "这个操作会从本地 Alpine rootfs 中删除该项目，可能影响运行环境，无法撤销。"
+        }
+    }
+
+    private var browserContent: some View {
+        ZStack {
+            theme.background.ignoresSafeArea()
+            VStack(spacing: 0) {
+                locationPicker
+                workspaceHeader
+                breadcrumbBar
+                Divider().foregroundStyle(theme.cardBorder.opacity(0.35))
+                content
+            }
+        }
+        .navigationTitle("浏览文件")
+        .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索文件")
+        .toolbar {
+            if showDoneButton {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("完成") { close() }
+                        .fontWeight(.semibold)
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button {
+                        Task { await loadDirectory() }
+                        Haptics.play(.light)
+                    } label: {
+                        Label("重新加载", systemImage: "arrow.clockwise")
+                    }
+
+                    if location == .rootfs {
+                        Divider()
+
+                        Button(role: .destructive) {
+                            confirmRootFSReset = true
+                        } label: {
+                            Label("重置 rootfs", systemImage: "arrow.counterclockwise.circle")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .scaledFont(size: 18, weight: .semibold)
+                }
+            }
         }
     }
 

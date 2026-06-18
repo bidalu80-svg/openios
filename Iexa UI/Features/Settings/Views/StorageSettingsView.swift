@@ -219,6 +219,25 @@ struct StorageSettingsView: View {
 
     private var quickActionsSection: some View {
         Section {
+            NavigationLink {
+                LocalWorkspaceFileBrowserView(showDoneButton: false, wrapInNavigationStack: false)
+            } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("浏览 Local Alpine 文件")
+                            .scaledFont(size: 15, weight: .medium)
+                            .foregroundStyle(theme.textPrimary)
+                        Text("/mnt/iexa 工作区和本地 Alpine rootfs")
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                } icon: {
+                    Image(systemName: "folder.badge.gearshape")
+                        .scaledFont(size: 20)
+                        .foregroundStyle(theme.brandPrimary)
+                }
+            }
+
             // Delete Hub cache (only show if hub cache exists)
             if hasHubCache {
                 Button {
