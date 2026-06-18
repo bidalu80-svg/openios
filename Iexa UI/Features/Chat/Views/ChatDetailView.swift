@@ -166,6 +166,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
     let commandResults: [LocalAlpineAgentCommandResult]
     let toolCalls: [LocalAlpineToolCall]
     let steps: [AgentActivityStep]
+    let stepIndexOffset: Int
+    let totalStepCountOverride: Int?
 
     init(
         id: String,
@@ -178,7 +180,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
         writtenFiles: [LocalAlpineWrittenFile],
         commandResults: [LocalAlpineAgentCommandResult],
         toolCalls: [LocalAlpineToolCall],
-        steps: [AgentActivityStep]
+        steps: [AgentActivityStep],
+        stepIndexOffset: Int = 0,
+        totalStepCountOverride: Int? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -191,6 +195,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
         self.commandResults = commandResults
         self.toolCalls = toolCalls
         self.steps = steps
+        self.stepIndexOffset = max(0, stepIndexOffset)
+        self.totalStepCountOverride = totalStepCountOverride
     }
 
     var isActive: Bool {
@@ -204,7 +210,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
     }
 
     var totalStepCount: Int {
-        max(steps.count, 1)
+        max(totalStepCountOverride ?? (stepIndexOffset + steps.count), 1)
     }
 
     var currentStepTitle: String {
@@ -236,7 +242,21 @@ private struct AgentActivityItem: Identifiable, Hashable {
               let index = steps.firstIndex(where: { $0.id == currentStep.id }) else {
             return min(max(completedStepCount, 1), totalStepCount)
         }
+        return min(max(stepIndexOffset + index + 1, 1), totalStepCount)
+    }
+
+    var currentVisibleStepIndex: Int {
+        guard let currentStep,
+              let index = steps.firstIndex(where: { $0.id == currentStep.id }) else {
+            return min(max(completedStepCount - stepIndexOffset, 1), max(steps.count, 1))
+        }
         return index + 1
+    }
+
+    func globalStepNumber(forVisibleIndex index: Int) -> Int {
+        guard !steps.isEmpty else { return min(max(currentStepIndex, 1), totalStepCount) }
+        let clamped = min(max(index, 0), steps.count - 1)
+        return min(max(stepIndexOffset + clamped + 1, 1), totalStepCount)
     }
 
     var currentStepPreview: String {
@@ -350,6 +370,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
         guard maxSteps > 0 else { return self }
 
         let limitedSteps = Array(steps.suffix(maxSteps)).map(Self.lightweightFloatingStep)
+        let droppedStepCount = max(0, steps.count - limitedSteps.count)
         let limitedFileCount = limitedSteps.filter { step in
             step.kind == .file || step.file != nil
         }.count
@@ -369,7 +390,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
             writtenFiles: limitedSteps.compactMap(\.file),
             commandResults: [],
             toolCalls: [],
-            steps: limitedSteps
+            steps: limitedSteps,
+            stepIndexOffset: stepIndexOffset + droppedStepCount,
+            totalStepCountOverride: totalStepCount
         )
     }
 
@@ -8962,11 +8985,9 @@ private struct AgentFallbackStepPill: View {
 private struct AgentInlineStepsView: View {
     let item: AgentActivityItem
 
-    @Environment(\.theme) private var theme
-
     private var visibleSteps: [AgentActivityStep] {
-        let limit = 8
-        return Array(item.steps.suffix(limit))
+        guard let step = item.currentStep ?? item.steps.last else { return [] }
+        return [step]
     }
 
     var body: some View {
@@ -8974,17 +8995,6 @@ private struct AgentInlineStepsView: View {
             ForEach(visibleSteps, id: \.id) { step in
                 AgentActivityStepPill(step: step)
                     .equatable()
-            }
-
-            if item.steps.count > visibleSteps.count {
-                HStack(spacing: 6) {
-                    Image(systemName: "ellipsis")
-                        .scaledFont(size: 11, weight: .bold)
-                    Text("还有 \(item.steps.count - visibleSteps.count) 个较早步骤")
-                        .scaledFont(size: 11, weight: .semibold)
-                }
-                .foregroundStyle(theme.textTertiary)
-                .padding(.leading, 12)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -9051,7 +9061,7 @@ private struct AgentStepFloatingBar: View {
     }
 
     private var pageText: String {
-        "\(clampedIndex + 1)/\(max(item.steps.count, 1))"
+        "\(item.globalStepNumber(forVisibleIndex: clampedIndex))/\(item.totalStepCount)"
     }
 
     private var previewTitle: String {
@@ -9192,10 +9202,10 @@ private struct AgentStepFloatingBar: View {
             Spacer(minLength: 2)
             pageControls
         }
-        .padding(.leading, 68)
+        .padding(.leading, 104)
         .padding(.trailing, 8)
         .padding(.vertical, 3)
-        .frame(height: 40, alignment: .center)
+        .frame(height: 42, alignment: .center)
         .frame(maxWidth: .infinity)
         .background(barFill)
         .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
@@ -9218,12 +9228,12 @@ private struct AgentStepFloatingBar: View {
                     previewText: previewText,
                     thumbnailReference: previewThumbnailReference
                 )
-                .frame(width: 64, height: 36, alignment: .topLeading)
+                .frame(width: 94, height: 54, alignment: .topLeading)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
-            .offset(x: 6, y: -6)
+            .offset(x: 4, y: -11)
         )
     }
 
@@ -9243,7 +9253,7 @@ private struct AgentStepFloatingBar: View {
             previewCardButton: previewCardButton,
             taskCount: taskCount,
             itemId: item.id,
-            currentStepIndex: item.currentStepIndex,
+            currentVisibleStepIndex: item.currentVisibleStepIndex,
             stepCount: item.steps.count,
             selectedIndex: $selectedIndex
         )
@@ -9255,12 +9265,12 @@ private struct AgentStepFloatingBarLayout: View {
     let previewCardButton: AnyView
     let taskCount: Int
     let itemId: String
-    let currentStepIndex: Int
+    let currentVisibleStepIndex: Int
     let stepCount: Int
     @Binding var selectedIndex: Int
 
     private var syncedIndex: Int {
-        min(max(0, currentStepIndex - 1), max(0, stepCount - 1))
+        min(max(0, currentVisibleStepIndex - 1), max(0, stepCount - 1))
     }
 
     var body: AnyView {
@@ -9269,14 +9279,14 @@ private struct AgentStepFloatingBarLayout: View {
                 floatingBarBody
                 previewCardButton
             }
-            .frame(height: 46, alignment: .bottom)
+            .frame(height: 60, alignment: .bottom)
             .onAppear {
                 selectedIndex = syncedIndex
             }
             .onChange(of: itemId) { _, _ in
                 selectedIndex = syncedIndex
             }
-            .onChange(of: currentStepIndex) { _, _ in
+            .onChange(of: currentVisibleStepIndex) { _, _ in
                 selectedIndex = syncedIndex
             }
             .onChange(of: stepCount) { _, _ in
@@ -9293,8 +9303,8 @@ private struct AgentToolPreviewPop: View {
     let previewText: String
     let thumbnailReference: String?
 
-    private let previewSize = CGSize(width: 64, height: 36)
-    private let cornerRadius: CGFloat = 8
+    private let previewSize = CGSize(width: 94, height: 54)
+    private let cornerRadius: CGFloat = 9
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -9322,25 +9332,25 @@ private struct AgentToolPreviewPop: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(previewTitle)
-                    .font(.system(size: 6.2, weight: .bold, design: .monospaced))
+                    .font(.system(size: 8.2, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.88))
                     .lineLimit(1)
 
                 Text(previewSubtitle)
-                    .font(.system(size: 5.3, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 6.7, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.66))
                     .lineLimit(1)
 
                 if thumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                     Text(previewText)
-                        .font(.system(size: 5.4, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 6.8, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Color(red: 0.30, green: 0.63, blue: 1.0))
                         .lineLimit(2)
                         .truncationMode(.tail)
                 }
             }
-            .padding(.horizontal, 5)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 5)
         }
         .frame(width: previewSize.width, height: previewSize.height, alignment: .topLeading)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
@@ -9907,7 +9917,7 @@ private struct AgentFloatingStepPreviewSheet: View {
     }
 
     private var pageText: String {
-        "\(clampedIndex + 1) / \(max(steps.count, 1))"
+        "\(item.activity.globalStepNumber(forVisibleIndex: clampedIndex)) / \(item.activity.totalStepCount)"
     }
 
     var body: some View {
