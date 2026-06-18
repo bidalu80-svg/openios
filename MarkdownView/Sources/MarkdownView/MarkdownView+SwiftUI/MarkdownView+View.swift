@@ -78,11 +78,10 @@ public struct MarkdownView: View {
             guard !codeBlockAutoScroll, containsCitationLink else { return }
             citationIconRefreshToken &+= 1
         }
-        // Animate height growth smoothly so the layout expands with a gentle easeOut
-        // rather than jumping. Only applies when measuredHeight actually grows (new lines)
-        // — this is the correct place because measuredHeight @State lives here and is
-        // set via DispatchQueue.main.async, bypassing any .animation() applied outside.
-        .animation(.easeOut(duration: 0.15), value: measuredHeight)
+        // Keep the gentle growth animation only while content is actively streaming.
+        // Historical rows are recycled by LazyVStack; animating their async height
+        // re-measurements can briefly overlay adjacent text during fast scrolls.
+        .animation(codeBlockAutoScroll ? .easeOut(duration: 0.15) : nil, value: measuredHeight)
     }
 
     private var containsCitationLink: Bool {

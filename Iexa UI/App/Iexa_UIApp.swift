@@ -141,7 +141,10 @@ struct Iexa_UIApp: App {
                     if newPhase == .active {
                         DiagnosticLogManager.shared.debug("Scene phase active", category: "App")
                         Task.detached(priority: .utility) {
-                            await LocalAlpineTerminalService.shared.prewarmIfNeeded(reason: "scene-active")
+                            await LocalAlpineTerminalService.shared.prewarmIfNeeded(
+                                reason: "scene-active",
+                                delayNanoseconds: 0
+                            )
                         }
                         // Process pending actions after a short delay so that
                         // MainChatView / iPadMainChatView have time to mount
@@ -210,7 +213,10 @@ struct Iexa_UIApp: App {
                         router.navigate(to: .chatDetail(conversationId: conversationId))
                     }
 
-                    await LocalAlpineTerminalService.shared.prewarmIfNeeded(reason: "app-launch")
+                    await LocalAlpineTerminalService.shared.prewarmIfNeeded(
+                        reason: "app-launch",
+                        delayNanoseconds: 0
+                    )
                 }
                 .onOpenURL { url in
                     if url.isFileURL {

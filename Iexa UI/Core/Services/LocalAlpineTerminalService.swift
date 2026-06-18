@@ -706,19 +706,20 @@ actor LocalAlpineTerminalService {
     }
 
     private func relativeWorkspacePreviewPath(from rawTarget: String) -> String? {
-        let normalized = rawTarget.replacingOccurrences(of: "\\", with: "/")
-        guard !normalized.hasPrefix("/"),
-              !normalized.hasPrefix("./"),
-              !normalized.hasPrefix("../"),
-              !normalized.contains("://"),
-              normalized.rangeOfCharacter(from: .newlines) == nil else {
-            return nil
+        var normalized = rawTarget
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        while normalized.hasPrefix("./") {
+            normalized.removeFirst(2)
         }
-
-        let lowercased = normalized.lowercased()
-        guard lowercased.hasSuffix(".html")
-            || lowercased.hasSuffix(".htm")
-            || lowercased.hasSuffix(".svg") else {
+        guard !normalized.isEmpty,
+              !normalized.hasPrefix("/"),
+              !normalized.hasPrefix("../"),
+              !normalized.contains("/../"),
+              !normalized.contains("://"),
+              !normalized.contains("\t"),
+              normalized.rangeOfCharacter(from: .newlines) == nil,
+              !(normalized as NSString).pathExtension.isEmpty else {
             return nil
         }
         return "/mnt/iexa/\(normalized)"

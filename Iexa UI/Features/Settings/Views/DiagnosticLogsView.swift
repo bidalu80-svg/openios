@@ -8,6 +8,7 @@ struct DiagnosticLogsView: View {
     @State private var showingShareSheet = false
     @State private var showingClearAlert = false
     @State private var exportErrorMessage: String?
+    @State private var logsEnabled = DiagnosticLogManager.shared.isEnabled
 
     private let manager = DiagnosticLogManager.shared
 
@@ -16,7 +17,12 @@ struct DiagnosticLogsView: View {
     }
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            loggingToggleCard
+                .padding(.horizontal, Spacing.md)
+                .padding(.top, Spacing.sm)
+                .padding(.bottom, files.isEmpty ? 0 : Spacing.sm)
+
             if files.isEmpty {
                 emptyState
             } else {
@@ -67,6 +73,10 @@ struct DiagnosticLogsView: View {
             }
         }
         .onAppear(perform: reload)
+        .onChange(of: logsEnabled) { _, enabled in
+            manager.isEnabled = enabled
+            reload()
+        }
         .sheet(isPresented: $showingShareSheet, onDismiss: cleanupShareURL) {
             if let shareURL {
                 ShareSheet(items: [shareURL])
@@ -92,6 +102,39 @@ struct DiagnosticLogsView: View {
         } message: {
             Text(exportErrorMessage ?? "")
         }
+    }
+
+    private var loggingToggleCard: some View {
+        HStack(spacing: Spacing.md) {
+            Image(systemName: logsEnabled ? "checkmark.shield.fill" : "pause.circle.fill")
+                .scaledFont(size: 22, weight: .semibold)
+                .foregroundStyle(logsEnabled ? theme.success : theme.textTertiary)
+                .frame(width: 38, height: 38)
+                .background((logsEnabled ? theme.success : theme.textTertiary).opacity(0.12))
+                .clipShape(Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("诊断日志")
+                    .scaledFont(size: 16, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                Text(logsEnabled ? "正在记录运行状态和错误摘要" : "已暂停写入本地诊断日志")
+                    .scaledFont(size: 13)
+                    .foregroundStyle(theme.textTertiary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            Toggle("启用诊断日志", isOn: $logsEnabled)
+                .labelsHidden()
+        }
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.sm)
+        .background(theme.cardBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(theme.cardBorder.opacity(0.45), lineWidth: 1)
+        )
     }
 
     private var emptyState: some View {

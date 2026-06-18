@@ -821,6 +821,43 @@ final class ChatViewModel {
         NotificationCenter.default.post(name: .localAlpineLiveToolStateUpdated, object: self, userInfo: userInfo)
     }
 
+    private static func pendingLocalAlpineToolCallId(for messageId: String) -> String {
+        "pending-local-alpine-\(messageId)"
+    }
+
+    private func publishPendingLocalAlpineExecutionStep(messageId: String, content: String) {
+        guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
+        let detail = Self.localAlpineCommandPreview(from: content)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = localAlpineRunningDescription(for: content)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let nowMs = Int64((Date().timeIntervalSince1970 * 1_000).rounded())
+        let call = LocalAlpineToolCall(
+            id: Self.pendingLocalAlpineToolCallId(for: messageId),
+            runId: "pending-\(messageId)",
+            name: "command",
+            phase: .start,
+            title: title.isEmpty ? "准备执行本地命令" : title,
+            detail: detail.isEmpty ? "准备执行本地命令" : detail,
+            cwd: "/mnt/iexa",
+            command: detail.isEmpty ? nil : detail,
+            exitCode: nil,
+            outputPreview: nil,
+            filePaths: [],
+            startedAtMs: nowMs,
+            completedAtMs: nil,
+            failed: false
+        )
+        localAlpinePendingToolCallsByMessageId[messageId] = [call]
+        localAlpinePendingToolStatusByMessageId[messageId] = ChatStatusUpdate(
+            action: "local_alpine_tool",
+            description: title.isEmpty ? "准备执行本地命令" : title,
+            done: false,
+            occurredAt: .now
+        )
+        flushLocalAlpineToolEvent(messageId: messageId)
+    }
+
     private func clearLocalAlpineLiveToolState(for messageId: String) {
         let finalCalls = localAlpinePendingToolCallsByMessageId[messageId]
             ?? localAlpineLiveToolCallsByMessageId[messageId]
@@ -859,6 +896,94 @@ final class ChatViewModel {
             userInfo["conversationId"] = chatId
         }
         NotificationCenter.default.post(name: .localAlpineLiveToolStateCleared, object: self, userInfo: userInfo)
+    }
+
+    private func completeRunningLocalAlpineLiveToolStateAsStopped(reason: String) {
+        let messageIds = Set(
+            Array(localAlpinePendingToolCallsByMessageId.keys)
+                + Array(localAlpineLiveToolCallsByMessageId.keys)
+                + Array(localAlpinePendingToolStatusByMessageId.keys)
+                + Array(localAlpineLastLiveToolStatusByMessageId.keys)
+        )
+        guard !messageIds.isEmpty else { return }
+
+        let now = Date()
+        let nowMs = Int64((now.timeIntervalSince1970 * 1_000).rounded())
+        for messageId in messageIds {
+            localAlpineToolEventFlushTasks[messageId]?.cancel()
+            localAlpineToolEventFlushTasks.removeValue(forKey: messageId)
+
+            let calls = localAlpinePendingToolCallsByMessageId[messageId]
+                ?? localAlpineLiveToolCallsByMessageId[messageId]
+                ?? []
+            let finalCalls = calls.map { call -> LocalAlpineToolCall in
+                guard call.isRunning else { return call }
+                let existingOutput = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let stoppedOutput = existingOutput.isEmpty
+                    ? reason
+                    : "\(existingOutput)\n\(reason)"
+                return LocalAlpineToolCall(
+                    id: call.id,
+                    runId: call.runId,
+                    name: call.name,
+                    phase: .result,
+                    title: call.title,
+                    detail: call.detail,
+                    cwd: call.cwd,
+                    command: call.command,
+                    exitCode: call.exitCode ?? 130,
+                    outputPreview: stoppedOutput,
+                    outputReference: call.outputReference,
+                    outputByteCount: call.outputByteCount,
+                    outputLineCount: call.outputLineCount,
+                    filePaths: call.filePaths,
+                    lineDelta: call.lineDelta,
+                    startedAtMs: call.startedAtMs,
+                    completedAtMs: call.completedAtMs ?? nowMs,
+                    browserURL: call.browserURL,
+                    imageFilePath: call.imageFilePath,
+                    failed: true
+                )
+            }
+            let status = ChatStatusUpdate(
+                action: "local_alpine_tool",
+                description: reason,
+                done: true,
+                occurredAt: now
+            )
+
+            localAlpinePendingToolCallsByMessageId.removeValue(forKey: messageId)
+            localAlpinePendingToolStatusByMessageId.removeValue(forKey: messageId)
+            if !finalCalls.isEmpty {
+                localAlpineLiveToolCallsByMessageId[messageId] = finalCalls
+            }
+            localAlpineLastLiveToolStatusByMessageId[messageId] = status
+            localAlpineLastToolEventFlushAtByMessageId[messageId] = now
+
+            if let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) {
+                conversation?.messages[index].isStreaming = false
+                conversation?.messages[index].statusHistory.append(status)
+                conversation?.messages[index].error = ChatMessageError(content: reason)
+                var metadata = conversation?.messages[index].metadata ?? [:]
+                if let toolCalls = LocalAlpineToolCall.metadataString(for: finalCalls) {
+                    metadata["iexa_local_alpine_tool_calls"] = toolCalls
+                }
+                conversation?.messages[index].metadata = metadata
+                let statusHistory = conversation?.messages[index].statusHistory ?? [status]
+                conversation?.history.updateNode(id: messageId) { node in
+                    node.done = true
+                    node.statusHistory = statusHistory
+                    node.error = ChatMessageError(content: reason)
+                    node.metadata = metadata
+                }
+            }
+
+            postLocalAlpineLiveToolState(
+                messageId: messageId,
+                finalCalls: finalCalls,
+                finalStatus: status
+            )
+        }
     }
 
     // MARK: - Tree Sync Helpers
@@ -8896,6 +9021,7 @@ final class ChatViewModel {
     }
 
     private func cancelLocalAlpineAgentLoop() {
+        completeRunningLocalAlpineLiveToolStateAsStopped(reason: "本地任务已停止")
         interruptLocalAlpineCommand(reason: "stop")
         localAlpineAgentStopRequested = true
         localAlpineAutoExecutionPaused = true
@@ -8909,10 +9035,10 @@ final class ChatViewModel {
         localAlpineContinuationParentIds.removeAll()
         localAlpineContinuationRetryCounts.removeAll()
         localAlpineMissingToolCorrectionParentIds.removeAll()
-        clearAllLocalAlpineLiveToolState()
     }
 
     private func pauseLocalAlpineAgentLoopForUserInterjection() {
+        completeRunningLocalAlpineLiveToolStateAsStopped(reason: "本地任务已暂停")
         interruptLocalAlpineCommand(reason: "user interjection")
         localAlpineAgentStopRequested = true
         localAlpineAutoExecutionPaused = true
@@ -8926,7 +9052,6 @@ final class ChatViewModel {
         localAlpineContinuationParentIds.removeAll()
         localAlpineContinuationRetryCounts.removeAll()
         localAlpineMissingToolCorrectionParentIds.removeAll()
-        clearAllLocalAlpineLiveToolState()
     }
 
     private func interruptLocalAlpineCommand(reason: String) {
@@ -20747,6 +20872,7 @@ final class ChatViewModel {
         conversation?.history.currentId = resultMessageId
         localAlpineAgentExecutedMessageIds.insert(resultMessageId)
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        publishPendingLocalAlpineExecutionStep(messageId: resultMessageId, content: content)
         await Task.yield()
 
         LocalAlpineBackgroundExecution.begin(reason: "agent")
@@ -22894,6 +23020,7 @@ final class ChatViewModel {
             ?? localAlpineLiveToolCallsByMessageId[messageId]
             ?? []
         let uiCall = localAlpineLiveToolUICall(event.call)
+        calls.removeAll { $0.id == Self.pendingLocalAlpineToolCallId(for: messageId) }
         if let existingIndex = calls.firstIndex(where: { $0.id == uiCall.id }) {
             calls[existingIndex] = uiCall
         } else {

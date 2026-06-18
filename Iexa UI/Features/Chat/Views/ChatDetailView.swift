@@ -959,8 +959,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
            let normalized = normalizedPreviewTarget(imageFilePath) {
             return normalized
         }
-        if let filePath = file?.path.trimmingCharacters(in: .whitespacesAndNewlines),
-           let normalized = normalizedPreviewTarget(filePath) {
+        if isDirectLocalPreviewToolName(normalizedToolName),
+           let filePath = file?.path.trimmingCharacters(in: .whitespacesAndNewlines),
+           let normalized = normalizedLocalPreviewPath(filePath) {
             return normalized
         }
         if let outputURL = localWebPreviewTarget(in: call.outputPreview) {
@@ -975,9 +976,21 @@ private struct AgentActivityItem: Identifiable, Hashable {
         guard !["shell_execute", "bash", "shell", "sh", "run", "command", "exec"].contains(normalizedToolName) else {
             return nil
         }
+        guard isDirectLocalPreviewToolName(normalizedToolName) else {
+            return nil
+        }
         return call.filePaths
             .compactMap(normalizedLocalPreviewPath(_:))
             .first
+    }
+
+    private static func isDirectLocalPreviewToolName(_ toolName: String) -> Bool {
+        switch toolName {
+        case "iexa_open", "open_preview", "browser.open", "browser_open", "browser.navigate", "browser_navigate", "browser.navigate_url":
+            return true
+        default:
+            return false
+        }
     }
 
     static func localWebPreviewTarget(in text: String?) -> String? {
@@ -1021,10 +1034,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
             pattern: #"/mnt/iexa/[^\s"'`<>()\[\]{}]+"#,
             in: trimmed
         ) {
-            return workspacePath
+            return trimmedPreviewURLCandidate(workspacePath)
         }
 
-        trimmed = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "\"'`.,;:!?)[]{}"))
+        trimmed = trimmedPreviewURLCandidate(trimmed)
         guard !trimmed.isEmpty else { return nil }
 
         let lower = trimmed.lowercased()
@@ -2330,6 +2343,45 @@ struct ChatDetailView: View {
         hasLocalAlpineFinalSummary(after: message, requireRenderableContent: true)
     }
 
+    private func localAlpineFinalSummaryParentId(for message: ChatMessage) -> String? {
+        guard let value = message.metadata?["iexa_local_alpine_final_summary"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty,
+              value != "true" else {
+            return nil
+        }
+        return value
+    }
+
+    private func attachedLocalAlpineFinalSummary(for resultMessage: ChatMessage) -> ChatMessage? {
+        guard isLocalAlpineResultMessage(resultMessage) else { return nil }
+        return viewModel.messages.first { candidate in
+            guard candidate.role == .assistant,
+                  candidate.error == nil,
+                  localAlpineFinalSummaryParentId(for: candidate) == resultMessage.id else {
+                return false
+            }
+            return candidate.isStreaming
+                || !visibleAssistantTextAfterToolProtocolCleanup(for: candidate)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty
+        }
+    }
+
+    private func isAttachedLocalAlpineFinalSummary(_ message: ChatMessage) -> Bool {
+        guard message.role == .assistant,
+              message.error == nil,
+              let parentId = localAlpineFinalSummaryParentId(for: message),
+              let parent = viewModel.messages.first(where: { $0.id == parentId }),
+              isLocalAlpineResultMessage(parent) else {
+            return false
+        }
+        return parent.metadata?["iexa_local_alpine_result"] == "true"
+            || messageHasConcreteActivityMetadata(parent)
+            || !viewModel.localAlpineLiveToolCalls(for: parent.id).isEmpty
+            || viewModel.localAlpineLiveToolStatus(for: parent.id) != nil
+    }
+
     private func localAlpineFallbackContent(for message: ChatMessage, activityItem: AgentActivityItem? = nil) -> String {
         guard isLocalAlpineResultMessage(message) else { return "" }
         guard !hasLocalAlpineFinalSummary(after: message, requireRenderableContent: false) else { return "" }
@@ -2390,10 +2442,14 @@ struct ChatDetailView: View {
             signature &+= item.commandCount &* 11
             signature &+= item.isStreaming ? 19 : 3
             signature &+= item.hasFailure ? 23 : 5
-            if let lastStep = item.steps.last {
-                signature &+= lastStep.id.hashValue
-                signature &+= lastStep.title.hashValue
-                signature &+= lastStep.isRunning ? 31 : 7
+            signature &+= item.currentStepIndex &* 17
+            for step in item.steps {
+                signature &+= step.id.hashValue
+                signature &+= step.title.hashValue
+                signature &+= step.detail.hashValue
+                signature &+= step.isRunning ? 31 : 7
+                signature &+= step.failed ? 37 : 11
+                signature &+= step.durationText?.hashValue ?? 0
             }
         }
         return signature
@@ -2629,6 +2685,7 @@ struct ChatDetailView: View {
         guard message.role == .assistant || message.role == .system else { return nil }
         let candidates: [String?] = [
             assistantContentOverride[message.id],
+            attachedLocalAlpineFinalSummary(for: message).map { visibleAssistantTextAfterToolProtocolCleanup(for: $0) },
             assistantContentOverrideForActivityParent(message, activityItem: nil),
             localAlpineFallbackContent(for: message),
             visibleAssistantTextAfterToolProtocolCleanup(for: message),
@@ -2703,6 +2760,9 @@ struct ChatDetailView: View {
                 && messageHasProcessOnlyStatus(message)
         }
         if metadata["iexa_local_alpine_final_summary"] != nil {
+            if isAttachedLocalAlpineFinalSummary(message) {
+                return true
+            }
             return !isMessageVisuallyStreaming(message)
                 && message.error == nil
                 && message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -2800,7 +2860,6 @@ struct ChatDetailView: View {
         activityItem: AgentActivityItem?
     ) -> [OrderedAgentTranscriptBlock]? {
         guard message.role == .assistant,
-              !isMessageVisuallyStreaming(message),
               !isLocalAlpineResultMessage(message),
               let activityItem,
               activityItem.hasConcreteSteps,
@@ -2993,10 +3052,15 @@ struct ChatDetailView: View {
     }
 
     private func contentContainsLocalAlpineInstruction(_ content: String) -> Bool {
-        content.range(
-            of: #"(?is)```[ \t]*iexa_alpine\b.*?```"#,
-            options: .regularExpression
-        ) != nil
+        let patterns = [
+            #"(?is)```[ \t]*iexa_alpine\b.*?```"#,
+            #"(?is)```[ \t]*local_alpine_exec\b.*?```"#,
+            #"(?is)<iexa_alpine>.*?</iexa_alpine>"#,
+            #"(?is)<local_alpine_exec>.*?</local_alpine_exec>"#
+        ]
+        return patterns.contains { pattern in
+            content.range(of: pattern, options: .regularExpression) != nil
+        }
     }
 
     // MARK: Model mention (@ trigger)
@@ -3777,6 +3841,9 @@ struct ChatDetailView: View {
                     fallbackItem: agentFloatingDisplayItem,
                     onPreviewTap: { item, index in
                         openAgentFloatingPreview(item: item, initialIndex: index)
+                    },
+                    onStopRunningStep: {
+                        viewModel.stopStreaming()
                     }
                 )
             }
@@ -4631,6 +4698,12 @@ struct ChatDetailView: View {
                     messageBubble(for: message, isLastAssistant: isLastAssistant, activityItem: rowAgentActivity)
                         .transition(.opacity)
                 }
+
+                if message.role == .assistant,
+                   let attachedSummary = attachedLocalAlpineFinalSummary(for: message) {
+                    attachedLocalAlpineFinalSummaryView(for: attachedSummary)
+                        .transition(.opacity)
+                }
             }
 
             if message.role == .assistant,
@@ -4752,6 +4825,27 @@ struct ChatDetailView: View {
         }
     }
 
+    @ViewBuilder
+    private func attachedLocalAlpineFinalSummaryView(for message: ChatMessage) -> some View {
+        let content = visibleAssistantTextAfterToolProtocolCleanup(for: message)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !content.isEmpty {
+            assistantTextBubble(
+                for: message,
+                content: content,
+                includeMessagePayload: true
+            )
+        } else if isMessageVisuallyStreaming(message) {
+            ChatMessageBubble(
+                role: .assistant,
+                showTimestamp: activeActionMessageId == message.id,
+                timestamp: message.timestamp
+            ) {
+                TypingIndicator()
+            }
+        }
+    }
+
     // MARK: - Assistant Header
 
     private func resolveModel(for message: ChatMessage) -> AIModel? {
@@ -4809,7 +4903,10 @@ struct ChatDetailView: View {
                 )
                 .transition(.opacity)
             case .steps(let item):
-                AgentInlineStepsView(item: item)
+                AgentInlineStepsView(
+                    item: item,
+                    onStopRunningStep: { viewModel.stopStreaming() }
+                )
                     .padding(.horizontal, Spacing.screenPadding)
                     .padding(.top, Spacing.xs)
             }
@@ -4919,7 +5016,10 @@ struct ChatDetailView: View {
             if let fallbackItem,
                fallbackItem.hasConcreteSteps,
                !fallbackItem.hasOnlyWebSearchStatusSteps {
-                AgentInlineStepsView(item: fallbackItem)
+                AgentInlineStepsView(
+                    item: fallbackItem,
+                    onStopRunningStep: { viewModel.stopStreaming() }
+                )
                     .padding(.horizontal, Spacing.screenPadding)
                     .padding(.top, Spacing.xs)
             }
@@ -9293,11 +9393,6 @@ private struct LocalAlpineResultCard: View {
         if !call.cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             parts.append(call.cwd)
         }
-        if let output = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !output.isEmpty,
-           !call.isRunning {
-            parts.append(oneLineCommand(output))
-        }
         return parts.joined(separator: " · ")
     }
 
@@ -9418,6 +9513,7 @@ private struct AgentFallbackStepPill: View {
 
 private struct AgentInlineStepsView: View {
     let item: AgentActivityItem
+    let onStopRunningStep: (() -> Void)?
 
     @Environment(\.theme) private var theme
 
@@ -9429,7 +9525,10 @@ private struct AgentInlineStepsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(visibleSteps, id: \.id) { step in
-                AgentActivityStepPill(step: step)
+                AgentActivityStepPill(
+                    step: step,
+                    onStopRunningStep: item.isActive ? onStopRunningStep : nil
+                )
                     .equatable()
             }
 
@@ -9492,6 +9591,7 @@ private struct AgentStepFloatingBarHost: View {
     let conversationId: String?
     let fallbackItem: AgentActivityItem?
     let onPreviewTap: (AgentActivityItem, Int) -> Void
+    let onStopRunningStep: () -> Void
 
     private var displayItem: AgentActivityItem? {
         fallbackItem?.hasConcreteSteps == true ? fallbackItem : nil
@@ -9503,7 +9603,8 @@ private struct AgentStepFloatingBarHost: View {
                 AgentStepFloatingBar(
                     item: item,
                     taskCount: item.totalStepCount,
-                    onPreviewTap: onPreviewTap
+                    onPreviewTap: onPreviewTap,
+                    onStopRunningStep: onStopRunningStep
                 )
                 .padding(.horizontal, 18)
                 .padding(.bottom, 4)
@@ -9526,6 +9627,7 @@ private struct AgentStepFloatingBar: View {
     let item: AgentActivityItem
     let taskCount: Int
     let onPreviewTap: (AgentActivityItem, Int) -> Void
+    let onStopRunningStep: () -> Void
 
     @Environment(\.theme) private var theme
     @State private var selectedIndex: Int = 0
@@ -9632,15 +9734,31 @@ private struct AgentStepFloatingBar: View {
     }
 
     private var statusDot: AnyView {
-        AnyView(ZStack {
+        let isRunning = selectedStep?.isRunning == true
+        let dotTint: Color = isRunning ? .red : tint
+        let dotIcon = isRunning ? "stop.fill" : icon
+        let content = ZStack {
             Circle()
-                .fill(tint.opacity(theme.isDark ? 0.16 : 0.12))
+                .fill(dotTint.opacity(theme.isDark ? 0.16 : 0.12))
                 .frame(width: 17, height: 17)
-            Image(systemName: icon)
+            Image(systemName: dotIcon)
                 .scaledFont(size: 9.5, weight: .bold)
-                .foregroundStyle(tint)
+                .foregroundStyle(dotTint)
                 .frame(width: 13, height: 13)
-        })
+        }
+        if isRunning {
+            return AnyView(
+                Button {
+                    Haptics.play(.medium)
+                    onStopRunningStep()
+                } label: {
+                    content
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("停止当前步骤")
+            )
+        }
+        return AnyView(content)
     }
 
     private var pageControls: AnyView {
@@ -9931,6 +10049,7 @@ private struct AgentToolPreviewThumbnail: View {
 
 private struct AgentActivityStepPill: View, Equatable {
     let step: AgentActivityStep
+    let onStopRunningStep: (() -> Void)?
 
     @Environment(\.theme) private var theme
 
@@ -9941,6 +10060,7 @@ private struct AgentActivityStepPill: View, Equatable {
             && lhs.step.isRunning == rhs.step.isRunning
             && lhs.step.failed == rhs.step.failed
             && lhs.step.durationText == rhs.step.durationText
+            && (lhs.onStopRunningStep != nil) == (rhs.onStopRunningStep != nil)
     }
 
     private var tint: Color {
@@ -9950,7 +10070,6 @@ private struct AgentActivityStepPill: View, Equatable {
 
     private var iconName: String {
         if step.failed { return "exclamationmark.circle.fill" }
-        if step.isRunning { return "clock.fill" }
         let title = step.title.lowercased()
         if title.contains("搜索") || title.contains("网页") || title.contains("browse") || title.contains("search") {
             return "globe"
@@ -9967,6 +10086,7 @@ private struct AgentActivityStepPill: View, Equatable {
         if title.contains("命令") || title.contains("脚本") || title.contains("shell") || title.contains("terminal") || title.contains("run") {
             return "terminal.fill"
         }
+        if step.isRunning { return "progress.indicator" }
         switch step.kind {
         case .file:
             return "doc.text"
@@ -9982,6 +10102,7 @@ private struct AgentActivityStepPill: View, Equatable {
     var body: some View {
         let fill = theme.surfaceContainerHighest.opacity(theme.isDark ? 0.22 : 0.58)
         let duration = step.durationText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let canStop = step.isRunning && onStopRunningStep != nil
 
         HStack(spacing: 8) {
             Image(systemName: iconName)
@@ -10003,9 +10124,27 @@ private struct AgentActivityStepPill: View, Equatable {
                     .monospacedDigit()
                     .lineLimit(1)
             }
+
+            if canStop {
+                Button {
+                    Haptics.play(.medium)
+                    onStopRunningStep?()
+                } label: {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(Color.red.opacity(theme.isDark ? 0.22 : 0.16))
+                            .frame(width: 17, height: 17)
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 7.5, weight: .bold))
+                            .foregroundStyle(Color.red)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("停止当前步骤")
+            }
         }
         .padding(.leading, 10)
-        .padding(.trailing, 12)
+        .padding(.trailing, canStop ? 8 : 12)
         .frame(height: 34)
         .background(fill, in: Capsule(style: .continuous))
         .overlay(

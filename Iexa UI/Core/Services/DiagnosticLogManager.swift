@@ -55,11 +55,31 @@ struct DiagnosticLogFile: Identifiable, Sendable {
 
 final class DiagnosticLogManager: @unchecked Sendable {
     static let shared = DiagnosticLogManager()
+    static let isEnabledDefaultsKey = "iexa.diagnosticLogsEnabled"
 
     private let logger = Logger(subsystem: "com.openui", category: "Diagnostic")
     private let storage = DiagnosticLogStorage()
 
     private init() {}
+
+    static var isEnabledPreference: Bool {
+        if UserDefaults.standard.object(forKey: isEnabledDefaultsKey) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: isEnabledDefaultsKey)
+    }
+
+    var isEnabled: Bool {
+        get { Self.isEnabledPreference }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.isEnabledDefaultsKey)
+            if newValue {
+                info("Diagnostic logging enabled", category: "Diagnostic")
+            } else {
+                storage.discardBuffer()
+            }
+        }
+    }
 
     var totalLogSize: Int64 { storage.totalLogSize }
     var logFileCount: Int { storage.logFileCount }
@@ -72,22 +92,30 @@ final class DiagnosticLogManager: @unchecked Sendable {
     }
 
     func debug(_ message: String, category: String = "General") {
-        storage.append(level: .debug, category: category, message: message)
+        if Self.isEnabledPreference {
+            storage.append(level: .debug, category: category, message: message)
+        }
         logger.debug("\(message)")
     }
 
     func info(_ message: String, category: String = "General") {
-        storage.append(level: .info, category: category, message: message)
+        if Self.isEnabledPreference {
+            storage.append(level: .info, category: category, message: message)
+        }
         logger.info("\(message)")
     }
 
     func warning(_ message: String, category: String = "General") {
-        storage.append(level: .warning, category: category, message: message)
+        if Self.isEnabledPreference {
+            storage.append(level: .warning, category: category, message: message)
+        }
         logger.warning("\(message)")
     }
 
     func error(_ message: String, category: String = "General") {
-        storage.append(level: .error, category: category, message: message)
+        if Self.isEnabledPreference {
+            storage.append(level: .error, category: category, message: message)
+        }
         logger.error("\(message)")
     }
 
@@ -287,6 +315,12 @@ private final class DiagnosticLogStorage: @unchecked Sendable {
         }
     }
 
+    func discardBuffer() {
+        queue.sync {
+            buffer.removeAll()
+        }
+    }
+
     private var logDirectory: URL {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("IexaDiagnosticLogs", isDirectory: true)
@@ -304,6 +338,10 @@ private final class DiagnosticLogStorage: @unchecked Sendable {
 
     private func flushBufferUnsafe() {
         guard !buffer.isEmpty else { return }
+        guard DiagnosticLogManager.isEnabledPreference else {
+            buffer.removeAll()
+            return
+        }
         ensureDirectoryExists()
 
         let text = buffer.joined(separator: "\n") + "\n"

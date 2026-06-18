@@ -105,7 +105,9 @@ extension MarkdownViewRepresentableBase {
         }
 
         if needsUpdate {
-            view.theme = theme
+            if view.theme != theme {
+                view.theme = theme
+            }
             view.setMarkdownManually(content)
             view.invalidateIntrinsicContentSize()
             coordinator.lastTheme = theme
