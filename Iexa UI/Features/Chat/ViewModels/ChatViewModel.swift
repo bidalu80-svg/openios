@@ -2400,6 +2400,7 @@ final class ChatViewModel {
         - Workspace `/mnt/iexa`; relative paths resolve there. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
         - Shell is Alpine BusyBox/ash. Install OS packages with `apk add --no-cache`; never use apt/brew/sudo/systemctl/macOS/Windows commands.
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
+        - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
         - Use `web_search` for live search, `browser_use` for bounded HTTP fetch/save/open-preview, `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
         - Website/app changes require a localhost preview: start `python3 -m http.server <port> --bind 127.0.0.1` or a framework dev server, verify it, run `iexa-open http://localhost:<port>/`, and give that URL.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed.
@@ -2736,6 +2737,7 @@ final class ChatViewModel {
         - Tools: \(toolNames). Compatibility aliases are accepted: `file_read`, `file_write`, `file_edit`, `shell_execute`, `browser_use`, `web_fetch`, `read_image`.
         - Every step needs a short user-language `tool_title`/`step_title`/`label`.
         - Prefer structured read/write/edit/patch/delete/list/glob/grep/verify/browser tools. Do not write source code with shell heredocs/redirection/echo/cat/tee/printf.
+        - Code that should be saved, edited, or run belongs in structured JSON (`write_files.code_lines`/`content_lines`, `edit_file`, `patch_file`) plus bounded verification, not in a normal Markdown code fence. Normal code fences are only for pure explanation with no Local Alpine operation.
         - Large outputs may provide `output_reference`; read that path only when the full content is needed.
         - Website/app changes require localhost preview: start a Python/static or framework dev server bound to `127.0.0.1`, verify it, run `iexa-open http://localhost:<port>/`, and give that exact URL.
         - Use one meaningful bounded step per turn, then wait for the returned observation. A write plus one direct verification may share a block if it validates the same change.
@@ -2763,7 +2765,7 @@ final class ChatViewModel {
             - If the user asks for rootfs/system/runtime dependencies, check the Alpine rootfs directly (`apk info`, `command -v`, version commands, `/usr/lib`, Python site-packages, pip list). Do not limit the answer to `/mnt/iexa` project files.
             - Treat imperative shorthand as local work in this mode: write/create/run/test/check/read/list/modify/change/replace/delete/rerun/continue and 写/创建/运行/跑/测试/检查/看下/读/改/换/删/再跑/继续 mean emit `iexa_alpine` when they refer to code, files, dependencies, runtime, terminal, or prior Local Alpine work.
             - If demo details are missing, choose safe defaults and execute: `example.com` or `example.org` for crawler URLs, `test.lua`/`main.cpp`/`simple_spider.py` for demo filenames, and small hello/test input data.
-            - If the user is asking a capability question, explanation, example, comparison, or "can this run" style question, answer normally and do not emit `iexa_alpine`.
+            - If the user is only asking a capability question, explanation, example, comparison, or "can this run" style question, and is not asking to create/save/modify/run local code/files, answer normally and do not emit `iexa_alpine`.
             - If the task depends on unknown current files, first get a small workspace listing, then continue from that observation.
             - If the task depends on compilers or packages, use one focused probe only when the toolchain has not already been observed.
             - Use the BusyBox/ash command dialect. Prefer structured wrappers (`list_dir`, `glob`, `grep`, `verify`) over raw `find`/`grep`; never use known GNU/bash-only patterns like `find -printf`, `grep -P`, Bash `[[ ... ]]`, `source`, or process substitution.
@@ -2936,6 +2938,7 @@ final class ChatViewModel {
         - If result output is present, answer from that output as the source of truth.
         - Follow controller_verdict: `needs_next_tool_*` means continue with exactly one new `iexa_alpine` block; `ready_for_final_summary` means stop tool use and summarize; `tool_running` means wait or report running status.
         - Missing `iexa_alpine` on a `needs_next_tool_*` state is invalid. Use the structured tools (`read_file`, `write_files`, `edit_file`, `patch_file`, `list_dir`, `glob`, `grep`, `verify`, `command`) instead of prose.
+        - On a `needs_next_tool_*` state, a normal Markdown code fence is not a tool call. If code needs to be written, edited, or run, put it inside the structured `iexa_alpine` JSON action.
         - If prior observations already prove a tool/package exists, do not repeat a generic environment probe. Move to the user's concrete task.
         - If the latest result shows the task is incomplete or failed, emit one next bounded `iexa_alpine` block to inspect, fix, or verify. Do not repeat the exact same command unless the output gives a clear reason.
         - Treat each tool turn as one ordered step. A structured write/edit plus one verification command is OK; do not pack multiple repair/run cycles into one block.
@@ -7406,6 +7409,20 @@ final class ChatViewModel {
     }
 
     private static func isLocalAlpineExplanationOnlyRequest(_ normalized: String) -> Bool {
+        let localOperationTerms = [
+            "写入", "写文件", "保存到", "保存为", "落盘",
+            "创建文件", "新建文件", "创建脚本", "生成脚本", "创建项目", "生成项目",
+            "运行", "执行", "跑一下", "跑一遍", "测试", "验证", "调试",
+            "修改", "修复", "修一下", "编辑", "替换", "删除",
+            "安装", "编译", "构建",
+            "write file", "save file", "create file", "generate file",
+            "create script", "generate script", "create project", "generate project",
+            "run ", "rerun", "execute", "test", "verify", "debug", "modify", "edit",
+            "fix", "repair", "replace", "delete", "install", "compile", "build"
+        ]
+        if containsAny(normalized, localOperationTerms) {
+            return false
+        }
         let explanationOnlyTerms = [
             "只解释", "解释一下", "讲解", "说明一下", "示例", "例子", "怎么写", "如何写",
             "只给命令", "给我命令",
@@ -21402,6 +21419,37 @@ final class ChatViewModel {
             }
             return
         }
+        let emittedLocalAlpineInstruction = !isFinalSummary && Self.contentContainsLocalAlpineInstruction(content)
+        if !isFinalSummary,
+           parentNeedsFollowUp,
+           !emittedLocalAlpineInstruction,
+           let parentResultId {
+            let retryCount = localAlpineContinuationRetryCounts[parentResultId] ?? 0
+            if retryCount < 1 {
+                localAlpineContinuationRetryCounts[parentResultId] = retryCount + 1
+                conversation?.messages.removeAll { $0.id == assistantMessageId }
+                conversation?.history.removeSubtree(rootId: assistantMessageId)
+                localAlpineContinuationParentIds.remove(parentResultId)
+                localAlpineFinishedContinuationMessageIds.remove(assistantMessageId)
+                cleanupStreaming()
+                await persistLocalConversationIfNeeded()
+                NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                scheduleLocalAlpineContinuationIfNeeded(after: parentResultId, forceContinue: true)
+                return
+            }
+            conversation?.messages.removeAll { $0.id == assistantMessageId }
+            conversation?.history.removeSubtree(rootId: assistantMessageId)
+            localAlpineAgentStopRequested = true
+            localAlpineContinuationTask = nil
+            cleanupStreaming()
+            appendLocalAlpineNoProgressStopMessage(
+                parentId: parentResultId,
+                reason: "模型连续没有给出结构化 `iexa_alpine` 工具步骤，而是返回了普通文本或代码块。"
+            )
+            await persistLocalConversationIfNeeded()
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            return
+        }
         guard !localAlpineFinishedContinuationMessageIds.contains(assistantMessageId) else {
             cleanupStreaming()
             return
@@ -21411,7 +21459,6 @@ final class ChatViewModel {
         let rawContent = isFinalSummary
             ? (visibleFinalSummaryContent ?? "")
             : content
-        let emittedLocalAlpineInstruction = !isFinalSummary && Self.contentContainsLocalAlpineInstruction(content)
         let doneDescription: String
         if isFinalSummary {
             doneDescription = "已整理本地回答"
@@ -21543,6 +21590,14 @@ final class ChatViewModel {
             return false
         }
         if let latestUserText,
+           localAlpineUserRequestNeedsNonInspectionFollowUp(latestUserText),
+           localAlpineObservationIsInspectionOnly(
+               toolCalls: toolCalls,
+               commandResults: commandResults
+           ) {
+            return true
+        }
+        if let latestUserText,
            isLocalAlpineGoalActionRequest(latestUserText),
            localAlpineResultIsOnlyPreflightOrQuestion(
                normalized,
@@ -21566,26 +21621,85 @@ final class ChatViewModel {
         let completed = toolCalls.filter { $0.phase == .result && !$0.failed }
         guard !completed.isEmpty else { return false }
         let toolNames = Set(completed.map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
-        if !toolNames.isDisjoint(with: ["verify", "verify_absent", "test", "compile", "build", "run", "run_script"]) {
-            return true
-        }
         let latestUserText = latestUserText ?? ""
-        if localAlpineUserRequestWantsDeletion(latestUserText),
-           toolNames.contains("delete_files") || toolNames.contains("delete_file") {
-            return true
-        }
         let commandText = commandResults.map { $0.command.lowercased() }.joined(separator: "\n")
-        if localAlpineCommandsContainGoalVerification(commandText) {
-            return true
-        }
-        if localAlpineUserRequestWantsModification(latestUserText),
-           !toolNames.isDisjoint(with: ["write_files", "write_file", "edit_file", "patch_file"]) {
+        let mutationToolNames: Set<String> = [
+            "write_files", "write_file", "file_write",
+            "edit_file", "file_edit", "patch_file",
+            "delete_files", "delete_file", "file_delete"
+        ]
+        let hasMutationTool = !toolNames.isDisjoint(with: mutationToolNames)
+            || commandResults.contains { localAlpineCommandMutatesState($0.command) }
+        if localAlpineUserRequestWantsModification(latestUserText)
+            || localAlpineUserRequestWantsDeletion(latestUserText) {
+            guard hasMutationTool else { return false }
             if localAlpineUserRequestWantsVerification(latestUserText) {
                 return localAlpineCommandsContainGoalVerification(commandText)
+                    || !toolNames.isDisjoint(with: ["verify", "verify_absent", "test", "compile", "build", "run", "run_script"])
             }
             return true
         }
+        if !toolNames.isDisjoint(with: ["verify", "verify_absent", "test", "compile", "build", "run", "run_script"]) {
+            return true
+        }
+        if localAlpineCommandsContainGoalVerification(commandText) {
+            return true
+        }
         return false
+    }
+
+    private static func localAlpineUserRequestNeedsNonInspectionFollowUp(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        if isLocalAlpineExecutionBlockedRequest(normalized)
+            || isLocalAlpineExplanationOnlyRequest(normalized)
+            || localAlpineUserRequestIsInspectionOnly(normalized) {
+            return false
+        }
+        if localAlpineUserRequestWantsModification(normalized)
+            || localAlpineUserRequestWantsDeletion(normalized)
+            || localAlpineUserRequestWantsVerification(normalized) {
+            return true
+        }
+        switch localAlpineIntent(forNormalized: normalized) {
+        case .explicitLocalAlpine, .shellCommand, .mutateLocalState,
+             .executeOrVerify, .setupDependency, .networkFetch, .generatedFile:
+            return true
+        case .inspectLocalState, .none:
+            return false
+        }
+    }
+
+    private static func localAlpineObservationIsInspectionOnly(
+        toolCalls: [LocalAlpineToolCall],
+        commandResults: [LocalAlpineAgentCommandResult]
+    ) -> Bool {
+        let completedToolNames = Set(
+            toolCalls
+                .filter { $0.phase == .result && !$0.failed }
+                .map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        )
+        if !completedToolNames.isEmpty {
+            let inspectionToolNames: Set<String> = [
+                "read_file", "read_files", "read", "file_read", "open_file", "cat",
+                "list_dir", "list", "ls", "file_list", "directory_list",
+                "glob", "find_files", "grep", "search_files"
+            ]
+            return completedToolNames.allSatisfy { inspectionToolNames.contains($0) }
+        }
+
+        let commandText = commandResults
+            .map { $0.command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        guard !commandText.isEmpty else { return false }
+        if commandResults.contains(where: { localAlpineCommandMutatesState($0.command) }) {
+            return false
+        }
+        if localAlpineCommandsContainGoalVerification(commandText) {
+            return false
+        }
+        return localAlpineCommandsAreInspectionOnly(commandText)
     }
 
     private static func isLocalAlpineGoalActionRequest(_ text: String) -> Bool {
@@ -21956,9 +22070,11 @@ final class ChatViewModel {
         - If it is `tool_running`, report that the local command is still running or ask whether to stop it.
         - `iexa_alpine` is a Markdown fence intercepted by the host app, not a provider function. Never say it does not exist.
         - Never ask the user to send back local output; the host app returns Local Alpine output automatically.
+        - If the controller needs another tool step, normal Markdown code fences are invalid. Code that should be saved, edited, or run must be inside structured `iexa_alpine` JSON (`write_files`, `edit_file`, `patch_file`, `verify`, or `command`).
+        - When summarizing source already read from Local Alpine, do not invent or reindent code as if it were exact. Use prose, identifiers, line numbers, exact short snippets from the observation, or clearly labeled illustrative snippets.
         - Use BusyBox/ash-compatible commands. Prefer `list_dir`, `glob`, `grep`, `verify`, and `browser_use` wrappers; if raw shell is necessary, avoid GNU/bash-only syntax such as `find -printf`, `grep -P`, `[[ ... ]]`, `source`, `mapfile`, and process substitution.
         - Keep visible text before a tool block empty or one short progress sentence.
-        - Do not paste prior command output, file contents, code, or large tables into visible prose. Use the latest observation as context and either call the next tool or give a concise final answer when the controller says the task is complete.
+        - Do not paste long prior command output, full file contents, large code blocks, or large tables into visible prose. Short explanatory snippets are allowed only when they clarify the issue and are not meant to be saved or run.
         [/Local Alpine continuation]
         """
         appendSystemInstruction(instruction, marker: "[Local Alpine continuation]", to: &messages)
@@ -21983,6 +22099,7 @@ final class ChatViewModel {
         - Emit exactly one fenced Markdown block with language `iexa_alpine`.
         - Do not ask for confirmation when the user already used imperative wording such as read, check, delete, modify, change, replace, run, rerun, test, or execute.
         - Use the full Local Alpine observation history supplied in the request as real tool-result context, including recent written files and executed commands.
+        - Do not replace the missing tool call with a normal Markdown code block. If the previous prose included code that should be saved, edited, or run, convert it to structured JSON fields.
         - For reads/checks, use `read_file`, `list_dir`, `grep`, `verify`, or bounded `command` as appropriate.
         - For deletes, use structured `delete_file`/`delete_files`, then verify absence in the same block.
         - For modification, read the relevant file if needed, then use `edit_file`, `patch_file`, or `write_files` and verify when the user asked to run/test.
@@ -22004,9 +22121,10 @@ final class ChatViewModel {
         - For script/project commands, say what ran, whether it succeeded, and the key output.
         - If files were created or changed, mention their paths.
         - If the command failed, explain the immediate error and the next fix path, but do not run another command until the user asks.
+        - When describing source code, prefer prose, identifiers, line numbers, and behavior. Short code examples are allowed only when they clarify the specific issue: quote exact snippets with indentation preserved from the Local Alpine observation, or label them as illustrative snippets. Keep them short.
         - Do not reproduce full command output, file contents, source code, HTML/CSS/JS, markdown tables, or long directory listings. If the output is long, mention only the important filenames/counts/errors and say that the detailed tool output is available in the step card.
         Keep it short and based only on the real Local Alpine output.
-        Always output at least one visible sentence. Do not output JSON, code fences, tool blocks, or protocol tags.
+        Always output at least one visible sentence. Do not output JSON tool instructions, `iexa_alpine` blocks, or protocol tags.
         [/Local Alpine final summary]
         """
         appendSystemInstruction(instruction, marker: "[Local Alpine final summary]", to: &messages)
