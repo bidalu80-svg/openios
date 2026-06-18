@@ -31,6 +31,11 @@ struct LocalAlpineCommandResult: Sendable {
     }
 }
 
+enum LocalAlpineCommandExecutionMode: Sendable {
+    case oneShot
+    case persistentAgent(sessionKey: String, timeoutSeconds: TimeInterval)
+}
+
 struct LocalAlpineFileSample: Sendable {
     let data: Data
     let fullSize: Int64?
@@ -187,6 +192,12 @@ enum LocalAlpineBackgroundExecution {
     private static func expire() {
         let interrupted = LocalAlpineTerminalService.shared.interruptRunningCommand()
         let interruptedText = interrupted ? "true" : "false"
+        Task {
+            let sessionInterrupted = await LocalAlpineTerminalService.shared.interruptPersistentAgentSessions()
+            let sessionInterruptedText = sessionInterrupted ? "true" : "false"
+            Logger(subsystem: "com.openui", category: "LocalAlpine")
+                .warning("Local Alpine persistent sessions expired; interrupt sent: \(sessionInterruptedText, privacy: .public)")
+        }
         Logger(subsystem: "com.openui", category: "LocalAlpine")
             .warning("Local Alpine background execution expired; interrupt sent: \(interruptedText, privacy: .public)")
         depth = 0
@@ -221,6 +232,13 @@ actor LocalAlpineTerminalService {
     private var nativeRuntimeStarted = false
     private var prewarmTask: Task<Void, Never>?
     private var lastPrewarmAttemptAt: Date?
+    private var persistentAgentSessions: [String: PersistentAgentSession] = [:]
+    private var persistentAgentBusyKeys = Set<String>()
+
+    private struct PersistentAgentSession {
+        let sessionID: Int
+        var lastUsedAt: Date
+    }
 
     static let environmentDiagnosticCommand = """
     printf '== Local Alpine ==\\n'
@@ -706,7 +724,8 @@ actor LocalAlpineTerminalService {
         command: String,
         cwd: String,
         stdinInput: String? = nil,
-        cwdIsRuntimePath: Bool = false
+        cwdIsRuntimePath: Bool = false,
+        executionMode: LocalAlpineCommandExecutionMode = .oneShot
     ) async -> LocalAlpineCommandResult {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -726,6 +745,17 @@ actor LocalAlpineTerminalService {
                     command: trimmed,
                     cwd: cwd
                 )
+            )
+        }
+
+        if case let .persistentAgent(sessionKey, timeoutSeconds) = executionMode {
+            return await executePersistentAgentCommand(
+                command: trimmed,
+                cwd: cwd,
+                stdinInput: stdinInput,
+                cwdIsRuntimePath: cwdIsRuntimePath,
+                sessionKey: sessionKey,
+                timeoutSeconds: timeoutSeconds
             )
         }
 
@@ -814,6 +844,229 @@ actor LocalAlpineTerminalService {
         )
         await LocalAlpineBackgroundExecution.finish()
         return commandResult
+    }
+
+    func interruptPersistentAgentSessions(sessionKey: String? = nil) -> Bool {
+        let keys: [String]
+        if let sessionKey {
+            keys = persistentAgentSessions.keys.filter { $0 == sessionKey }
+        } else {
+            keys = Array(persistentAgentSessions.keys)
+        }
+
+        var interrupted = false
+        for key in keys {
+            guard let session = persistentAgentSessions.removeValue(forKey: key) else { continue }
+            interrupted = LocalAlpineNativeRuntime.shared.interruptSession(sessionID: session.sessionID) || interrupted
+            interrupted = LocalAlpineNativeRuntime.shared.closeSession(sessionID: session.sessionID) || interrupted
+            persistentAgentBusyKeys.remove(key)
+        }
+        return interrupted
+    }
+
+    private func executePersistentAgentCommand(
+        command: String,
+        cwd: String,
+        stdinInput: String?,
+        cwdIsRuntimePath: Bool,
+        sessionKey: String,
+        timeoutSeconds: TimeInterval
+    ) async -> LocalAlpineCommandResult {
+        let normalizedSessionKey = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedSessionKey.isEmpty else {
+            return await execute(command: command, cwd: cwd, stdinInput: stdinInput, cwdIsRuntimePath: cwdIsRuntimePath)
+        }
+
+        guard await waitForPersistentAgentSlot(normalizedSessionKey) else {
+            return LocalAlpineCommandResult(
+                command: command,
+                output: "Local Alpine persistent shell was cancelled before this command started.",
+                exitCode: 130,
+                interactiveRequest: nil
+            )
+        }
+        defer { releasePersistentAgentSlot(normalizedSessionKey) }
+
+        let runtimeCWD = cwdIsRuntimePath
+            ? normalizedAbsoluteRuntimePath(cwd)
+            : normalizedRuntimePath(cwd)
+        let compatibleCommand = compatibilityCommand(for: command)
+        let bootstrappedCommand = bootstrappedShellCommand(for: compatibleCommand)
+        let runtimeCommand = stdinInput.map {
+            wrappedCommandForInteractiveInput(command: bootstrappedCommand, stdinInput: $0)
+        } ?? bootstrappedCommand
+        let materialized = await materializedRuntimeCommandIfNeeded(runtimeCommand)
+
+        await LocalAlpineBackgroundExecution.begin(reason: "agent-shell")
+        let result = await runPersistentAgentMaterializedCommand(
+            originalCommand: command,
+            materializedCommand: materialized.command,
+            runtimeCWD: runtimeCWD,
+            sessionKey: normalizedSessionKey,
+            timeoutSeconds: timeoutSeconds
+        )
+        if let cleanupPath = materialized.cleanupPath {
+            try? await deleteItem(path: cleanupPath)
+        }
+        await LocalAlpineBackgroundExecution.finish()
+        return result
+    }
+
+    private func waitForPersistentAgentSlot(_ sessionKey: String) async -> Bool {
+        while persistentAgentBusyKeys.contains(sessionKey) {
+            guard !Task.isCancelled else { return false }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        persistentAgentBusyKeys.insert(sessionKey)
+        return true
+    }
+
+    private func releasePersistentAgentSlot(_ sessionKey: String) {
+        persistentAgentBusyKeys.remove(sessionKey)
+    }
+
+    private func persistentAgentSessionID(sessionKey: String, runtimeCWD: String) async -> (sessionID: Int?, message: String?) {
+        if var existing = persistentAgentSessions[sessionKey] {
+            if LocalAlpineNativeRuntime.shared.writeSessionInput(sessionID: existing.sessionID, input: "") {
+                existing.lastUsedAt = Date()
+                persistentAgentSessions[sessionKey] = existing
+                return (existing.sessionID, nil)
+            }
+
+            _ = LocalAlpineNativeRuntime.shared.closeSession(sessionID: existing.sessionID)
+            persistentAgentSessions.removeValue(forKey: sessionKey)
+        }
+
+        let startResult = await startInteractiveSession(cwd: runtimeCWD, cwdIsRuntimePath: true)
+        guard let sessionID = startResult.sessionID else {
+            return (nil, startResult.message ?? "Local Alpine persistent shell could not be started.")
+        }
+
+        await configurePersistentAgentShell(sessionID: sessionID)
+        persistentAgentSessions[sessionKey] = PersistentAgentSession(sessionID: sessionID, lastUsedAt: Date())
+        return (sessionID, nil)
+    }
+
+    private func configurePersistentAgentShell(sessionID: Int) async {
+        _ = LocalAlpineNativeRuntime.shared.resizeSession(sessionID: sessionID, columns: 120, rows: 40)
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        _ = LocalAlpineNativeRuntime.shared.readSessionOutput(sessionID: sessionID)
+        _ = LocalAlpineNativeRuntime.shared.writeSessionInput(sessionID: sessionID, input: "stty -echo 2>/dev/null || true\nexport PS1=''\n")
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        _ = LocalAlpineNativeRuntime.shared.readSessionOutput(sessionID: sessionID)
+    }
+
+    private func runPersistentAgentMaterializedCommand(
+        originalCommand: String,
+        materializedCommand: String,
+        runtimeCWD: String,
+        sessionKey: String,
+        timeoutSeconds: TimeInterval
+    ) async -> LocalAlpineCommandResult {
+        let session = await persistentAgentSessionID(sessionKey: sessionKey, runtimeCWD: runtimeCWD)
+        guard let sessionID = session.sessionID else {
+            return LocalAlpineCommandResult(
+                command: originalCommand,
+                output: session.message ?? "Local Alpine persistent shell could not be started.",
+                exitCode: 126,
+                interactiveRequest: nil
+            )
+        }
+
+        let marker = "__IEXA_AGENT_DONE_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))__"
+        let markerPrefix = "\(marker):"
+        let envelope = persistentAgentCommandEnvelope(
+            materializedCommand: materializedCommand,
+            runtimeCWD: runtimeCWD,
+            markerPrefix: markerPrefix
+        )
+
+        guard LocalAlpineNativeRuntime.shared.writeSessionInput(sessionID: sessionID, input: envelope + "\n") else {
+            persistentAgentSessions.removeValue(forKey: sessionKey)
+            return LocalAlpineCommandResult(
+                command: originalCommand,
+                output: "Local Alpine persistent shell is not running.",
+                exitCode: 130,
+                interactiveRequest: nil
+            )
+        }
+
+        var rawOutput = ""
+        var openTargets = Set<String>()
+        var openRequests: [LocalAlpineOpenRequest] = []
+        let deadline = Date().addingTimeInterval(max(1, timeoutSeconds))
+
+        func commandResult(rawOutput: String, exitCode: Int?) -> LocalAlpineCommandResult {
+            let parsed = LocalAlpineOpenMarkerParser.extract(from: rawOutput)
+            for request in parsed.requests where openTargets.insert(request.target).inserted {
+                openRequests.append(request)
+            }
+            return LocalAlpineCommandResult(
+                command: originalCommand,
+                output: trimTrailingNewlines(parsed.cleaned.replacingOccurrences(of: "\u{0007}", with: "")),
+                exitCode: exitCode,
+                interactiveRequest: nil,
+                openRequests: openRequests
+            )
+        }
+
+        while Date() < deadline {
+            if Task.isCancelled {
+                _ = LocalAlpineNativeRuntime.shared.interruptSession(sessionID: sessionID)
+                _ = LocalAlpineNativeRuntime.shared.closeSession(sessionID: sessionID)
+                persistentAgentSessions.removeValue(forKey: sessionKey)
+                let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
+                return commandResult(rawOutput: parsed.rawOutput, exitCode: parsed.exitCode ?? 130)
+            }
+
+            let chunk = LocalAlpineNativeRuntime.shared.readSessionOutput(sessionID: sessionID)
+            if !chunk.isEmpty {
+                rawOutput += chunk
+                let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
+                if parsed.finished {
+                    if var stored = persistentAgentSessions[sessionKey] {
+                        stored.lastUsedAt = Date()
+                        persistentAgentSessions[sessionKey] = stored
+                    }
+                    return commandResult(rawOutput: parsed.rawOutput, exitCode: parsed.exitCode ?? 0)
+                }
+            } else if !LocalAlpineNativeRuntime.shared.writeSessionInput(sessionID: sessionID, input: "") {
+                persistentAgentSessions.removeValue(forKey: sessionKey)
+                let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
+                return commandResult(rawOutput: parsed.rawOutput, exitCode: parsed.exitCode ?? 130)
+            }
+            try? await Task.sleep(nanoseconds: 80_000_000)
+        }
+
+        _ = LocalAlpineNativeRuntime.shared.interruptSession(sessionID: sessionID)
+        _ = LocalAlpineNativeRuntime.shared.closeSession(sessionID: sessionID)
+        persistentAgentSessions.removeValue(forKey: sessionKey)
+        let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
+        let timedOutOutput = trimTrailingNewlines(parsed.rawOutput)
+        let suffix = "[Command timed out after \(Int(max(1, timeoutSeconds)))s]"
+        return commandResult(
+            rawOutput: timedOutOutput.isEmpty ? suffix : "\(timedOutOutput)\n\(suffix)",
+            exitCode: 124
+        )
+    }
+
+    private func persistentAgentCommandEnvelope(
+        materializedCommand: String,
+        runtimeCWD: String,
+        markerPrefix: String
+    ) -> String {
+        """
+        __iexa_agent_status=0
+        stty -echo 2>/dev/null || true
+        export PS1=''
+        if cd \(shellSingleQuoted(runtimeCWD)); then
+        \(materializedCommand)
+        __iexa_agent_status=$?
+        else
+        __iexa_agent_status=$?
+        fi
+        printf '\\n\(markerPrefix)%s\\n' "$__iexa_agent_status"
+        """
     }
 
     func executeStreaming(

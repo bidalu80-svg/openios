@@ -13,6 +13,7 @@ struct LocalAlpineTerminalAgentToolResult: Sendable {
 enum LocalAlpineTerminalAgentRunner {
     static func run(
         _ toolUse: LocalAlpineTerminalAgentToolUse,
+        persistentSessionKey: String? = nil,
         inputProvider: (@MainActor (LocalAlpineInteractiveRequest) async -> String?)? = nil,
         eventHandler: LocalAlpineToolEventHandler? = nil
     ) async -> LocalAlpineTerminalAgentToolResult {
@@ -26,6 +27,7 @@ enum LocalAlpineTerminalAgentRunner {
 
         let result = await LocalAlpineAgentService.shared.executeBlocks(
             in: executableContent,
+            persistentSessionKey: persistentSessionKey,
             inputProvider: inputProvider,
             eventHandler: eventHandler
         )

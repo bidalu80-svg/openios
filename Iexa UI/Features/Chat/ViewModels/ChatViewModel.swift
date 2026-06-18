@@ -8914,9 +8914,23 @@ final class ChatViewModel {
 
     private func interruptLocalAlpineCommand(reason: String) {
         let interrupted = LocalAlpineTerminalService.shared.interruptRunningCommand()
+        let persistentSessionKey = localAlpinePersistentSessionKey
+        Task {
+            let sessionInterrupted = await LocalAlpineTerminalService.shared.interruptPersistentAgentSessions(
+                sessionKey: persistentSessionKey
+            )
+            if sessionInterrupted {
+                self.logger.info("Local Alpine persistent session interrupted: \(reason, privacy: .public)")
+            }
+        }
         if interrupted {
             logger.info("Local Alpine command interrupted: \(reason, privacy: .public)")
         }
+    }
+
+    private var localAlpinePersistentSessionKey: String {
+        let chatId = conversationId ?? conversation?.id ?? sessionId
+        return "chat:\(chatId)"
     }
 
     private func formatDirectLocalAlpineOutput(command: String, result: LocalAlpineCommandResult) -> String {
@@ -12077,6 +12091,7 @@ final class ChatViewModel {
         let content = Self.localAlpineNativeToolEnvelopeContent(for: call)
         let toolResult = await LocalAlpineTerminalAgentRunner.run(
             .executableContent(content),
+            persistentSessionKey: localAlpinePersistentSessionKey,
             inputProvider: { request in
                 guard !Task.isCancelled else { return nil }
                 return await self.requestLocalAlpineInput(request)
@@ -20734,6 +20749,7 @@ final class ChatViewModel {
 
         let toolResult = await LocalAlpineTerminalAgentRunner.run(
             .executableContent(content),
+            persistentSessionKey: localAlpinePersistentSessionKey,
             inputProvider: { request in
                 guard !Task.isCancelled else { return nil }
                 return await self.requestLocalAlpineInput(request)

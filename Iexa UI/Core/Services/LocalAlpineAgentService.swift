@@ -815,6 +815,7 @@ actor LocalAlpineAgentService {
 
     func executeBlocks(
         in content: String,
+        persistentSessionKey: String? = nil,
         inputProvider: (@MainActor (LocalAlpineInteractiveRequest) async -> String?)? = nil,
         eventHandler: LocalAlpineToolEventHandler? = nil
     ) async -> LocalAlpineAgentResult {
@@ -856,6 +857,9 @@ actor LocalAlpineAgentService {
         var toolCalls: [LocalAlpineToolCall] = []
         var editedFilePaths = Set<String>()
         var stopRemainingCommands = false
+        let shellExecutionMode: LocalAlpineCommandExecutionMode = persistentSessionKey
+            .map { .persistentAgent(sessionKey: $0, timeoutSeconds: 900) }
+            ?? .oneShot
 
         lines.insert("Local Alpine 执行结果", at: 0)
         lines.append("环境：内置 Alpine Linux，工作目录默认 `/mnt/iexa`")
@@ -1159,7 +1163,8 @@ actor LocalAlpineAgentService {
                 }
                 var result = await LocalAlpineTerminalService.shared.execute(
                     command: commandToExecute,
-                    cwd: effectiveCWD
+                    cwd: effectiveCWD,
+                    executionMode: shellExecutionMode
                 )
                 openRequests.append(contentsOf: result.openRequests)
                 while let request = result.interactiveRequest {
@@ -1168,7 +1173,8 @@ actor LocalAlpineAgentService {
                         result = await LocalAlpineTerminalService.shared.execute(
                             command: request.command,
                             cwd: request.cwd,
-                            stdinInput: stdinInput
+                            stdinInput: stdinInput,
+                            executionMode: shellExecutionMode
                         )
                         openRequests.append(contentsOf: result.openRequests)
                     } else {
