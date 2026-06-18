@@ -1469,10 +1469,6 @@ actor LocalAlpineTerminalService {
         }
 
         socket_port_in_use() {
-          if command -v nc >/dev/null 2>&1; then
-            nc -z 127.0.0.1 "$1" >/dev/null 2>&1 && return 0
-            return 1
-          fi
           if [ -r /proc/net/tcp ]; then
             port_hex=$(printf '%04X' "$1" 2>/dev/null || true)
             if [ -n "$port_hex" ]; then
@@ -1482,6 +1478,14 @@ actor LocalAlpineTerminalService {
               fi
               return 1
             fi
+          fi
+          if command -v nc >/dev/null 2>&1; then
+            if command -v timeout >/dev/null 2>&1; then
+              timeout 1 nc -z -w 1 127.0.0.1 "$1" >/dev/null 2>&1 && return 0
+            else
+              nc -z -w 1 127.0.0.1 "$1" >/dev/null 2>&1 && return 0
+            fi
+            return 1
           fi
           return 2
         }
@@ -2154,6 +2158,10 @@ actor LocalAlpineTerminalService {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowercased = trimmed.lowercased()
 
+        if let previewCommand = managedPythonHTTPServerCommand(for: trimmed) {
+            return previewCommand
+        }
+
         if lowercased.hasPrefix("curl ") {
             let rest = trimmed.dropFirst("curl ".count).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !rest.isEmpty,
@@ -2179,6 +2187,148 @@ actor LocalAlpineTerminalService {
         return protectSlowNPMVersionChecks(in: rewriteApkNodeAlias(in: command))
     }
 
+    private func managedPythonHTTPServerCommand(for command: String) -> String? {
+        let pattern = #"(?i)\bpython(?:3(?:\.\d+)?)?\s+-m\s+http[.]server\b"#
+        guard command.range(of: pattern, options: .regularExpression) != nil else {
+            return nil
+        }
+        guard !hasStandaloneBackgroundAmpersand(command) else {
+            return nil
+        }
+
+        let port = pythonHTTPServerPort(in: command) ?? 8000
+        let url = "http://localhost:\(port)/"
+        let escapedCommand = shellSingleQuoted(command)
+        let escapedURL = shellSingleQuoted(url)
+        return """
+        __iexa_preview_command=\(escapedCommand)
+        __iexa_preview_port=\(port)
+        __iexa_preview_url=\(escapedURL)
+        __iexa_preview_runtime=/tmp/iexa-serve
+        mkdir -p "$__iexa_preview_runtime"
+        __iexa_preview_log="$__iexa_preview_runtime/$__iexa_preview_port.log"
+        __iexa_preview_pidfile="$__iexa_preview_runtime/$__iexa_preview_port.pid"
+        __iexa_preview_dirfile="$__iexa_preview_runtime/$__iexa_preview_port.dir"
+
+        __iexa_preview_port_ready() {
+          __iexa_port="$1"
+          if [ -r /proc/net/tcp ]; then
+            __iexa_hex=$(printf '%04X' "$__iexa_port" 2>/dev/null || true)
+            if [ -n "$__iexa_hex" ]; then
+              awk -v p=":$__iexa_hex" 'tolower($2) ~ tolower(p) && $4 == "0A" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp 2>/dev/null && return 0
+              [ -r /proc/net/tcp6 ] && awk -v p=":$__iexa_hex" 'tolower($2) ~ tolower(p) && $4 == "0A" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp6 2>/dev/null && return 0
+              return 1
+            fi
+          fi
+          if command -v nc >/dev/null 2>&1; then
+            if command -v timeout >/dev/null 2>&1; then
+              timeout 1 nc -z -w 1 127.0.0.1 "$__iexa_port" >/dev/null 2>&1 && return 0
+            else
+              nc -z -w 1 127.0.0.1 "$__iexa_port" >/dev/null 2>&1 && return 0
+            fi
+          fi
+          return 1
+        }
+
+        if __iexa_preview_port_ready "$__iexa_preview_port"; then
+          printf 'Iexa local preview server already running.\\n'
+          printf 'Preview URL: %s\\n' "$__iexa_preview_url"
+          iexa-open "$__iexa_preview_url" 2>/dev/null || {
+            __iexa_esc=$(printf '\\033')
+            __iexa_bel=$(printf '\\007')
+            printf '%s]1337;IexaOpenURL=%s%s\\n' "$__iexa_esc" "$__iexa_preview_url" "$__iexa_bel"
+          }
+          exit 0
+        fi
+
+        ( eval "$__iexa_preview_command" ) >"$__iexa_preview_log" 2>&1 &
+        __iexa_preview_pid=$!
+        printf '%s\\n' "$__iexa_preview_pid" > "$__iexa_preview_pidfile"
+        pwd > "$__iexa_preview_dirfile" 2>/dev/null || true
+
+        __iexa_attempt=0
+        while [ "$__iexa_attempt" -lt 30 ]; do
+          if ! kill -0 "$__iexa_preview_pid" 2>/dev/null; then
+            printf 'Iexa local preview server failed to start. Log: %s\\n' "$__iexa_preview_log" >&2
+            [ -f "$__iexa_preview_log" ] && tail -40 "$__iexa_preview_log" >&2
+            rm -f "$__iexa_preview_pidfile" "$__iexa_preview_dirfile"
+            exit 1
+          fi
+          __iexa_preview_port_ready "$__iexa_preview_port" && break
+          __iexa_attempt=$((__iexa_attempt + 1))
+          sleep 0.1 2>/dev/null || true
+        done
+
+        if __iexa_preview_port_ready "$__iexa_preview_port"; then
+          printf 'Iexa local preview server started.\\n'
+        else
+          printf 'Iexa local preview server is starting in background.\\n'
+        fi
+        printf 'PID: %s\\n' "$__iexa_preview_pid"
+        printf 'Log: %s\\n' "$__iexa_preview_log"
+        printf 'Preview URL: %s\\n' "$__iexa_preview_url"
+        iexa-open "$__iexa_preview_url" 2>/dev/null || {
+          __iexa_esc=$(printf '\\033')
+          __iexa_bel=$(printf '\\007')
+          printf '%s]1337;IexaOpenURL=%s%s\\n' "$__iexa_esc" "$__iexa_preview_url" "$__iexa_bel"
+        }
+        exit 0
+        """
+    }
+
+    private func pythonHTTPServerPort(in command: String) -> Int? {
+        let pattern = #"(?i)\bpython(?:3(?:\.\d+)?)?\s+-m\s+http[.]server(?:\s+([0-9]{2,5}))?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(command.startIndex..<command.endIndex, in: command)
+        guard let match = regex.firstMatch(in: command, range: range),
+              match.numberOfRanges > 1,
+              match.range(at: 1).location != NSNotFound,
+              let portRange = Range(match.range(at: 1), in: command),
+              let port = Int(command[portRange]),
+              (1...65_535).contains(port) else {
+            return nil
+        }
+        return port
+    }
+
+    private func hasStandaloneBackgroundAmpersand(_ command: String) -> Bool {
+        var escaped = false
+        var inSingleQuote = false
+        var inDoubleQuote = false
+        let characters = Array(command)
+
+        for index in characters.indices {
+            let character = characters[index]
+            if escaped {
+                escaped = false
+                continue
+            }
+            if character == "\\" {
+                escaped = true
+                continue
+            }
+            if character == "'", !inDoubleQuote {
+                inSingleQuote.toggle()
+                continue
+            }
+            if character == Character("\""), !inSingleQuote {
+                inDoubleQuote.toggle()
+                continue
+            }
+            guard character == "&", !inSingleQuote, !inDoubleQuote else {
+                continue
+            }
+            let previousIsAmpersand = index > characters.startIndex && characters[characters.index(before: index)] == "&"
+            let nextIndex = characters.index(after: index)
+            let nextIsAmpersand = nextIndex < characters.endIndex && characters[nextIndex] == "&"
+            if !previousIsAmpersand && !nextIsAmpersand {
+                return true
+            }
+        }
+
+        return false
+    }
+
     private func bootstrappedShellCommand(for command: String) -> String {
         let script = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !script.isEmpty else { return command }
@@ -2192,7 +2342,7 @@ actor LocalAlpineTerminalService {
         export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
-          _iexa_bootstrap_version=2026-06-18.1
+          _iexa_bootstrap_version=2026-06-18.2
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
           if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
             export PATH="$_iexa_bootstrap_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
@@ -2273,10 +2423,6 @@ actor LocalAlpineTerminalService {
           [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
         }
         socket_port_in_use() {
-          if command -v nc >/dev/null 2>&1; then
-            nc -z 127.0.0.1 "$1" >/dev/null 2>&1 && return 0
-            return 1
-          fi
           if [ -r /proc/net/tcp ]; then
             port_hex=$(printf '%04X' "$1" 2>/dev/null || true)
             if [ -n "$port_hex" ]; then
@@ -2284,6 +2430,14 @@ actor LocalAlpineTerminalService {
               [ -r /proc/net/tcp6 ] && awk -v p=":$port_hex" 'tolower($2) ~ tolower(p) && $4 == "0A" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp6 2>/dev/null && return 0
               return 1
             fi
+          fi
+          if command -v nc >/dev/null 2>&1; then
+            if command -v timeout >/dev/null 2>&1; then
+              timeout 1 nc -z -w 1 127.0.0.1 "$1" >/dev/null 2>&1 && return 0
+            else
+              nc -z -w 1 127.0.0.1 "$1" >/dev/null 2>&1 && return 0
+            fi
+            return 1
           fi
           return 2
         }

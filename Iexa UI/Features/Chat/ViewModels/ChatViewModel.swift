@@ -2527,7 +2527,7 @@ final class ChatViewModel {
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
         - Use `web_search` for live search, `browser_use` for bounded HTTP fetch/save/open-preview, `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
-        - Website/app changes require a localhost preview: start `python3 -m http.server <port> --bind 127.0.0.1` or a framework dev server, verify it, run `iexa-open http://localhost:<port>/`, and give that URL.
+        - Website/app changes require a localhost preview: for static files use `iexa-serve <directory-or-file> <port>`; for framework dev servers, start them in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed.
         - One meaningful step per decision. A write plus one direct verification may share a step when validating the same change. Stop when the tool result completes the user goal.
         - iOS background time is limited; keep long jobs resumable and save progress/results under `/mnt/iexa`.
@@ -2864,7 +2864,7 @@ final class ChatViewModel {
         - Prefer structured read/write/edit/patch/delete/list/glob/grep/verify/browser tools. Do not write source code with shell heredocs/redirection/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured JSON (`write_files.code_lines`/`content_lines`, `edit_file`, `patch_file`) plus bounded verification, not in a normal Markdown code fence. Normal code fences are only for pure explanation with no Local Alpine operation.
         - Large outputs may provide `output_reference`; read that path only when the full content is needed.
-        - Website/app changes require localhost preview: start a Python/static or framework dev server bound to `127.0.0.1`, verify it, run `iexa-open http://localhost:<port>/`, and give that exact URL.
+        - Website/app changes require localhost preview: for static files use `iexa-serve <directory-or-file> <port>`; for framework dev servers, start them in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that exact URL. Never run a foreground long-lived server as a normal shell step.
         - Use one meaningful bounded step per turn, then wait for the returned observation. A write plus one direct verification may share a block if it validates the same change.
         - When emitting a tool block, do not append guessed stdout, success claims, file contents, or a final summary after it.
         """
