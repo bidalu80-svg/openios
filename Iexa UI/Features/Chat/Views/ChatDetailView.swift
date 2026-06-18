@@ -149,6 +149,21 @@ private struct AgentActivityStep: Identifiable, Hashable {
     }
 }
 
+private struct LocalAlpineInstructionSpan {
+    let range: Range<String.Index>
+    let body: String
+}
+
+private struct OrderedAgentTranscriptBlock: Identifiable {
+    enum Content {
+        case text(String)
+        case steps(AgentActivityItem)
+    }
+
+    let id: String
+    let content: Content
+}
+
 private struct AgentActivityItem: Identifiable, Hashable {
     private static let uiOutputPreviewLimit = 700
     private static let floatingOutputPreviewLimit = 480
@@ -370,6 +385,37 @@ private struct AgentActivityItem: Identifiable, Hashable {
             commandResults: [],
             toolCalls: [],
             steps: limitedSteps
+        )
+    }
+
+    func retainingSteps(_ retainedSteps: [AgentActivityStep], idSuffix: String) -> AgentActivityItem? {
+        guard !retainedSteps.isEmpty else { return nil }
+        let stepIds = Set(retainedSteps.map(\.id))
+        let retainedToolCalls = toolCalls.filter { stepIds.contains("tool-\($0.id)") }
+        let retainedFiles = retainedSteps.compactMap(\.file)
+        let retainedCommandCount = retainedSteps.filter { step in
+            step.kind == .command
+                || step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }.count
+        let retainedFileCount = retainedSteps.filter { step in
+            step.kind == .file || step.file != nil
+        }.count
+        let retainedSummary = retainedSteps.last(where: { $0.isRunning })?.title
+            ?? retainedSteps.last?.title
+            ?? summary
+
+        return AgentActivityItem(
+            id: "\(id)::\(idSuffix)",
+            timestamp: timestamp,
+            isStreaming: isStreaming && retainedSteps.contains { $0.isRunning },
+            summary: retainedSummary,
+            fileCount: retainedFileCount,
+            commandCount: retainedCommandCount,
+            hasFailure: retainedSteps.contains { $0.failed },
+            writtenFiles: retainedFiles,
+            commandResults: [],
+            toolCalls: retainedToolCalls,
+            steps: retainedSteps
         )
     }
 
@@ -1701,7 +1747,6 @@ struct ChatDetailView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
 
-    private static let agentFloatingPreviewStepLimit = 24
     private let logger = Logger(subsystem: "com.openui", category: "ChatDetailView")
 
     private let initialConversationId: String?
@@ -1991,14 +2036,10 @@ struct ChatDetailView: View {
 
     private func agentActivity(for message: ChatMessage) -> AgentActivityItem? {
         if message.metadata?["iexa_local_alpine_final_summary"] != nil {
-            return mergedLocalAlpineTurnActivity(through: message)
+            return nil
         }
         if isLocalAlpineResultMessage(message) {
-            let directItem = activityItem(for: message)
-            if isMessageVisuallyStreaming(message) {
-                return directItem
-            }
-            return mergedLocalAlpineTurnActivity(through: message) ?? directItem
+            return activityItem(for: message)
         }
         return activityItem(for: message)
     }
@@ -2158,41 +2199,6 @@ struct ChatDetailView: View {
         return trimmed
     }
 
-    private func mergedLocalAlpineTurnActivity(through message: ChatMessage) -> AgentActivityItem? {
-        guard let endIndex = viewModel.messages.firstIndex(where: { $0.id == message.id }) else {
-            return nil
-        }
-        let endExclusive: Array<ChatMessage>.Index = isLocalAlpineResultMessage(message)
-            ? viewModel.messages.index(after: endIndex)
-            : endIndex
-        let priorMessages = viewModel.messages[..<endExclusive]
-        let lastUserIndex = priorMessages.lastIndex(where: { $0.role == .user })
-        let startIndex = lastUserIndex.map { viewModel.messages.index(after: $0) } ?? viewModel.messages.startIndex
-        guard startIndex < endExclusive else { return nil }
-
-        let cacheKey = "merged-local-alpine-turn::\(message.id)"
-        let signature = mergedLocalAlpineTurnActivitySignature(
-            messages: viewModel.messages[startIndex..<endExclusive]
-        )
-        if let cached = agentActivityCache.lookup(messageId: cacheKey, signature: signature) {
-            return cached.item
-        }
-
-        let turnItems = viewModel.messages[startIndex..<endExclusive]
-            .compactMap { activityItem(for: $0) }
-        let item = AgentActivityItem.mergedTurn(id: "inline-\(message.id)", items: turnItems)
-        agentActivityCache.store(messageId: cacheKey, signature: signature, item: item)
-        return item
-    }
-
-    private func mergedLocalAlpineTurnActivitySignature(messages: ArraySlice<ChatMessage>) -> Int {
-        var signature = messages.count &* 31
-        for message in messages where AgentActivityItem.isActivityMessage(message) {
-            signature &+= agentActivityCacheSignature(for: message)
-        }
-        return signature
-    }
-
     private func hasLaterLocalAlpineTurnMessage(after message: ChatMessage) -> Bool {
         guard let index = viewModel.messages.firstIndex(where: { $0.id == message.id }) else {
             return false
@@ -2319,7 +2325,7 @@ struct ChatDetailView: View {
            !hasActiveAgentFloatingActivity {
             return
         }
-        agentFloatingActivitySnapshot = item.limitingSteps(to: Self.agentFloatingPreviewStepLimit)
+        agentFloatingActivitySnapshot = item
     }
 
     private func handleAgentFloatingLiveToolNotification(_ notification: Notification) {
@@ -2338,7 +2344,7 @@ struct ChatDetailView: View {
             messageId: messageId,
             toolCalls: calls,
             liveStatus: status
-        )?.limitingSteps(to: Self.agentFloatingPreviewStepLimit),
+        ),
               item.hasConcreteSteps else {
             return
         }
@@ -2509,17 +2515,17 @@ struct ChatDetailView: View {
             return !hasVisibleCleanedAssistantText() && !hasRenderableAgentActivityCached()
         }
         if isLocalAlpineResultMessage(message) {
-            if context.visibleFinalSummaryAfter.contains(message.id) {
-                return true
-            }
-            if context.laterLocalAlpineTurnMessageAfter.contains(message.id) {
-                return true
-            }
             let hasVisibleActivity = messageHasConcreteActivityMetadata(message)
                 || !viewModel.localAlpineLiveToolCalls(for: message.id).isEmpty
                 || viewModel.localAlpineLiveToolStatus(for: message.id) != nil
             if hasVisibleActivity {
                 return false
+            }
+            if context.visibleFinalSummaryAfter.contains(message.id) {
+                return true
+            }
+            if context.laterLocalAlpineTurnMessageAfter.contains(message.id) {
+                return true
             }
             if isMessageVisuallyStreaming(message) {
                 return false
@@ -2618,6 +2624,203 @@ struct ChatDetailView: View {
             || action == "browser_web_search"
             || action == "get_readable"
             || action.contains("readable")
+    }
+
+    private func orderedLocalAlpineTranscriptBlocks(
+        for message: ChatMessage,
+        activityItem: AgentActivityItem?
+    ) -> [OrderedAgentTranscriptBlock]? {
+        guard message.role == .assistant,
+              !isMessageVisuallyStreaming(message),
+              !isLocalAlpineResultMessage(message),
+              let activityItem,
+              activityItem.hasConcreteSteps,
+              !activityItem.hasOnlyWebSearchStatusSteps else {
+            return nil
+        }
+
+        let spans = localAlpineInstructionSpans(in: message.content)
+        guard !spans.isEmpty else { return nil }
+
+        let stepGroups = localAlpineStepGroups(activityItem.steps, for: spans)
+        var blocks: [OrderedAgentTranscriptBlock] = []
+        var cursor = message.content.startIndex
+
+        func appendTextBlock(_ rawText: String, ordinal: Int) {
+            let visible = stripNativeToolProtocolBlocks(
+                from: LocalAlpineAgentService.visibleContent(from: rawText)
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !visible.isEmpty,
+                  visible != "正在准备本地执行，结果会自动回来。" else {
+                return
+            }
+            blocks.append(
+                OrderedAgentTranscriptBlock(
+                    id: "\(message.id)-ordered-text-\(ordinal)",
+                    content: .text(visible)
+                )
+            )
+        }
+
+        for (index, span) in spans.enumerated() {
+            if cursor < span.range.lowerBound {
+                appendTextBlock(String(message.content[cursor..<span.range.lowerBound]), ordinal: blocks.count)
+            }
+            if stepGroups.indices.contains(index),
+               let item = activityItem.retainingSteps(stepGroups[index], idSuffix: "ordered-\(index)") {
+                blocks.append(
+                    OrderedAgentTranscriptBlock(
+                        id: "\(message.id)-ordered-steps-\(index)",
+                        content: .steps(item)
+                    )
+                )
+            }
+            cursor = span.range.upperBound
+        }
+
+        if cursor < message.content.endIndex {
+            appendTextBlock(String(message.content[cursor..<message.content.endIndex]), ordinal: blocks.count)
+        }
+
+        let hasText = blocks.contains { block in
+            if case .text = block.content { return true }
+            return false
+        }
+        let hasSteps = blocks.contains { block in
+            if case .steps = block.content { return true }
+            return false
+        }
+        guard hasText && hasSteps else { return nil }
+        return blocks
+    }
+
+    private func localAlpineInstructionSpans(in content: String) -> [LocalAlpineInstructionSpan] {
+        guard content.range(of: "iexa_alpine", options: .caseInsensitive) != nil
+                || content.range(of: "local_alpine_exec", options: .caseInsensitive) != nil else {
+            return []
+        }
+
+        let nsContent = content as NSString
+        let fullRange = NSRange(location: 0, length: nsContent.length)
+        var spans: [LocalAlpineInstructionSpan] = []
+
+        func appendSpan(range: NSRange, body: String) {
+            guard range.location != NSNotFound,
+                  range.length > 0,
+                  let swiftRange = Range(range, in: content) else {
+                return
+            }
+            spans.append(LocalAlpineInstructionSpan(range: swiftRange, body: body))
+        }
+
+        if let fenceRegex = try? NSRegularExpression(
+            pattern: #"```([^\n`]*)(?:\n([\s\S]*?))?```"#,
+            options: [.caseInsensitive]
+        ) {
+            for match in fenceRegex.matches(in: content, range: fullRange) {
+                let info = match.numberOfRanges > 1 && match.range(at: 1).location != NSNotFound
+                    ? nsContent.substring(with: match.range(at: 1))
+                    : ""
+                let body = match.numberOfRanges > 2 && match.range(at: 2).location != NSNotFound
+                    ? nsContent.substring(with: match.range(at: 2))
+                    : ""
+                let lowerInfo = info.lowercased()
+                let lowerBody = body.lowercased()
+                if lowerInfo.contains("iexa_alpine")
+                    || lowerInfo.contains("local_alpine_exec")
+                    || lowerBody.contains("\"iexa_alpine\"")
+                    || lowerBody.contains("\"local_alpine_exec\"") {
+                    appendSpan(range: match.range, body: body)
+                }
+            }
+        }
+
+        for pattern in [
+            #"<iexa_alpine>([\s\S]*?)</iexa_alpine>"#,
+            #"<local_alpine_exec>([\s\S]*?)</local_alpine_exec>"#
+        ] {
+            guard let tagRegex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                continue
+            }
+            for match in tagRegex.matches(in: content, range: fullRange) where match.numberOfRanges > 1 {
+                let bodyRange = match.range(at: 1)
+                let body = bodyRange.location != NSNotFound ? nsContent.substring(with: bodyRange) : ""
+                appendSpan(range: match.range, body: body)
+            }
+        }
+
+        var filtered: [LocalAlpineInstructionSpan] = []
+        for span in spans.sorted(by: { $0.range.lowerBound < $1.range.lowerBound }) {
+            if let previous = filtered.last,
+               span.range.lowerBound < previous.range.upperBound {
+                continue
+            }
+            filtered.append(span)
+        }
+        return filtered
+    }
+
+    private func localAlpineStepGroups(
+        _ steps: [AgentActivityStep],
+        for spans: [LocalAlpineInstructionSpan]
+    ) -> [[AgentActivityStep]] {
+        guard !spans.isEmpty else { return [] }
+        guard spans.count > 1 else { return [steps] }
+
+        let normalizedBodies = spans.map { normalizedLocalAlpineMatchText($0.body) }
+        var matchedGroups = Array(repeating: [AgentActivityStep](), count: spans.count)
+        var matchedCount = 0
+
+        for step in steps {
+            if let index = normalizedBodies.firstIndex(where: { localAlpineStep(step, matchesInstructionBody: $0) }) {
+                matchedGroups[index].append(step)
+                matchedCount += 1
+            }
+        }
+        if matchedCount == steps.count {
+            return matchedGroups
+        }
+
+        var groups = Array(repeating: [AgentActivityStep](), count: spans.count)
+        var cursor = 0
+        for index in spans.indices {
+            let remainingSteps = steps.count - cursor
+            let remainingGroups = spans.count - index
+            guard remainingSteps > 0 else { break }
+            let count = index == spans.count - 1
+                ? remainingSteps
+                : max(1, (remainingSteps + remainingGroups - 1) / remainingGroups)
+            let end = min(steps.count, cursor + count)
+            groups[index] = Array(steps[cursor..<end])
+            cursor = end
+        }
+        return groups
+    }
+
+    private func localAlpineStep(
+        _ step: AgentActivityStep,
+        matchesInstructionBody body: String
+    ) -> Bool {
+        guard !body.isEmpty else { return false }
+        var candidates = [
+            step.command,
+            step.detail,
+            step.file?.path,
+            step.file?.fileName
+        ].compactMap { $0 }
+        candidates.append(contentsOf: step.filePaths)
+        return candidates.contains { candidate in
+            let normalized = normalizedLocalAlpineMatchText(candidate)
+            return normalized.count >= 4 && body.contains(normalized)
+        }
+    }
+
+    private func normalizedLocalAlpineMatchText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
     }
 
     private func contentContainsLocalAlpineInstruction(_ content: String) -> Bool {
@@ -3399,7 +3602,6 @@ struct ChatDetailView: View {
                 AgentStepFloatingBarHost(
                     conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
                     fallbackItem: agentFloatingActivitySnapshot,
-                    stepLimit: Self.agentFloatingPreviewStepLimit,
                     onPreviewTap: { item, index in
                         openAgentFloatingPreview(item: item, initialIndex: index)
                     }
@@ -4203,6 +4405,10 @@ struct ChatDetailView: View {
         let waitingUIIsDelayed = shouldDelayWaitingUI(for: message)
         let rowAgentActivity = AgentActivityItem.isActivityMessage(message) ? agentActivity(for: message) : nil
         let suppressAssistantBubble = shouldSuppressAssistantBubbleForActivityParent(message, activityItem: rowAgentActivity)
+        let orderedAgentBlocks = orderedLocalAlpineTranscriptBlocks(
+            for: message,
+            activityItem: rowAgentActivity
+        )
         let isLatestUserMessage = message.role == .user
             && message.id == latestUserMessageId
 
@@ -4221,26 +4427,31 @@ struct ChatDetailView: View {
                     .userAttachmentReveal(enabled: isLatestUserMessage)
             }
 
-            if message.role == .assistant {
-                agentStepPreview(for: message, fallbackItem: rowAgentActivity)
-            }
+            if message.role == .assistant,
+               let orderedAgentBlocks {
+                orderedAgentTranscriptView(for: message, blocks: orderedAgentBlocks)
+            } else {
+                if message.role == .assistant {
+                    agentStepPreview(for: message, fallbackItem: rowAgentActivity)
+                }
 
-            // ── Streaming status indicators ──
-            if message.role == .assistant
-                && !waitingUIIsDelayed
-                && !isLocalAlpineResultMessage(message)
-                && !hasAgentToolPreview(for: message, activityItem: rowAgentActivity)
-                && !messageHasProcessOnlyStatus(message) {
-                IsolatedStreamingStatus(
-                    streamingStore: viewModel.streamingStore,
-                    message: message
-                )
-            }
+                // ── Streaming status indicators ──
+                if message.role == .assistant
+                    && !waitingUIIsDelayed
+                    && !isLocalAlpineResultMessage(message)
+                    && !hasAgentToolPreview(for: message, activityItem: rowAgentActivity)
+                    && !messageHasProcessOnlyStatus(message) {
+                    IsolatedStreamingStatus(
+                        streamingStore: viewModel.streamingStore,
+                        message: message
+                    )
+                }
 
-            // ── Message bubble / content ──
-            if !userTextIsEmpty && !waitingUIIsDelayed && !suppressAssistantBubble {
-                messageBubble(for: message, isLastAssistant: isLastAssistant, activityItem: rowAgentActivity)
-                    .transition(.opacity)
+                // ── Message bubble / content ──
+                if !userTextIsEmpty && !waitingUIIsDelayed && !suppressAssistantBubble {
+                    messageBubble(for: message, isLastAssistant: isLastAssistant, activityItem: rowAgentActivity)
+                        .transition(.opacity)
+                }
             }
 
             // ── Tool-generated images ──
@@ -4383,6 +4594,58 @@ struct ChatDetailView: View {
     }
 
     // MARK: - Message Bubble
+
+    @ViewBuilder
+    private func orderedAgentTranscriptView(
+        for message: ChatMessage,
+        blocks: [OrderedAgentTranscriptBlock]
+    ) -> some View {
+        let lastTextBlockId = blocks.reversed().first { block in
+            if case .text = block.content { return true }
+            return false
+        }?.id
+
+        ForEach(blocks) { block in
+            switch block.content {
+            case .text(let content):
+                assistantTextBubble(
+                    for: message,
+                    content: content,
+                    includeMessagePayload: block.id == lastTextBlockId
+                )
+                .transition(.opacity)
+            case .steps(let item):
+                AgentInlineStepsView(item: item)
+                    .padding(.horizontal, Spacing.screenPadding)
+                    .padding(.top, Spacing.xs)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func assistantTextBubble(
+        for message: ChatMessage,
+        content: String,
+        includeMessagePayload: Bool
+    ) -> some View {
+        ChatMessageBubble(
+            role: .assistant,
+            showTimestamp: activeActionMessageId == message.id,
+            timestamp: message.timestamp
+        ) {
+            AssistantMessageContent(
+                content: content,
+                isStreaming: false,
+                messageEmbeds: includeMessagePayload ? message.embeds : [],
+                localReasoningContent: includeMessagePayload ? message.metadata?["iexa_local_reasoning_content"] : nil,
+                localReasoningDone: includeMessagePayload ? (message.metadata?["iexa_local_reasoning_done"] == "true") : nil,
+                localStructuredPartsJSON: includeMessagePayload ? message.metadata?["iexa_local_content_parts"] : nil,
+                authToken: viewModel.serverAuthToken,
+                serverBaseURL: viewModel.serverBaseURL,
+                apiClient: dependencies.apiClient
+            )
+        }
+    }
 
     @ViewBuilder
     private func messageBubble(for message: ChatMessage, isLastAssistant: Bool, activityItem: AgentActivityItem? = nil) -> some View {
@@ -8998,13 +9261,10 @@ private struct AgentInlineStepsView: View {
 private struct AgentStepFloatingBarHost: View {
     let conversationId: String?
     let fallbackItem: AgentActivityItem?
-    let stepLimit: Int
     let onPreviewTap: (AgentActivityItem, Int) -> Void
 
     private var displayItem: AgentActivityItem? {
-        fallbackItem?.hasConcreteSteps == true
-            ? fallbackItem?.limitingSteps(to: stepLimit)
-            : nil
+        fallbackItem?.hasConcreteSteps == true ? fallbackItem : nil
     }
 
     var body: some View {
@@ -9020,6 +9280,16 @@ private struct AgentStepFloatingBarHost: View {
             }
         }
     }
+}
+
+private enum AgentStepFloatingMetrics {
+    static let previewSize = CGSize(width: 100, height: 65)
+    static let previewCornerRadius: CGFloat = 10
+    static let previewOffset = CGSize(width: 0, height: 0)
+    static let barHeight: CGFloat = 40
+    static let barCornerRadius: CGFloat = 15
+    static let barLeadingInset: CGFloat = 118
+    static let layoutHeight: CGFloat = 46
 }
 
 private struct AgentStepFloatingBar: View {
@@ -9192,19 +9462,19 @@ private struct AgentStepFloatingBar: View {
             Spacer(minLength: 2)
             pageControls
         }
-        .padding(.leading, 68)
+        .padding(.leading, AgentStepFloatingMetrics.barLeadingInset)
         .padding(.trailing, 8)
         .padding(.vertical, 3)
-        .frame(height: 40, alignment: .center)
+        .frame(height: AgentStepFloatingMetrics.barHeight, alignment: .center)
         .frame(maxWidth: .infinity)
         .background(barFill)
-        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: AgentStepFloatingMetrics.barCornerRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
+            RoundedRectangle(cornerRadius: AgentStepFloatingMetrics.barCornerRadius, style: .continuous)
                 .strokeBorder(barStroke, lineWidth: 0.8)
         )
         .shadow(color: barShadow, radius: 7, x: 0, y: 3)
-        .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous)))
+        .contentShape(RoundedRectangle(cornerRadius: AgentStepFloatingMetrics.barCornerRadius, style: .continuous)))
     }
 
     private var previewCardButton: AnyView {
@@ -9218,12 +9488,19 @@ private struct AgentStepFloatingBar: View {
                     previewText: previewText,
                     thumbnailReference: previewThumbnailReference
                 )
-                .frame(width: 64, height: 36, alignment: .topLeading)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .frame(
+                    width: AgentStepFloatingMetrics.previewSize.width,
+                    height: AgentStepFloatingMetrics.previewSize.height,
+                    alignment: .topLeading
+                )
+                .clipShape(RoundedRectangle(cornerRadius: AgentStepFloatingMetrics.previewCornerRadius, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: AgentStepFloatingMetrics.previewCornerRadius, style: .continuous))
             }
             .buttonStyle(.plain)
-            .offset(x: 6, y: -6)
+            .offset(
+                x: AgentStepFloatingMetrics.previewOffset.width,
+                y: AgentStepFloatingMetrics.previewOffset.height
+            )
         )
     }
 
@@ -9269,7 +9546,7 @@ private struct AgentStepFloatingBarLayout: View {
                 floatingBarBody
                 previewCardButton
             }
-            .frame(height: 46, alignment: .bottom)
+            .frame(height: AgentStepFloatingMetrics.layoutHeight, alignment: .bottom)
             .onAppear {
                 selectedIndex = syncedIndex
             }
@@ -9293,8 +9570,8 @@ private struct AgentToolPreviewPop: View {
     let previewText: String
     let thumbnailReference: String?
 
-    private let previewSize = CGSize(width: 64, height: 36)
-    private let cornerRadius: CGFloat = 8
+    private let previewSize = AgentStepFloatingMetrics.previewSize
+    private let cornerRadius = AgentStepFloatingMetrics.previewCornerRadius
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -9322,25 +9599,25 @@ private struct AgentToolPreviewPop: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(previewTitle)
-                    .font(.system(size: 6.2, weight: .bold, design: .monospaced))
+                    .font(.system(size: 7.0, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.88))
                     .lineLimit(1)
 
                 Text(previewSubtitle)
-                    .font(.system(size: 5.3, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 6.0, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.66))
                     .lineLimit(1)
 
                 if thumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                     Text(previewText)
-                        .font(.system(size: 5.4, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 6.0, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Color(red: 0.30, green: 0.63, blue: 1.0))
                         .lineLimit(2)
                         .truncationMode(.tail)
                 }
             }
-            .padding(.horizontal, 5)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
         }
         .frame(width: previewSize.width, height: previewSize.height, alignment: .topLeading)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
