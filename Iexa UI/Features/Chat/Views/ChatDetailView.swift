@@ -2397,6 +2397,21 @@ struct ChatDetailView: View {
         hideAgentFloatingBarForKeyboard
     }
 
+    private var agentFloatingDisplayItem: AgentActivityItem? {
+        let windowItem = agentActivityWindowPreview(includeInactive: true)
+        if let windowItem,
+           let snapshot = agentFloatingActivitySnapshot {
+            if windowItem.steps.count >= snapshot.steps.count {
+                return windowItem
+            }
+            return AgentActivityItem.mergedTurn(
+                id: windowItem.id,
+                items: [windowItem, snapshot]
+            ) ?? windowItem
+        }
+        return windowItem ?? agentFloatingActivitySnapshot
+    }
+
     private func refreshAgentFloatingActivitySnapshotFromLatestMessage() {
         guard !keyboard.isVisible,
               !hideAgentFloatingBarForKeyboard,
@@ -3745,7 +3760,7 @@ struct ChatDetailView: View {
             if !shouldHideAgentFloatingBarForKeyboard {
                 AgentStepFloatingBarHost(
                     conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
-                    fallbackItem: agentFloatingActivitySnapshot,
+                    fallbackItem: agentFloatingDisplayItem,
                     onPreviewTap: { item, index in
                         openAgentFloatingPreview(item: item, initialIndex: index)
                     }
