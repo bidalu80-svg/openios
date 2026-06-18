@@ -1956,13 +1956,14 @@ struct ChatDetailView: View {
             signature &+= Self.lightweightTranscriptTextSignature(call.browserURL ?? "")
         }
         if let liveStatus {
-            let statusText = [
+            let statusFragments: [String?] = [
                 liveStatus.action,
                 liveStatus.status,
                 liveStatus.description,
                 liveStatus.query,
                 liveStatus.queries.joined(separator: " ")
             ]
+            let statusText = statusFragments
                 .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
                 .joined(separator: " ")
@@ -2601,7 +2602,7 @@ struct ChatDetailView: View {
 
     private func localAssistantPreviewTarget(for message: ChatMessage) -> String? {
         guard message.role == .assistant || message.role == .system else { return nil }
-        let candidates = [
+        let candidates: [String?] = [
             assistantContentOverride[message.id],
             assistantContentOverrideForActivityParent(message, activityItem: nil),
             localAlpineFallbackContent(for: message),
@@ -2622,39 +2623,6 @@ struct ChatDetailView: View {
         let port = components.port.map { ":\($0)" } ?? ""
         let path = components.path.isEmpty ? "/" : components.path
         return "\(host)\(port)\(path)"
-    }
-
-    private func assistantLocalPreviewButton(target: String) -> some View {
-        Button {
-            if openPreviewURLString(target) {
-                Haptics.play(.light)
-            }
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: "safari")
-                    .scaledFont(size: 12, weight: .semibold)
-                Text("打开预览")
-                    .scaledFont(size: 12, weight: .semibold)
-                Text(assistantLocalPreviewDisplayText(target))
-                    .scaledFont(size: 11, weight: .medium)
-                    .foregroundStyle(theme.textTertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .foregroundStyle(theme.brandPrimary)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 7)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(theme.brandPrimary.opacity(theme.isDark ? 0.18 : 0.10))
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(theme.brandPrimary.opacity(theme.isDark ? 0.24 : 0.20), lineWidth: 0.7)
-            )
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .buttonStyle(.plain)
     }
 
     private func shouldHideFromTranscript(_ message: ChatMessage, context: TranscriptVisibilityContext) -> Bool {
@@ -4633,7 +4601,14 @@ struct ChatDetailView: View {
             if message.role == .assistant,
                !isMessageVisuallyStreaming(message),
                let target = localAssistantPreviewTarget(for: message) {
-                assistantLocalPreviewButton(target: target)
+                AssistantLocalPreviewButton(
+                    displayText: assistantLocalPreviewDisplayText(target),
+                    onOpen: {
+                        if openPreviewURLString(target) {
+                            Haptics.play(.light)
+                        }
+                    }
+                )
                     .padding(.horizontal, Spacing.screenPadding)
                     .padding(.top, Spacing.xs)
             }
@@ -9439,6 +9414,42 @@ private struct AgentInlineStepsView: View {
             transaction.animation = nil
         }
         .accessibilityLabel("步骤")
+    }
+}
+
+private struct AssistantLocalPreviewButton: View {
+    let displayText: String
+    let onOpen: () -> Void
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 7) {
+                Image(systemName: "safari")
+                    .scaledFont(size: 12, weight: .semibold)
+                Text("打开预览")
+                    .scaledFont(size: 12, weight: .semibold)
+                Text(displayText)
+                    .scaledFont(size: 11, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .foregroundStyle(theme.brandPrimary)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(theme.brandPrimary.opacity(theme.isDark ? 0.18 : 0.10))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(theme.brandPrimary.opacity(theme.isDark ? 0.24 : 0.20), lineWidth: 0.7)
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
     }
 }
 
