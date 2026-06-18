@@ -219,6 +219,8 @@ actor LocalAlpineTerminalService {
     private let sharedFolderName = "shared"
     private let maximumInlineRuntimeCommandBytes = 3_072
     private var nativeRuntimeStarted = false
+    private var prewarmTask: Task<Void, Never>?
+    private var lastPrewarmAttemptAt: Date?
 
     static let environmentDiagnosticCommand = """
     printf '== Local Alpine ==\\n'
@@ -246,6 +248,58 @@ actor LocalAlpineTerminalService {
     """
 
     private init() {}
+
+    func prewarmIfNeeded(reason: String = "startup", delayNanoseconds: UInt64 = 1_500_000_000) {
+        guard nativeRuntimeStarted == false else { return }
+        guard prewarmTask == nil else { return }
+
+        let now = Date()
+        if let lastPrewarmAttemptAt, now.timeIntervalSince(lastPrewarmAttemptAt) < 30 {
+            return
+        }
+        lastPrewarmAttemptAt = now
+
+        prewarmTask = Task.detached(priority: .utility) {
+            if delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            }
+            guard !Task.isCancelled else {
+                await LocalAlpineTerminalService.shared.finishPrewarm(reason: reason, startedAt: Date(), result: nil)
+                return
+            }
+            guard await LocalAlpineTerminalService.shared.shouldContinuePrewarm() else { return }
+
+            let startedAt = Date()
+            let result = await LocalAlpineTerminalService.shared.execute(command: ":", cwd: "/mnt/iexa")
+            await LocalAlpineTerminalService.shared.finishPrewarm(reason: reason, startedAt: startedAt, result: result)
+        }
+    }
+
+    private func shouldContinuePrewarm() -> Bool {
+        guard nativeRuntimeStarted == false else {
+            prewarmTask = nil
+            return false
+        }
+        return true
+    }
+
+    private func finishPrewarm(reason: String, startedAt: Date, result: LocalAlpineCommandResult?) {
+        prewarmTask = nil
+        guard let result else { return }
+
+        if runtimeLikelyStarted(from: result) {
+            nativeRuntimeStarted = true
+        }
+
+        let elapsed = Date().timeIntervalSince(startedAt)
+        let elapsedText = String(format: "%.2f", elapsed)
+        let exitText = result.exitCode.map(String.init) ?? "nil"
+        if result.exitCode == 0 {
+            logger.info("Local Alpine prewarm completed reason=\(reason, privacy: .public) elapsed=\(elapsedText, privacy: .public)s")
+        } else {
+            logger.warning("Local Alpine prewarm finished with exit=\(exitText, privacy: .public) reason=\(reason, privacy: .public) elapsed=\(elapsedText, privacy: .public)s")
+        }
+    }
 
     func status() -> LocalAlpineStatus {
         LocalAlpineStatus(
@@ -1824,7 +1878,14 @@ actor LocalAlpineTerminalService {
         export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
+          _iexa_bootstrap_version=2026-06-18.1
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
+          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
+            export PATH="$_iexa_bootstrap_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
+            export BROWSER=iexa-open
+            hash -r 2>/dev/null || true
+            return 0
+          fi
           cat > "$_iexa_bootstrap_bin/iexa-open" <<'IEXA_OPEN_FALLBACK'
         #!/bin/sh
         ESC=$(printf '\\033')
@@ -1997,6 +2058,7 @@ actor LocalAlpineTerminalService {
         exit 127
         IEXA_LSOF_FALLBACK
           chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" 2>/dev/null || true
+          printf '%s\\n' "$_iexa_bootstrap_version" > "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null || true
           export PATH="$_iexa_bootstrap_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
           export BROWSER=iexa-open
           hash -r 2>/dev/null || true
