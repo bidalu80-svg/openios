@@ -576,6 +576,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             guard !Self.commandDuplicatesStructuredTool(command, toolPathsByName: structuredToolPathsByName) else { continue }
             let reference = result.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
             let hasReference = !(reference?.isEmpty ?? true)
+            let previewOpenURL = Self.localWebPreviewTarget(in: result.outputPreview)
             steps.append(
                 AgentActivityStep(
                     id: "command-\(index)-\(command.hashValue)",
@@ -595,7 +596,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                     cwd: result.cwd,
                     durationText: nil,
                     previewThumbnailReference: nil,
-                    previewOpenURL: nil,
+                    previewOpenURL: previewOpenURL,
                     previewFile: nil
                 )
             )
@@ -962,6 +963,12 @@ private struct AgentActivityItem: Identifiable, Hashable {
            let normalized = normalizedPreviewTarget(filePath) {
             return normalized
         }
+        if let outputURL = localWebPreviewTarget(in: call.outputPreview) {
+            return outputURL
+        }
+        if let detailURL = localWebPreviewTarget(in: call.displayDetail) {
+            return detailURL
+        }
         if call.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
             return nil
         }
@@ -971,6 +978,29 @@ private struct AgentActivityItem: Identifiable, Hashable {
         return call.filePaths
             .compactMap(normalizedLocalPreviewPath(_:))
             .first
+    }
+
+    static func localWebPreviewTarget(in text: String?) -> String? {
+        guard let text,
+              let raw = firstRegexMatch(
+                pattern: #"https?://(?:(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0)|\[[0-9a-f:]+\])(?::\d+)?[^\s"'`<>\[\]{}]*"#,
+                in: text
+              ),
+              let normalized = normalizedPreviewTarget(raw),
+              var components = URLComponents(string: normalized),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host?.lowercased() else {
+            return nil
+        }
+        if host == "0.0.0.0" {
+            components.host = "127.0.0.1"
+        } else if host != "localhost"
+                    && !host.hasPrefix("127.")
+                    && host != "::1" {
+            return nil
+        }
+        return components.string ?? normalized
     }
 
     static func normalizedPreviewTarget(_ value: String?) -> String? {
@@ -1549,7 +1579,18 @@ private struct AgentActivityItem: Identifiable, Hashable {
         var mergedSteps: [AgentActivityStep] = []
         for item in activeOrConcreteItems {
             for step in item.steps {
-                let key = "\(item.id)::\(step.id)"
+                let key: String = {
+                    switch step.kind {
+                    case .tool:
+                        return step.id
+                    case .file:
+                        return step.file?.path ?? step.id
+                    case .command:
+                        return step.command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? step.id
+                    case .status:
+                        return "\(item.id)::\(step.id)"
+                    }
+                }()
                 guard seenStepIds.insert(key).inserted else { continue }
                 mergedSteps.append(step)
             }
@@ -1844,9 +1885,9 @@ struct ChatDetailView: View {
     }
 
     private func currentTurnAgentActivityItems(includeInactive: Bool) -> [AgentActivityItem] {
-        let isLive = viewModel.isStreaming || viewModel.streamingStore.isActive
-        guard isLive || includeInactive else { return [] }
         let messages = viewModel.messages
+        let isLive = hasLiveAgentActivityState(in: messages)
+        guard isLive || includeInactive else { return [] }
         guard let turnMessages = currentTurnAgentActivityMessages(in: messages) else { return [] }
 
         let cacheKey = includeInactive ? "current-turn-include-inactive" : "current-turn-live-only"
@@ -1880,6 +1921,53 @@ struct ChatDetailView: View {
         signature &+= isLive ? 29 : 11
         for message in messages {
             signature &+= agentActivityCacheSignature(for: message)
+            signature &+= localAlpineLiveActivitySignature(for: message)
+        }
+        return signature
+    }
+
+    private func hasLiveAgentActivityState(in messages: [ChatMessage]? = nil) -> Bool {
+        let messages = messages ?? viewModel.messages
+        if viewModel.isStreaming || viewModel.streamingStore.isActive {
+            return true
+        }
+        return messages.contains { message in
+            isMessageVisuallyStreaming(message)
+                || !viewModel.localAlpineLiveToolCalls(for: message.id).isEmpty
+                || viewModel.localAlpineLiveToolStatus(for: message.id) != nil
+        }
+    }
+
+    private func localAlpineLiveActivitySignature(for message: ChatMessage) -> Int {
+        let liveToolCalls = viewModel.localAlpineLiveToolCalls(for: message.id)
+        let liveStatus = viewModel.localAlpineLiveToolStatus(for: message.id)
+        guard !liveToolCalls.isEmpty || liveStatus != nil else { return 0 }
+
+        var signature = liveToolCalls.count &* 31
+        for call in liveToolCalls.suffix(8) {
+            signature &+= call.id.hashValue
+            signature &+= call.name.hashValue
+            signature &+= call.isRunning ? 13 : 3
+            signature &+= call.failed ? 17 : 5
+            signature &+= call.startedAtMs.hashValue
+            signature &+= (call.completedAtMs ?? 0).hashValue
+            signature &+= Self.lightweightTranscriptTextSignature(call.command ?? "")
+            signature &+= Self.lightweightTranscriptTextSignature(call.outputPreview ?? "")
+            signature &+= Self.lightweightTranscriptTextSignature(call.browserURL ?? "")
+        }
+        if let liveStatus {
+            let statusText = [
+                liveStatus.action,
+                liveStatus.status,
+                liveStatus.description,
+                liveStatus.query,
+                liveStatus.queries.joined(separator: " ")
+            ]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            signature &+= Self.lightweightTranscriptTextSignature(statusText)
+            signature &+= (liveStatus.done == true ? 23 : 7)
         }
         return signature
     }
@@ -2252,7 +2340,7 @@ struct ChatDetailView: View {
 
     private func agentActivityWindowPreview(includeInactive: Bool) -> AgentActivityItem? {
         let turnItems = currentTurnAgentActivityItems(includeInactive: includeInactive)
-        let isLive = viewModel.isStreaming || viewModel.streamingStore.isActive
+        let isLive = hasLiveAgentActivityState()
         let cacheKey = includeInactive ? "window-preview-include-inactive" : "window-preview-live-only"
         let signature = currentTurnMergedActivitySignature(items: turnItems, includeInactive: includeInactive, isLive: isLive)
         let merged: AgentActivityItem? = {
@@ -2301,7 +2389,7 @@ struct ChatDetailView: View {
     }
 
     private var hasActiveAgentFloatingActivity: Bool {
-        viewModel.isStreaming || viewModel.streamingStore.isActive
+        hasLiveAgentActivityState()
     }
 
     private var shouldHideAgentFloatingBarForKeyboard: Bool {
@@ -2328,6 +2416,32 @@ struct ChatDetailView: View {
         agentFloatingActivitySnapshot = item
     }
 
+    private func resolvedAgentFloatingActivityItem(
+        messageId: String,
+        notificationItem: AgentActivityItem?
+    ) -> AgentActivityItem? {
+        var candidates = currentTurnAgentActivityItems(includeInactive: true)
+        if let message = viewModel.messages.first(where: { $0.id == messageId }),
+           let messageItem = agentActivity(for: message) {
+            candidates.append(messageItem)
+        }
+        if let existing = agentFloatingActivitySnapshot {
+            candidates.append(existing)
+        }
+        if let notificationItem {
+            candidates.append(notificationItem)
+        }
+
+        let merged = AgentActivityItem.mergedTurn(
+            id: "turn-\(messageId)",
+            items: candidates
+        )
+        if let merged, merged.hasConcreteSteps {
+            return merged
+        }
+        return notificationItem
+    }
+
     private func handleAgentFloatingLiveToolNotification(_ notification: Notification) {
         guard matchesAgentFloatingConversation(notification.userInfo?["conversationId"] as? String),
               let messageId = notification.userInfo?["messageId"] as? String else {
@@ -2340,10 +2454,14 @@ struct ChatDetailView: View {
         let status = notification.userInfo?["status"] as? ChatStatusUpdate
         guard !calls.isEmpty || status != nil else { return }
 
-        guard let item = AgentActivityItem.liveLocalAlpine(
+        let notificationItem = AgentActivityItem.liveLocalAlpine(
             messageId: messageId,
             toolCalls: calls,
             liveStatus: status
+        )
+        guard let item = resolvedAgentFloatingActivityItem(
+            messageId: messageId,
+            notificationItem: notificationItem
         ),
               item.hasConcreteSteps else {
             return
@@ -2408,9 +2526,6 @@ struct ChatDetailView: View {
     @MainActor
     private func openAgentPreviewResult(step: AgentActivityStep?, item: AgentActivityItem) -> Bool {
         if let step {
-            if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-                return false
-            }
             if let file = step.previewFile {
                 openMessageFile(file)
                 return true
@@ -2418,6 +2533,9 @@ struct ChatDetailView: View {
             if let urlString = step.previewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines),
                openPreviewURLString(urlString) {
                 return true
+            }
+            if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                return false
             }
             return false
         }
@@ -2479,6 +2597,64 @@ struct ChatDetailView: View {
                 }
             }
         }
+    }
+
+    private func localAssistantPreviewTarget(for message: ChatMessage) -> String? {
+        guard message.role == .assistant || message.role == .system else { return nil }
+        let candidates = [
+            assistantContentOverride[message.id],
+            assistantContentOverrideForActivityParent(message, activityItem: nil),
+            localAlpineFallbackContent(for: message),
+            visibleAssistantTextAfterToolProtocolCleanup(for: message),
+            message.content
+        ]
+        for content in candidates {
+            if let target = AgentActivityItem.localWebPreviewTarget(in: content) {
+                return target
+            }
+        }
+        return nil
+    }
+
+    private func assistantLocalPreviewDisplayText(_ target: String) -> String {
+        guard let components = URLComponents(string: target) else { return target }
+        let host = components.host ?? ""
+        let port = components.port.map { ":\($0)" } ?? ""
+        let path = components.path.isEmpty ? "/" : components.path
+        return "\(host)\(port)\(path)"
+    }
+
+    private func assistantLocalPreviewButton(target: String) -> some View {
+        Button {
+            if openPreviewURLString(target) {
+                Haptics.play(.light)
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "safari")
+                    .scaledFont(size: 12, weight: .semibold)
+                Text("打开预览")
+                    .scaledFont(size: 12, weight: .semibold)
+                Text(assistantLocalPreviewDisplayText(target))
+                    .scaledFont(size: 11, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .foregroundStyle(theme.brandPrimary)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(theme.brandPrimary.opacity(theme.isDark ? 0.18 : 0.10))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(theme.brandPrimary.opacity(theme.isDark ? 0.24 : 0.20), lineWidth: 0.7)
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
     }
 
     private func shouldHideFromTranscript(_ message: ChatMessage, context: TranscriptVisibilityContext) -> Bool {
@@ -4452,6 +4628,14 @@ struct ChatDetailView: View {
                     messageBubble(for: message, isLastAssistant: isLastAssistant, activityItem: rowAgentActivity)
                         .transition(.opacity)
                 }
+            }
+
+            if message.role == .assistant,
+               !isMessageVisuallyStreaming(message),
+               let target = localAssistantPreviewTarget(for: message) {
+                assistantLocalPreviewButton(target: target)
+                    .padding(.horizontal, Spacing.screenPadding)
+                    .padding(.top, Spacing.xs)
             }
 
             // ── Tool-generated images ──
@@ -9275,21 +9459,21 @@ private struct AgentStepFloatingBarHost: View {
                     taskCount: item.totalStepCount,
                     onPreviewTap: onPreviewTap
                 )
-                .padding(.horizontal, 12)
-                .padding(.bottom, 1)
+                .padding(.horizontal, 18)
+                .padding(.bottom, 4)
             }
         }
     }
 }
 
 private enum AgentStepFloatingMetrics {
-    static let previewSize = CGSize(width: 100, height: 65)
-    static let previewCornerRadius: CGFloat = 10
+    static let previewSize = CGSize(width: 86, height: 54)
+    static let previewCornerRadius: CGFloat = 8
     static let previewOffset = CGSize(width: 0, height: 0)
-    static let barHeight: CGFloat = 40
-    static let barCornerRadius: CGFloat = 15
-    static let barLeadingInset: CGFloat = 118
-    static let layoutHeight: CGFloat = 46
+    static let barHeight: CGFloat = 34
+    static let barCornerRadius: CGFloat = 13
+    static let barLeadingInset: CGFloat = 98
+    static let layoutHeight: CGFloat = 39
 }
 
 private struct AgentStepFloatingBar: View {
@@ -9405,23 +9589,23 @@ private struct AgentStepFloatingBar: View {
         AnyView(ZStack {
             Circle()
                 .fill(tint.opacity(theme.isDark ? 0.16 : 0.12))
-                .frame(width: 18, height: 18)
+                .frame(width: 17, height: 17)
             Image(systemName: icon)
-                .scaledFont(size: 10, weight: .bold)
+                .scaledFont(size: 9.5, weight: .bold)
                 .foregroundStyle(tint)
-                .frame(width: 14, height: 14)
+                .frame(width: 13, height: 13)
         })
     }
 
     private var pageControls: AnyView {
-        AnyView(HStack(spacing: 1) {
+        AnyView(HStack(spacing: 0) {
             Button {
                 movePage(-1)
             } label: {
                 Image(systemName: "chevron.left")
-                    .scaledFont(size: 10, weight: .bold)
+                    .scaledFont(size: 9.5, weight: .bold)
                     .foregroundStyle(canMoveBackward ? theme.textPrimary : theme.textTertiary.opacity(0.42))
-                    .frame(width: 20, height: 20)
+                    .frame(width: 18, height: 18)
             }
             .buttonStyle(.plain)
             .disabled(!canMoveBackward)
@@ -9432,15 +9616,15 @@ private struct AgentStepFloatingBar: View {
                 .monospacedDigit()
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
-                .frame(width: 34, alignment: .center)
+                .frame(width: 36, alignment: .center)
 
             Button {
                 movePage(1)
             } label: {
                 Image(systemName: "chevron.right")
-                    .scaledFont(size: 10, weight: .bold)
+                    .scaledFont(size: 9.5, weight: .bold)
                     .foregroundStyle(canMoveForward ? theme.textPrimary : theme.textTertiary.opacity(0.42))
-                    .frame(width: 20, height: 20)
+                    .frame(width: 18, height: 18)
             }
             .buttonStyle(.plain)
             .disabled(!canMoveForward)
@@ -9452,7 +9636,7 @@ private struct AgentStepFloatingBar: View {
             statusDot
 
             Text(selectedTitle)
-                .scaledFont(size: 11.5, weight: .semibold)
+                .scaledFont(size: 11, weight: .semibold)
                 .foregroundStyle(theme.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -9463,8 +9647,8 @@ private struct AgentStepFloatingBar: View {
             pageControls
         }
         .padding(.leading, AgentStepFloatingMetrics.barLeadingInset)
-        .padding(.trailing, 8)
-        .padding(.vertical, 3)
+        .padding(.trailing, 7)
+        .padding(.vertical, 2)
         .frame(height: AgentStepFloatingMetrics.barHeight, alignment: .center)
         .frame(maxWidth: .infinity)
         .background(barFill)
@@ -9473,7 +9657,7 @@ private struct AgentStepFloatingBar: View {
             RoundedRectangle(cornerRadius: AgentStepFloatingMetrics.barCornerRadius, style: .continuous)
                 .strokeBorder(barStroke, lineWidth: 0.8)
         )
-        .shadow(color: barShadow, radius: 7, x: 0, y: 3)
+        .shadow(color: barShadow, radius: 5, x: 0, y: 2)
         .contentShape(RoundedRectangle(cornerRadius: AgentStepFloatingMetrics.barCornerRadius, style: .continuous)))
     }
 
@@ -9599,24 +9783,24 @@ private struct AgentToolPreviewPop: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(previewTitle)
-                    .font(.system(size: 7.0, weight: .bold, design: .monospaced))
+                    .font(.system(size: 6.6, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.88))
                     .lineLimit(1)
 
                 Text(previewSubtitle)
-                    .font(.system(size: 6.0, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 5.6, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.66))
                     .lineLimit(1)
 
                 if thumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                     Text(previewText)
-                        .font(.system(size: 6.0, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 5.6, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Color(red: 0.30, green: 0.63, blue: 1.0))
                         .lineLimit(2)
                         .truncationMode(.tail)
                 }
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 5)
             .padding(.vertical, 4)
         }
         .frame(width: previewSize.width, height: previewSize.height, alignment: .topLeading)
