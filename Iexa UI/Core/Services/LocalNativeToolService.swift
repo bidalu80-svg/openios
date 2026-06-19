@@ -63,6 +63,7 @@ struct LocalNativeBrowserDocument: Sendable {
     let query: String?
     let summary: String
     let items: [ChatStatusItem]
+    let previewImages: [String]
     let error: String?
 }
 
@@ -785,6 +786,7 @@ final class LocalNativeToolService {
                 query: query,
                 summary: summary,
                 items: items,
+                previewImages: previewImages,
                 error: result["error"] as? String
             )
         }

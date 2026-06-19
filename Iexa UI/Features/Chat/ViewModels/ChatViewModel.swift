@@ -839,7 +839,7 @@ final class ChatViewModel {
             phase: .start,
             title: title.isEmpty ? "准备执行本地命令" : title,
             detail: detail.isEmpty ? "准备执行本地命令" : detail,
-            cwd: "/mnt/iexa",
+            cwd: "/mnt/iexa/shared",
             command: detail.isEmpty ? nil : detail,
             exitCode: nil,
             outputPreview: nil,
@@ -2363,7 +2363,7 @@ final class ChatViewModel {
     private static let localAlpineBusyBoxCompatibilityNotes = """
         Local Alpine rules:
         - Prefer `file_read`, `file_write`, `file_edit`, `list_dir`, `glob`, `grep`, `verify`, and `browser_use` over raw shell for common work.
-        - Raw shell must be POSIX sh/BusyBox ash. Use `/mnt/iexa` for project files; use `/mnt/iexa/shared` only when the user explicitly wants shared files.
+        - Raw shell must be POSIX sh/BusyBox ash. Use `/mnt/iexa/shared` as the default project workspace; `/mnt/iexa` is only the namespace root for shared, skills, memory, and mounts.
         - Install OS packages with Alpine `apk` only: check `command -v <tool>` or `apk info -e <pkg>`, then `apk add --no-cache <pkg>`.
         - Do not use apt/brew/sudo/systemctl/macOS/Windows commands or bash/GNU-only syntax such as `find -printf`, `grep -P`, `[[ ... ]]`, `source`, process substitution, or `sed -i ''`.
         - Use the tool `delay` field for waits; avoid shell `sleep` and Python `time.sleep()` in generated tests.
@@ -2376,13 +2376,13 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "shell_execute",
-                    "description": "Run one bounded POSIX sh/BusyBox ash command in Local Alpine. Use `/mnt/iexa` for project work, `/mnt/iexa/shared` for explicitly shared files, and `apk add --no-cache` for missing OS packages.",
+                    "description": "Run one bounded POSIX sh/BusyBox ash command in Local Alpine. Use `/mnt/iexa/shared` for project work and `apk add --no-cache` for missing OS packages.",
                     "parameters": [
                         "type": "object",
                         "properties": [
                             "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
                             "command": ["type": "string", "description": "POSIX sh/BusyBox ash command under 1000 characters."],
-                            "cwd": ["type": "string", "description": "Working directory; defaults to /mnt/iexa."],
+                            "cwd": ["type": "string", "description": "Working directory; defaults to /mnt/iexa/shared."],
                             "timeout": ["type": "integer", "description": "Timeout in seconds for the command."],
                             "delay": ["type": "number", "description": "Optional host-side delay before running the command, in seconds."]
                         ],
@@ -2449,7 +2449,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "file_write",
-                    "description": "Create or overwrite a UTF-8 text file, normally under `/mnt/iexa`.",
+                    "description": "Create or overwrite a UTF-8 text file, normally under `/mnt/iexa/shared`.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2502,7 +2502,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "browser_use",
-                    "description": "Fetch an HTTP/HTTPS URL, optionally save it under `/mnt/iexa`, and open preview.",
+                    "description": "Fetch an HTTP/HTTPS URL, optionally save it under `/mnt/iexa/shared`, and open preview.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2568,7 +2568,7 @@ final class ChatViewModel {
         [Local Alpine native tools]
         Tools: `file_read`, `file_write`, `file_edit`, `read_image`, `browser_use`\(memoryToolNames), `shell_execute`. Iexa executes them in Local Alpine and returns real results.
         Rules:
-        - Workspace namespace `/mnt/iexa`; relative paths resolve there. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` and `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Use `/mnt/iexa` or project subfolders for project work; use `/mnt/iexa/shared` only when the user asks for shared files. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
+        - Default workspace is `/mnt/iexa/shared`; relative paths resolve there. `/mnt/iexa` is the namespace root. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` and `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
         - Shell is Alpine BusyBox/ash. Install OS packages with `apk add --no-cache`; never use apt/brew/sudo/systemctl/macOS/Windows commands.
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
@@ -2576,7 +2576,7 @@ final class ChatViewModel {
         - Website/app changes require a localhost preview: for static files use `iexa-serve <directory-or-file> <port>`; for framework dev servers, start them in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
         - One meaningful step per decision. A write plus one direct verification may share a step when validating the same change. Stop when the tool result completes the user goal.
-        - iOS background time is limited; keep long jobs resumable and save progress/results under `/mnt/iexa`.
+        - iOS background time is limited; keep long jobs resumable and save progress/results under `/mnt/iexa/shared`.
         - If native tools are rejected, fallback to exactly one fenced `iexa_alpine` JSON block with the same tool shape.
         [/Local Alpine native tools]
         """
@@ -2901,9 +2901,9 @@ final class ChatViewModel {
         - Emit one fenced Markdown block with language `iexa_alpine`; Iexa runs it locally and returns the real observation in the next turn. Do not fake output or say the tool is unavailable.
         - Valid shape:
           ```iexa_alpine
-          {"tool_title":"列出目录","command":"pwd && ls -la","cwd":"/mnt/iexa"}
+          {"tool_title":"列出目录","command":"pwd && ls -la","cwd":"/mnt/iexa/shared"}
           ```
-        - Workspace namespace `/mnt/iexa`; relative paths resolve there. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` and `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Use `/mnt/iexa` or project subfolders for project work; use `/mnt/iexa/shared` only when the user asks for shared files. Execution is embedded Local Alpine/iSH, not Open Terminal, iOS/macOS/Windows, Debian, or Ubuntu.
+        - Default workspace is `/mnt/iexa/shared`; relative paths resolve there. `/mnt/iexa` is the namespace root. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` and `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Execution is embedded Local Alpine/iSH, not Open Terminal, iOS/macOS/Windows, Debian, or Ubuntu.
         - Shell is Alpine BusyBox/ash. Use `apk add --no-cache` for missing OS packages after `command -v` or `apk info -e`; never use apt/brew/sudo/systemctl or bash/GNU-only syntax.
         - Tools: \(toolNames). Compatibility aliases are accepted: `file_read`, `file_write`, `file_edit`, `shell_execute`, `browser_use`, `web_fetch`, `read_image`.
         - Every step needs a short user-language `tool_title`/`step_title`/`label`.
@@ -2944,7 +2944,7 @@ final class ChatViewModel {
             - If the user gave an explicit simple file operation target, combine the operation with a minimal `pwd`/`ls` verification instead of running a separate bootstrap.
             - Do not ask for confirmation for explicit operations bounded to `/mnt/iexa`; user wording such as delete/remove/modify/run/test/read/check is already confirmation. Ask only for paths outside `/mnt/iexa` or multiple unsafe targets.
             - Only treat run/test/build/fix/install/read/write/delete/search as an operation request when the user asks you to actually perform it. If the wording is asking for advice or feasibility, do not use the tool.
-            - For "run this code" follow-ups, use the latest runnable code block, write it under `/mnt/iexa`, run the matching interpreter/compiler, and summarize the real output.
+            - For "run this code" follow-ups, use the latest runnable code block, write it under `/mnt/iexa/shared`, run the matching interpreter/compiler, and summarize the real output.
             - Do not ask the user how to operate the environment. Use one fenced `iexa_alpine` block as the first tool_use.
             [/Local Alpine execution state]
             """
@@ -3439,7 +3439,7 @@ final class ChatViewModel {
             if !shell.isEmpty {
                 commands.append(ParsedLocalAlpineCommand(
                     command: shell,
-                    cwd: "/mnt/iexa",
+                    cwd: "/mnt/iexa/shared",
                     hasWriteFiles: false,
                     writeFilePaths: []
                 ))
@@ -3487,7 +3487,7 @@ final class ChatViewModel {
             let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? [] : [ParsedLocalAlpineCommand(
                 command: trimmed,
-                cwd: "/mnt/iexa",
+            cwd: "/mnt/iexa/shared",
                 hasWriteFiles: false,
                 writeFilePaths: []
             )]
@@ -4018,7 +4018,7 @@ final class ChatViewModel {
         }
         let candidate = nsText.substring(with: match.range(at: 1))
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let path = normalizedLocalAlpinePythonPath(candidate, cwd: "/mnt/iexa")
+        let path = normalizedLocalAlpinePythonPath(candidate, cwd: "/mnt/iexa/shared")
         return isUserPythonPath(path, allowFailedDraft: allowFailedDraft) ? path : nil
     }
 
@@ -7648,7 +7648,7 @@ final class ChatViewModel {
             ```
             """
         }
-        normalizedBlocks.append(contentsOf: shellBlocks.map { ["command": $0, "cwd": "/mnt/iexa"] })
+        normalizedBlocks.append(contentsOf: shellBlocks.map { ["command": $0, "cwd": "/mnt/iexa/shared"] })
         guard !normalizedBlocks.isEmpty else { return nil }
 
         let object: [String: Any] = ["iexa_alpine": normalizedBlocks]
@@ -7741,14 +7741,14 @@ final class ChatViewModel {
         targetPaths: [String]
     ) -> [[String: Any]] {
         if let query = localAlpineSearchQuery(from: userText) {
-            return [["grep": ["path": ".", "pattern": query, "include": "*"], "cwd": "/mnt/iexa"]]
+            return [["grep": ["path": ".", "pattern": query, "include": "*"], "cwd": "/mnt/iexa/shared"]]
         }
         if !targetPaths.isEmpty {
             return targetPaths.prefix(4).map {
-                ["read_file": ["path": localAlpineWorkspaceRelativePath($0), "max_bytes": 120_000], "cwd": "/mnt/iexa"]
+                ["read_file": ["path": localAlpineWorkspaceRelativePath($0), "max_bytes": 120_000], "cwd": "/mnt/iexa/shared"]
             }
         }
-        return [["list_dir": ["path": ".", "max_depth": 3], "cwd": "/mnt/iexa"]]
+        return [["list_dir": ["path": ".", "max_depth": 3], "cwd": "/mnt/iexa/shared"]]
     }
 
     private static func localAlpineSynthesizedBootstrapCommands(
@@ -7759,7 +7759,7 @@ final class ChatViewModel {
         if !targetPaths.isEmpty {
             if localAlpineUserRequestWantsModification(userText) {
                 commands.append(contentsOf: targetPaths.prefix(3).map {
-                    ["read_file": ["path": localAlpineWorkspaceRelativePath($0), "max_bytes": 160_000], "cwd": "/mnt/iexa"]
+                    ["read_file": ["path": localAlpineWorkspaceRelativePath($0), "max_bytes": 160_000], "cwd": "/mnt/iexa/shared"]
                 })
             }
             commands.append(contentsOf: localAlpineVerificationCommands(
@@ -7769,14 +7769,14 @@ final class ChatViewModel {
             ))
             if commands.isEmpty {
                 commands.append(contentsOf: targetPaths.prefix(3).map {
-                    ["read_file": ["path": localAlpineWorkspaceRelativePath($0), "max_bytes": 120_000], "cwd": "/mnt/iexa"]
+                    ["read_file": ["path": localAlpineWorkspaceRelativePath($0), "max_bytes": 120_000], "cwd": "/mnt/iexa/shared"]
                 })
             }
             return commands
         }
 
-        commands.append(["list_dir": ["path": ".", "max_depth": 3], "cwd": "/mnt/iexa"])
-        commands.append(["command": localAlpineProjectProbeCommand(), "cwd": "/mnt/iexa"])
+        commands.append(["list_dir": ["path": ".", "max_depth": 3], "cwd": "/mnt/iexa/shared"])
+        commands.append(["command": localAlpineProjectProbeCommand(), "cwd": "/mnt/iexa/shared"])
         return commands
     }
 
@@ -7810,7 +7810,7 @@ final class ChatViewModel {
                     "path": localAlpineWorkspaceRelativePath(path),
                     "code_lines": normalizedBody.components(separatedBy: "\n")
                 ]],
-                "cwd": "/mnt/iexa"
+                "cwd": "/mnt/iexa/shared"
             ])
         }
 
@@ -8096,7 +8096,7 @@ final class ChatViewModel {
         let runnable = localAlpineRunnablePaths(from: paths)
         guard force || localAlpineUserRequestWantsVerification(latestUserText ?? "") else { return [] }
         return runnable.prefix(3).map {
-            ["verify": ["path": localAlpineWorkspaceRelativePath($0)], "cwd": "/mnt/iexa"]
+            ["verify": ["path": localAlpineWorkspaceRelativePath($0)], "cwd": "/mnt/iexa/shared"]
         }
     }
 
@@ -8571,7 +8571,7 @@ final class ChatViewModel {
             "apk", "ash", "sh", "bash", "cat", "cd", "chmod", "chown", "command", "cp", "date",
             "curl", "df", "du", "echo", "env", "find", "free", "gcc", "g++", "git", "grep", "head",
             "id", "java", "javac", "go", "cargo", "rustc", "ls", "lua", "make", "cmake", "mkdir",
-            "mv", "node", "npm", "npx", "perl", "php", "pip", "pip3", "printf", "ps", "pwd",
+            "mv", "node", "npm", "npx", "perl", "php", "pip", "pip3", "printf", "pwd",
             "python", "python3", "rm", "rmdir", "ruby", "sed", "sleep", "tail", "tar", "test",
             "top", "touch", "type", "uname", "unset", "vi", "vim", "wget", "which", "whoami"
         ]
@@ -8637,7 +8637,7 @@ final class ChatViewModel {
                 "iexa_local_alpine_result": "true",
                 "iexa_local_alpine_command_preview": command,
                 "iexa_local_alpine_display_command": userMessage.content,
-                "iexa_local_alpine_cwd": "/mnt/iexa"
+                "iexa_local_alpine_cwd": "/mnt/iexa/shared"
             ]
         ))
         localAlpineAgentExecutedMessageIds.insert(assistantMessageId)
@@ -8697,7 +8697,7 @@ final class ChatViewModel {
             phase: .start,
             title: directToolDisplay.title,
             detail: directToolDetail,
-            cwd: "/mnt/iexa",
+            cwd: "/mnt/iexa/shared",
             command: command,
             exitCode: nil,
             outputPreview: nil,
@@ -8712,7 +8712,7 @@ final class ChatViewModel {
         )
         await Task.yield()
 
-        var result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa")
+        var result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa/shared")
         enqueueLocalAlpineOpenRequests(result.openRequests)
         while let request = result.interactiveRequest {
             updateAssistantMessage(
@@ -8756,7 +8756,7 @@ final class ChatViewModel {
         )
         let directCommandResult = LocalAlpineAgentCommandResult.compact(
             command: command,
-            cwd: "/mnt/iexa",
+            cwd: "/mnt/iexa/shared",
             exitCode: result.exitCode,
             output: result.output
         )
@@ -8773,7 +8773,7 @@ final class ChatViewModel {
             phase: .result,
             title: directToolDisplay.title,
             detail: directToolDetail,
-            cwd: "/mnt/iexa",
+            cwd: "/mnt/iexa/shared",
             command: command,
             exitCode: result.exitCode,
             outputPreview: directToolOutput.preview,
@@ -11828,6 +11828,7 @@ final class ChatViewModel {
                         query: nil,
                         summary: "模型返回的搜索指令无法解析。",
                         items: [],
+                        previewImages: [],
                         error: "模型返回的搜索指令无法解析。"
                     ),
                     keepStreaming: true
@@ -11900,6 +11901,7 @@ final class ChatViewModel {
                     query: nil,
                     summary: "搜索没有返回可用结果。",
                     items: [],
+                    previewImages: [],
                     error: "搜索没有返回可用结果。"
                 ),
                 keepStreaming: true
@@ -12389,9 +12391,20 @@ final class ChatViewModel {
             output: result.summary,
             openRequests: result.openRequests,
             browserURL: result.browserDocument?.url,
-            imageFilePath: result.browserDocument?.items.compactMap(\.thumbnailURL).first,
+            imageFilePath: Self.localNativeBrowserPreviewImage(from: result.browserDocument),
             failed: failed
         )
+    }
+
+    private static func localNativeBrowserPreviewImage(from document: LocalNativeBrowserDocument?) -> String? {
+        guard let document else { return nil }
+        return document.previewImages
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+            ?? document.items
+                .compactMap(\.thumbnailURL)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty }
     }
 
     private func executeLocalAlpineOpenToolCall(
@@ -12483,7 +12496,7 @@ final class ChatViewModel {
                     phase: .start,
                     title: resolvedTitle,
                     detail: resolvedDetail,
-                    cwd: "/mnt/iexa",
+                    cwd: "/mnt/iexa/shared",
                     command: nil,
                     exitCode: nil,
                     outputPreview: nil,
@@ -12511,7 +12524,7 @@ final class ChatViewModel {
             phase: .result,
             title: resolvedTitle,
             detail: resolvedDetail,
-            cwd: "/mnt/iexa",
+            cwd: "/mnt/iexa/shared",
             command: nil,
             exitCode: failed ? 1 : 0,
             outputPreview: compact.preview,
@@ -16807,7 +16820,7 @@ final class ChatViewModel {
 
     private static func workspaceDisabledForLocalAlpineSystemContext() -> String {
         """
-        Legacy Documents/Iexa Workspace operations are disabled for this turn. For local files, directories, scripts, dependencies, builds, tests, reads, writes, deletes, and searches, use Local Alpine at `/mnt/iexa` only. Do not emit `iexa_workspace`.
+        Legacy Documents/Iexa Workspace operations are disabled for this turn. For local files, directories, scripts, dependencies, builds, tests, reads, writes, deletes, and searches, use Local Alpine at `/mnt/iexa/shared` by default. Do not emit `iexa_workspace`.
         """
     }
 
@@ -16955,14 +16968,15 @@ final class ChatViewModel {
         \(localAlpineToolManifest)
 
         Environment:
-        - Workspace root: `/mnt/iexa`. Relative paths resolve there.
-        - Reserved folders under `/mnt/iexa`: `/mnt/iexa/shared` is model read/write; `/mnt/iexa/skills` contains `SKILL.md` skill files and `/mnt/iexa/memory` contains user-maintained `GLOBAL.md` plus daily memory files. Skills and memory are model-read-only for structured write/edit/delete/move/copy/mkdir tools; use the `memory_write` tool for daily memory entries. `/mnt/iexa/mounts/<name>` contains user-mounted external folders; model structured write permission follows the user's file-browser setting for each mount.
+        - Default workspace: `/mnt/iexa/shared`. Relative paths resolve there.
+        - Namespace root: `/mnt/iexa`. Reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` containing `SKILL.md` skill files, `/mnt/iexa/memory` containing user-maintained `GLOBAL.md` plus daily memory files, and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Skills and memory are model-read-only for structured write/edit/delete/move/copy/mkdir tools; use the `memory_write` tool for daily memory entries. Mounted folder structured write permission follows the user's file-browser setting for each mount.
         - Shell: Alpine Linux BusyBox/ash. Prefer portable POSIX `sh` syntax; avoid Bash-only arrays, process substitution, and Debian/macOS assumptions unless the needed tool is first proven installed.
         - Package manager: `apk`. Check first with `apk info -e <pkg>` or `command -v <tool>`; install only packages proven missing with `apk add --no-cache <pkg>`. When a task needs a missing OS tool/library, install it through Local Alpine `apk` and continue; do not tell the user to install it on iOS/macOS/Ubuntu and do not use `apt`/`brew`/`sudo`.
         - Unsupported command families here: `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, and macOS-only utilities. Translate those intentions to Alpine/BusyBox equivalents.
+        - Do not use `ps`, `pgrep`, or `pkill` for server/process checks. They are blocked in this embedded runtime. For preview servers, use `iexa-serve`, `iexa-serve stop <port|all>`, `nc -z 127.0.0.1 <port>`, or `/proc/net/tcp`.
         - Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, and `/var` are system paths. Inspect them when useful; do not edit them except through package-manager operations or explicit user requests.
         - Do not check `/mnt/iexa/rootfs` unless the user explicitly created that folder; the Local Alpine commands already execute inside the Alpine rootfs.
-        - iOS background execution is limited. Keep long jobs resumable, write progress/results under `/mnt/iexa`, and do not promise Android-style foreground-service/WakeLock behavior. If the app is backgrounded for too long, continue from saved files/results when it returns.
+        - iOS background execution is limited. Keep long jobs resumable, write progress/results under `/mnt/iexa/shared`, and do not promise Android-style foreground-service/WakeLock behavior. If the app is backgrounded for too long, continue from saved files/results when it returns.
 
         Tool-selection policy:
         - Use the tool only for explicit operation requests that require current local state or mutation: read/list/search files, create/edit/delete/rename/move/copy files, install dependencies, run/test/build/compile/debug/fix code, inspect the Alpine environment, fetch/scrape a URL from the local shell, or verify real output.
@@ -16971,13 +16985,13 @@ final class ChatViewModel {
         - Treat imperative shorthand as execution requests when the complete conversation and Local Alpine observations identify a current file, command, project, or workspace target.
         - Use the full Local Alpine observation history supplied in the request as real tool-result context. Do not ignore prior local outputs or ask the user to restate information that is already present in those observations.
         - If a demo request omits a URL, filename, or sample input, choose safe defaults and proceed: `example.com`/`example.org` for network demos and simple names like `test.lua`, `main.cpp`, or `simple_spider.py`.
-        - Do not ask for confirmation for explicit `/mnt/iexa` deletes, edits, reads, checks, runs, or reruns. Ask only when the target is outside `/mnt/iexa`, destructive across many files, or genuinely unknown.
-        - If the user asks you to write/run/fix/check a project or script, operate under `/mnt/iexa`, verify with a bounded command, and then summarize the real result.
+        - Do not ask for confirmation for explicit `/mnt/iexa/shared` deletes, edits, reads, checks, runs, or reruns. Ask only when the target is outside `/mnt/iexa`, destructive across many files, or genuinely unknown.
+        - If the user asks you to write/run/fix/check a project or script, operate under `/mnt/iexa/shared`, verify with a bounded command, and then summarize the real result.
         - If verification/build/run fails because a command or library is missing, do one bounded Alpine dependency step such as `command -v make >/dev/null 2>&1 || apk add --no-cache make`, then rerun the relevant check. Use language package managers only for project dependencies after their runtime exists.
         - For existing source files, read the target first and prefer same-path `edit_file`/`patch_file`; use `write_files` for new files or large same-path rewrites. For deletes, use `delete_file`/`delete_files` instead of shell `rm`; set `recursive:true` only when deleting a directory.
         - Prefer structured `list_dir`, `glob`, `grep`, and `verify` wrappers over ad-hoc `find`/`grep`/run syntax when they fit.
-        - If the user asks to run recent code from the conversation, save the latest runnable code block under `/mnt/iexa`, run it with the right interpreter/compiler, and summarize the real output.
-        - If the user asks to generate, save, show, display, or send images, write each final image under `/mnt/iexa` and print every final path, preferably one `READY: /mnt/iexa/<name>.png` line per image. If the user requests multiple images, create distinct variants rather than duplicating one file: vary composition, angle, lighting, background details, colors, or small visual details while preserving the user's core prompt. The host app will read PNG/JPEG/WebP/GIF/BMP/AVIF files from `/mnt/iexa` and attach them to the chat bubble automatically. Do not claim you cannot send or display images after creating them.
+        - If the user asks to run recent code from the conversation, save the latest runnable code block under `/mnt/iexa/shared`, run it with the right interpreter/compiler, and summarize the real output.
+        - If the user asks to generate, save, show, display, or send images, write each final image under `/mnt/iexa/shared` and print every final path, preferably one `READY: /mnt/iexa/shared/<name>.png` line per image. If the user requests multiple images, create distinct variants rather than duplicating one file: vary composition, angle, lighting, background details, colors, or small visual details while preserving the user's core prompt. The host app will read PNG/JPEG/WebP/GIF/BMP/AVIF files from `/mnt/iexa` and attach them to the chat bubble automatically. Do not claim you cannot send or display images after creating them.
         - If a tool result shows failure, choose one different bounded fix/diagnostic step or stop with the concrete blocker. Never repeat the exact same failed command.
         - If a tool result shows success and the user goal is complete, stop tool use and answer normally.
         [/Local Alpine client tool registry]
@@ -19481,6 +19495,7 @@ final class ChatViewModel {
                         query: nil,
                         summary: "模型返回的搜索指令无法解析。",
                         items: [],
+                        previewImages: [],
                         error: "模型返回的搜索指令无法解析。"
                     )
                 )
@@ -19535,6 +19550,7 @@ final class ChatViewModel {
                     query: nil,
                     summary: "搜索没有返回可用结果。",
                     items: [],
+                    previewImages: [],
                     error: "搜索没有返回可用结果。"
                 )
             )
@@ -20494,7 +20510,7 @@ final class ChatViewModel {
             let text = message.content + "\n" + (message.metadata?["iexa_local_alpine_raw_result"] ?? "")
             if Self.localAlpineOutputHasPythonSyntaxIssue(text) {
                 let command = message.metadata?["iexa_local_alpine_display_command"] ?? ""
-                let cwd = message.metadata?["iexa_local_alpine_cwd"] ?? "/mnt/iexa"
+            let cwd = message.metadata?["iexa_local_alpine_cwd"] ?? "/mnt/iexa/shared"
                 let targetPath = Self.localAlpinePythonTargetPath(output: text, command: command, cwd: cwd)
                 return (
                     Self.localAlpinePythonFilePath(command: command, output: text, cwd: cwd),
@@ -20971,7 +20987,7 @@ final class ChatViewModel {
                 "iexa_local_alpine_result": "true",
                 "iexa_local_alpine_command_preview": Self.localAlpineCommandPreview(from: content),
                 "iexa_local_alpine_display_command": Self.localAlpineCommandPreview(from: content),
-                "iexa_local_alpine_cwd": "/mnt/iexa"
+                "iexa_local_alpine_cwd": "/mnt/iexa/shared"
             ]
         )
         let placeholderNode = HistoryNode(

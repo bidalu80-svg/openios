@@ -1699,7 +1699,65 @@ actor LocalAlpineTerminalService {
 
         if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
           printf 'Usage: iexa-serve [directory-or-file] [port]\\n' >&2
+          printf '       iexa-serve stop [port|all]\\n' >&2
           exit 0
+        fi
+
+        runtime_dir=/tmp/iexa-serve
+        mkdir -p "$runtime_dir"
+
+        if [ "${1:-}" = "stop" ] || [ "${1:-}" = "--stop" ]; then
+          stop_target=${2:-all}
+          is_managed_http_pid() {
+            [ -n "${1:-}" ] || return 1
+            if [ -r "/proc/$1/cmdline" ]; then
+              tr '\\000' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -Eq 'python3? -m http[.]server|busybox .*httpd|httpd' && return 0
+              return 1
+            fi
+            return 0
+          }
+          stop_one() {
+            stop_port="$1"
+            stop_pidfile="$runtime_dir/$stop_port.pid"
+            stop_dirfile="$runtime_dir/$stop_port.dir"
+            if [ ! -f "$stop_pidfile" ]; then
+              printf 'No managed Iexa preview server on port %s.\\n' "$stop_port"
+              return 1
+            fi
+            stop_pid=$(cat "$stop_pidfile" 2>/dev/null || true)
+            if [ -n "$stop_pid" ] && kill -0 "$stop_pid" 2>/dev/null; then
+              if is_managed_http_pid "$stop_pid"; then
+                kill "$stop_pid" 2>/dev/null || true
+                printf 'Stopped Iexa preview server on port %s.\\n' "$stop_port"
+              else
+                printf 'Refused to stop non-preview process from stale pidfile on port %s.\\n' "$stop_port" >&2
+                return 1
+              fi
+            else
+              printf 'Removed stale Iexa preview pidfile for port %s.\\n' "$stop_port"
+            fi
+            rm -f "$stop_pidfile" "$stop_dirfile"
+            return 0
+          }
+          stopped=0
+          if [ "$stop_target" = "all" ]; then
+            for stop_pidfile in "$runtime_dir"/*.pid; do
+              [ -e "$stop_pidfile" ] || continue
+              stop_port=${stop_pidfile##*/}
+              stop_port=${stop_port%.pid}
+              stop_one "$stop_port" && stopped=1
+            done
+            [ "$stopped" -eq 1 ] || printf 'No managed Iexa preview servers are running.\\n'
+            exit 0
+          fi
+          case "$stop_target" in
+            ''|*[!0-9]*)
+              printf 'iexa-serve stop: port must be a number or all.\\n' >&2
+              exit 1
+              ;;
+          esac
+          stop_one "$stop_target"
+          exit $?
         fi
 
         target=${1:-.}
@@ -1730,13 +1788,11 @@ actor LocalAlpineTerminalService {
           exit 1
         fi
 
-        runtime_dir=/tmp/iexa-serve
-        mkdir -p "$runtime_dir"
-
         print_urls() {
-          url="http://localhost:$1/"
+          token=$(date +%s 2>/dev/null || printf '%s' "$$")
+          url="http://localhost:$1/?iexa_preview=$token"
           printf 'Preview URL: %s\\n' "$url"
-          printf 'Loopback URL: http://127.0.0.1:%s/\\n' "$1"
+          printf 'Loopback URL: http://127.0.0.1:%s/?iexa_preview=%s\\n' "$1" "$token"
           printf '访问地址: %s\\n' "$url"
           emit_open_marker "$url"
         }
@@ -2474,103 +2530,112 @@ actor LocalAlpineTerminalService {
         guard command.range(of: pattern, options: .regularExpression) != nil else {
             return nil
         }
-        guard !hasStandaloneBackgroundAmpersand(command) else {
-            return nil
-        }
 
-        let port = pythonHTTPServerPort(in: command) ?? 8000
-        let url = "http://localhost:\(port)/"
-        let escapedCommand = shellSingleQuoted(command)
-        let escapedURL = shellSingleQuoted(url)
-        return """
-        __iexa_preview_command=\(escapedCommand)
-        __iexa_preview_port=\(port)
-        __iexa_preview_url=\(escapedURL)
-        __iexa_preview_runtime=/tmp/iexa-serve
-        mkdir -p "$__iexa_preview_runtime"
-        __iexa_preview_log="$__iexa_preview_runtime/$__iexa_preview_port.log"
-        __iexa_preview_pidfile="$__iexa_preview_runtime/$__iexa_preview_port.pid"
-        __iexa_preview_dirfile="$__iexa_preview_runtime/$__iexa_preview_port.dir"
-
-        __iexa_preview_port_ready() {
-          __iexa_port="$1"
-          if [ -r /proc/net/tcp ]; then
-            __iexa_hex=$(printf '%04X' "$__iexa_port" 2>/dev/null || true)
-            if [ -n "$__iexa_hex" ]; then
-              awk -v p=":$__iexa_hex" 'tolower($2) ~ tolower(p) && $4 == "0A" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp 2>/dev/null && return 0
-              [ -r /proc/net/tcp6 ] && awk -v p=":$__iexa_hex" 'tolower($2) ~ tolower(p) && $4 == "0A" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp6 2>/dev/null && return 0
-              return 1
-            fi
-          fi
-          if command -v nc >/dev/null 2>&1; then
-            if command -v timeout >/dev/null 2>&1; then
-              timeout 1 nc -z -w 1 127.0.0.1 "$__iexa_port" >/dev/null 2>&1 && return 0
-            else
-              nc -z -w 1 127.0.0.1 "$__iexa_port" >/dev/null 2>&1 && return 0
-            fi
-          fi
-          return 1
-        }
-
-        if __iexa_preview_port_ready "$__iexa_preview_port"; then
-          printf 'Iexa local preview server already running.\\n'
-          printf 'Preview URL: %s\\n' "$__iexa_preview_url"
-          iexa-open "$__iexa_preview_url" 2>/dev/null || {
-            __iexa_esc=$(printf '\\033')
-            __iexa_bel=$(printf '\\007')
-            printf '%s]1337;IexaOpenURL=%s%s\\n' "$__iexa_esc" "$__iexa_preview_url" "$__iexa_bel"
-          }
-          exit 0
-        fi
-
-        ( eval "$__iexa_preview_command" ) >"$__iexa_preview_log" 2>&1 &
-        __iexa_preview_pid=$!
-        printf '%s\\n' "$__iexa_preview_pid" > "$__iexa_preview_pidfile"
-        pwd > "$__iexa_preview_dirfile" 2>/dev/null || true
-
-        __iexa_attempt=0
-        while [ "$__iexa_attempt" -lt 30 ]; do
-          if ! kill -0 "$__iexa_preview_pid" 2>/dev/null; then
-            printf 'Iexa local preview server failed to start. Log: %s\\n' "$__iexa_preview_log" >&2
-            [ -f "$__iexa_preview_log" ] && tail -40 "$__iexa_preview_log" >&2
-            rm -f "$__iexa_preview_pidfile" "$__iexa_preview_dirfile"
-            exit 1
-          fi
-          __iexa_preview_port_ready "$__iexa_preview_port" && break
-          __iexa_attempt=$((__iexa_attempt + 1))
-          sleep 0.1 2>/dev/null || true
-        done
-
-        if __iexa_preview_port_ready "$__iexa_preview_port"; then
-          printf 'Iexa local preview server started.\\n'
-        else
-          printf 'Iexa local preview server is starting in background.\\n'
-        fi
-        printf 'PID: %s\\n' "$__iexa_preview_pid"
-        printf 'Log: %s\\n' "$__iexa_preview_log"
-        printf 'Preview URL: %s\\n' "$__iexa_preview_url"
-        iexa-open "$__iexa_preview_url" 2>/dev/null || {
-          __iexa_esc=$(printf '\\033')
-          __iexa_bel=$(printf '\\007')
-          printf '%s]1337;IexaOpenURL=%s%s\\n' "$__iexa_esc" "$__iexa_preview_url" "$__iexa_bel"
-        }
-        exit 0
-        """
+        let invocation = pythonHTTPServerInvocation(in: command)
+        let directory = invocation?.directory ?? "."
+        let port = invocation?.port ?? 8000
+        return "iexa-serve \(shellSingleQuoted(directory)) \(port)"
     }
 
-    private func pythonHTTPServerPort(in command: String) -> Int? {
-        let pattern = #"(?i)\bpython(?:3(?:\.\d+)?)?\s+-m\s+http[.]server(?:\s+([0-9]{2,5}))?"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let range = NSRange(command.startIndex..<command.endIndex, in: command)
-        guard let match = regex.firstMatch(in: command, range: range),
-              match.numberOfRanges > 1,
-              match.range(at: 1).location != NSNotFound,
-              let portRange = Range(match.range(at: 1), in: command),
-              let port = Int(command[portRange]),
-              (1...65_535).contains(port) else {
+    private func pythonHTTPServerInvocation(in command: String) -> (directory: String, port: Int)? {
+        let words = shellWordsForSimpleCommand(command)
+        guard !words.isEmpty else { return nil }
+
+        var prefixDirectory: String?
+        var searchStart = words.startIndex
+        if words.count >= 4,
+           words[0] == "cd",
+           words[2] == "&&" {
+            prefixDirectory = words[1]
+            searchStart = 3
+        }
+
+        guard let moduleIndex = words[searchStart...].firstIndex(where: { $0.lowercased() == "http.server" }) else {
             return nil
         }
-        return port
+
+        var directory = "."
+        var port: Int?
+        var index = words.index(after: moduleIndex)
+        while index < words.endIndex {
+            let word = words[index]
+            if word == "--directory" || word == "-d" {
+                let valueIndex = words.index(after: index)
+                if valueIndex < words.endIndex {
+                    directory = words[valueIndex]
+                    index = words.index(after: valueIndex)
+                    continue
+                }
+            }
+            if port == nil,
+               let candidate = Int(word),
+               (1...65_535).contains(candidate) {
+                port = min(max(candidate, 1024), 65_535)
+            }
+            index = words.index(after: index)
+        }
+
+        if directory == ".", let prefixDirectory {
+            directory = prefixDirectory
+        } else if let prefixDirectory, !directory.hasPrefix("/") {
+            directory = joinedShellPath(prefixDirectory, directory)
+        }
+        return (directory, port ?? 8000)
+    }
+
+    private func joinedShellPath(_ base: String, _ child: String) -> String {
+        let trimmedBase = base.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let trimmedChild = child.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if base.hasPrefix("/") {
+            return "/" + [trimmedBase, trimmedChild].filter { !$0.isEmpty }.joined(separator: "/")
+        }
+        return [trimmedBase, trimmedChild].filter { !$0.isEmpty }.joined(separator: "/")
+    }
+
+    private func shellWordsForSimpleCommand(_ command: String) -> [String] {
+        var words: [String] = []
+        var current = ""
+        var quote: Character?
+        var escaping = false
+
+        for character in command {
+            if escaping {
+                current.append(character)
+                escaping = false
+                continue
+            }
+            if character == "\\" {
+                escaping = true
+                continue
+            }
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                } else {
+                    current.append(character)
+                }
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character
+                continue
+            }
+            if character == " " || character == "\t" || character == "\n" {
+                if !current.isEmpty {
+                    words.append(current)
+                    current.removeAll(keepingCapacity: true)
+                }
+                continue
+            }
+            current.append(character)
+        }
+        if escaping {
+            current.append("\\")
+        }
+        if !current.isEmpty {
+            words.append(current)
+        }
+        return words
     }
 
     private func hasStandaloneBackgroundAmpersand(_ command: String) -> Bool {
@@ -2624,7 +2689,7 @@ actor LocalAlpineTerminalService {
         export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
-          _iexa_bootstrap_version=2026-06-18.3
+          _iexa_bootstrap_version=2026-06-19.1
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
           if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
             export PATH="$_iexa_bootstrap_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
@@ -2693,6 +2758,61 @@ actor LocalAlpineTerminalService {
           printf '%s]1337;IexaOpenURL=%s%s\\n' "$ESC" "$1" "$BEL"
         }
         target=${1:-.}
+        runtime_dir=/tmp/iexa-serve
+        mkdir -p "$runtime_dir"
+        if [ "${1:-}" = "stop" ] || [ "${1:-}" = "--stop" ]; then
+          stop_target=${2:-all}
+          is_managed_http_pid() {
+            [ -n "${1:-}" ] || return 1
+            if [ -r "/proc/$1/cmdline" ]; then
+              tr '\\000' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -Eq 'python3? -m http[.]server|busybox .*httpd|httpd' && return 0
+              return 1
+            fi
+            return 0
+          }
+          stop_one() {
+            stop_port="$1"
+            stop_pidfile="$runtime_dir/$stop_port.pid"
+            stop_dirfile="$runtime_dir/$stop_port.dir"
+            if [ ! -f "$stop_pidfile" ]; then
+              printf 'No managed Iexa preview server on port %s.\\n' "$stop_port"
+              return 1
+            fi
+            stop_pid=$(cat "$stop_pidfile" 2>/dev/null || true)
+            if [ -n "$stop_pid" ] && kill -0 "$stop_pid" 2>/dev/null; then
+              if is_managed_http_pid "$stop_pid"; then
+                kill "$stop_pid" 2>/dev/null || true
+                printf 'Stopped Iexa preview server on port %s.\\n' "$stop_port"
+              else
+                printf 'Refused to stop non-preview process from stale pidfile on port %s.\\n' "$stop_port" >&2
+                return 1
+              fi
+            else
+              printf 'Removed stale Iexa preview pidfile for port %s.\\n' "$stop_port"
+            fi
+            rm -f "$stop_pidfile" "$stop_dirfile"
+            return 0
+          }
+          stopped=0
+          if [ "$stop_target" = "all" ]; then
+            for stop_pidfile in "$runtime_dir"/*.pid; do
+              [ -e "$stop_pidfile" ] || continue
+              stop_port=${stop_pidfile##*/}
+              stop_port=${stop_port%.pid}
+              stop_one "$stop_port" && stopped=1
+            done
+            [ "$stopped" -eq 1 ] || printf 'No managed Iexa preview servers are running.\\n'
+            exit 0
+          fi
+          case "$stop_target" in
+            ''|*[!0-9]*)
+              printf 'iexa-serve stop: port must be a number or all.\\n' >&2
+              exit 1
+              ;;
+          esac
+          stop_one "$stop_target"
+          exit $?
+        fi
         port=${2:-8080}
         case "$port" in ''|*[!0-9]*) port=8080 ;; esac
         if [ -f "$target" ]; then
@@ -2715,12 +2835,11 @@ actor LocalAlpineTerminalService {
           printf 'iexa-serve: cannot resolve directory: %s\\n' "$target" >&2
           exit 1
         fi
-        runtime_dir=/tmp/iexa-serve
-        mkdir -p "$runtime_dir"
         print_urls() {
-          url="http://localhost:$1/"
+          token=$(date +%s 2>/dev/null || printf '%s' "$$")
+          url="http://localhost:$1/?iexa_preview=$token"
           printf 'Preview URL: %s\\n' "$url"
-          printf 'Loopback URL: http://127.0.0.1:%s/\\n' "$1"
+          printf 'Loopback URL: http://127.0.0.1:%s/?iexa_preview=%s\\n' "$1" "$token"
           printf '访问地址: %s\\n' "$url"
           emit_open_marker "$url"
         }

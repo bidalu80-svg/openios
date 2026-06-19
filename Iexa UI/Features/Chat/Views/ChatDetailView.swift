@@ -1850,6 +1850,10 @@ struct ChatDetailView: View {
     /// Keeps a newly sent turn anchored at the top of the viewport until
     /// the user explicitly follows the bottom again.
     @State private var pinCurrentTurnStartForLatestTurn = false
+    /// Set when the user explicitly follows the bottom during streaming.
+    /// This prevents the current-turn-start pin from pulling the transcript
+    /// back upward when the stream finishes.
+    @State private var userRequestedBottomFollowDuringStreaming = false
     /// Timestamp of the last *programmatic* scroll-to-bottom.
     /// Used both as a streaming throttle guard (prevent pump-scroll more than 10hz)
     /// and as a suppressor to prevent the offset-change handler from falsely
@@ -4243,6 +4247,7 @@ struct ChatDetailView: View {
             let latestVisibleRole = snapshotMessages.last?.role
             if latestVisibleRole == .user {
                 pinCurrentTurnStartForLatestTurn = true
+                userRequestedBottomFollowDuringStreaming = false
                 if keyboard.isVisible {
                     repinToCurrentTurnStartIfFollowing(after: 0.06)
                 } else {
@@ -4253,6 +4258,7 @@ struct ChatDetailView: View {
             } else if oldIds.isEmpty && !keyboard.isVisible {
                 // First visible assistant/content in a new chat — smooth ease-out.
                 pinCurrentTurnStartForLatestTurn = false
+                userRequestedBottomFollowDuringStreaming = false
                 withAnimation(.easeOut(duration: 0.3)) {
                     scrollPosition.scrollTo(edge: .bottom)
                 }
@@ -4306,6 +4312,8 @@ struct ChatDetailView: View {
         // tokens keep the view anchored at the bottom.
         .onChange(of: isScrolledUp) { oldValue, newValue in
             if oldValue == true && newValue == false && isAnyMessageVisuallyStreaming {
+                userRequestedBottomFollowDuringStreaming = true
+                pinCurrentTurnStartForLatestTurn = false
                 lastProgrammaticScrollTime = Date()
                 scrollPosition.scrollTo(edge: .bottom)
             }
@@ -4340,6 +4348,10 @@ struct ChatDetailView: View {
             if distanceFromBottom <= 100 {
                 // User scrolled very close to the bottom — re-engage auto-scroll.
                 if isScrolledUp { isScrolledUp = false }
+                if isAnyMessageVisuallyStreaming {
+                    userRequestedBottomFollowDuringStreaming = true
+                    pinCurrentTurnStartForLatestTurn = false
+                }
                 if !scrollRuntime.isNearBottom {
                     scrollRuntime.isNearBottom = true
                     self.distanceFromBottom = 0
@@ -4377,6 +4389,7 @@ struct ChatDetailView: View {
                         }
                     }
                     if !isScrolledUp { isScrolledUp = true }
+                    userRequestedBottomFollowDuringStreaming = false
                 }
             }
             if abs(newOffset.y - scrollRuntime.lastScrollOffset) > 2 {
@@ -4401,7 +4414,13 @@ struct ChatDetailView: View {
             // and the user hasn't scrolled up, animate to the bottom so new
             // content slides in smoothly instead of snapping.
             let grew = newSize.width > oldContentHeight + 1
-            if grew && isAnyMessageVisuallyStreaming && !isScrolledUp && !pinCurrentTurnStartForLatestTurn {
+            if grew
+                && isAnyMessageVisuallyStreaming
+                && !isScrolledUp
+                && (!pinCurrentTurnStartForLatestTurn || userRequestedBottomFollowDuringStreaming) {
+                if userRequestedBottomFollowDuringStreaming {
+                    pinCurrentTurnStartForLatestTurn = false
+                }
                 let now = Date()
                 if now.timeIntervalSince(lastProgrammaticScrollTime) > 0.32 {
                     lastProgrammaticScrollTime = now
@@ -4442,6 +4461,7 @@ struct ChatDetailView: View {
                     // Disengage auto-scroll lock first so the streaming pump
                     // doesn't fight the scroll animation we're about to start.
                     pinCurrentTurnStartForLatestTurn = false
+                    userRequestedBottomFollowDuringStreaming = true
                     isScrolledUp = false
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
                         scrollPosition.scrollTo(edge: .bottom)
@@ -4669,7 +4689,10 @@ struct ChatDetailView: View {
 
     private func repinToBottomAfterStreamingIfFollowing(after delay: TimeInterval = 0) {
         let action = {
-            guard !isScrolledUp, !pinCurrentTurnStartForLatestTurn, !transcriptMessages.isEmpty else { return }
+            let shouldFollowBottom = userRequestedBottomFollowDuringStreaming || !pinCurrentTurnStartForLatestTurn
+            guard !isScrolledUp, shouldFollowBottom, !transcriptMessages.isEmpty else { return }
+            pinCurrentTurnStartForLatestTurn = false
+            userRequestedBottomFollowDuringStreaming = false
             lastProgrammaticScrollTime = Date()
             scrollToBottomWithoutAnimation()
         }

@@ -762,14 +762,14 @@ actor LocalAlpineAgentService {
     private let maxOutputCharactersPerCommand = 6_000
     private let defaultReadFileMaxBytes = 192_000
     private let maxReadFileMaxBytes = 512_000
-    private let defaultCWD = "/mnt/iexa"
+    private let defaultCWD = "/mnt/iexa/shared"
 
     private init() {}
 
     func runPythonCodeBlock(
         _ code: String,
         fileName: String,
-        cwd: String = "/mnt/iexa",
+        cwd: String = "/mnt/iexa/shared",
         arguments: [String] = [],
         stdinInput: String? = nil
     ) async -> LocalAlpineAgentResult {
@@ -784,7 +784,7 @@ actor LocalAlpineAgentService {
         let writeResult = await writeFiles([file], cwd: cwd)
         var lines = [
             "Local Alpine 执行结果",
-            "环境：内置 Alpine Linux，工作区命名空间是 `/mnt/iexa`；保留目录：`/mnt/iexa/shared`（模型读写）、`/mnt/iexa/skills`、`/mnt/iexa/memory`、`/mnt/iexa/mounts/<name>`",
+            "环境：内置 Alpine Linux，默认工作区是 `/mnt/iexa/shared`；`/mnt/iexa` 是命名空间根，保留目录：`/mnt/iexa/shared`（模型读写）、`/mnt/iexa/skills`、`/mnt/iexa/memory`、`/mnt/iexa/mounts/<name>`",
             writeResult.summary
         ]
         var commandResults: [LocalAlpineAgentCommandResult] = []
@@ -922,7 +922,7 @@ actor LocalAlpineAgentService {
             ?? .oneShot
 
         lines.insert("Local Alpine 执行结果", at: 0)
-        lines.append("环境：内置 Alpine Linux，工作区命名空间是 `/mnt/iexa`；保留目录：`/mnt/iexa/shared`（模型读写）、`/mnt/iexa/skills`、`/mnt/iexa/memory`、`/mnt/iexa/mounts/<name>`")
+        lines.append("环境：内置 Alpine Linux，默认工作区是 `/mnt/iexa/shared`；`/mnt/iexa` 是命名空间根，保留目录：`/mnt/iexa/shared`（模型读写）、`/mnt/iexa/skills`、`/mnt/iexa/memory`、`/mnt/iexa/mounts/<name>`")
         var modelLines = lines
 
         func emitTool(_ call: LocalAlpineToolCall) async {
@@ -2605,7 +2605,7 @@ actor LocalAlpineAgentService {
                   ) else {
                 return []
             }
-            let cwd = Self.cwdString(from: arguments) ?? "/mnt/iexa"
+            let cwd = Self.cwdString(from: arguments) ?? defaultCWD
             let write: [String: Any] = [
                 "write_file": [
                     "path": path,
@@ -2626,7 +2626,7 @@ actor LocalAlpineAgentService {
 
         case "delete_dir", "remove_dir", "rmdir":
             guard let path = Self.pathString(from: arguments) else { return [] }
-            let cwd = Self.cwdString(from: arguments) ?? "/mnt/iexa"
+            let cwd = Self.cwdString(from: arguments) ?? defaultCWD
             var sequence: [[String: Any]] = [[
                 "delete_file": [
                     "path": path,
@@ -2669,7 +2669,7 @@ actor LocalAlpineAgentService {
                   ) else {
                 return []
             }
-            let cwd = Self.cwdString(from: arguments) ?? "/mnt/iexa"
+            let cwd = Self.cwdString(from: arguments) ?? defaultCWD
             let resolvedSource = resolvedFilePath(source, cwd: cwd)
             let resolvedDestination = resolvedFilePath(destination, cwd: cwd)
             if Self.isModelReadOnlySharedPath(resolvedSource) || Self.isModelReadOnlySharedPath(resolvedDestination) {
@@ -2711,7 +2711,7 @@ actor LocalAlpineAgentService {
                   ) else {
                 return []
             }
-            let cwd = Self.cwdString(from: arguments) ?? "/mnt/iexa"
+            let cwd = Self.cwdString(from: arguments) ?? defaultCWD
             let resolvedDestination = resolvedFilePath(destination, cwd: cwd)
             if Self.isModelReadOnlySharedPath(resolvedDestination) {
                 return [Self.blockedModelReadOnlyCommand(
@@ -2730,7 +2730,7 @@ actor LocalAlpineAgentService {
 
         case "mkdir":
             guard let path = Self.pathString(from: arguments) else { return [] }
-            let cwd = Self.cwdString(from: arguments) ?? "/mnt/iexa"
+            let cwd = Self.cwdString(from: arguments) ?? defaultCWD
             let resolvedTarget = resolvedFilePath(path, cwd: cwd)
             if Self.isModelReadOnlySharedPath(resolvedTarget) {
                 return [Self.blockedModelReadOnlyCommand(
@@ -2764,7 +2764,7 @@ actor LocalAlpineAgentService {
             }
             return [LocalAlpineAgentCommand(
                 command: "iexa-open \(Self.shellSingleQuotedStatic(target))",
-                cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa",
+                cwd: Self.cwdString(from: arguments) ?? defaultCWD,
                 delaySeconds: Self.delaySeconds(from: arguments),
                 shellToolName: "iexa_open",
                 shellToolDetail: target,
@@ -2809,7 +2809,7 @@ actor LocalAlpineAgentService {
             """
             return [LocalAlpineAgentCommand(
                 command: command,
-                cwd: Self.cwdString(from: arguments) ?? "/mnt/iexa",
+                cwd: Self.cwdString(from: arguments) ?? defaultCWD,
                 delaySeconds: Self.delaySeconds(from: arguments),
                 shellToolName: "web_search",
                 shellToolDetail: query
@@ -3251,7 +3251,7 @@ actor LocalAlpineAgentService {
            let path = runnablePathFromNaturalRunCommand(shellCommand) {
             let verifyObject: [String: Any] = [
                 "verify": ["path": path],
-                "cwd": cwd ?? "/mnt/iexa"
+                "cwd": cwd ?? defaultCWD
             ]
             return generatedShellCommand(from: verifyObject, shellCommand: "verify")
         }
@@ -5751,16 +5751,7 @@ actor LocalAlpineAgentService {
         let words = shellWordsForSimpleCommand(trimmed)
         guard words.first == "iexa-serve" else { return command }
 
-        let directory = words.dropFirst().first ?? "/mnt/iexa"
-        let rawPort = words.dropFirst(2).first.flatMap { Int($0) } ?? 8080
-        let port = min(max(rawPort, 1024), 65_535)
-        let logPath = "/tmp/iexa-preview-\(port).log"
-        return """
-        command -v python3 >/dev/null 2>&1 || { printf 'python3 not found\\n' >&2; exit 127; }
-        cd \(shellSingleQuotedStatic(directory)) || exit 1
-        python3 -m http.server \(port) --bind 127.0.0.1 >\(shellSingleQuotedStatic(logPath)) 2>&1 &
-        printf 'Preview URL: http://localhost:\(port)/\\n'
-        """
+        return command
     }
 
     private nonisolated static func shellWordsForSimpleCommand(_ command: String) -> [String] {
@@ -5840,6 +5831,9 @@ actor LocalAlpineAgentService {
         } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)lsof\b"#) {
             issue = "`lsof` is disabled in this embedded iSH runtime because it can crash the app."
             replacement = "For localhost preview checks, use `nc -z 127.0.0.1 <port>` or inspect `/proc/net/tcp`."
+        } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)(ps|pgrep|pkill)\b"#) {
+            issue = "`ps`/`pgrep`/`pkill` are blocked in this embedded iSH runtime because process-table scans can crash the app."
+            replacement = "For website previews, use `iexa-serve <directory-or-file> <port>` and the printed Preview URL. To stop managed preview servers, use `iexa-serve stop <port>` or `iexa-serve stop all`. For localhost readiness checks, use `nc -z 127.0.0.1 <port>` or inspect `/proc/net/tcp`; do not scan or kill the process table."
         } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)(open|osascript|pbcopy|pbpaste|powershell|pwsh|cmd\.exe)\b"#) {
             issue = "This is a host desktop/Windows/macOS command, not an Alpine Linux command."
             replacement = "Use Local Alpine tools only. For previews, create a project file under `/mnt/iexa` or an explicitly shared file under `/mnt/iexa/shared`, then use `iexa-open <path>` when appropriate."
@@ -6962,7 +6956,7 @@ actor LocalAlpineAgentService {
         "cargo", "deno", "env", "find", "free", "g++", "gcc", "git", "go", "grep",
         "gunzip", "gzip", "head", "id", "install", "java", "javac", "ln", "ls", "lua",
         "make", "mkdir", "mv", "nc", "node", "npm", "npx", "patch", "perl", "php",
-        "pip", "pip3", "printf", "ps", "pwd", "python", "python3", "rm", "rmdir", "ruby",
+        "pip", "pip3", "printf", "pwd", "python", "python3", "rm", "rmdir", "ruby",
         "rustc", "sed", "sh", "sleep", "sort", "tail", "tar", "tee", "test", "top",
         "touch", "tr", "uname", "uniq", "unzip", "vi", "vim", "wget", "which", "whoami",
         "xargs", "xz", "zip"
