@@ -967,8 +967,14 @@ private struct AgentActivityItem: Identifiable, Hashable {
         if let outputURL = localWebPreviewTarget(in: call.outputPreview) {
             return outputURL
         }
+        if let outputLocalTarget = localPreviewTarget(in: call.outputPreview) {
+            return outputLocalTarget
+        }
         if let detailURL = localWebPreviewTarget(in: call.displayDetail) {
             return detailURL
+        }
+        if let detailLocalTarget = localPreviewTarget(in: call.displayDetail) {
+            return detailLocalTarget
         }
         if call.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
             return nil
@@ -1016,6 +1022,25 @@ private struct AgentActivityItem: Identifiable, Hashable {
         return components.string ?? normalized
     }
 
+    static func localPreviewTarget(in text: String?) -> String? {
+        guard let text else { return nil }
+        let patterns = [
+            #"iexa://[^\s"'`<>()\[\]{}]+"#,
+            #"file://[^\s"'`<>()\[\]{}]+"#,
+            #"/mnt/iexa/[^\s"'`<>()\[\]{}]+"#,
+            #"/tmp/[^\s"'`<>()\[\]{}]+"#,
+            #"/var/[^\s"'`<>()\[\]{}]+"#
+        ]
+        for pattern in patterns {
+            if let raw = firstRegexMatch(pattern: pattern, in: text),
+               let normalized = normalizedPreviewTarget(raw),
+               isPreviewableLocalResource(normalized) {
+                return normalized
+            }
+        }
+        return nil
+    }
+
     static func normalizedPreviewTarget(_ value: String?) -> String? {
         guard var trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty,
@@ -1057,6 +1082,28 @@ private struct AgentActivityItem: Identifiable, Hashable {
             return trimmed
         }
         return nil
+    }
+
+    private static func isPreviewableLocalResource(_ value: String) -> Bool {
+        let lower = value.lowercased()
+        if lower.hasPrefix("http://") || lower.hasPrefix("https://") {
+            return false
+        }
+        if lower.hasPrefix("iexa://") || lower.hasPrefix("file://") {
+            return true
+        }
+        if value.hasPrefix("/mnt/iexa/")
+            || value.hasPrefix("/tmp/")
+            || value.hasPrefix("/var/") {
+            let ext = (value as NSString).pathExtension.lowercased()
+            return [
+                "html", "htm", "svg",
+                "png", "jpg", "jpeg", "gif", "webp", "heic",
+                "pdf", "md", "txt", "csv",
+                "mp3", "wav", "m4a", "mp4", "mov", "webm"
+            ].contains(ext)
+        }
+        return false
     }
 
     private static func trimmedPreviewURLCandidate(_ value: String) -> String {
@@ -2103,6 +2150,8 @@ struct ChatDetailView: View {
         "iexa_local_alpine_command_results",
         "iexa_local_alpine_written_files",
         "iexa_local_alpine_final_summary",
+        "iexa_local_alpine_mirrored_parent",
+        "iexa_local_alpine_mirrored_result_id",
         "iexa_local_alpine_continuation",
         "iexa_local_alpine_auto_verify",
         "iexa_local_alpine_missing_tool_correction",
@@ -2361,7 +2410,10 @@ struct ChatDetailView: View {
     }
 
     private func attachedLocalAlpineFinalSummary(for resultMessage: ChatMessage) -> ChatMessage? {
-        guard isLocalAlpineResultMessage(resultMessage) else { return nil }
+        guard isLocalAlpineResultMessage(resultMessage) else {
+            guard let mirroredResult = mirroredLocalAlpineResult(for: resultMessage) else { return nil }
+            return attachedLocalAlpineFinalSummary(for: mirroredResult)
+        }
         return viewModel.messages.first { candidate in
             guard candidate.role == .assistant,
                   candidate.error == nil,
@@ -2702,11 +2754,20 @@ struct ChatDetailView: View {
             if let target = AgentActivityItem.localWebPreviewTarget(in: content) {
                 return target
             }
+            if let target = AgentActivityItem.localPreviewTarget(in: content) {
+                return target
+            }
         }
         return nil
     }
 
     private func assistantLocalPreviewDisplayText(_ target: String) -> String {
+        if target.hasPrefix("/mnt/iexa/") || target.hasPrefix("/tmp/") || target.hasPrefix("/var/") {
+            return (target as NSString).lastPathComponent.isEmpty ? target : (target as NSString).lastPathComponent
+        }
+        if target.lowercased().hasPrefix("iexa://") || target.lowercased().hasPrefix("file://") {
+            return (URL(string: target)?.lastPathComponent).flatMap { $0.isEmpty ? nil : $0 } ?? target
+        }
         guard let components = URLComponents(string: target) else { return target }
         let host = components.host ?? ""
         let port = components.port.map { ":\($0)" } ?? ""
@@ -2748,6 +2809,12 @@ struct ChatDetailView: View {
             return !hasVisibleCleanedAssistantText() && !hasRenderableAgentActivityCached()
         }
         if isLocalAlpineResultMessage(message) {
+            if isMirroredLocalAlpineResultMessage(message),
+               let parentId = message.metadata?["iexa_local_alpine_mirrored_parent"],
+               let parent = viewModel.messages.first(where: { $0.id == parentId }),
+               hasRenderableAgentActivity(for: parent) {
+                return true
+            }
             let hasVisibleActivity = messageHasConcreteActivityMetadata(message)
                 || !viewModel.localAlpineLiveToolCalls(for: message.id).isEmpty
                 || viewModel.localAlpineLiveToolStatus(for: message.id) != nil
@@ -5126,6 +5193,29 @@ struct ChatDetailView: View {
             || (message.model == "Local Alpine" && message.statusHistory.contains {
                 $0.action?.lowercased() == "local_alpine"
             })
+    }
+
+    private func isMirroredLocalAlpineResultMessage(_ message: ChatMessage) -> Bool {
+        guard isLocalAlpineResultMessage(message),
+              let parentId = message.metadata?["iexa_local_alpine_mirrored_parent"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return false
+        }
+        return !parentId.isEmpty
+    }
+
+    private func mirroredLocalAlpineResult(for parentMessage: ChatMessage) -> ChatMessage? {
+        guard !isLocalAlpineResultMessage(parentMessage) else { return nil }
+        if let resultId = parentMessage.metadata?["iexa_local_alpine_mirrored_result_id"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !resultId.isEmpty,
+           let result = viewModel.messages.first(where: { $0.id == resultId && isLocalAlpineResultMessage($0) }) {
+            return result
+        }
+        return viewModel.messages.first { candidate in
+            isLocalAlpineResultMessage(candidate)
+                && candidate.metadata?["iexa_local_alpine_mirrored_parent"] == parentMessage.id
+        }
     }
 
     private func hasAgentToolPreview(for message: ChatMessage, activityItem: AgentActivityItem? = nil) -> Bool {
@@ -9643,14 +9733,25 @@ private struct AgentInlineStepsView: View {
 
     @Environment(\.theme) private var theme
 
-    private var visibleSteps: [AgentActivityStep] {
-        let limit = 8
-        return Array(item.steps.suffix(limit))
+    private var leadingSteps: [AgentActivityStep] {
+        let limit = 24
+        guard item.steps.count > limit else { return item.steps }
+        return Array(item.steps.prefix(12))
+    }
+
+    private var trailingSteps: [AgentActivityStep] {
+        let limit = 24
+        guard item.steps.count > limit else { return [] }
+        return Array(item.steps.suffix(12))
+    }
+
+    private var hiddenMiddleStepCount: Int {
+        max(0, item.steps.count - leadingSteps.count - trailingSteps.count)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(visibleSteps, id: \.id) { step in
+            ForEach(leadingSteps, id: \.id) { step in
                 AgentActivityStepPill(
                     step: step,
                     onStopRunningStep: item.isActive ? onStopRunningStep : nil
@@ -9658,15 +9759,23 @@ private struct AgentInlineStepsView: View {
                     .equatable()
             }
 
-            if item.steps.count > visibleSteps.count {
+            if hiddenMiddleStepCount > 0 {
                 HStack(spacing: 6) {
                     Image(systemName: "ellipsis")
                         .scaledFont(size: 11, weight: .bold)
-                    Text("还有 \(item.steps.count - visibleSteps.count) 个较早步骤")
+                    Text("省略 \(hiddenMiddleStepCount) 个中间步骤")
                         .scaledFont(size: 11, weight: .semibold)
                 }
                 .foregroundStyle(theme.textTertiary)
                 .padding(.leading, 12)
+            }
+
+            ForEach(trailingSteps, id: \.id) { step in
+                AgentActivityStepPill(
+                    step: step,
+                    onStopRunningStep: item.isActive ? onStopRunningStep : nil
+                )
+                    .equatable()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

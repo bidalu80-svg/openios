@@ -1836,7 +1836,7 @@ actor LocalAlpineTerminalService {
             return 1
           fi
           candidate_dir=$(cat "$candidate_dirfile" 2>/dev/null || true)
-          if [ -z "$candidate_dir" ] || [ "$candidate_dir" = "$dir" ]; then
+          if [ "$candidate_dir" = "$dir" ]; then
             printf 'Iexa local preview server already running.\\n'
             printf 'Directory: %s\\n' "$dir"
             printf 'PID: %s\\n' "$candidate_pid"
@@ -2876,7 +2876,7 @@ actor LocalAlpineTerminalService {
           socket_status=$?
           [ "$socket_status" -eq 1 ] && return 1
           candidate_dir=$(cat "$candidate_dirfile" 2>/dev/null || true)
-          if [ -z "$candidate_dir" ] || [ "$candidate_dir" = "$dir" ]; then
+          if [ "$candidate_dir" = "$dir" ]; then
             printf 'Iexa local preview server already running.\\n'
             printf 'Directory: %s\\n' "$dir"
             printf 'PID: %s\\n' "$candidate_pid"

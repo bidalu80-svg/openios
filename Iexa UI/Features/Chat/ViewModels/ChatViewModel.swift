@@ -925,6 +925,48 @@ final class ChatViewModel {
         )
     }
 
+    private func mirrorLocalAlpineAgentActivityToParent(parentMessageId: String, resultMessageId: String) {
+        guard let parentIndex = conversation?.messages.firstIndex(where: { $0.id == parentMessageId }),
+              conversation?.messages[parentIndex].role == .assistant,
+              let resultIndex = conversation?.messages.firstIndex(where: { $0.id == resultMessageId }) else {
+            return
+        }
+
+        let resultMetadata = conversation?.messages[resultIndex].metadata ?? [:]
+        let mirrorKeys = [
+            "iexa_local_alpine_raw_result",
+            "iexa_local_alpine_tool_run_id",
+            "iexa_local_alpine_tool_calls",
+            "iexa_local_alpine_written_files",
+            "iexa_local_alpine_command_results"
+        ]
+        guard mirrorKeys.contains(where: { key in
+            !(resultMetadata[key]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        }) else {
+            return
+        }
+
+        var parentMetadata = conversation?.messages[parentIndex].metadata ?? [:]
+        for key in mirrorKeys {
+            if let value = resultMetadata[key],
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                parentMetadata[key] = value
+            }
+        }
+        parentMetadata["iexa_local_alpine_mirrored_result_id"] = resultMessageId
+        conversation?.messages[parentIndex].metadata = parentMetadata
+        conversation?.history.updateNode(id: parentMessageId) { node in
+            node.metadata = parentMetadata
+        }
+
+        var mirroredResultMetadata = resultMetadata
+        mirroredResultMetadata["iexa_local_alpine_mirrored_parent"] = parentMessageId
+        conversation?.messages[resultIndex].metadata = mirroredResultMetadata
+        conversation?.history.updateNode(id: resultMessageId) { node in
+            node.metadata = mirroredResultMetadata
+        }
+    }
+
     private func clearAllLocalAlpineLiveToolState() {
         for task in localAlpineToolEventFlushTasks.values {
             task.cancel()
@@ -2573,7 +2615,7 @@ final class ChatViewModel {
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
         - Use `web_search` for live search, `browser_use` for bounded HTTP fetch/save/open-preview, `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
-        - Website/app changes require a localhost preview: for static files use `iexa-serve <directory-or-file> <port>`; for framework dev servers, start them in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
+        - Website/app preview: for static HTML/SVG/files, use `iexa-open <path>` directly so Iexa opens the in-app preview. Use `iexa-serve <directory-or-file> <port>` or a framework dev server only when the project actually requires localhost; start long-running servers in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
         - One meaningful step per decision. A write plus one direct verification may share a step when validating the same change. Stop when the tool result completes the user goal.
         - iOS background time is limited; keep long jobs resumable and save progress/results under `/mnt/iexa/shared`.
@@ -2910,7 +2952,7 @@ final class ChatViewModel {
         - Prefer structured read/write/edit/patch/delete/list/glob/grep/verify/browser tools. Do not write source code with shell heredocs/redirection/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured JSON (`write_files.code_lines`/`content_lines`, `edit_file`, `patch_file`) plus bounded verification, not in a normal Markdown code fence. Normal code fences are only for pure explanation with no Local Alpine operation.
         - Large outputs may provide `output_reference`; read that path only when the full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
-        - Website/app changes require localhost preview: for static files use `iexa-serve <directory-or-file> <port>`; for framework dev servers, start them in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that exact URL. Never run a foreground long-lived server as a normal shell step.
+        - Website/app preview: for static HTML/SVG/files, use `iexa-open <path>` directly so Iexa opens the in-app preview. Use `iexa-serve <directory-or-file> <port>` or a framework dev server only when the project actually requires localhost; start long-running servers in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that exact URL. Never run a foreground long-lived server as a normal shell step.
         - Use one meaningful bounded step per turn, then wait for the returned observation. A write plus one direct verification may share a block if it validates the same change.
         - When emitting a tool block, do not append guessed stdout, success claims, file contents, or a final summary after it.
         """
@@ -20975,6 +21017,16 @@ final class ChatViewModel {
 
         let resultMessageId = UUID().uuidString
         let initialStatus = localAlpineStatus(description: localAlpineRunningDescription(for: content), done: false)
+        let mirrorActivityToParent = conversation?.messages.first(where: { $0.id == messageId })?.role == .assistant
+        var placeholderMetadata: [String: String] = [
+            "iexa_local_alpine_result": "true",
+            "iexa_local_alpine_command_preview": Self.localAlpineCommandPreview(from: content),
+            "iexa_local_alpine_display_command": Self.localAlpineCommandPreview(from: content),
+            "iexa_local_alpine_cwd": "/mnt/iexa/shared"
+        ]
+        if mirrorActivityToParent {
+            placeholderMetadata["iexa_local_alpine_mirrored_parent"] = messageId
+        }
         let placeholderMessage = ChatMessage(
             id: resultMessageId,
             role: .assistant,
@@ -20983,12 +21035,7 @@ final class ChatViewModel {
             model: "Local Alpine",
             isStreaming: true,
             statusHistory: [initialStatus],
-            metadata: [
-                "iexa_local_alpine_result": "true",
-                "iexa_local_alpine_command_preview": Self.localAlpineCommandPreview(from: content),
-                "iexa_local_alpine_display_command": Self.localAlpineCommandPreview(from: content),
-                "iexa_local_alpine_cwd": "/mnt/iexa/shared"
-            ]
+            metadata: placeholderMetadata
         )
         let placeholderNode = HistoryNode(
             id: resultMessageId,
@@ -21107,6 +21154,10 @@ final class ChatViewModel {
             }
             conversation?.messages[index].metadata = metadata
         }
+        mirrorLocalAlpineAgentActivityToParent(
+            parentMessageId: messageId,
+            resultMessageId: resultMessageId
+        )
         await attachLocalAlpineGeneratedMediaIfNeeded(messageId: resultMessageId)
         clearLocalAlpineLiveToolState(for: resultMessageId)
         let resultMessageSnapshot = conversation?.messages.first(where: { $0.id == resultMessageId })
@@ -23281,6 +23332,20 @@ final class ChatViewModel {
             messageId: messageId,
             calls: localAlpineLiveToolCallsByMessageId[messageId] ?? []
         )
+        if let parentId = conversation?.messages
+            .first(where: { $0.id == messageId })?
+            .metadata?["iexa_local_alpine_mirrored_parent"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !parentId.isEmpty,
+           conversation?.messages.first(where: { $0.id == parentId })?.role == .assistant {
+            let calls = localAlpineLiveToolCallsByMessageId[messageId] ?? []
+            updateLocalAlpineToolCallMetadata(messageId: parentId, calls: calls)
+            postLocalAlpineLiveToolState(
+                messageId: parentId,
+                finalCalls: calls,
+                finalStatus: localAlpineLastLiveToolStatusByMessageId[messageId]
+            )
+        }
         postLocalAlpineLiveToolState(messageId: messageId)
     }
 

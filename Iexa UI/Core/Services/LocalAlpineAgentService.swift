@@ -5833,7 +5833,7 @@ actor LocalAlpineAgentService {
             replacement = "For localhost preview checks, use `nc -z 127.0.0.1 <port>` or inspect `/proc/net/tcp`."
         } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)(ps|pgrep|pkill)\b"#) {
             issue = "`ps`/`pgrep`/`pkill` are blocked in this embedded iSH runtime because process-table scans can crash the app."
-            replacement = "For website previews, use `iexa-serve <directory-or-file> <port>` and the printed Preview URL. To stop managed preview servers, use `iexa-serve stop <port>` or `iexa-serve stop all`. For localhost readiness checks, use `nc -z 127.0.0.1 <port>` or inspect `/proc/net/tcp`; do not scan or kill the process table."
+            replacement = "For static website previews, use `iexa-open <path>` directly. Use `iexa-serve <directory-or-file> <port>` only when the app requires localhost; stop managed preview servers with `iexa-serve stop <port>` or `iexa-serve stop all`. For localhost readiness checks, use `nc -z 127.0.0.1 <port>` or inspect `/proc/net/tcp`; do not scan or kill the process table."
         } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)(open|osascript|pbcopy|pbpaste|powershell|pwsh|cmd\.exe)\b"#) {
             issue = "This is a host desktop/Windows/macOS command, not an Alpine Linux command."
             replacement = "Use Local Alpine tools only. For previews, create a project file under `/mnt/iexa` or an explicitly shared file under `/mnt/iexa/shared`, then use `iexa-open <path>` when appropriate."
