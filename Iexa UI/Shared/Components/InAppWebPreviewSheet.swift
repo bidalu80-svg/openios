@@ -11,10 +11,12 @@ struct WebPreviewURL: Identifiable, Equatable {
 
 struct InAppWebPreviewSheet: View {
     let url: URL
+    var showsAddressBar: Bool = false
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @State private var state = InAppWebPreviewState()
+    @State private var addressText = ""
     @State private var resolvedDouyinPost: ResolvedDouyinPost?
     @State private var resolvedXiaohongshuPost: ResolvedXiaohongshuPost?
     @State private var isResolvingDouyin = false
@@ -24,6 +26,7 @@ struct InAppWebPreviewSheet: View {
     @State private var downloadedMedia: WebPreviewDownloadedMedia?
     @State private var resolvedDouyinSourceID = ""
     @State private var resolvedXiaohongshuSourceID = ""
+    @FocusState private var addressFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -49,6 +52,11 @@ struct InAppWebPreviewSheet: View {
             }
             .navigationTitle(state.title.isEmpty ? hostLabel : state.title)
             .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if showsAddressBar {
+                    addressBar
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("完成") { dismiss() }
@@ -78,6 +86,9 @@ struct InAppWebPreviewSheet: View {
         .task(id: douyinTaskID) {
             await resolveSocialMediaIfNeeded()
         }
+        .onAppear {
+            addressText = Self.addressText(for: activeURL)
+        }
         .onChange(of: state.pageVideoURL) { _, _ in
             if resolvedDouyinPost?.video == nil && resolvedXiaohongshuPost?.video == nil {
                 douyinErrorMessage = nil
@@ -90,6 +101,9 @@ struct InAppWebPreviewSheet: View {
             resolvedDouyinSourceID = ""
             resolvedXiaohongshuSourceID = ""
             douyinErrorMessage = nil
+            if !addressFocused {
+                addressText = Self.addressText(for: newURL)
+            }
         }
         .sheet(item: $playingVideo) { item in
             WebPreviewVideoPlayerSheet(url: item.url, refererURL: activeURL)
@@ -127,6 +141,69 @@ struct InAppWebPreviewSheet: View {
             || resolvedDouyinPost?.hasMedia == true
             || resolvedXiaohongshuPost?.hasMedia == true
             || state.pageVideoURL != nil
+    }
+
+    private var addressBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(theme.textSecondary)
+
+            TextField("搜索或输入网址", text: $addressText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+                .submitLabel(.go)
+                .focused($addressFocused)
+                .onSubmit(navigateFromAddressBar)
+
+            Button {
+                navigateFromAddressBar()
+            } label: {
+                Image(systemName: "arrow.right.circle.fill")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(theme.brandPrimary)
+            }
+            .disabled(addressText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(theme.surface)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(theme.divider.opacity(0.7))
+                .frame(height: 0.5)
+        }
+    }
+
+    private func navigateFromAddressBar() {
+        guard let destination = Self.normalizedAddressURL(addressText) else { return }
+        addressFocused = false
+        addressText = Self.addressText(for: destination)
+        state.webView?.load(URLRequest(url: destination))
+    }
+
+    private static func addressText(for url: URL) -> String {
+        guard url.scheme != "about" else { return "" }
+        return url.absoluteString
+    }
+
+    private static func normalizedAddressURL(_ rawValue: String) -> URL? {
+        let raw = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+
+        if let url = URL(string: raw), url.scheme != nil {
+            return url
+        }
+
+        let looksLikeHost = raw.contains(".") && !raw.contains(" ")
+        if looksLikeHost, let url = URL(string: "https://\(raw)") {
+            return url
+        }
+
+        let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&+"))
+        let encodedQuery = raw.addingPercentEncoding(withAllowedCharacters: allowed) ?? raw
+        return URL(string: "https://www.baidu.com/s?wd=\(encodedQuery)")
     }
 
     private var playableVideoURL: URL? {

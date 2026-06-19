@@ -12,6 +12,8 @@ import SwiftUI
 // connected if it reports regular).
 
 struct iPadMainChatView: View {
+    private static let defaultSessionBrowserURL = URL(string: "https://www.baidu.com/")!
+
     @Environment(AppDependencyContainer.self) private var dependencies
     @Environment(AppRouter.self) private var router
     @Environment(\.theme) private var theme
@@ -51,6 +53,9 @@ struct iPadMainChatView: View {
     @State private var showLocalAlpineTerminal = false
     @State private var pendingLocalAlpineTerminalCommand: String?
     @State private var pendingLocalAlpineTerminalCwd: String?
+
+    /// Whether the in-app session browser is visible.
+    @State private var showSessionBrowser = false
 
     /// Whether the local Alpine workspace file browser is visible.
     @State private var showLocalWorkspaceBrowser = false
@@ -374,6 +379,13 @@ struct iPadMainChatView: View {
             .id("\(pendingLocalAlpineTerminalCommand ?? "")|\(pendingLocalAlpineTerminalCwd ?? "")")
             .preferredColorScheme(.dark)
         }
+        // In-app session browser
+        .sheet(isPresented: $showSessionBrowser) {
+            InAppWebPreviewSheet(url: Self.defaultSessionBrowserURL, showsAddressBar: true)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(24)
+        }
         // Local Alpine workspace browser
         .sheet(isPresented: $showLocalWorkspaceBrowser) {
             LocalWorkspaceFileBrowserView()
@@ -415,6 +427,7 @@ struct iPadMainChatView: View {
             showMemories: $showMemories,
             showCalendar: $showCalendar,
             showLocalAlpineTerminal: $showLocalAlpineTerminal,
+            showSessionBrowser: $showSessionBrowser,
             showLocalWorkspaceBrowser: $showLocalWorkspaceBrowser,
             showAutomations: $showAutomations,
             showAdminConsole: $showAdminConsole,
@@ -782,6 +795,7 @@ struct iPadSidebarContent: View {
     @Binding var showMemories: Bool
     @Binding var showCalendar: Bool
     @Binding var showLocalAlpineTerminal: Bool
+    @Binding var showSessionBrowser: Bool
     @Binding var showLocalWorkspaceBrowser: Bool
     @Binding var showAutomations: Bool
     @Binding var showAdminConsole: Bool
@@ -1719,6 +1733,10 @@ struct iPadSidebarContent: View {
 
                     Button { showLocalWorkspaceBrowser = true } label: {
                         Label("浏览文件", systemImage: "folder")
+                    }
+
+                    Button { showSessionBrowser = true } label: {
+                        Label("打开浏览器", systemImage: "globe")
                     }
 
                     Button(action: onOpenLocalAlpineTerminal) {

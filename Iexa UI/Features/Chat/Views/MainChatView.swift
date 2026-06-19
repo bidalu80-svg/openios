@@ -15,6 +15,8 @@ import SwiftUI
 ///   intercepts taps instead, avoiding a full re-render of the chat stack.
 /// - Haptic feedback uses the pre-prepared `Haptics` service.
 struct MainChatView: View {
+    private static let defaultSessionBrowserURL = URL(string: "https://www.baidu.com/")!
+
     @Environment(AppDependencyContainer.self) private var dependencies
     @Environment(AppRouter.self) private var router
     @Environment(\.theme) private var theme
@@ -43,6 +45,9 @@ struct MainChatView: View {
     @State private var showLocalAlpineTerminal = false
     @State private var pendingLocalAlpineTerminalCommand: String?
     @State private var pendingLocalAlpineTerminalCwd: String?
+
+    /// Controls the in-app session browser presentation.
+    @State private var showSessionBrowser = false
 
     /// Controls the local Alpine workspace file browser presentation.
     @State private var showLocalWorkspaceBrowser = false
@@ -532,6 +537,7 @@ struct MainChatView: View {
         case workspace
         case calendar
         case weather
+        case sessionBrowser
         case localWorkspaceBrowser
         case automations
         case memories
@@ -553,6 +559,7 @@ struct MainChatView: View {
             case .workspace: return "workspace"
             case .calendar: return "calendar"
             case .weather: return "weather"
+            case .sessionBrowser: return "sessionBrowser"
             case .localWorkspaceBrowser: return "localWorkspaceBrowser"
             case .automations: return "automations"
             case .memories: return "memories"
@@ -588,6 +595,7 @@ struct MainChatView: View {
         if showWorkspace { return .workspace }
         if showCalendar { return .calendar }
         if showWeather { return .weather }
+        if showSessionBrowser { return .sessionBrowser }
         if showLocalWorkspaceBrowser { return .localWorkspaceBrowser }
         if showAutomations { return .automations }
         if showMemories { return .memories }
@@ -786,6 +794,12 @@ struct MainChatView: View {
                 .environment(dependencies)
                 .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
 
+        case .sessionBrowser:
+            InAppWebPreviewSheet(url: Self.defaultSessionBrowserURL, showsAddressBar: true)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(24)
+
         case .localWorkspaceBrowser:
             LocalWorkspaceFileBrowserView()
                 .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
@@ -917,6 +931,8 @@ struct MainChatView: View {
             showCalendar = false
         case .weather:
             showWeather = false
+        case .sessionBrowser:
+            showSessionBrowser = false
         case .localWorkspaceBrowser:
             showLocalWorkspaceBrowser = false
         case .automations:
@@ -2892,6 +2908,13 @@ struct MainChatView: View {
                         showLocalWorkspaceBrowser = true
                     } label: {
                         Label("浏览文件", systemImage: "folder")
+                    }
+
+                    Button {
+                        closeDrawer()
+                        showSessionBrowser = true
+                    } label: {
+                        Label("打开浏览器", systemImage: "globe")
                     }
 
                     Button {

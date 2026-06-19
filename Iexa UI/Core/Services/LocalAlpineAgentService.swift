@@ -3251,7 +3251,7 @@ actor LocalAlpineAgentService {
            let path = runnablePathFromNaturalRunCommand(shellCommand) {
             let verifyObject: [String: Any] = [
                 "verify": ["path": path],
-                "cwd": cwd ?? defaultCWD
+                "cwd": cwd ?? "/mnt/iexa/shared"
             ]
             return generatedShellCommand(from: verifyObject, shellCommand: "verify")
         }
