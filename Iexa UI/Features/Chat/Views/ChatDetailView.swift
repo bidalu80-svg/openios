@@ -8,9 +8,24 @@ import PDFKit
 import ImageIO
 import MarkdownView
 import Translation
+import WebKit
 import os.log
 
 // MARK: - Chat Detail View
+
+private let agentToolWebPreviewPrefix = "web-preview:"
+
+private func agentToolWebPreviewReference(for target: String) -> String {
+    agentToolWebPreviewPrefix + target
+}
+
+private func agentToolWebPreviewTarget(from reference: String) -> String? {
+    let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.lowercased().hasPrefix(agentToolWebPreviewPrefix) else { return nil }
+    let value = String(trimmed.dropFirst(agentToolWebPreviewPrefix.count))
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
+}
 
 private struct MessageShareItem: Identifiable {
     let id = UUID()
@@ -905,10 +920,15 @@ private struct AgentActivityItem: Identifiable, Hashable {
             || action.contains("browser_web_search")
             || action.contains("get_readable")
             || action.contains("readable") {
-            return status.items.compactMap { item in
+            if let thumbnail = status.items.compactMap({ item in
                 let value = item.thumbnailURL?.trimmingCharacters(in: .whitespacesAndNewlines)
                 return value?.isEmpty == false ? value : nil
-            }.first
+            }).first {
+                return thumbnail
+            }
+            if let url = statusOpenURL(for: status, action: action) {
+                return agentToolWebPreviewReference(for: url)
+            }
         }
         return nil
     }
@@ -938,9 +958,57 @@ private struct AgentActivityItem: Identifiable, Hashable {
            isImagePath(file.path) {
             return file.path
         }
-        return call.filePaths
+        let imagePath = call.filePaths
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first(where: isImagePath(_:))
+        if let imagePath {
+            return imagePath
+        }
+        if let browserURL = call.browserURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let reference = webThumbnailReference(for: browserURL) {
+            return reference
+        }
+        if let outputURL = localWebPreviewTarget(in: call.outputPreview),
+           let reference = webThumbnailReference(for: outputURL) {
+            return reference
+        }
+        if let outputTarget = localPreviewTarget(in: call.outputPreview),
+           let reference = webThumbnailReference(for: outputTarget) {
+            return reference
+        }
+        if let detailURL = localWebPreviewTarget(in: call.displayDetail),
+           let reference = webThumbnailReference(for: detailURL) {
+            return reference
+        }
+        if let detailTarget = localPreviewTarget(in: call.displayDetail),
+           let reference = webThumbnailReference(for: detailTarget) {
+            return reference
+        }
+        return call.filePaths
+            .compactMap { webThumbnailReference(for: $0) }
+            .first
+    }
+
+    private static func webThumbnailReference(for target: String) -> String? {
+        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let url = URL(string: trimmed),
+           let scheme = url.scheme?.lowercased(),
+           ["http", "https"].contains(scheme) {
+            let extensionName = url.pathExtension.lowercased()
+            guard !["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tiff"].contains(extensionName) else {
+                return nil
+            }
+            return agentToolWebPreviewReference(for: trimmed)
+        }
+
+        let normalized = normalizedLocalPreviewPath(trimmed) ?? trimmed
+        let extensionName = (normalized as NSString).pathExtension.lowercased()
+        guard ["html", "htm", "xhtml", "svg"].contains(extensionName)
+                || normalized.lowercased().hasPrefix("iexa://") else {
+            return nil
+        }
+        return agentToolWebPreviewReference(for: normalized)
     }
 
     private static func toolCallPreviewOpenTarget(
@@ -10212,7 +10280,10 @@ private struct AgentToolPreviewThumbnail: View {
 
     @ViewBuilder
     private func thumbnailContent(size: CGSize) -> some View {
-        if let image = Self.localImage(from: reference) {
+        if let webTarget = agentToolWebPreviewTarget(from: reference) {
+            AgentToolPreviewWebThumbnail(target: webTarget)
+                .frame(width: size.width, height: size.height)
+        } else if let image = Self.localImage(from: reference) {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()
@@ -10264,6 +10335,113 @@ private struct AgentToolPreviewThumbnail: View {
             return UIImage(contentsOfFile: trimmed)
         }
         return nil
+    }
+}
+
+private struct AgentToolPreviewWebThumbnail: View {
+    let target: String
+
+    @State private var resolvedURL: URL?
+    @State private var failed = false
+
+    var body: some View {
+        ZStack {
+            fallback
+            if let resolvedURL {
+                AgentToolPreviewWebThumbnailView(url: resolvedURL)
+                    .transition(.opacity)
+            } else if failed {
+                Image(systemName: "safari")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.42))
+            } else {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .scaleEffect(0.55)
+                    .tint(.white.opacity(0.72))
+            }
+        }
+        .task(id: target) {
+            await resolveTarget()
+        }
+    }
+
+    private var fallback: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.05, green: 0.06, blue: 0.08),
+                Color(red: 0.10, green: 0.12, blue: 0.16)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    @MainActor
+    private func resolveTarget() async {
+        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            failed = true
+            resolvedURL = nil
+            return
+        }
+
+        if let url = URL(string: trimmed),
+           let scheme = url.scheme?.lowercased(),
+           ["http", "https", "file"].contains(scheme) {
+            resolvedURL = url
+            failed = false
+            return
+        }
+
+        do {
+            let url = try await LocalAlpineTerminalService.shared.materializePreviewURL(
+                for: LocalAlpineOpenRequest(target: trimmed)
+            )
+            resolvedURL = url
+            failed = false
+        } catch {
+            resolvedURL = nil
+            failed = true
+        }
+    }
+}
+
+private struct AgentToolPreviewWebThumbnailView: UIViewRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.bounces = false
+        webView.scrollView.showsVerticalScrollIndicator = false
+        webView.scrollView.showsHorizontalScrollIndicator = false
+        webView.isUserInteractionEnabled = false
+        webView.allowsLinkPreview = false
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        guard context.coordinator.loadedURL != url else { return }
+        context.coordinator.loadedURL = url
+        if url.isFileURL {
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        } else {
+            webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 8))
+        }
+    }
+
+    final class Coordinator {
+        var loadedURL: URL?
     }
 }
 

@@ -1823,6 +1823,24 @@ actor LocalAlpineTerminalService {
           return 2
         }
 
+        server_ready() {
+          socket_port_in_use "$1"
+          socket_status=$?
+          [ "$socket_status" -eq 0 ] && return 0
+          if command -v python3 >/dev/null 2>&1; then
+            python3 - "$1" <<'PY' >/dev/null 2>&1 && return 0
+        import socket
+        import sys
+
+        sock = socket.socket()
+        sock.settimeout(0.5)
+        sock.connect(("127.0.0.1", int(sys.argv[1])))
+        sock.close()
+        PY
+          fi
+          return "$socket_status"
+        }
+
         existing_server_for_dir() {
           candidate_port="$1"
           candidate_pidfile="$runtime_dir/$candidate_port.pid"
@@ -1830,11 +1848,6 @@ actor LocalAlpineTerminalService {
           [ -f "$candidate_pidfile" ] || return 1
           candidate_pid=$(cat "$candidate_pidfile" 2>/dev/null || true)
           pid_alive "$candidate_pid" || return 1
-          socket_port_in_use "$candidate_port"
-          socket_status=$?
-          if [ "$socket_status" -eq 1 ]; then
-            return 1
-          fi
           candidate_dir=$(cat "$candidate_dirfile" 2>/dev/null || true)
           if [ "$candidate_dir" = "$dir" ]; then
             printf 'Iexa local preview server already running.\\n'
@@ -1843,23 +1856,28 @@ actor LocalAlpineTerminalService {
             print_urls "$candidate_port"
             exit 0
           fi
+          socket_port_in_use "$candidate_port"
+          socket_status=$?
+          if [ "$socket_status" -eq 1 ]; then
+            return 1
+          fi
           return 1
         }
 
         port_in_use() {
-          socket_port_in_use "$1"
-          socket_status=$?
-          if [ "$socket_status" -eq 0 ]; then
-            return 0
-          elif [ "$socket_status" -eq 1 ]; then
-            return 1
-          fi
           pidfile="$runtime_dir/$1.pid"
           if [ -f "$pidfile" ]; then
             pid=$(cat "$pidfile" 2>/dev/null || true)
             if pid_alive "$pid"; then
               return 0
             fi
+          fi
+          socket_port_in_use "$1"
+          socket_status=$?
+          if [ "$socket_status" -eq 0 ]; then
+            return 0
+          elif [ "$socket_status" -eq 1 ]; then
+            return 1
           fi
           return 1
         }
@@ -1908,15 +1926,7 @@ actor LocalAlpineTerminalService {
           rm -f "$pidfile" "$dirfile"
           exit 1
         fi
-        socket_port_in_use "$port"
-        socket_status=$?
-        if [ "$socket_status" -eq 1 ]; then
-          printf 'iexa-serve: server did not listen on localhost:%s. Log: %s\\n' "$port" "$log" >&2
-          [ -f "$log" ] && tail -40 "$log" >&2
-          kill "$pid" 2>/dev/null || true
-          rm -f "$pidfile" "$dirfile"
-          exit 1
-        fi
+        server_ready "$port" >/dev/null 2>&1 || true
 
         printf 'Iexa local preview server started.\\n'
         printf 'Directory: %s\\n' "$dir"
@@ -2689,7 +2699,7 @@ actor LocalAlpineTerminalService {
         export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
-          _iexa_bootstrap_version=2026-06-19.1
+          _iexa_bootstrap_version=2026-06-19.2
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
           if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
             export PATH="$_iexa_bootstrap_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
@@ -2865,6 +2875,23 @@ actor LocalAlpineTerminalService {
           fi
           return 2
         }
+        server_ready() {
+          socket_port_in_use "$1"
+          socket_status=$?
+          [ "$socket_status" -eq 0 ] && return 0
+          if command -v python3 >/dev/null 2>&1; then
+            python3 - "$1" <<'PY' >/dev/null 2>&1 && return 0
+        import socket
+        import sys
+
+        sock = socket.socket()
+        sock.settimeout(0.5)
+        sock.connect(("127.0.0.1", int(sys.argv[1])))
+        sock.close()
+        PY
+          fi
+          return "$socket_status"
+        }
         existing_server_for_dir() {
           candidate_port="$1"
           candidate_pidfile="$runtime_dir/$candidate_port.pid"
@@ -2872,9 +2899,6 @@ actor LocalAlpineTerminalService {
           [ -f "$candidate_pidfile" ] || return 1
           candidate_pid=$(cat "$candidate_pidfile" 2>/dev/null || true)
           pid_alive "$candidate_pid" || return 1
-          socket_port_in_use "$candidate_port"
-          socket_status=$?
-          [ "$socket_status" -eq 1 ] && return 1
           candidate_dir=$(cat "$candidate_dirfile" 2>/dev/null || true)
           if [ "$candidate_dir" = "$dir" ]; then
             printf 'Iexa local preview server already running.\\n'
@@ -2883,18 +2907,21 @@ actor LocalAlpineTerminalService {
             print_urls "$candidate_port"
             exit 0
           fi
+          socket_port_in_use "$candidate_port"
+          socket_status=$?
+          [ "$socket_status" -eq 1 ] && return 1
           return 1
         }
         port_in_use() {
-          socket_port_in_use "$1"
-          socket_status=$?
-          [ "$socket_status" -eq 0 ] && return 0
-          [ "$socket_status" -eq 1 ] && return 1
           pidfile="$runtime_dir/$1.pid"
           if [ -f "$pidfile" ]; then
             pid=$(cat "$pidfile" 2>/dev/null || true)
             pid_alive "$pid" && return 0
           fi
+          socket_port_in_use "$1"
+          socket_status=$?
+          [ "$socket_status" -eq 0 ] && return 0
+          [ "$socket_status" -eq 1 ] && return 1
           return 1
         }
         existing_server_for_dir "$port"
@@ -2929,15 +2956,7 @@ actor LocalAlpineTerminalService {
           rm -f "$pidfile" "$dirfile"
           exit 1
         fi
-        socket_port_in_use "$port"
-        socket_status=$?
-        if [ "$socket_status" -eq 1 ]; then
-          printf 'iexa-serve: server did not listen on localhost:%s. Log: %s\\n' "$port" "$log" >&2
-          [ -f "$log" ] && tail -40 "$log" >&2
-          kill "$pid" 2>/dev/null || true
-          rm -f "$pidfile" "$dirfile"
-          exit 1
-        fi
+        server_ready "$port" >/dev/null 2>&1 || true
         printf 'Iexa local preview server started.\\n'
         printf 'Directory: %s\\n' "$dir"
         printf 'PID: %s\\n' "$pid"
