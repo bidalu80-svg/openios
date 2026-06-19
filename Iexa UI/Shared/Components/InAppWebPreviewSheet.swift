@@ -168,7 +168,7 @@ struct InAppWebPreviewSheet: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        .background(theme.surface)
+        .background(theme.surfaceContainer)
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(theme.divider.opacity(0.7))
