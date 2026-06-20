@@ -2563,7 +2563,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = true
         textView.textContainer.heightTracksTextView = false
-        textView.textContainer.lineBreakMode = .byWordWrapping
+        textView.textContainer.lineBreakMode = .byCharWrapping
         textView.layoutManager.allowsNonContiguousLayout = false
         textView.adjustsFontForContentSizeCategory = false
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -2630,7 +2630,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
                         baseColor: textColor,
                         isDarkMode: isDarkMode,
                         lineSpacing: lineSpacing,
-                        lineBreakMode: wrapLines ? .byWordWrapping : .byClipping
+                        lineBreakMode: wrapLines ? .byCharWrapping : .byClipping
                     )
                 )
             }
@@ -2642,7 +2642,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
                 baseColor: textColor,
                 isDarkMode: isDarkMode,
                 lineSpacing: lineSpacing,
-                lineBreakMode: wrapLines ? .byWordWrapping : .byClipping
+                lineBreakMode: wrapLines ? .byCharWrapping : .byClipping
             )
             uiView.setContentOffset(.zero, animated: false)
         }
@@ -2744,7 +2744,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
     private static func configureTextContainer(_ uiView: UITextView, preferredWidth: CGFloat, wrapLines: Bool) {
         uiView.textContainer.widthTracksTextView = wrapLines
         uiView.textContainer.heightTracksTextView = false
-        uiView.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
+        uiView.textContainer.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
         if wrapLines {
             uiView.textContainer.size = CGSize(
                 width: max(1, uiView.bounds.width),
@@ -2775,7 +2775,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
     private static func updateHorizontalContentMetrics(_ uiView: UITextView, preferredWidth: CGFloat, wrapLines: Bool) {
         if wrapLines {
             uiView.textContainer.widthTracksTextView = true
-            uiView.textContainer.lineBreakMode = .byWordWrapping
+            uiView.textContainer.lineBreakMode = .byCharWrapping
             uiView.alwaysBounceHorizontal = false
             uiView.showsHorizontalScrollIndicator = false
             let viewportWidth = max(1, uiView.bounds.width)
@@ -2917,7 +2917,7 @@ private final class NoCaretSourceTextView: UITextView {
         super.layoutSubviews()
         guard !wrapLines else {
             textContainer.widthTracksTextView = true
-            textContainer.lineBreakMode = .byWordWrapping
+            textContainer.lineBreakMode = .byCharWrapping
             let viewportWidth = max(1, bounds.width)
             textContainer.size = CGSize(
                 width: viewportWidth,
