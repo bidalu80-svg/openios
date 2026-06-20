@@ -1105,6 +1105,22 @@ struct StreamingMarkdownView: View {
             let recoveredFence = recoveredMalformedFence(language: rawLanguage, content: rawCodeContent)
             let lang = displayLanguage(forFenceInfo: recoveredFence.language)
             let codeContent = recoveredFence.content
+            if !Self.isRenderableClosedFenceLanguage(lang) {
+                let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
+                if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    units.append(.markdown(preceding))
+                }
+                let demotedFence = Self.demotedRejectedFenceMarkdown(
+                    language: recoveredFence.language,
+                    code: codeContent
+                )
+                if !demotedFence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    units.append(.markdown(demotedFence))
+                }
+                let blockEnd = closeRange.upperBound
+                remaining = normalizedFenceTail(remaining[blockEnd...])
+                continue
+            }
             if Self.isHiddenInternalToolBlock(language: lang, code: codeContent) {
                 removedInternalToolBlock = true
                 let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
@@ -1673,6 +1689,12 @@ struct StreamingMarkdownView: View {
         if title.isEmpty { return body }
         if body.isEmpty { return title }
         return title + "\n" + body
+    }
+
+    private static func isRenderableClosedFenceLanguage(_ language: String) -> Bool {
+        let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        return trimmed.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
     }
 
     private static let recognizedFenceLanguageTokens: Set<String> = [
