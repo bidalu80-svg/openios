@@ -1399,7 +1399,6 @@ struct StreamingMarkdownView: View {
         guard let first = parts.first else { return ("", nil) }
 
         let language = displayLanguage(forFenceInfo: String(first))
-        guard language.isEmpty || Self.isPlausibleFenceLanguageToken(language) else { return nil }
 
         if parts.count == 1 {
             guard language.count <= 32 else { return nil }
@@ -1656,7 +1655,6 @@ struct StreamingMarkdownView: View {
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789_+-#.")
         let firstTokenIsSafe = firstToken.unicodeScalars.allSatisfy { allowed.contains($0) }
         let wholeInfoIsSafe = normalized.unicodeScalars.allSatisfy { allowed.contains($0) }
-        guard Self.isPlausibleFenceLanguageToken(firstToken) else { return false }
         if wholeInfoIsSafe {
             return !trimmedCode.isEmpty || StreamingMarkdownView.recognizedFenceLanguageTokens.contains(normalized)
         }
@@ -1666,12 +1664,6 @@ struct StreamingMarkdownView: View {
             return true
         }
         return false
-    }
-
-    private static func isPlausibleFenceLanguageToken(_ token: String) -> Bool {
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return true }
-        return trimmed.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
     }
 
     private static func demotedRejectedFenceMarkdown(language: String, code: String) -> String {
