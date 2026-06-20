@@ -2415,7 +2415,7 @@ private struct StandardCodeBlockView: View {
                 language: displayLanguage,
                 maxHeight: codeViewMaxHeight,
                 autoFollowTail: isStreaming,
-                wrapLines: true
+                wrapLines: false
             )
                 .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.22 : 0.42))
         }
@@ -2491,6 +2491,39 @@ struct SourceCodeTextView: View {
             max(48, measuredContentHeight > 0 ? measuredContentHeight : estimatedContentHeight)
         )
 
+        Group {
+            if wrapLines {
+                highlightedCodeView(
+                    width: nil,
+                    contentWidth: contentWidth,
+                    contentHeight: contentHeight,
+                    viewWrapsLines: true
+                )
+                .padding(.horizontal, 16)
+            } else {
+                ScrollView(.horizontal, showsIndicators: true) {
+                    highlightedCodeView(
+                        width: contentWidth,
+                        contentWidth: contentWidth,
+                        contentHeight: contentHeight,
+                        viewWrapsLines: true
+                    )
+                    .frame(width: contentWidth, alignment: .leading)
+                    .padding(.horizontal, 16)
+                }
+            }
+        }
+        .padding(.vertical, verticalPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: contentHeight + verticalPadding * 2)
+    }
+
+    private func highlightedCodeView(
+        width: CGFloat?,
+        contentWidth: CGFloat,
+        contentHeight: CGFloat,
+        viewWrapsLines: Bool
+    ) -> some View {
         HighlightedSourceTextView(
             text: visibleCode,
             language: normalizedLanguage,
@@ -2501,18 +2534,14 @@ struct SourceCodeTextView: View {
             maximumHeight: contentMaxHeight,
             contentWidth: contentWidth,
             autoFollowTail: autoFollowTail,
-            wrapLines: wrapLines,
+            wrapLines: viewWrapsLines,
             onHeightChange: { height in
                 let nextHeight = min(contentMaxHeight, max(48, height))
                 guard abs(measuredContentHeight - nextHeight) > 0.5 else { return }
                 measuredContentHeight = nextHeight
             }
         )
-        .frame(height: contentHeight)
-        .padding(.horizontal, 16)
-        .padding(.vertical, verticalPadding)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: contentHeight + verticalPadding * 2)
+        .frame(width: width, height: contentHeight, alignment: .leading)
     }
 
     private static func layoutMetrics(
@@ -3722,7 +3751,7 @@ struct FullCodeView: View {
                     code: code,
                     language: language,
                     maxHeight: max(240, proxy.size.height),
-                    wrapLines: true
+                    wrapLines: false
                 )
                 .navigationTitle(language)
                 .navigationBarTitleDisplayMode(.inline)

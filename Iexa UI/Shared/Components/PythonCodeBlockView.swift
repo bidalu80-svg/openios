@@ -57,7 +57,7 @@ struct PythonCodeBlockView: View {
                 language: "python",
                 maxHeight: 420,
                 autoFollowTail: isStreaming,
-                wrapLines: true
+                wrapLines: false
             )
                 .background(Color(.secondarySystemBackground))
 
