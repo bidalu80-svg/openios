@@ -7138,6 +7138,8 @@ actor LocalAlpineAgentService {
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        guard !cleaned.contains("```") else { return cleaned }
+
         let sentences = visibleSentences(from: cleaned)
         guard !sentences.isEmpty else { return cleaned }
 

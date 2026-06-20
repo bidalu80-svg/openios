@@ -347,10 +347,6 @@ struct StreamingMarkdownView: View {
         if pythonLanguageTags.contains(normalizedLanguage) {
             return .python(code)
         }
-        if Self.isPlainTextFence(language: normalizedLanguage),
-           !Self.looksLikeSourceCode(code) {
-            return .markdown(code)
-        }
         if !normalizedLanguage.isEmpty {
             return .codeBlock(
                 language: normalizedLanguage,
@@ -1156,19 +1152,9 @@ struct StreamingMarkdownView: View {
             let isMath = mathLanguageTags.contains(lang)
             let isCompactModule = shouldRenderCompactCodeModule(language: lang, code: codeContent)
             let preceding = String(remaining[remaining.startIndex..<openRange.lowerBound])
-            let isPlainTextFence = Self.isPlainTextFence(language: lang)
             let isStandardCodeBlock = normalizedBlock != nil
-                && (!isPlainTextFence || Self.looksLikeSourceCode(codeContent))
 
-            if isPlainTextFence && !Self.looksLikeSourceCode(codeContent) {
-                if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    units.append(.markdown(preceding))
-                }
-                if !codeContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    units.append(.markdown(codeContent))
-                }
-                remaining = normalizedFenceTail(remaining[closeRange.upperBound...])
-            } else if isChart || isHTML || isLinkedWebAsset || isMermaid || isSVG || isPython || isMath || isCompactModule || isStandardCodeBlock {
+            if isChart || isHTML || isLinkedWebAsset || isMermaid || isSVG || isPython || isMath || isCompactModule || isStandardCodeBlock {
                 if !preceding.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     units.append(.markdown(preceding))
                 }
@@ -1741,6 +1727,9 @@ struct StreamingMarkdownView: View {
         let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         if isLikelyDirtyClosingFenceSuffix(prefix) {
+            return true
+        }
+        if trimmed.count <= 80, trimmed.last.map({ ":：".contains($0) }) == true {
             return true
         }
 
