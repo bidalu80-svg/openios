@@ -1399,7 +1399,7 @@ struct StreamingMarkdownView: View {
         guard let first = parts.first else { return ("", nil) }
 
         let language = displayLanguage(forFenceInfo: String(first))
-        guard !language.isEmpty || String(first).isEmpty else { return nil }
+        guard language.isEmpty || Self.isPlausibleFenceLanguageToken(language) else { return nil }
 
         if parts.count == 1 {
             guard language.count <= 32 else { return nil }
@@ -1656,6 +1656,7 @@ struct StreamingMarkdownView: View {
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789_+-#.")
         let firstTokenIsSafe = firstToken.unicodeScalars.allSatisfy { allowed.contains($0) }
         let wholeInfoIsSafe = normalized.unicodeScalars.allSatisfy { allowed.contains($0) }
+        guard Self.isPlausibleFenceLanguageToken(firstToken) else { return false }
         if wholeInfoIsSafe {
             return !trimmedCode.isEmpty || StreamingMarkdownView.recognizedFenceLanguageTokens.contains(normalized)
         }
@@ -1665,6 +1666,12 @@ struct StreamingMarkdownView: View {
             return true
         }
         return false
+    }
+
+    private static func isPlausibleFenceLanguageToken(_ token: String) -> Bool {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        return trimmed.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
     }
 
     private static func demotedRejectedFenceMarkdown(language: String, code: String) -> String {
@@ -2563,7 +2570,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = true
         textView.textContainer.heightTracksTextView = false
-        textView.textContainer.lineBreakMode = .byCharWrapping
+        textView.textContainer.lineBreakMode = .byWordWrapping
         textView.layoutManager.allowsNonContiguousLayout = false
         textView.adjustsFontForContentSizeCategory = false
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -2630,7 +2637,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
                         baseColor: textColor,
                         isDarkMode: isDarkMode,
                         lineSpacing: lineSpacing,
-                        lineBreakMode: wrapLines ? .byCharWrapping : .byClipping
+                        lineBreakMode: wrapLines ? .byWordWrapping : .byClipping
                     )
                 )
             }
@@ -2642,7 +2649,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
                 baseColor: textColor,
                 isDarkMode: isDarkMode,
                 lineSpacing: lineSpacing,
-                lineBreakMode: wrapLines ? .byCharWrapping : .byClipping
+                lineBreakMode: wrapLines ? .byWordWrapping : .byClipping
             )
             uiView.setContentOffset(.zero, animated: false)
         }
@@ -2744,7 +2751,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
     private static func configureTextContainer(_ uiView: UITextView, preferredWidth: CGFloat, wrapLines: Bool) {
         uiView.textContainer.widthTracksTextView = wrapLines
         uiView.textContainer.heightTracksTextView = false
-        uiView.textContainer.lineBreakMode = wrapLines ? .byCharWrapping : .byClipping
+        uiView.textContainer.lineBreakMode = wrapLines ? .byWordWrapping : .byClipping
         if wrapLines {
             uiView.textContainer.size = CGSize(
                 width: max(1, uiView.bounds.width),
@@ -2775,7 +2782,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
     private static func updateHorizontalContentMetrics(_ uiView: UITextView, preferredWidth: CGFloat, wrapLines: Bool) {
         if wrapLines {
             uiView.textContainer.widthTracksTextView = true
-            uiView.textContainer.lineBreakMode = .byCharWrapping
+            uiView.textContainer.lineBreakMode = .byWordWrapping
             uiView.alwaysBounceHorizontal = false
             uiView.showsHorizontalScrollIndicator = false
             let viewportWidth = max(1, uiView.bounds.width)
@@ -2917,7 +2924,7 @@ private final class NoCaretSourceTextView: UITextView {
         super.layoutSubviews()
         guard !wrapLines else {
             textContainer.widthTracksTextView = true
-            textContainer.lineBreakMode = .byCharWrapping
+            textContainer.lineBreakMode = .byWordWrapping
             let viewportWidth = max(1, bounds.width)
             textContainer.size = CGSize(
                 width: viewportWidth,
