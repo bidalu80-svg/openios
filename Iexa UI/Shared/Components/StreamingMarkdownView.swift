@@ -2589,8 +2589,9 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         textView.dataDetectorTypes = []
         textView.showsVerticalScrollIndicator = true
         textView.showsHorizontalScrollIndicator = true
-        textView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 24)
-        textView.scrollIndicatorInsets = textView.contentInset
+        textView.contentInsetAdjustmentBehavior = .never
+        textView.contentInset = .zero
+        textView.scrollIndicatorInsets = .zero
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = true
@@ -2789,18 +2790,19 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             height: UIView.layoutFittingExpandedSize.height
         )
         uiView.contentSize = CGSize(
-            width: preferredWidth + uiView.adjustedContentInset.left + uiView.adjustedContentInset.right,
+            width: preferredWidth
+                + uiView.textContainerInset.left
+                + uiView.textContainerInset.right,
             height: max(uiView.contentSize.height, 1)
         )
     }
 
     private static func configureScrollInsets(_ uiView: UITextView, wrapLines: Bool) {
-        let inset = wrapLines
-            ? UIEdgeInsets.zero
-            : UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 96)
-        if uiView.contentInset != inset {
-            uiView.contentInset = inset
-            uiView.scrollIndicatorInsets = inset
+        if uiView.contentInset != .zero {
+            uiView.contentInset = .zero
+        }
+        if uiView.scrollIndicatorInsets != .zero {
+            uiView.scrollIndicatorInsets = .zero
         }
     }
 
@@ -2847,8 +2849,6 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         let scrollableWidth = requiredWidth
             + uiView.textContainerInset.left
             + uiView.textContainerInset.right
-            + uiView.adjustedContentInset.left
-            + uiView.adjustedContentInset.right
         if abs(uiView.contentSize.width - scrollableWidth) > 0.5 {
             uiView.contentSize.width = scrollableWidth
         }
@@ -2973,8 +2973,8 @@ private final class NoCaretSourceTextView: UITextView {
             height: UIView.layoutFittingExpandedSize.height
         )
         let requiredContentWidth = minimumContentWidth
-            + adjustedContentInset.left
-            + adjustedContentInset.right
+            + textContainerInset.left
+            + textContainerInset.right
         if contentSize.width < requiredContentWidth {
             contentSize.width = requiredContentWidth
         }
