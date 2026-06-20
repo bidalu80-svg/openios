@@ -2405,7 +2405,7 @@ private struct StandardCodeBlockView: View {
                 language: displayLanguage,
                 maxHeight: codeViewMaxHeight,
                 autoFollowTail: isStreaming,
-                wrapLines: true
+                wrapLines: false
             )
                 .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.22 : 0.42))
         }
@@ -3707,7 +3707,7 @@ struct FullCodeView: View {
                     code: code,
                     language: language,
                     maxHeight: max(240, proxy.size.height),
-                    wrapLines: true
+                    wrapLines: false
                 )
                 .navigationTitle(language)
                 .navigationBarTitleDisplayMode(.inline)

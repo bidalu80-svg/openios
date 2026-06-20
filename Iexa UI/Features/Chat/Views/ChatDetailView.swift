@@ -10704,7 +10704,7 @@ private struct LocalAlpineWrittenFilePreviewSheet: View {
                         code: item.code,
                         language: item.file.language,
                         maxHeight: max(240, proxy.size.height),
-                        wrapLines: true
+                        wrapLines: false
                     )
                 }
             }
@@ -10826,7 +10826,7 @@ private struct LocalAlpineLazyFilePreview: View {
                 code: displayCode,
                 language: language,
                 maxHeight: 1_200,
-                wrapLines: true
+                wrapLines: false
             )
             Divider()
             footer
