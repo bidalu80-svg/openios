@@ -7134,8 +7134,7 @@ actor LocalAlpineAgentService {
             }
         }
 
-        cleaned = cleaned
-            .replacingOccurrences(of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
+        cleaned = collapseVisibleProtocolNoiseOutsideFences(cleaned)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -7160,6 +7159,36 @@ actor LocalAlpineAgentService {
         return unique.joined(separator: " ")
     }
 
+    nonisolated private static func collapseVisibleProtocolNoiseOutsideFences(_ content: String) -> String {
+        var result = ""
+        var cursor = content.startIndex
+        var insideFence = false
+
+        while cursor < content.endIndex {
+            guard let fenceRange = content.range(of: "```", range: cursor..<content.endIndex) else {
+                let tail = String(content[cursor...])
+                result += insideFence ? tail : collapseHorizontalWhitespace(tail)
+                break
+            }
+
+            let before = String(content[cursor..<fenceRange.lowerBound])
+            result += insideFence ? before : collapseHorizontalWhitespace(before)
+            result += "```"
+            insideFence.toggle()
+            cursor = fenceRange.upperBound
+        }
+
+        return result
+    }
+
+    nonisolated private static func collapseHorizontalWhitespace(_ text: String) -> String {
+        text.replacingOccurrences(
+            of: #"[ \t]{2,}"#,
+            with: " ",
+            options: .regularExpression
+        )
+    }
+
     nonisolated private static func cleanedVisibleProtocolNoise(from content: String) -> String {
         var cleaned = content
             .replacingOccurrences(of: #"\r\n?"#, with: "\n", options: .regularExpression)
@@ -7179,8 +7208,7 @@ actor LocalAlpineAgentService {
             }
         }
 
-        return cleaned
-            .replacingOccurrences(of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
+        return collapseVisibleProtocolNoiseOutsideFences(cleaned)
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
