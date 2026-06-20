@@ -1399,6 +1399,7 @@ struct StreamingMarkdownView: View {
         guard let first = parts.first else { return ("", nil) }
 
         let language = displayLanguage(forFenceInfo: String(first))
+        guard !language.isEmpty || String(first).isEmpty else { return nil }
 
         if parts.count == 1 {
             guard language.count <= 32 else { return nil }
