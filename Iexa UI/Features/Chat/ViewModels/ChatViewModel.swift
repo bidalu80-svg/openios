@@ -1886,8 +1886,8 @@ final class ChatViewModel {
     private static func sanitizedMessageForDisplay(_ message: ChatMessage) -> ChatMessage {
         var sanitized = message
         if sanitized.role == .assistant {
-            sanitized.content = safeAssistantDisplayContent(
-                cleanedProviderCitationArtifacts(sanitized.content)
+            sanitized.content = safeAssistantDisplayContentPreservingCode(
+                sanitized.content
             )
         }
         sanitized.files = sanitizedMessageFiles(sanitized.files)
@@ -1905,8 +1905,8 @@ final class ChatViewModel {
     private static func sanitizedHistoryNodeForDisplay(_ node: HistoryNode) -> HistoryNode {
         var sanitized = node
         if sanitized.role == .assistant {
-            sanitized.content = safeAssistantDisplayContent(
-                cleanedProviderCitationArtifacts(sanitized.content)
+            sanitized.content = safeAssistantDisplayContentPreservingCode(
+                sanitized.content
             )
         }
         sanitized.files = sanitizedMessageFiles(sanitized.files)
@@ -1915,8 +1915,8 @@ final class ChatViewModel {
 
     private static func sanitizedMessageVersionForDisplay(_ version: ChatMessageVersion) -> ChatMessageVersion {
         var sanitized = version
-        sanitized.content = safeAssistantDisplayContent(
-            cleanedProviderCitationArtifacts(sanitized.content)
+        sanitized.content = safeAssistantDisplayContentPreservingCode(
+            sanitized.content
         )
         sanitized.files = sanitizedMessageFiles(sanitized.files)
         return sanitized
@@ -22880,6 +22880,14 @@ final class ChatViewModel {
         cleanedInternalPromptArtifacts(
             StreamingMarkdownView.removeProviderCitationArtifacts(from: text)
         )
+    }
+
+    private static func safeAssistantDisplayContentPreservingCode(_ text: String) -> String {
+        transformProseOutsideFencedCode(in: text) { prose in
+            safeAssistantDisplayContent(
+                cleanedProviderCitationArtifacts(prose)
+            )
+        }
     }
 
     private static func safeAssistantDisplayContent(_ text: String) -> String {

@@ -296,7 +296,7 @@ struct StreamingMarkdownView: View {
         while let first = lines.first, first.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lines.removeFirst()
         }
-        if let marker = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+        if let marker = recoverableLanguageLine(from: lines.first),
            isRecognizedCodeLanguage(marker) {
             lines.removeFirst()
             return ParsedBlock(language: marker, content: lines.joined(separator: "\n"))
@@ -1609,7 +1609,7 @@ struct StreamingMarkdownView: View {
         while let first = lines.first, first.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             lines.removeFirst()
         }
-        if let marker = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+        if let marker = recoverableLanguageLine(from: lines.first),
            isRecognizedCodeLanguage(marker) {
             lines.removeFirst()
             let recoveredContent = lines.joined(separator: "\n")
@@ -1648,6 +1648,16 @@ struct StreamingMarkdownView: View {
             ? firstCommandLine
             : firstCommandLine + "\n" + content
         return ParsedBlock(language: languageToken.isEmpty ? normalizedLanguage : languageToken, content: recoveredContent)
+    }
+
+    private func recoverableLanguageLine(from line: String?) -> String? {
+        guard let line else { return nil }
+        let marker = line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !marker.isEmpty,
+              marker.range(of: #"^[a-z0-9_+#.-]{1,32}$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        return marker
     }
 
     private func displayLanguage(forFenceInfo language: String) -> String {
@@ -2779,7 +2789,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
             height: UIView.layoutFittingExpandedSize.height
         )
         uiView.contentSize = CGSize(
-            width: preferredWidth + uiView.adjustedContentInset.right,
+            width: preferredWidth + uiView.adjustedContentInset.left + uiView.adjustedContentInset.right,
             height: max(uiView.contentSize.height, 1)
         )
     }
@@ -2787,7 +2797,7 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
     private static func configureScrollInsets(_ uiView: UITextView, wrapLines: Bool) {
         let inset = wrapLines
             ? UIEdgeInsets.zero
-            : UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 24)
+            : UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 96)
         if uiView.contentInset != inset {
             uiView.contentInset = inset
             uiView.scrollIndicatorInsets = inset
@@ -2837,6 +2847,8 @@ private struct HighlightedSourceTextView: UIViewRepresentable {
         let scrollableWidth = requiredWidth
             + uiView.textContainerInset.left
             + uiView.textContainerInset.right
+            + uiView.adjustedContentInset.left
+            + uiView.adjustedContentInset.right
         if abs(uiView.contentSize.width - scrollableWidth) > 0.5 {
             uiView.contentSize.width = scrollableWidth
         }
@@ -2960,8 +2972,11 @@ private final class NoCaretSourceTextView: UITextView {
             width: minimumContentWidth,
             height: UIView.layoutFittingExpandedSize.height
         )
-        if contentSize.width < minimumContentWidth {
-            contentSize.width = minimumContentWidth
+        let requiredContentWidth = minimumContentWidth
+            + adjustedContentInset.left
+            + adjustedContentInset.right
+        if contentSize.width < requiredContentWidth {
+            contentSize.width = requiredContentWidth
         }
     }
 
