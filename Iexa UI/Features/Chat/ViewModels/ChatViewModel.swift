@@ -2610,7 +2610,7 @@ final class ChatViewModel {
         [Local Alpine native tools]
         Tools: `file_read`, `file_write`, `file_edit`, `read_image`, `browser_use`\(memoryToolNames), `shell_execute`. Iexa executes them in Local Alpine and returns real results.
         Rules:
-        - Default workspace is `/mnt/iexa/shared`; relative paths resolve there. `/mnt/iexa` is the namespace root. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` and `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
+        - Default workspace is `/mnt/iexa/shared`; relative paths resolve there. `/mnt/iexa` is the namespace root. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` (model read/write for local `SKILL.md` skills), `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
         - Shell is Alpine BusyBox/ash. Install OS packages with `apk add --no-cache`; never use apt/brew/sudo/systemctl/macOS/Windows commands.
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
@@ -2945,7 +2945,7 @@ final class ChatViewModel {
           ```iexa_alpine
           {"tool_title":"列出目录","command":"pwd && ls -la","cwd":"/mnt/iexa/shared"}
           ```
-        - Default workspace is `/mnt/iexa/shared`; relative paths resolve there. `/mnt/iexa` is the namespace root. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` and `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Execution is embedded Local Alpine/iSH, not Open Terminal, iOS/macOS/Windows, Debian, or Ubuntu.
+        - Default workspace is `/mnt/iexa/shared`; relative paths resolve there. `/mnt/iexa` is the namespace root. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` (model read/write for local `SKILL.md` skills), `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Execution is embedded Local Alpine/iSH, not Open Terminal, iOS/macOS/Windows, Debian, or Ubuntu.
         - Shell is Alpine BusyBox/ash. Use `apk add --no-cache` for missing OS packages after `command -v` or `apk info -e`; never use apt/brew/sudo/systemctl or bash/GNU-only syntax.
         - Tools: \(toolNames). Compatibility aliases are accepted: `file_read`, `file_write`, `file_edit`, `shell_execute`, `browser_use`, `web_fetch`, `read_image`.
         - Every step needs a short user-language `tool_title`/`step_title`/`label`.
@@ -7027,7 +7027,8 @@ final class ChatViewModel {
                 if Task.isCancelled { return }
 
                 acc.markReasoningDone()
-                if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   !self.assistantMessageHasRenderableImage(messageId: assistantMessageId) {
                     self.updateAssistantMessage(
                         id: assistantMessageId,
                         content: "",
@@ -9781,7 +9782,8 @@ final class ChatViewModel {
                 if Task.isCancelled { return }
 
                 acc.markReasoningDone()
-                if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   !self.assistantMessageHasRenderableImage(messageId: capturedNewAssistantId) {
                     self.updateAssistantMessage(
                         id: capturedNewAssistantId,
                         content: "",
@@ -14070,7 +14072,8 @@ final class ChatViewModel {
         normalizeAssistantGeneratedMedia(messageId: assistantMessageId)
         var finalAssistantContent = conversation?.messages
             .first(where: { $0.id == assistantMessageId })?.content ?? acc.content
-        if finalAssistantContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if finalAssistantContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !assistantMessageHasRenderableImage(messageId: assistantMessageId) {
             updateAssistantMessage(
                 id: assistantMessageId,
                 content: "",
@@ -14201,7 +14204,8 @@ final class ChatViewModel {
 
         let finalContent = conversation?.messages
             .first(where: { $0.id == assistantMessageId })?.content ?? ""
-        if finalContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if finalContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !assistantMessageHasRenderableImage(messageId: assistantMessageId) {
             updateAssistantMessage(
                 id: assistantMessageId,
                 content: "",
@@ -17011,7 +17015,7 @@ final class ChatViewModel {
 
         Environment:
         - Default workspace: `/mnt/iexa/shared`. Relative paths resolve there.
-        - Namespace root: `/mnt/iexa`. Reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` containing `SKILL.md` skill files, `/mnt/iexa/memory` containing user-maintained `GLOBAL.md` plus daily memory files, and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Skills and memory are model-read-only for structured write/edit/delete/move/copy/mkdir tools; use the `memory_write` tool for daily memory entries. Mounted folder structured write permission follows the user's file-browser setting for each mount.
+        - Namespace root: `/mnt/iexa`. Reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` containing read/write local `SKILL.md` skill files, `/mnt/iexa/memory` containing user-maintained `GLOBAL.md` plus daily memory files, and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Memory is model-read-only for structured write/edit/delete/move/copy/mkdir tools; use the `memory_write` tool for daily memory entries. Mounted folder structured write permission follows the user's file-browser setting for each mount.
         - Shell: Alpine Linux BusyBox/ash. Prefer portable POSIX `sh` syntax; avoid Bash-only arrays, process substitution, and Debian/macOS assumptions unless the needed tool is first proven installed.
         - Package manager: `apk`. Check first with `apk info -e <pkg>` or `command -v <tool>`; install only packages proven missing with `apk add --no-cache <pkg>`. When a task needs a missing OS tool/library, install it through Local Alpine `apk` and continue; do not tell the user to install it on iOS/macOS/Ubuntu and do not use `apt`/`brew`/`sudo`.
         - Unsupported command families here: `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, and macOS-only utilities. Translate those intentions to Alpine/BusyBox equivalents.
@@ -23553,6 +23557,18 @@ final class ChatViewModel {
                 node.files = message.files
                 node.done = true
             }
+        }
+    }
+
+    private func assistantMessageHasRenderableImage(messageId: String) -> Bool {
+        guard let message = conversation?.messages.first(where: { $0.id == messageId }) else {
+            return false
+        }
+        return message.files.contains { file in
+            Self.isImageFile(file)
+                && !file.isGeneratedImageFailurePlaceholder
+                && (Self.isRenderableImageReference(file.displayURL)
+                    || Self.isRenderableImageReference(file.url))
         }
     }
 

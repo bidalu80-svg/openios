@@ -33,6 +33,7 @@ final class LocalSkillsService {
            let stored = try? JSONDecoder().decode([LocalSkill].self, from: data) {
             decoded = stored
         }
+        decoded = Self.mergedFileSystemSkills(into: decoded)
         skills = Self.mergeBuiltinSkills(into: decoded)
         save()
     }
@@ -181,6 +182,149 @@ final class LocalSkillsService {
             .appendingPathComponent("Iexa Alpine", isDirectory: true)
             .appendingPathComponent("shared", isDirectory: true)
             .appendingPathComponent("skills", isDirectory: true)
+    }
+
+    private static func mergedFileSystemSkills(into stored: [LocalSkill]) -> [LocalSkill] {
+        guard let directory = try? localAlpineSkillsDirectory(),
+              let children = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+              ) else {
+            return stored
+        }
+
+        var merged = stored
+        for folderURL in children {
+            guard isDirectory(folderURL) else {
+                continue
+            }
+            let skillURL = folderURL.appendingPathComponent("SKILL.md")
+            guard let text = try? String(contentsOf: skillURL, encoding: .utf8),
+                  let imported = localSkill(fromMarkdown: text, fallbackId: folderURL.lastPathComponent) else {
+                continue
+            }
+            if let index = merged.firstIndex(where: { $0.id == imported.id }) {
+                guard !merged[index].isBuiltin,
+                      imported.updatedAt > merged[index].updatedAt else {
+                    continue
+                }
+                merged[index] = imported
+            } else {
+                merged.append(imported)
+            }
+        }
+        return merged
+    }
+
+    private static func localSkill(fromMarkdown text: String, fallbackId: String) -> LocalSkill? {
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let (metadata, body) = splitFrontmatter(from: normalized)
+        let content = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return nil }
+
+        let rawId = metadata["id"] ?? fallbackId
+        let id = safePathComponent(rawId, fallback: "skill")
+        let name = (metadata["name"] ?? firstMarkdownHeading(in: content) ?? id)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, !name.isEmpty else { return nil }
+
+        let metadataDate = dateValue(metadata["updated_at"])
+        let modifiedDate = fileModificationDate(for: fallbackId)
+        let updatedAt = [metadataDate, modifiedDate].compactMap { $0 }.max() ?? Date()
+
+        return LocalSkill(
+            id: id,
+            name: name,
+            description: (metadata["description"] ?? firstPlainParagraph(in: content) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            content: content,
+            isEnabled: boolValue(metadata["enabled"]) ?? true,
+            isBuiltin: false,
+            updatedAt: updatedAt
+        )
+    }
+
+    private static func splitFrontmatter(from text: String) -> ([String: String], String) {
+        guard text.hasPrefix("---\n"),
+              let endRange = text.range(of: "\n---", range: text.index(text.startIndex, offsetBy: 4)..<text.endIndex) else {
+            return ([:], text)
+        }
+        let frontmatter = String(text[text.index(text.startIndex, offsetBy: 4)..<endRange.lowerBound])
+        let bodyStart = text.index(endRange.upperBound, offsetBy: text[endRange.upperBound...].hasPrefix("\n") ? 1 : 0)
+        var metadata: [String: String] = [:]
+        for line in frontmatter.components(separatedBy: "\n") {
+            guard let separator = line.firstIndex(of: ":") else { continue }
+            let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !key.isEmpty {
+                metadata[key] = unquotedScalar(value)
+            }
+        }
+        return (metadata, String(text[bodyStart...]))
+    }
+
+    private static func unquotedScalar(_ value: String) -> String {
+        guard value.count >= 2,
+              value.first == "\"",
+              value.last == "\"" else {
+            return value
+        }
+        let inner = String(value.dropFirst().dropLast())
+        return inner
+            .replacingOccurrences(of: "\\n", with: "\n")
+            .replacingOccurrences(of: "\\\"", with: "\"")
+            .replacingOccurrences(of: "\\\\", with: "\\")
+    }
+
+    private static func firstMarkdownHeading(in text: String) -> String? {
+        text.components(separatedBy: "\n").compactMap { line in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("#") else { return nil }
+            return trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+        }.first { !$0.isEmpty }
+    }
+
+    private static func firstPlainParagraph(in text: String) -> String? {
+        text.components(separatedBy: "\n\n").compactMap { paragraph in
+            let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return nil }
+            return trimmed.count > 160 ? String(trimmed.prefix(160)) : trimmed
+        }.first
+    }
+
+    private static func boolValue(_ value: String?) -> Bool? {
+        switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true", "yes", "1", "enabled": return true
+        case "false", "no", "0", "disabled": return false
+        default: return nil
+        }
+    }
+
+    private static func dateValue(_ value: String?) -> Date? {
+        guard let value, !value.isEmpty else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+
+    private static func fileModificationDate(for folderName: String) -> Date? {
+        guard let directory = try? localAlpineSkillsDirectory() else { return nil }
+        let url = directory
+            .appendingPathComponent(folderName, isDirectory: true)
+            .appendingPathComponent("SKILL.md")
+        guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey]) else {
+            return nil
+        }
+        return values.contentModificationDate
+    }
+
+    private static func isDirectory(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey]) else {
+            return false
+        }
+        return values.isDirectory == true
     }
 
     private static func safePathComponent(_ value: String, fallback: String) -> String {

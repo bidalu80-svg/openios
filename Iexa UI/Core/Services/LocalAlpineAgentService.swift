@@ -784,7 +784,7 @@ actor LocalAlpineAgentService {
         let writeResult = await writeFiles([file], cwd: cwd)
         var lines = [
             "Local Alpine 执行结果",
-            "环境：内置 Alpine Linux，默认工作区是 `/mnt/iexa/shared`；`/mnt/iexa` 是命名空间根，保留目录：`/mnt/iexa/shared`（模型读写）、`/mnt/iexa/skills`、`/mnt/iexa/memory`、`/mnt/iexa/mounts/<name>`",
+            "环境：内置 Alpine Linux，默认工作区是 `/mnt/iexa/shared`；`/mnt/iexa` 是命名空间根，保留目录：`/mnt/iexa/shared`（模型读写）、`/mnt/iexa/skills`（本地技能读写）、`/mnt/iexa/memory`（结构化写入只读）、`/mnt/iexa/mounts/<name>`",
             writeResult.summary
         ]
         var commandResults: [LocalAlpineAgentCommandResult] = []
@@ -922,7 +922,7 @@ actor LocalAlpineAgentService {
             ?? .oneShot
 
         lines.insert("Local Alpine 执行结果", at: 0)
-        lines.append("环境：内置 Alpine Linux，默认工作区是 `/mnt/iexa/shared`；`/mnt/iexa` 是命名空间根，保留目录：`/mnt/iexa/shared`（模型读写）、`/mnt/iexa/skills`、`/mnt/iexa/memory`、`/mnt/iexa/mounts/<name>`")
+        lines.append("环境：内置 Alpine Linux，默认工作区是 `/mnt/iexa/shared`；`/mnt/iexa` 是命名空间根，保留目录：`/mnt/iexa/shared`（模型读写）、`/mnt/iexa/skills`（本地技能读写）、`/mnt/iexa/memory`（结构化写入只读）、`/mnt/iexa/mounts/<name>`")
         var modelLines = lines
 
         func emitTool(_ call: LocalAlpineToolCall) async {
@@ -5281,9 +5281,7 @@ actor LocalAlpineAgentService {
         while normalized.contains("//") {
             normalized = normalized.replacingOccurrences(of: "//", with: "/")
         }
-        return normalized == "/skills"
-            || normalized.hasPrefix("/skills/")
-            || normalized == "/memory"
+        return normalized == "/memory"
             || normalized.hasPrefix("/memory/")
             || LocalAlpineMountStore.isModelReadOnlyPath(normalized)
     }
