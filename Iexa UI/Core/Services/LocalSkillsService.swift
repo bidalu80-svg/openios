@@ -287,11 +287,12 @@ final class LocalSkillsService {
     }
 
     private static func firstPlainParagraph(in text: String) -> String? {
-        text.components(separatedBy: "\n\n").compactMap { paragraph in
+        for paragraph in text.components(separatedBy: "\n\n") {
             let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return nil }
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
             return trimmed.count > 160 ? String(trimmed.prefix(160)) : trimmed
-        }.first
+        }
+        return nil
     }
 
     private static func boolValue(_ value: String?) -> Bool? {
