@@ -6423,6 +6423,11 @@ struct ChatDetailView: View {
                 || candidate.hasPrefix("local-alpine:") {
                 return candidate
             }
+            let lowerCandidate = candidate.lowercased()
+            if !candidate.contains("/"),
+               lowerCandidate.range(of: #"\.(png|jpe?g|webp|gif|bmp|avif)$"#, options: .regularExpression) != nil {
+                return "local-alpine:/shared/\(candidate)"
+            }
             if !candidate.contains("/") {
                 return candidate
             }

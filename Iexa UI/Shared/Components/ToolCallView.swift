@@ -1282,13 +1282,21 @@ enum ToolCallParser {
 
             // Strategy 2: Extract from JSON fields like "file_id", "id", "url",
             // "path", "src", or "source" that point at a generated file.
-            let jsonURLPattern = #"(?:"file_id"|"id"|"url"|"path"|"src"|"source")\s*:\s*"([^"]*(?:/api/v1/files/[^"/]+/content|/files/[^"/]+/content|[a-zA-Z0-9_\-]{12,})[^"]*)""#
+            let jsonURLPattern = #"(?:"file_id"|"id"|"url"|"path"|"src"|"source"|"file_url"|"download_url")\s*:\s*"([^"]*(?:/api/v1/files/[^"/]+/content|/files/[^"/]+/content|/mnt/iexa/[^"]+\.(?:png|jpe?g|webp|gif|bmp|avif)|file://[^"]+\.(?:png|jpe?g|webp|gif|bmp|avif)|(?:\.?/)?(?:shared/)?[A-Za-z0-9._/\-]+?\.(?:png|jpe?g|webp|gif|bmp|avif)|[a-zA-Z0-9_\-]{12,})[^"]*)""#
             if let jsonRegex = cachedRegex(jsonURLPattern) {
                 let nsResult = result as NSString
                 let matches = jsonRegex.matches(in: result, range: NSRange(location: 0, length: nsResult.length))
                 for match in matches where match.numberOfRanges > 1 {
                     let value = nsResult.substring(with: match.range(at: 1))
                     if value.hasPrefix("data:image/") { continue }
+                    if let localImage = localImageFile(from: value) {
+                        let key = localImage.displayURL ?? localImage.url ?? value
+                        if !seenIds.contains(key) {
+                            seenIds.insert(key)
+                            files.append(localImage)
+                        }
+                        continue
+                    }
                     let fileId: String = {
                         if let fileId = extractFileId(from: value, pattern: #"/api/v1/files/([^/\s\"')]+)/content"#) {
                             return fileId
@@ -1354,6 +1362,77 @@ enum ToolCallParser {
             return nil
         }
         return nsValue.substring(with: match.range(at: 1))
+    }
+
+    private static func localImageFile(from value: String) -> ChatMessageFile? {
+        let trimmed = value.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "`\"'“”‘’，。；：、）)]}")))
+        guard !trimmed.isEmpty else { return nil }
+        let lower = trimmed.lowercased()
+        let imageExtensions = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif"]
+
+        if lower.hasPrefix("file://"),
+           let url = URL(string: trimmed),
+           imageExtensions.contains(url.pathExtension.lowercased()) {
+            return ChatMessageFile(
+                type: "image",
+                url: trimmed,
+                name: url.lastPathComponent,
+                contentType: imageContentType(for: trimmed),
+                displayURL: trimmed
+            )
+        }
+
+        guard let localPath = normalizedLocalAlpineImagePath(trimmed),
+              imageExtensions.contains((localPath as NSString).pathExtension.lowercased()) else {
+            return nil
+        }
+        let localReference = "local-alpine:\(localPath)"
+        return ChatMessageFile(
+            type: "image",
+            url: localReference,
+            name: (localPath as NSString).lastPathComponent,
+            contentType: imageContentType(for: localPath),
+            displayURL: localReference
+        )
+    }
+
+    private static func normalizedLocalAlpineImagePath(_ value: String) -> String? {
+        var path = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+        guard !path.contains("://") else { return nil }
+        while path.hasPrefix("./") {
+            path.removeFirst(2)
+        }
+        if path.lowercased().hasPrefix("/mnt/iexa/") {
+            path = String(path.dropFirst("/mnt/iexa".count))
+        } else if path.hasPrefix("/shared/") || path.hasPrefix("/mounts/") || path.hasPrefix("/attachments/") {
+            // Already in host workspace namespace.
+        } else if path.hasPrefix("/") {
+            return nil
+        } else if path.hasPrefix("shared/") || path.hasPrefix("mounts/") || path.hasPrefix("attachments/") {
+            path = "/\(path)"
+        } else {
+            path = "/shared/\(path)"
+        }
+        while path.contains("//") {
+            path = path.replacingOccurrences(of: "//", with: "/")
+        }
+        guard path.hasPrefix("/"), !path.contains("../"), !path.contains("/..") else {
+            return nil
+        }
+        return path
+    }
+
+    private static func imageContentType(for reference: String) -> String {
+        switch (reference as NSString).pathExtension.lowercased() {
+        case "png": return "image/png"
+        case "webp": return "image/webp"
+        case "gif": return "image/gif"
+        case "bmp": return "image/bmp"
+        case "avif": return "image/avif"
+        default: return "image/jpeg"
+        }
     }
 }
 

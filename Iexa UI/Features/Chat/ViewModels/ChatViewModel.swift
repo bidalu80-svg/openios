@@ -1880,7 +1880,144 @@ final class ChatViewModel {
     }
 
     private static func sanitizedMessageFiles(_ files: [ChatMessageFile]) -> [ChatMessageFile] {
-        files.compactMap(sanitizedMessageFile)
+        var merged: [ChatMessageFile] = []
+        for file in files.compactMap(sanitizedMessageFile) {
+            upsertMessageFile(file, into: &merged)
+        }
+        return merged
+    }
+
+    private static func upsertMessageFile(_ file: ChatMessageFile, into files: inout [ChatMessageFile]) {
+        if let index = files.firstIndex(where: { sameMessageFile($0, file) }) {
+            files[index] = preferredMessageFile(existing: files[index], incoming: file)
+        } else {
+            files.append(file)
+        }
+    }
+
+    private static func sameMessageFile(_ lhs: ChatMessageFile, _ rhs: ChatMessageFile) -> Bool {
+        if lhs.isGeneratedImageFailurePlaceholder || rhs.isGeneratedImageFailurePlaceholder {
+            return lhs.url == rhs.url
+        }
+        let lhsKeys = messageFileIdentityKeys(lhs)
+        let rhsKeys = messageFileIdentityKeys(rhs)
+        if !lhsKeys.isDisjoint(with: rhsKeys) {
+            return true
+        }
+        if isImageFile(lhs), isImageFile(rhs),
+           shouldMergeImageFilesByName(lhs, rhs) {
+            return true
+        }
+        return false
+    }
+
+    private static func shouldMergeImageFilesByName(_ lhs: ChatMessageFile, _ rhs: ChatMessageFile) -> Bool {
+        guard let lhsName = normalizedMessageFileName(lhs),
+              let rhsName = normalizedMessageFileName(rhs),
+              lhsName == rhsName else {
+            return false
+        }
+        if messageFileHasLocalReference(lhs) != messageFileHasLocalReference(rhs) {
+            return true
+        }
+        return (messageFileHasFileURLReference(lhs) && messageFileHasWorkspaceReference(rhs))
+            || (messageFileHasWorkspaceReference(lhs) && messageFileHasFileURLReference(rhs))
+    }
+
+    private static func preferredMessageFile(existing: ChatMessageFile, incoming: ChatMessageFile) -> ChatMessageFile {
+        if existing.isGeneratedImageFailurePlaceholder { return incoming }
+        if incoming.isGeneratedImageFailurePlaceholder { return existing }
+
+        var preferred = messageFileRenderableScore(incoming) >= messageFileRenderableScore(existing)
+            ? incoming
+            : existing
+        let other = preferred == incoming ? existing : incoming
+
+        if preferred.displayURL == nil { preferred.displayURL = other.displayURL }
+        if preferred.contentType == nil { preferred.contentType = other.contentType }
+        if preferred.type == nil { preferred.type = other.type }
+        if preferred.name == nil { preferred.name = other.name }
+        return preferred
+    }
+
+    private static func messageFileRenderableScore(_ file: ChatMessageFile) -> Int {
+        var score = 0
+        for value in [file.displayURL, file.url].compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) }) {
+            let lower = value.lowercased()
+            if lower.hasPrefix("file://") || lower.hasPrefix("local-alpine:") || lower.hasPrefix("data:image/") {
+                score += 4
+            } else if lower.hasPrefix("http://") || lower.hasPrefix("https://") {
+                score += 3
+            } else if isRenderableImageReference(value) {
+                score += 1
+            }
+        }
+        return score
+    }
+
+    private static func messageFileIdentityKeys(_ file: ChatMessageFile) -> Set<String> {
+        var keys = Set<String>()
+        for value in [file.url, file.displayURL].compactMap({ $0 }) {
+            if let key = normalizedMessageFileReferenceKey(value) {
+                keys.insert(key)
+            }
+        }
+        return keys
+    }
+
+    private static func messageFileHasLocalReference(_ file: ChatMessageFile) -> Bool {
+        messageFileHasFileURLReference(file) || messageFileHasWorkspaceReference(file)
+    }
+
+    private static func messageFileHasFileURLReference(_ file: ChatMessageFile) -> Bool {
+        [file.url, file.displayURL]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .contains { $0.hasPrefix("file://") }
+    }
+
+    private static func messageFileHasWorkspaceReference(_ file: ChatMessageFile) -> Bool {
+        [file.url, file.displayURL]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .contains { value in
+                value.hasPrefix("local-alpine:")
+                    || value.hasPrefix("/mnt/iexa")
+                    || value.hasPrefix("/shared/")
+                    || value.hasPrefix("/mounts/")
+                    || value.hasPrefix("/attachments/")
+            }
+    }
+
+    private static func normalizedMessageFileName(_ file: ChatMessageFile) -> String? {
+        for value in [file.name, file.url, file.displayURL].compactMap({ $0 }) {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let candidate: String
+            if let url = URL(string: trimmed), !url.lastPathComponent.isEmpty {
+                candidate = url.lastPathComponent
+            } else {
+                candidate = (trimmed as NSString).lastPathComponent
+            }
+            let normalized = candidate.lowercased()
+            if !normalized.isEmpty, normalized != "/" {
+                return normalized
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedMessageFileReferenceKey(_ value: String) -> String? {
+        var trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let url = URL(string: trimmed), url.isFileURL {
+            return "file:\(url.standardizedFileURL.path.lowercased())"
+        }
+        if trimmed.hasPrefix("local-alpine:") {
+            trimmed = String(trimmed.dropFirst("local-alpine:".count))
+        }
+        if let path = normalizedLocalAlpineImagePathReference(trimmed) {
+            return "local-alpine:\(path)"
+        }
+        return trimmed.lowercased()
     }
 
     private static func sanitizedMessageForDisplay(_ message: ChatMessage) -> ChatMessage {
@@ -1925,6 +2062,10 @@ final class ChatViewModel {
     private static func sanitizedMessageFile(_ file: ChatMessageFile) -> ChatMessageFile? {
         var sanitized = file
 
+        if isImageFile(sanitized) {
+            sanitized = normalizedLocalAlpineImageMessageFile(sanitized)
+        }
+
         if let url = sanitized.url {
             sanitized.url = safeMessageFileReference(
                 url,
@@ -1951,6 +2092,67 @@ final class ChatViewModel {
             return nil
         }
         return sanitized
+    }
+
+    private static func normalizedLocalAlpineImageMessageFile(_ file: ChatMessageFile) -> ChatMessageFile {
+        var normalized = file
+        let candidates = [file.url, file.displayURL].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard let path = candidates.compactMap({ normalizedLocalAlpineImagePathReference($0) }).first else {
+            return file
+        }
+
+        let localReference = "local-alpine:\(path)"
+        if normalized.url == nil
+            || normalized.url?.hasPrefix("/mnt/iexa") == true
+            || normalized.url?.hasPrefix("local-alpine:") == true {
+            normalized.url = localReference
+        }
+        if normalized.displayURL == nil || normalized.displayURL?.hasPrefix("/mnt/iexa") == true {
+            normalized.displayURL = localReference
+        }
+        if normalized.name == nil || normalized.name?.isEmpty == true {
+            let fileName = (path as NSString).lastPathComponent
+            normalized.name = fileName.isEmpty ? nil : fileName
+        }
+        return normalized
+    }
+
+    private static func normalizedLocalAlpineImagePathReference(_ rawValue: String) -> String? {
+        var value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        if value.lowercased().hasPrefix("local-alpine:") {
+            value = String(value.dropFirst("local-alpine:".count))
+        }
+        let lower = value.lowercased()
+        guard !lower.hasPrefix("file://"), !lower.contains("://") else { return nil }
+
+        var normalizedSlashes = value.replacingOccurrences(of: "\\", with: "/")
+        while normalizedSlashes.hasPrefix("./") {
+            normalizedSlashes.removeFirst(2)
+        }
+
+        let pathCandidate: String
+        if normalizedSlashes.hasPrefix("/mnt/iexa/")
+            || normalizedSlashes == "/mnt/iexa"
+            || normalizedSlashes.hasPrefix("/shared/")
+            || normalizedSlashes.hasPrefix("/mounts/")
+            || normalizedSlashes.hasPrefix("/attachments/") {
+            pathCandidate = normalizedSlashes
+        } else if normalizedSlashes.hasPrefix("shared/")
+            || normalizedSlashes.hasPrefix("mounts/")
+            || normalizedSlashes.hasPrefix("attachments/") {
+            pathCandidate = "/\(normalizedSlashes)"
+        } else if localAlpinePathLooksLikeImage(normalizedSlashes) {
+            pathCandidate = "/shared/\(normalizedSlashes)"
+        } else {
+            return nil
+        }
+
+        guard let path = normalizedLocalAlpineSharedMediaPath(pathCandidate),
+              localAlpinePathLooksLikeImage(path) else {
+            return nil
+        }
+        return path
     }
 
     private static func safeMessageFileReference(_ value: String, isImage: Bool, isVideo: Bool = false) -> String? {
@@ -18193,18 +18395,18 @@ final class ChatViewModel {
             return
         }
 
-        var files = conversation?.messages[currentIndex].files ?? []
-        var didAppend = false
+        let existingFiles = conversation?.messages[currentIndex].files ?? []
+        var files = Self.sanitizedMessageFiles(existingFiles)
+        var didChange = files != existingFiles
         for file in appended {
-            guard !files.contains(where: {
-                $0.url == file.url
-                    || $0.displayURL == file.displayURL
-                    || ($0.name == file.name && Self.isImageFile($0))
-            }) else { continue }
-            files.append(file)
-            didAppend = true
+            guard let sanitized = Self.sanitizedMessageFile(file) else { continue }
+            let before = files
+            Self.upsertMessageFile(sanitized, into: &files)
+            if before != files {
+                didChange = true
+            }
         }
-        guard didAppend else { return }
+        guard didChange else { return }
 
         conversation?.messages[currentIndex].files = files
         conversation?.history.updateNode(id: messageId) { node in
@@ -18461,8 +18663,20 @@ final class ChatViewModel {
             path = "/"
         } else if path.hasPrefix("./") {
             path = String(path.dropFirst(1))
+            if !path.hasPrefix("/")
+                && !path.hasPrefix("shared/")
+                && !path.hasPrefix("mounts/")
+                && !path.hasPrefix("attachments/") {
+                path = "/shared/\(path)"
+            }
         } else if !path.hasPrefix("/") {
-            path = "/" + path
+            if path.hasPrefix("shared/")
+                || path.hasPrefix("mounts/")
+                || path.hasPrefix("attachments/") {
+                path = "/" + path
+            } else {
+                path = "/shared/" + path
+            }
         }
         while path.contains("//") {
             path = path.replacingOccurrences(of: "//", with: "/")
@@ -20323,9 +20537,15 @@ final class ChatViewModel {
         guard let index = conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) else {
             return
         }
-        var merged = conversation?.messages[index].files ?? []
-        for file in files where !merged.contains(where: { $0.url == file.url && $0.name == file.name }) {
-            merged.append(file)
+        let existingFiles = conversation?.messages[index].files ?? []
+        var merged = Self.sanitizedMessageFiles(existingFiles)
+        for file in files {
+            guard let sanitized = Self.sanitizedMessageFile(file) else { continue }
+            Self.upsertMessageFile(sanitized, into: &merged)
+        }
+        guard merged != existingFiles else {
+            localNativeGeneratedFilesByResultMessageId[parentId] = nil
+            return
         }
         conversation?.messages[index].files = merged
         conversation?.history.updateNode(id: assistantMessageId) { node in
