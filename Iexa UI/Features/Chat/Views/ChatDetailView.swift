@@ -1276,6 +1276,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
     }
 
     private static func imageReference(for file: ChatMessageFile) -> String? {
+        if let displayReference = preferredDisplayImageReference(for: file.displayURL) {
+            return displayReference
+        }
         if let localAlpineReference = [file.url, file.displayURL]
             .compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) })
             .first(where: { $0.lowercased().hasPrefix("local-alpine:") }) {
@@ -1286,6 +1289,22 @@ private struct AgentActivityItem: Identifiable, Hashable {
             .first {
                 !$0.isEmpty && !$0.lowercased().hasPrefix("local-inline-image:")
             }
+    }
+
+    private static func preferredDisplayImageReference(for value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("data:image/") {
+            guard trimmed.utf8.count <= 7_000_000 else { return nil }
+            return trimmed
+        }
+        guard trimmed.utf8.count <= 4_096 else { return nil }
+        if trimmed.hasPrefix("file://")
+            || trimmed.hasPrefix("http://")
+            || trimmed.hasPrefix("https://") {
+            return trimmed
+        }
+        return nil
     }
 
     static func previewSnippet(_ text: String, limit: Int = 220) -> String {
@@ -6375,6 +6394,9 @@ struct ChatDetailView: View {
     }
 
     private func imageReference(for file: ChatMessageFile) -> String? {
+        if let displayReference = Self.preferredDisplayImageReference(for: file.displayURL) {
+            return displayReference
+        }
         if let localAlpineReference = [file.url, file.displayURL]
             .compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) })
             .first(where: { $0.lowercased().hasPrefix("local-alpine:") }) {
@@ -6408,6 +6430,22 @@ struct ChatDetailView: View {
             if let idx = parts.firstIndex(of: "files"), idx + 1 < parts.count {
                 return String(parts[idx + 1])
             }
+        }
+        return nil
+    }
+
+    private static func preferredDisplayImageReference(for value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("data:image/") {
+            guard trimmed.utf8.count <= 7_000_000 else { return nil }
+            return trimmed
+        }
+        guard trimmed.utf8.count <= 4_096 else { return nil }
+        if trimmed.hasPrefix("file://")
+            || trimmed.hasPrefix("http://")
+            || trimmed.hasPrefix("https://") {
+            return trimmed
         }
         return nil
     }
