@@ -234,7 +234,7 @@ struct TypingIndicator: View {
         Canvas { context, size in
             for index in 0..<3 {
                 let point = dotPoint(index: index, progress: progress)
-                let diameter = CGFloat(5.2) * dotScale(index: index, progress: progress)
+                let diameter = CGFloat(4.8) * dotScale(index: index, progress: progress)
                 let center = CGPoint(
                     x: size.width / 2 + point.x,
                     y: size.height / 2 + point.y
@@ -289,8 +289,8 @@ struct TypingIndicator: View {
         let base = linePoint(index)
         let envelope = smootherstep(t / 0.10) * (1 - smootherstep((t - 0.72) / 0.16))
         let phase = t * .pi * 3.25 - Double(index) * 0.82
-        let lift = sin(phase) * 4.7
-        let swell = sin(.pi * t) * 0.95
+        let lift = sin(phase) * 5.8
+        let swell = sin(.pi * t) * 1.15
         return CGPoint(
             x: base.x + CGFloat(cos(phase * 0.56)) * 0.45 * CGFloat(envelope),
             y: base.y - CGFloat((lift + swell) * envelope)
