@@ -15610,35 +15610,59 @@ final class ChatViewModel {
         let maxImageCount = 9
         let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return 1 }
-        let patterns = [
-            #"(?<!\d)(\d{1,2})\s*(?:张|幅|个|款|版|images?|pictures?|pics?|photos?|variants?|versions?)(?!\w)"#,
-            #"(?:生成|画|绘制|做|create|generate|make|draw)\s*(\d{1,2})\s*(?:张|幅|个|款|版|images?|pictures?|pics?|photos?|variants?|versions?)(?!\w)"#
-        ]
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+
+        let imageOutputObject = #"(?:图片|图像|照片|相片|海报|壁纸|头像|插画|漫画|封面|图标|logo|图(?![案层块形表谱纸标]))"#
+        let variantOutputObject = #"(?:版本|方案|变体|草案|稿|风格|样式|构图)"#
+        let countBoundary = #"(?=$|[\s,，.。!！?？:：;；、）)\]】}])"#
+        var matches: [(location: Int, count: Int)] = []
+
+        func appendDigitMatches(_ pattern: String) {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return }
             let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
-            if let match = regex.firstMatch(in: text, range: nsRange),
-               match.numberOfRanges >= 2,
-               let range = Range(match.range(at: 1), in: text),
-               let count = Int(String(text[range])) {
-                return min(max(count, 1), maxImageCount)
+            regex.enumerateMatches(in: text, range: nsRange) { match, _, _ in
+                guard let match,
+                      match.numberOfRanges >= 2,
+                      let range = Range(match.range(at: 1), in: text),
+                      let count = Int(String(text[range]))
+                else { return }
+                matches.append((match.range.location, min(max(count, 1), maxImageCount)))
             }
         }
+
+        func appendFixedCountMatches(_ pattern: String, count: Int) {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return }
+            let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+            regex.enumerateMatches(in: text, range: nsRange) { match, _, _ in
+                guard let match else { return }
+                matches.append((match.range.location, min(max(count, 1), maxImageCount)))
+            }
+        }
+
+        let digitPrefix = #"(?<![第\d])(\d{1,2})\s*"#
+        appendDigitMatches(digitPrefix + #"(?:张|幅)\s*(?:"# + imageOutputObject + #"|"# + countBoundary + #")"#)
+        appendDigitMatches(digitPrefix + #"(?:版|款)\s*(?:"# + imageOutputObject + #"|"# + variantOutputObject + #"|"# + countBoundary + #")"#)
+        appendDigitMatches(digitPrefix + #"(?:个|种)\s*(?:"# + imageOutputObject + #"|"# + variantOutputObject + #")"#)
+        appendDigitMatches(#"(?<!\d)(\d{1,2})\s*(?:images?|pictures?|pics?|photos?|variants?|versions?)(?!\w)"#)
+        appendDigitMatches(#"(?:create|generate|make|draw|render|design)\s+(\d{1,2})\s*(?:images?|pictures?|pics?|photos?|variants?|versions?)(?!\w)"#)
 
         let chineseNumbers: [(String, Int)] = [
             ("十", 10), ("九", 9), ("八", 8), ("七", 7), ("六", 6),
             ("五", 5), ("四", 4), ("三", 3), ("两", 2), ("二", 2), ("一", 1)
         ]
-        for (token, value) in chineseNumbers where containsChineseImageCountToken(text, token: token) {
-            return min(max(value, 1), maxImageCount)
+        for (token, value) in chineseNumbers {
+            let escapedToken = NSRegularExpression.escapedPattern(for: token)
+            let chinesePrefix = #"(?<!第)"# + escapedToken
+            appendFixedCountMatches(chinesePrefix + #"\s*(?:张|幅)\s*(?:"# + imageOutputObject + #"|"# + countBoundary + #")"#, count: value)
+            appendFixedCountMatches(chinesePrefix + #"\s*(?:版|款)\s*(?:"# + imageOutputObject + #"|"# + variantOutputObject + #"|"# + countBoundary + #")"#, count: value)
+            appendFixedCountMatches(chinesePrefix + #"\s*(?:个|种)\s*(?:"# + imageOutputObject + #"|"# + variantOutputObject + #")"#, count: value)
         }
-        return 1
-    }
 
-    private static func containsChineseImageCountToken(_ text: String, token: String) -> Bool {
-        ["张", "幅", "个", "款", "版"].contains { suffix in
-            text.contains("\(token)\(suffix)")
-        }
+        return matches.min { lhs, rhs in
+            if lhs.location == rhs.location {
+                return lhs.count > rhs.count
+            }
+            return lhs.location < rhs.location
+        }?.count ?? 1
     }
 
     private static func imageVariantPrompts(basePrompt: String, requestedCount: Int) -> [String] {
