@@ -866,7 +866,7 @@ struct StreamingMarkdownView: View {
             }
             if prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                isLikelyDirtyClosingFenceSuffix(suffix) {
-                return fence.lowerBound..<lineEnd
+                return fence
             }
             cursor = fence.upperBound
         }
@@ -902,6 +902,7 @@ struct StreamingMarkdownView: View {
             "示例", "预期", "命令", "使用", "保存", "文件", "代码", "之后", "最终", "测试", "如下", "例如", "比如",
             "然后", "接着", "继续", "再", "访问", "返回", "会返回", "得到", "打开", "查看",
             "但", "如果", "不过", "另外", "并且", "而且", "同时", "因此", "所以", "当前", "这里", "上面", "下面", "这个", "下面这个",
+            "以上", "对于", "需要", "若", "当", "其中", "常见", "可根据", "可以", "你可以", "三种", "几种", "多种",
             "已通过", "通过", "语法检查", "运行测试", "测试结果",
             "key", "notes", "note", "summary", "explanation", "recommendation", "next", "example",
             "output", "result", "results", "stdout", "stderr", "command", "usage", "expected", "then", "after",
@@ -909,7 +910,13 @@ struct StreamingMarkdownView: View {
             "but", "if", "however", "also", "therefore", "so", "because"
         ]
         let lowered = trimmed.lowercased()
-        return proseLeadWords.contains { lowered.hasPrefix($0) }
+        if proseLeadWords.contains(where: { lowered.hasPrefix($0) }) {
+            return true
+        }
+        return lowered.range(
+            of: #"^(?:[一二三四五六七八九十两0-9]+种|[一二三四五六七八九十两0-9]+个(?:写法|示例|例子|方案|版本|场景))"#,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func startOfLine(in text: String, before index: String.Index) -> String.Index {
@@ -1461,7 +1468,7 @@ struct StreamingMarkdownView: View {
                 return lineStart..<fence.upperBound
             }
             if isAtFenceLineStart && Self.isLikelyDirtyClosingFenceSuffix(suffixBeforeNewline) {
-                return lineStart..<lineEnd
+                return lineStart..<fence.upperBound
             }
             cursor = fence.upperBound
         }
