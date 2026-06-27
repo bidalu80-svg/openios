@@ -142,7 +142,7 @@ struct StreamingMarkdownView: View {
         // Keep raw content for structural parsing so fenced code blocks preserve
         // exact bytes (especially Python indentation). Markdown-only segments are
         // sanitized later at render time in `segmentView`.
-        let renderContent = normalizedInlineFenceOpenersAfterProse(
+        let renderContent = normalizedMalformedFenceBoundaries(
             in: Self.normalizedApostropheFenceMarkers(content)
         )
         guard !renderContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
@@ -1398,6 +1398,107 @@ struct StreamingMarkdownView: View {
         }
 
         return repaired.joined(separator: "\n")
+    }
+
+    private func normalizedMalformedFenceBoundaries(in text: String) -> String {
+        guard text.contains("```") else { return text }
+        return normalizedDirtyClosingFenceLines(
+            in: normalizedInlineFenceOpenersAfterProse(in: text)
+        )
+    }
+
+    private func normalizedDirtyClosingFenceLines(in text: String) -> String {
+        guard text.contains("```") else { return text }
+
+        var insideFence = false
+        var repaired: [String] = []
+
+        for line in text.components(separatedBy: "\n") {
+            guard let fence = line.range(of: "```") else {
+                repaired.append(line)
+                continue
+            }
+
+            if !insideFence {
+                repaired.append(line)
+                if isOpeningFenceLine(line) {
+                    insideFence = true
+                }
+                continue
+            }
+
+            let beforeFence = line[line.startIndex..<fence.lowerBound]
+            let afterFence = line[fence.upperBound..<line.endIndex]
+            let beforeTrimmed = beforeFence.trimmingCharacters(in: .whitespacesAndNewlines)
+            let afterTrimmed = afterFence.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if beforeTrimmed.isEmpty {
+                repaired.append(String(beforeFence) + "```")
+                if !afterTrimmed.isEmpty {
+                    repaired.append(String(afterFence).trimmingCharacters(in: .whitespaces))
+                }
+                insideFence = false
+                continue
+            }
+
+            if shouldSplitInlineFenceCloser(prefix: beforeFence, suffix: afterFence) {
+                repaired.append(String(beforeFence))
+                repaired.append("```")
+                if !afterTrimmed.isEmpty {
+                    repaired.append(String(afterFence).trimmingCharacters(in: .whitespaces))
+                }
+                insideFence = false
+                continue
+            }
+
+            repaired.append(line)
+        }
+
+        return repaired.joined(separator: "\n")
+    }
+
+    private func isOpeningFenceLine(_ line: String) -> Bool {
+        guard let fence = line.range(of: "```") else { return false }
+        let beforeFence = line[line.startIndex..<fence.lowerBound]
+        guard beforeFence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+
+        let rawLanguage = line[fence.upperBound..<line.endIndex]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawLanguage.contains("```") else { return false }
+        if rawLanguage.isEmpty { return true }
+        if splitInlineFenceInfo(rawLanguage) != nil { return true }
+        return Self.shouldRenderFenceAsCode(language: rawLanguage, code: "")
+    }
+
+    private func shouldSplitInlineFenceCloser(prefix: Substring, suffix: Substring) -> Bool {
+        let beforeTrimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !beforeTrimmed.isEmpty else { return false }
+
+        let afterTrimmed = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        if afterTrimmed.isEmpty || Self.isLikelyDirtyClosingFenceSuffix(suffix) {
+            return looksLikeInlineFenceCloserPrefix(beforeTrimmed)
+        }
+        return false
+    }
+
+    private func looksLikeInlineFenceCloserPrefix(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.count <= 4 { return true }
+        if trimmed.range(
+            of: #"[}\]);>\]"'`:]$"#,
+            options: .regularExpression
+        ) != nil {
+            return true
+        }
+        let lowered = trimmed.lowercased()
+        let closingWords = [
+            "end", "fi", "done", "esac", "wend", "next", "return", "break",
+            "continue", "pass", "default:", "else:"
+        ]
+        return closingWords.contains { lowered == $0 || lowered.hasSuffix(" " + $0) }
     }
 
     private func splitInlineFenceInfo(_ rawFenceInfo: String) -> (language: String, inlineCode: String?)? {
