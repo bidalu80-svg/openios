@@ -2590,7 +2590,7 @@ final class ChatViewModel {
         LocalAlpineToolCapability(
             name: "browser_use",
             description: "Operate the shared iOS browser session: navigate, inspect, screenshot, click, type, scroll, run JS, fetch/download, wait for generated images, and continue from the visible browser state.",
-            arguments: ["action navigate/screenshot/click/type/get_text/get_readable/scroll/find_elements/fetch/wait_for_image/execute_js", "url?", "selector?", "text?", "coordinate_x/y?", "save_to?", "screenshot?", "aliases: web_fetch/fetch_url/open_url"]
+            arguments: ["action navigate/screenshot/click/type/get_text/get_readable/scroll/find_elements/fetch/wait_for_image/execute_js", "url?", "selector?", "label/button_text?", "text?", "coordinate_x/y?", "scan_page?", "max_scrolls?", "save_to?", "screenshot?", "aliases: web_fetch/fetch_url/open_url"]
         ),
         LocalAlpineToolCapability(
             name: "web_search",
@@ -2762,16 +2762,18 @@ final class ChatViewModel {
                                 "description": "Browser action to perform."
                             ],
                             "url": ["type": "string", "description": "HTTP, HTTPS, or file URL. Required for navigate/fetch or when loading a page before another action."],
-                            "selector": ["type": "string", "description": "CSS selector or XPath for click/type/text/scroll/find actions."],
-                            "label": ["type": "string", "description": "For click: visible button/control text or accessible label when no selector is known."],
-                            "button_text": ["type": "string", "description": "For click: compatibility alias for label."],
-                            "aria_label": ["type": "string", "description": "For click: aria-label text to match."],
-                            "text": ["type": "string", "description": "Text to type into the selected element."],
-                            "coordinate_x": ["type": "integer", "description": "Viewport x coordinate for click fallback."],
-                            "coordinate_y": ["type": "integer", "description": "Viewport y coordinate for click fallback."],
-                            "direction": ["type": "string", "enum": ["up", "down"], "description": "Scroll direction."],
-                            "amount": ["type": "integer", "description": "Scroll distance in pixels."],
-                            "script": ["type": "string", "description": "JavaScript body for execute_js."],
+                                "selector": ["type": "string", "description": "CSS selector or XPath for click/type/text/scroll/find actions."],
+                                "label": ["type": "string", "description": "For click: visible button/control text or accessible label when no selector is known."],
+                                "button_text": ["type": "string", "description": "For click: compatibility alias for label."],
+                                "aria_label": ["type": "string", "description": "For click: aria-label text to match."],
+                                "text": ["type": "string", "description": "Text to type into the selected element."],
+                                "coordinate_x": ["type": "integer", "description": "Viewport x coordinate for click fallback."],
+                                "coordinate_y": ["type": "integer", "description": "Viewport y coordinate for click fallback."],
+                                "direction": ["type": "string", "enum": ["up", "down"], "description": "Scroll direction."],
+                                "amount": ["type": "integer", "description": "Scroll distance in pixels."],
+                                "scan_page": ["type": "boolean", "description": "For find_elements: scroll the full page and merge controls. Defaults to true."],
+                                "max_scrolls": ["type": "integer", "description": "For find_elements: maximum viewport positions to scan."],
+                                "script": ["type": "string", "description": "JavaScript body for execute_js."],
                             "save_to": ["type": "string", "description": "Optional output path/name for fetch/download compatibility."],
                             "output": ["type": "string", "description": "Compatibility alias for save_to."],
                             "path": ["type": "string", "description": "Compatibility alias for save_to when action is fetch."],
@@ -2840,7 +2842,7 @@ final class ChatViewModel {
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
         - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
-        - Browser interaction: use `find_elements` to list visible inputs/buttons when selectors are unknown. For clicks, prefer a stable selector when available; otherwise use `label`, `button_text`, `aria_label`, or coordinates from `find_elements`/screenshot. Do not retry the same failed selector.
+        - Browser interaction: use `find_elements` to scan the page for inputs/buttons when selectors are unknown. It scrolls the page by default; use `scan_page:true`/`max_scrolls` when a target may be below the first viewport. For clicks, prefer a stable selector when available; otherwise use `label`, `button_text`, or `aria_label` from `find_elements`; use screenshot coordinates only as a fallback after the target is in the current viewport. Do not retry the same failed selector.
         - For image-generation websites, after entering the prompt and clicking generate/download, use `browser_use` action `wait_for_image` to poll for the generated image and save it as an attachment. Do not repeatedly call generic screenshot/read actions once `wait_for_image` returns a saved file.
         - Website/app preview: for static HTML/SVG/files, use `iexa-open <path>` directly so Iexa opens the in-app preview. Use `iexa-serve <directory-or-file> <port>` or a framework dev server only when the project actually requires localhost; start long-running servers in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
@@ -2970,15 +2972,17 @@ final class ChatViewModel {
                                     "description": "Browser action to perform."
                                 ],
                                 "url": ["type": "string", "description": "HTTP, HTTPS, or file URL. Required for navigate/fetch or when loading a new page before another action."],
-                            "selector": ["type": "string", "description": "CSS selector or XPath for click/type/text/scroll/find actions."],
-                            "label": ["type": "string", "description": "For click: visible button/control text or accessible label when no selector is known."],
-                            "button_text": ["type": "string", "description": "For click: compatibility alias for label."],
-                            "aria_label": ["type": "string", "description": "For click: aria-label text to match."],
-                            "text": ["type": "string", "description": "Text to type into the selected element."],
+                                "selector": ["type": "string", "description": "CSS selector or XPath for click/type/text/scroll/find actions."],
+                                "label": ["type": "string", "description": "For click: visible button/control text or accessible label when no selector is known."],
+                                "button_text": ["type": "string", "description": "For click: compatibility alias for label."],
+                                "aria_label": ["type": "string", "description": "For click: aria-label text to match."],
+                                "text": ["type": "string", "description": "Text to type into the selected element."],
                                 "coordinate_x": ["type": "integer", "description": "Viewport x coordinate for click fallback."],
                                 "coordinate_y": ["type": "integer", "description": "Viewport y coordinate for click fallback."],
                                 "direction": ["type": "string", "enum": ["up", "down"], "description": "Scroll direction."],
                                 "amount": ["type": "integer", "description": "Scroll distance in pixels."],
+                                "scan_page": ["type": "boolean", "description": "For find_elements: scroll the full page and merge controls. Defaults to true."],
+                                "max_scrolls": ["type": "integer", "description": "For find_elements: maximum viewport positions to scan."],
                                 "script": ["type": "string", "description": "JavaScript body for execute_js."],
                                 "user_agent": ["type": "string", "enum": ["desktop_chrome", "mobile_chrome"], "description": "Optional user-agent profile."],
                                 "max_depth": ["type": "integer", "description": "DOM backbone depth."],
@@ -17464,7 +17468,7 @@ final class ChatViewModel {
             : ""
         let browserInstructions = includeBrowserTools ? """
 
-        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when the answer depends on current/recent/external/source-backed facts or live website content. Use search when there is no exact URL, readable for a known URL or result verification, and `browser_use` for bounded interactive page work (navigate/screenshot/click/type/scroll/DOM/cookies/js). When selectors are unknown, call `browser_use` with `action:"find_elements"` to list visible controls, then click by stable selector, `label`/`button_text`/`aria_label`, or returned coordinates. For image-generation websites, after entering the prompt and clicking generate/download, call `browser_use` with `action:"wait_for_image"` to poll the visible page and save the generated image as an attachment, then answer from that result instead of repeating screenshots. In Markdown fallback, keep `action:"browser_use"` and put the concrete action in `browser_use_action`. Set `screenshot:true` when visual evidence helps. Answer from the returned browser result and cite title/URL plainly.
+        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when the answer depends on current/recent/external/source-backed facts or live website content. Use search when there is no exact URL, readable for a known URL or result verification, and `browser_use` for bounded interactive page work (navigate/screenshot/click/type/scroll/DOM/cookies/js). When selectors are unknown, call `browser_use` with `action:"find_elements"` to scan controls across the page; use `scan_page:true`/`max_scrolls` if the target may be below the first viewport. Then click by stable selector, `label`/`button_text`/`aria_label`; use screenshot coordinates only after the target is in the current viewport. For image-generation websites, after entering the prompt and clicking generate/download, call `browser_use` with `action:"wait_for_image"` to poll the visible page and save the generated image as an attachment, then answer from that result instead of repeating screenshots. In Markdown fallback, keep `action:"browser_use"` and put the concrete action in `browser_use_action`. Set `screenshot:true` when visual evidence helps. Answer from the returned browser result and cite title/URL plainly.
         """ : ""
         let officeInstructions = includeOfficeTools ? """
 

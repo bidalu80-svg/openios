@@ -615,10 +615,11 @@ final class BrowserWebSearchService: NSObject {
           }
           function visible(node) {
             if (!node || !node.getBoundingClientRect) return false;
+            if (node.hidden || (node.closest && node.closest('[hidden],[aria-hidden="true"]'))) return false;
             const style = getComputedStyle(node);
             if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) return false;
             const r = node.getBoundingClientRect();
-            return r.width > 1 && r.height > 1 && r.bottom >= 0 && r.right >= 0 && r.top <= innerHeight && r.left <= innerWidth;
+            return r.width > 1 && r.height > 1;
           }
           function allRoots() {
             const roots = [document];
@@ -1105,8 +1106,19 @@ final class BrowserWebSearchService: NSObject {
         }
         try? await Task.sleep(nanoseconds: 250_000_000)
 
-        let selector = Self.firstString(in: call, keys: ["selector", "css"]) ?? "a, button, input, textarea, select, [role='button'], [onclick]"
+        let defaultSelector = "a, button, input, textarea, select, [role='button'], [role='link'], [onclick], [tabindex], [aria-label]"
+        let selector = Self.firstString(in: call, keys: ["selector", "css"]) ?? defaultSelector
         let limit = min(max(Self.intValue(call["limit"] ?? call["max_results"]) ?? 30, 1), 100)
+        let scanPage = Self.boolValue(call["scan_page"] ?? call["scanPage"] ?? call["full_page"] ?? call["fullPage"]) ?? true
+        if scanPage {
+            let maxScrolls = min(max(Self.intValue(call["max_scrolls"] ?? call["maxScrolls"] ?? call["scroll_count"] ?? call["count"]) ?? 16, 1), 20)
+            return await executeNativeFindElementsAcrossPage(
+                selector: selector,
+                limit: limit,
+                maxScrolls: maxScrolls
+            )
+        }
+
         let script = Self.elementCollectionScript(selector: selector, limit: limit)
         guard let object = await evaluateJSONObject(script) else {
             return [
@@ -1119,6 +1131,116 @@ final class BrowserWebSearchService: NSObject {
         payload["action"] = "browser.find_elements"
         payload["summary"] = "已找到网页元素。"
         return payload
+    }
+
+    private func executeNativeFindElementsAcrossPage(selector: String, limit: Int, maxScrolls: Int) async -> [String: Any] {
+        guard let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) else {
+            return [
+                "action": "browser.find_elements",
+                "ok": false,
+                "error": "Unable to inspect page elements"
+            ]
+        }
+
+        let originalY = Self.intValue(metrics["scroll_y"]) ?? 0
+        let viewportHeight = max(Self.intValue(metrics["viewport_height"]) ?? 720, 240)
+        let scrollHeight = max(Self.intValue(metrics["scroll_height"]) ?? viewportHeight, viewportHeight)
+        let maxY = max(scrollHeight - viewportHeight, 0)
+        let step = max(Int(Double(viewportHeight) * 0.78), 240)
+        var offsets = [0]
+        if maxY > 0 {
+            var nextY = 0
+            while nextY < maxY {
+                offsets.append(nextY)
+                nextY += step
+            }
+            offsets.append(maxY)
+        }
+        var uniqueOffsets: [Int] = []
+        var seenOffsets = Set<Int>()
+        for offset in offsets {
+            let clamped = min(max(offset, 0), maxY)
+            guard seenOffsets.insert(clamped).inserted else { continue }
+            uniqueOffsets.append(clamped)
+        }
+
+        let scrollOffsets: [Int]
+        if uniqueOffsets.count <= maxScrolls {
+            scrollOffsets = uniqueOffsets
+        } else if maxScrolls == 1 {
+            scrollOffsets = [uniqueOffsets.first ?? 0]
+        } else {
+            var sampled: [Int] = []
+            let lastIndex = uniqueOffsets.count - 1
+            for index in 0..<maxScrolls {
+                let rawIndex = Double(index) * Double(lastIndex) / Double(maxScrolls - 1)
+                let sampleIndex = min(max(Int(rawIndex.rounded()), 0), lastIndex)
+                sampled.append(uniqueOffsets[sampleIndex])
+            }
+            var seenSamples = Set<Int>()
+            scrollOffsets = sampled.filter { seenSamples.insert($0).inserted }
+        }
+        var collected: [[String: Any]] = []
+        var seen = Set<String>()
+        let viewportCount = max(scrollOffsets.count, 1)
+        let perViewportLimit = max(6, min(24, ((limit + viewportCount - 1) / viewportCount) + 4))
+
+        for (viewportIndex, offset) in scrollOffsets.enumerated() {
+            _ = await evaluateJSONObject(Self.scrollToPageYScript(offset))
+            try? await Task.sleep(nanoseconds: viewportIndex == 0 ? 180_000_000 : 300_000_000)
+
+            guard let snapshot = await evaluateJSONObject(Self.elementCollectionScript(selector: selector, limit: min(max(perViewportLimit * 2, 24), 100))),
+                  let items = snapshot["items"] as? [[String: Any]] else {
+                continue
+            }
+
+            var addedInViewport = 0
+            for rawItem in items {
+                let key = Self.elementIdentityKey(rawItem)
+                guard !key.isEmpty, seen.insert(key).inserted else { continue }
+
+                var item = rawItem
+                item["index"] = collected.count
+                item["viewport_index"] = viewportIndex
+                item["scroll_y"] = offset
+                if let rect = item["rect"] as? [String: Any] {
+                    if let pageX = Self.intValue(rect["page_x"]) {
+                        item["page_x"] = pageX
+                    }
+                    if let pageY = Self.intValue(rect["page_y"]) {
+                        item["page_y"] = pageY
+                    }
+                    if let pageCenterX = Self.intValue(rect["page_center_x"]) {
+                        item["page_center_x"] = pageCenterX
+                    }
+                    if let pageCenterY = Self.intValue(rect["page_center_y"]) {
+                        item["page_center_y"] = pageCenterY
+                    }
+                }
+                collected.append(item)
+                addedInViewport += 1
+                if addedInViewport >= perViewportLimit { break }
+            }
+        }
+
+        _ = await evaluateJSONObject(Self.scrollToPageYScript(originalY))
+        let returnedItems = Self.evenlySampleElements(collected, limit: limit)
+
+        return [
+            "action": "browser.find_elements",
+            "ok": true,
+            "title": metrics["title"] as? String ?? "",
+            "url": metrics["url"] as? String ?? "",
+            "selector": selector,
+            "scan_page": true,
+            "scroll_positions": scrollOffsets.count,
+            "scroll_height": scrollHeight,
+            "viewport_height": viewportHeight,
+            "count": returnedItems.count,
+            "total_count": collected.count,
+            "items": returnedItems,
+            "summary": collected.isEmpty ? "整页扫描后未找到匹配网页元素。" : "已滚动扫描整页并找到 \(collected.count) 个网页元素，返回其中 \(returnedItems.count) 个代表项。"
+        ]
     }
 
     private func executeNativeBackbone(_ call: [String: Any]) async -> [String: Any] {
@@ -1738,6 +1860,89 @@ final class BrowserWebSearchService: NSObject {
             .filter { !$0.isEmpty }
     }
 
+    private static func pageScrollMetricsScript() -> String {
+        """
+        (() => {
+          const doc = document.documentElement;
+          const body = document.body || doc;
+          const scrollHeight = Math.max(
+            doc.scrollHeight || 0,
+            body.scrollHeight || 0,
+            doc.offsetHeight || 0,
+            body.offsetHeight || 0,
+            doc.clientHeight || 0
+          );
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            scroll_y: Math.round(window.scrollY || doc.scrollTop || body.scrollTop || 0),
+            scroll_x: Math.round(window.scrollX || doc.scrollLeft || body.scrollLeft || 0),
+            scroll_height: Math.round(scrollHeight),
+            scroll_width: Math.round(Math.max(doc.scrollWidth || 0, body.scrollWidth || 0, doc.clientWidth || 0)),
+            viewport_height: Math.round(window.innerHeight || doc.clientHeight || 0),
+            viewport_width: Math.round(window.innerWidth || doc.clientWidth || 0)
+          });
+        })();
+        """
+    }
+
+    private static func scrollToPageYScript(_ y: Int) -> String {
+        """
+        (() => {
+          const y = \(max(y, 0));
+          const doc = document.scrollingElement || document.documentElement || document.body;
+          if (doc && doc.scrollTo) {
+            doc.scrollTo({ top: y, left: 0, behavior: 'auto' });
+          } else {
+            window.scrollTo(0, y);
+          }
+          return JSON.stringify({
+            ok: true,
+            scroll_y: Math.round(window.scrollY || (doc && doc.scrollTop) || 0)
+          });
+        })();
+        """
+    }
+
+    private static func elementIdentityKey(_ item: [String: Any]) -> String {
+        var parts: [String] = []
+        for key in ["href", "id", "aria_label", "name", "role", "title", "text", "tag"] {
+            if let value = item[key] as? String {
+                let normalized = value
+                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                if !normalized.isEmpty {
+                    parts.append(normalized)
+                }
+            }
+        }
+        if let rect = item["rect"] as? [String: Any] {
+            let pageX = Self.intValue(rect["page_x"] ?? rect["x"]) ?? 0
+            let pageY = Self.intValue(rect["page_y"] ?? rect["y"]) ?? 0
+            let width = Self.intValue(rect["width"]) ?? 0
+            let height = Self.intValue(rect["height"]) ?? 0
+            parts.append("rect:\(pageX):\(pageY):\(width):\(height)")
+        }
+        return parts.joined(separator: "|")
+    }
+
+    private static func evenlySampleElements(_ items: [[String: Any]], limit: Int) -> [[String: Any]] {
+        guard limit > 0, items.count > limit else { return items }
+        if limit == 1 { return [items[0]] }
+        var sampled: [[String: Any]] = []
+        let lastIndex = items.count - 1
+        for index in 0..<limit {
+            let rawIndex = Double(index) * Double(lastIndex) / Double(limit - 1)
+            let sampleIndex = min(max(Int(rawIndex.rounded()), 0), lastIndex)
+            var item = items[sampleIndex]
+            item["index"] = sampled.count
+            sampled.append(item)
+        }
+        return sampled
+    }
+
     private static func elementCollectionScript(selector: String, limit: Int) -> String {
         """
         (() => {
@@ -1777,15 +1982,24 @@ final class BrowserWebSearchService: NSObject {
           function rect(node) {
             if (!node || !node.getBoundingClientRect) return null;
             const r = node.getBoundingClientRect();
+            const pageX = r.x + window.scrollX;
+            const pageY = r.y + window.scrollY;
             return {
               x: Math.round(r.x),
               y: Math.round(r.y),
+              page_x: Math.round(pageX),
+              page_y: Math.round(pageY),
+              page_center_x: Math.round(pageX + r.width / 2),
+              page_center_y: Math.round(pageY + r.height / 2),
               width: Math.round(r.width),
-              height: Math.round(r.height)
+              height: Math.round(r.height),
+              center_x: Math.round(r.x + r.width / 2),
+              center_y: Math.round(r.y + r.height / 2)
             };
           }
           function visible(node) {
             if (!node || !node.getBoundingClientRect) return false;
+            if (node.hidden || (node.closest && node.closest('[hidden],[aria-hidden="true"]'))) return false;
             const style = getComputedStyle(node);
             if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) return false;
             const r = node.getBoundingClientRect();
