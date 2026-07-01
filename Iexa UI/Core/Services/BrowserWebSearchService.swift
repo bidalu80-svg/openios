@@ -1300,7 +1300,6 @@ final class BrowserWebSearchService: NSObject {
                 lastCandidates = candidates
                 if let candidate = candidates.first,
                    let saved = await saveBrowserImageCandidate(candidate) {
-                    let thumbnail = await capturePageThumbnail(prefix: "browser_image_result")
                     return [
                         "action": "browser.wait_for_image",
                         "ok": true,
@@ -1313,7 +1312,7 @@ final class BrowserWebSearchService: NSObject {
                         "image_width": candidate["width"] as? Int ?? 0,
                         "image_height": candidate["height"] as? Int ?? 0,
                         "source_url": candidate["src"] as? String ?? "",
-                        "preview_images": [saved.url.absoluteString] + (thumbnail.map { [$0.absoluteString] } ?? []),
+                        "preview_images": [saved.url.absoluteString],
                         "items": [[
                             "title": "生成图片",
                             "link": saved.url.absoluteString,
@@ -1324,7 +1323,7 @@ final class BrowserWebSearchService: NSObject {
                     ]
                 }
             }
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
         }
 
         let thumbnail = await capturePageThumbnail(prefix: "browser_image_timeout")
@@ -1790,7 +1789,7 @@ final class BrowserWebSearchService: NSObject {
             const src = img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-original') || '';
             push(items, {
               src,
-              data_url: dataURLFromImage(img),
+              data_url: String(src || '').startsWith('blob:') ? dataURLFromImage(img) : '',
               width: img.naturalWidth || r.width,
               height: img.naturalHeight || r.height,
               alt: img.alt || '',
@@ -1813,12 +1812,15 @@ final class BrowserWebSearchService: NSObject {
               selector: a.id ? `#${a.id}` : ''
             });
           }
+          let canvasDataURLCount = 0;
           for (const canvas of Array.from(document.querySelectorAll('canvas'))) {
             if (!visible(canvas)) continue;
             const r = canvas.getBoundingClientRect();
             if (r.width < minWidth || r.height < minHeight) continue;
+            if (canvasDataURLCount >= 2) continue;
             try {
               const dataURL = canvas.toDataURL('image/png');
+              canvasDataURLCount += 1;
               push(items, {
                 src: dataURL,
                 data_url: dataURL,
@@ -1874,7 +1876,7 @@ final class BrowserWebSearchService: NSObject {
 
     private func makeBrowserWebView() -> WKWebView {
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .nonPersistent()
+        config.websiteDataStore = .default()
         let prefs = WKWebpagePreferences()
         prefs.allowsContentJavaScript = true
         config.defaultWebpagePreferences = prefs
