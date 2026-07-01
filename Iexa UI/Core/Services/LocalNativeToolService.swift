@@ -233,6 +233,7 @@ final class LocalNativeToolService {
             "browser.set_user_agent", "browser_set_user_agent", "set_user_agent",
             "browser.get_cookies", "browser_get_cookies", "get_cookies",
             "browser.wait_for_dom_stable", "browser_wait_for_dom_stable", "wait_for_dom_stable",
+            "browser.wait_for_image", "browser_wait_for_image", "wait_for_image", "wait_image", "image_result",
             "browser.new_tab", "browser_new_tab", "new_tab",
             "browser.close_tab", "browser_close_tab", "close_tab",
             "browser.list_tabs", "browser_list_tabs", "list_tabs"
@@ -308,6 +309,7 @@ final class LocalNativeToolService {
              "browser.set_user_agent", "browser_set_user_agent", "set_user_agent",
              "browser.get_cookies", "browser_get_cookies", "get_cookies",
              "browser.wait_for_dom_stable", "browser_wait_for_dom_stable", "wait_for_dom_stable",
+             "browser.wait_for_image", "browser_wait_for_image", "wait_for_image", "wait_image", "image_result",
              "browser.new_tab", "browser_new_tab", "new_tab",
              "browser.close_tab", "browser_close_tab", "close_tab",
              "browser.list_tabs", "browser_list_tabs", "list_tabs":
@@ -704,11 +706,13 @@ final class LocalNativeToolService {
         var files: [ChatMessageFile] = []
         if let fileURL = result["file_url"] as? String,
            let fileName = result["file_name"] as? String {
+            let contentType = result["content_type"] as? String
             files.append(ChatMessageFile(
-                type: "file",
+                type: contentType?.lowercased().hasPrefix("image/") == true ? "image" : "file",
                 url: fileURL,
                 name: fileName,
-                contentType: result["content_type"] as? String
+                contentType: contentType,
+                displayURL: contentType?.lowercased().hasPrefix("image/") == true ? fileURL : nil
             ))
         }
         if let previews = result["preview_images"] as? [String] {
@@ -1587,6 +1591,8 @@ final class LocalNativeToolService {
             return "browser.readable"
         case "browser.use", "browser_use":
             return "browser_use"
+        case "browser.wait_for_image", "browser_wait_for_image", "wait_for_image", "wait_image", "image_result":
+            return "browser.wait_for_image"
         case "shortcuts.run", "shortcut.run", "shortcuts_run", "run_shortcut":
             return "shortcuts.run"
         case "shortcuts.open", "shortcut.open", "shortcuts_open", "open_shortcut":
@@ -1647,6 +1653,7 @@ final class LocalNativeToolService {
              "browser.set_user_agent", "browser_set_user_agent", "set_user_agent",
              "browser.get_cookies", "browser_get_cookies", "get_cookies",
              "browser.wait_for_dom_stable", "browser_wait_for_dom_stable", "wait_for_dom_stable",
+             "browser.wait_for_image", "browser_wait_for_image", "wait_for_image", "wait_image", "image_result",
              "browser.new_tab", "browser_new_tab", "new_tab",
              "browser.close_tab", "browser_close_tab", "close_tab",
              "browser.list_tabs", "browser_list_tabs", "list_tabs",

@@ -169,6 +169,8 @@ final class BrowserWebSearchService: NSObject {
             return await executeNativeCookies(call)
         case "browser.wait_for_dom_stable", "browser_wait_for_dom_stable", "wait_for_dom_stable":
             return await executeNativeWaitForDOMStable(call)
+        case "browser.wait_for_image", "browser_wait_for_image", "wait_for_image", "wait_image", "image_result":
+            return await executeNativeWaitForImage(call)
         case "browser.new_tab", "browser_new_tab", "new_tab":
             return await executeNativeNewTab(call)
         case "browser.close_tab", "browser_close_tab", "close_tab":
@@ -594,6 +596,11 @@ final class BrowserWebSearchService: NSObject {
               return null;
             }
           }
+          function isEditable(node) {
+            if (!node) return false;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            return tag === 'input' || tag === 'textarea' || tag === 'select' || !!node.isContentEditable;
+          }
           const node = findNode(selector) || ((Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null);
           if (!node) {
             return JSON.stringify({ ok: false, error: 'Element not found' });
@@ -601,7 +608,8 @@ final class BrowserWebSearchService: NSObject {
           if (node.scrollIntoView) {
             node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
           }
-          const target = node.closest && node.closest('button, a, input, textarea, select, [role="button"], [onclick]') || node;
+          const target = node.closest && node.closest('button, a, input, textarea, select, [contenteditable], [role="button"], [onclick]') || node;
+          const editableTarget = isEditable(target);
           const events = [
             ['pointerdown', { bubbles: true, cancelable: true, composed: true }],
             ['mousedown', { bubbles: true, cancelable: true, composed: true }],
@@ -613,8 +621,11 @@ final class BrowserWebSearchService: NSObject {
               target.dispatchEvent(new MouseEvent(name, init));
             } catch (_) {}
           }
-          if (typeof target.click === 'function') {
+          if (!editableTarget && typeof target.click === 'function') {
             try { target.click(); } catch (_) {}
+          }
+          if (editableTarget && document.activeElement && document.activeElement.blur) {
+            try { document.activeElement.blur(); } catch (_) {}
           }
           return JSON.stringify({
             ok: true,
@@ -690,12 +701,11 @@ final class BrowserWebSearchService: NSObject {
           if (!node) {
             return JSON.stringify({ ok: false, error: 'Element not found' });
           }
-          if (node.focus) {
-            try { node.focus(); } catch (_) {}
-          }
           if (node.scrollIntoView) {
             try { node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (_) {}
           }
+          try { node.dispatchEvent(new FocusEvent('focusin', { bubbles: true, cancelable: false, composed: true })); } catch (_) {}
+          try { node.dispatchEvent(new FocusEvent('focus', { bubbles: false, cancelable: false, composed: true })); } catch (_) {}
           if (node.isContentEditable) {
             if (clear) {
               node.innerText = '';
@@ -730,6 +740,11 @@ final class BrowserWebSearchService: NSObject {
             for (const event of events) {
               try { node.dispatchEvent(event); } catch (_) {}
             }
+          }
+          try { node.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false, composed: true })); } catch (_) {}
+          try { node.dispatchEvent(new FocusEvent('focusout', { bubbles: true, cancelable: false, composed: true })); } catch (_) {}
+          if (document.activeElement && document.activeElement.blur) {
+            try { document.activeElement.blur(); } catch (_) {}
           }
           return JSON.stringify({
             ok: true,
@@ -1257,6 +1272,146 @@ final class BrowserWebSearchService: NSObject {
         ]
     }
 
+    private func executeNativeWaitForImage(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !(await load(url: url, timeout: 14)) {
+            return [
+                "action": "browser.wait_for_image",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+
+        let timeout = TimeInterval(Self.intValue(call["timeout"] ?? call["timeout_seconds"]) ?? 45)
+        let deadline = Date().addingTimeInterval(min(max(timeout, 3), 90))
+        let minWidth = max(Self.intValue(call["min_width"]) ?? 160, 32)
+        let minHeight = max(Self.intValue(call["min_height"]) ?? 160, 32)
+        let query = Self.firstString(in: call, keys: ["query", "keywords", "hint"])
+        var lastCandidates: [[String: Any]] = []
+
+        while Date() < deadline {
+            if let object = await evaluateJSONObject(Self.generatedImageCandidateScript(
+                minWidth: minWidth,
+                minHeight: minHeight,
+                query: query
+            )) {
+                let candidates = object["candidates"] as? [[String: Any]] ?? []
+                lastCandidates = candidates
+                if let candidate = candidates.first,
+                   let saved = await saveBrowserImageCandidate(candidate) {
+                    let thumbnail = await capturePageThumbnail(prefix: "browser_image_result")
+                    return [
+                        "action": "browser.wait_for_image",
+                        "ok": true,
+                        "title": object["title"] as? String ?? "生成图片",
+                        "url": object["url"] as? String ?? "",
+                        "file_url": saved.url.absoluteString,
+                        "file_name": saved.url.lastPathComponent,
+                        "content_type": saved.contentType,
+                        "bytes": saved.byteCount,
+                        "image_width": candidate["width"] as? Int ?? 0,
+                        "image_height": candidate["height"] as? Int ?? 0,
+                        "source_url": candidate["src"] as? String ?? "",
+                        "preview_images": [saved.url.absoluteString] + (thumbnail.map { [$0.absoluteString] } ?? []),
+                        "items": [[
+                            "title": "生成图片",
+                            "link": saved.url.absoluteString,
+                            "snippet": "已等待并保存网页生成的图片。",
+                            "thumbnail_url": saved.url.absoluteString
+                        ]],
+                        "summary": "已等待到网页生成图片并保存为附件：\(saved.url.lastPathComponent)"
+                    ]
+                }
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+
+        let thumbnail = await capturePageThumbnail(prefix: "browser_image_timeout")
+        var payload: [String: Any] = [
+            "action": "browser.wait_for_image",
+            "ok": false,
+            "candidate_count": lastCandidates.count,
+            "candidates": Array(lastCandidates.prefix(5)),
+            "error": "Timed out waiting for a generated image"
+        ]
+        if let thumbnail {
+            payload["preview_images"] = [thumbnail.absoluteString]
+            payload["items"] = [[
+                "title": "页面截图",
+                "link": thumbnail.absoluteString,
+                "snippet": "等待图片超时，已保存当前页面截图。",
+                "thumbnail_url": thumbnail.absoluteString
+            ]]
+        }
+        return payload
+    }
+
+    private func saveBrowserImageCandidate(_ candidate: [String: Any]) async -> (url: URL, contentType: String, byteCount: Int)? {
+        let source = [
+            candidate["data_url"] as? String,
+            candidate["src"] as? String,
+            candidate["href"] as? String
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? ""
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let data: Data
+        let contentType: String
+        if let decoded = Self.decodeDataURL(trimmed) {
+            data = decoded.data
+            contentType = decoded.contentType
+        } else if let url = URL(string: trimmed),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            do {
+                var request = URLRequest(url: url, timeoutInterval: 24)
+                request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                request.setValue(
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+                    forHTTPHeaderField: "User-Agent"
+                )
+                let (downloaded, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse,
+                      (200..<300).contains(http.statusCode),
+                      downloaded.count > 512 else {
+                    return nil
+                }
+                data = downloaded
+                contentType = http.value(forHTTPHeaderField: "Content-Type")?.components(separatedBy: ";").first
+                    ?? Self.imageContentType(fromURL: url)
+                    ?? "image/png"
+            } catch {
+                return nil
+            }
+        } else {
+            return nil
+        }
+
+        guard contentType.lowercased().hasPrefix("image/"),
+              data.count > 512 else {
+            return nil
+        }
+
+        do {
+            let folder = try browserOutputDirectory()
+            let suggested = (candidate["alt"] as? String)
+                ?? (candidate["title"] as? String)
+                ?? "generated-image"
+            let fileName = Self.safeDownloadFileName(
+                suggested,
+                fallbackExtension: Self.fileExtension(for: contentType)
+            )
+            let stamped = "\(Int(Date().timeIntervalSince1970 * 1000))_\(fileName)"
+            let fileURL = folder.appendingPathComponent(stamped)
+            try data.write(to: fileURL, options: [.atomic])
+            return (fileURL, contentType, data.count)
+        } catch {
+            return nil
+        }
+    }
+
     private func executeNativeNewTab(_ call: [String: Any]) async -> [String: Any] {
         guard browserTabs.count < 3 else {
             return [
@@ -1446,6 +1601,8 @@ final class BrowserWebSearchService: NSObject {
             return "browser.get_cookies"
         case "wait_for_dom_stable", "browser.wait_for_dom_stable":
             return "browser.wait_for_dom_stable"
+        case "wait_for_image", "wait_image", "image_result", "browser.wait_for_image":
+            return "browser.wait_for_image"
         case "new_tab", "browser.new_tab":
             return "browser.new_tab"
         case "close_tab", "browser.close_tab":
@@ -1543,6 +1700,142 @@ final class BrowserWebSearchService: NSObject {
             selector,
             count: items.length,
             items
+          });
+        })();
+        """
+    }
+
+    private static func generatedImageCandidateScript(minWidth: Int, minHeight: Int, query: String?) -> String {
+        let queryWords = (query ?? "")
+            .lowercased()
+            .split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == "，" })
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        let queryJSON = (try? JSONSerialization.data(withJSONObject: queryWords))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        return """
+        (() => {
+          const minWidth = \(minWidth);
+          const minHeight = \(minHeight);
+          const queryWords = \(queryJSON);
+          const seen = new Set();
+          function visible(node) {
+            if (!node) return false;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) return false;
+            const r = node.getBoundingClientRect();
+            return r.width >= 20 && r.height >= 20 && r.bottom >= 0 && r.right >= 0 && r.top <= innerHeight * 2 && r.left <= innerWidth * 2;
+          }
+          function absoluteURL(value) {
+            if (!value) return '';
+            if (value.startsWith('data:image/')) return value;
+            if (value.startsWith('blob:')) return value;
+            try { return new URL(value, location.href).href; } catch (_) { return value; }
+          }
+          function imageLike(value) {
+            const lower = String(value || '').toLowerCase();
+            return lower.startsWith('data:image/') || lower.startsWith('blob:') || /\\.(png|jpe?g|webp|gif|bmp|avif|heic)(\\?|#|$)/.test(lower);
+          }
+          function text(node) {
+            return ((node && (node.innerText || node.textContent)) || '').replace(/\\s+/g, ' ').trim();
+          }
+          function dataURLFromImage(img) {
+            try {
+              if (!img || !img.naturalWidth || !img.naturalHeight) return '';
+              const canvas = document.createElement('canvas');
+              canvas.width = img.naturalWidth;
+              canvas.height = img.naturalHeight;
+              const ctx = canvas.getContext('2d');
+              if (!ctx) return '';
+              ctx.drawImage(img, 0, 0);
+              return canvas.toDataURL('image/png');
+            } catch (_) {
+              return '';
+            }
+          }
+          function scoreCandidate(item) {
+            let score = 0;
+            if (item.width >= minWidth && item.height >= minHeight) score += 30;
+            score += Math.min(30, Math.round((item.width * item.height) / 20000));
+            const joined = [item.alt, item.title, item.text, item.src].join(' ').toLowerCase();
+            if (/download|result|generated|output|image|photo|preview|保存|下载|生成|结果|图片|预览/.test(joined)) score += 20;
+            for (const word of queryWords) if (word && joined.includes(word)) score += 5;
+            if (item.src && item.src.startsWith('data:image/')) score += 10;
+            if (item.src && item.src.startsWith('blob:')) score += 8;
+            return score;
+          }
+          function push(items, raw) {
+            const src = absoluteURL(raw.src || raw.href || raw.data_url || '');
+            if (!src || !imageLike(src) || seen.has(src)) return;
+            seen.add(src);
+            const item = {
+              src,
+              href: raw.href ? absoluteURL(raw.href) : '',
+              data_url: raw.data_url || '',
+              width: Math.round(raw.width || 0),
+              height: Math.round(raw.height || 0),
+              alt: raw.alt || '',
+              title: raw.title || '',
+              text: raw.text || '',
+              selector: raw.selector || ''
+            };
+            if (item.width < minWidth && item.height < minHeight && !src.startsWith('data:image/')) return;
+            item.score = scoreCandidate(item);
+            items.push(item);
+          }
+          const items = [];
+          for (const img of Array.from(document.images || [])) {
+            if (!visible(img)) continue;
+            const r = img.getBoundingClientRect();
+            const src = img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-original') || '';
+            push(items, {
+              src,
+              data_url: dataURLFromImage(img),
+              width: img.naturalWidth || r.width,
+              height: img.naturalHeight || r.height,
+              alt: img.alt || '',
+              title: img.title || '',
+              text: text(img.closest('figure, article, div, section') || img.parentElement),
+              selector: img.id ? `#${img.id}` : ''
+            });
+          }
+          for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+            const href = a.href || a.getAttribute('href') || '';
+            if (!imageLike(href)) continue;
+            const r = a.getBoundingClientRect();
+            push(items, {
+              src: href,
+              href,
+              width: r.width || minWidth,
+              height: r.height || minHeight,
+              title: a.title || '',
+              text: text(a),
+              selector: a.id ? `#${a.id}` : ''
+            });
+          }
+          for (const canvas of Array.from(document.querySelectorAll('canvas'))) {
+            if (!visible(canvas)) continue;
+            const r = canvas.getBoundingClientRect();
+            if (r.width < minWidth || r.height < minHeight) continue;
+            try {
+              const dataURL = canvas.toDataURL('image/png');
+              push(items, {
+                src: dataURL,
+                data_url: dataURL,
+                width: canvas.width || r.width,
+                height: canvas.height || r.height,
+                title: canvas.title || '',
+                text: text(canvas.closest('figure, article, div, section') || canvas.parentElement),
+                selector: canvas.id ? `#${canvas.id}` : 'canvas'
+              });
+            } catch (_) {}
+          }
+          items.sort((a, b) => b.score - a.score);
+          return JSON.stringify({
+            ok: items.length > 0,
+            title: document.title || '',
+            url: location.href,
+            candidates: items.slice(0, 8)
           });
         })();
         """
@@ -1846,6 +2139,45 @@ final class BrowserWebSearchService: NSObject {
             return "\"\""
         }
         return String(json.dropFirst().dropLast())
+    }
+
+    private static func decodeDataURL(_ value: String) -> (contentType: String, data: Data)? {
+        guard value.lowercased().hasPrefix("data:image/"),
+              let comma = value.firstIndex(of: ",") else {
+            return nil
+        }
+        let header = String(value[value.index(value.startIndex, offsetBy: "data:".count)..<comma])
+        let body = String(value[value.index(after: comma)...])
+        let contentType = header.components(separatedBy: ";").first ?? "image/png"
+        let data: Data?
+        if header.lowercased().contains(";base64") {
+            data = Data(base64Encoded: body)
+        } else {
+            data = body.removingPercentEncoding?.data(using: .utf8)
+        }
+        guard let data else { return nil }
+        return (contentType, data)
+    }
+
+    private static func imageContentType(fromURL url: URL) -> String? {
+        switch url.pathExtension.lowercased() {
+        case "png":
+            return "image/png"
+        case "jpg", "jpeg":
+            return "image/jpeg"
+        case "webp":
+            return "image/webp"
+        case "gif":
+            return "image/gif"
+        case "bmp":
+            return "image/bmp"
+        case "avif":
+            return "image/avif"
+        case "heic":
+            return "image/heic"
+        default:
+            return nil
+        }
     }
 
     private static func fetchFileName(for url: URL, contentType: String, headers: [AnyHashable: Any]) -> String {

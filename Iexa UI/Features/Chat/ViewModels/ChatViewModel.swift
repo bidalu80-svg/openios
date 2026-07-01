@@ -2589,8 +2589,8 @@ final class ChatViewModel {
         ),
         LocalAlpineToolCapability(
             name: "browser_use",
-            description: "Operate the shared iOS browser session: navigate, inspect, screenshot, click, type, scroll, run JS, fetch/download, and continue from the visible browser state.",
-            arguments: ["action navigate/screenshot/click/type/get_text/get_readable/scroll/find_elements/fetch/execute_js", "url?", "selector?", "text?", "coordinate_x/y?", "save_to?", "screenshot?", "aliases: web_fetch/fetch_url/open_url"]
+            description: "Operate the shared iOS browser session: navigate, inspect, screenshot, click, type, scroll, run JS, fetch/download, wait for generated images, and continue from the visible browser state.",
+            arguments: ["action navigate/screenshot/click/type/get_text/get_readable/scroll/find_elements/fetch/wait_for_image/execute_js", "url?", "selector?", "text?", "coordinate_x/y?", "save_to?", "screenshot?", "aliases: web_fetch/fetch_url/open_url"]
         ),
         LocalAlpineToolCapability(
             name: "web_search",
@@ -2756,7 +2756,7 @@ final class ChatViewModel {
                                 "enum": [
                                     "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
                                     "scroll", "scroll_and_collect", "find_elements", "get_page_info",
-                                    "get_backbone", "fetch", "new_tab", "close_tab", "list_tabs",
+                                    "get_backbone", "fetch", "wait_for_image", "new_tab", "close_tab", "list_tabs",
                                     "set_user_agent", "set_viewport", "get_cookies", "wait_for_dom_stable", "execute_js"
                                 ],
                                 "description": "Browser action to perform."
@@ -2774,6 +2774,8 @@ final class ChatViewModel {
                             "path": ["type": "string", "description": "Compatibility alias for save_to when action is fetch."],
                             "screenshot": ["type": "boolean", "description": "Capture a screenshot/thumbnail when visual evidence helps."],
                             "max_length": ["type": "integer", "description": "Maximum readable text length."],
+                            "min_width": ["type": "integer", "description": "For wait_for_image: minimum generated image width."],
+                            "min_height": ["type": "integer", "description": "For wait_for_image: minimum generated image height."],
                             "timeout": ["type": "integer", "description": "Timeout in seconds."]
                         ],
                         "required": ["tool_title", "action"]
@@ -2834,7 +2836,8 @@ final class ChatViewModel {
         - Shell is Alpine BusyBox/ash. Install OS packages with `apk add --no-cache`; never use apt/brew/sudo/systemctl/macOS/Windows commands.
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
-        - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
+        - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
+        - For image-generation websites, after entering the prompt and clicking generate/download, use `browser_use` action `wait_for_image` to poll for the generated image and save it as an attachment. Do not repeatedly call generic screenshot/read actions once `wait_for_image` returns a saved file.
         - Website/app preview: for static HTML/SVG/files, use `iexa-open <path>` directly so Iexa opens the in-app preview. Use `iexa-serve <directory-or-file> <port>` or a framework dev server only when the project actually requires localhost; start long-running servers in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
         - One meaningful step per decision. A write plus one direct verification may share a step when validating the same change. Stop when the tool result completes the user goal.
@@ -2948,7 +2951,7 @@ final class ChatViewModel {
                     "type": "function",
                     "function": [
                         "name": "browser_use",
-                        "description": "Interactive browser tool backed by the iOS WKWebView. Supports up to 3 tabs and actions: navigate, screenshot, click, type, hover, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, new_tab, close_tab, list_tabs, set_user_agent, set_viewport, get_cookies, wait_for_dom_stable, execute_js. Use for website preview checks, DOM inspection, clicking/typing flows, local file URLs, and source-backed web work.",
+                        "description": "Interactive browser tool backed by the iOS WKWebView. Supports up to 3 tabs and actions: navigate, screenshot, click, type, hover, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, wait_for_image, new_tab, close_tab, list_tabs, set_user_agent, set_viewport, get_cookies, wait_for_dom_stable, execute_js. Use for website preview checks, DOM inspection, clicking/typing flows, generated-image polling, local file URLs, and source-backed web work.",
                         "parameters": [
                             "type": "object",
                             "properties": [
@@ -2957,7 +2960,7 @@ final class ChatViewModel {
                                     "enum": [
                                         "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
                                         "scroll", "scroll_and_collect", "find_elements", "get_page_info",
-                                        "get_backbone", "fetch", "new_tab", "close_tab", "list_tabs",
+                                        "get_backbone", "fetch", "wait_for_image", "new_tab", "close_tab", "list_tabs",
                                         "set_user_agent", "set_viewport", "get_cookies", "wait_for_dom_stable", "execute_js"
                                     ],
                                     "description": "Browser action to perform."
@@ -2978,6 +2981,8 @@ final class ChatViewModel {
                                 "keywords": ["type": "string", "description": "Cookie name keywords."],
                                 "fuzzy": ["type": "boolean", "description": "Fuzzy cookie keyword matching."],
                                 "timeout": ["type": "integer", "description": "Timeout in seconds."],
+                                "min_width": ["type": "integer", "description": "For wait_for_image: minimum generated image width."],
+                                "min_height": ["type": "integer", "description": "For wait_for_image: minimum generated image height."],
                                 "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport."],
                                 "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport."],
                                 "reset": ["type": "boolean", "description": "Reset viewport to default."]
@@ -11635,6 +11640,43 @@ final class ChatViewModel {
         var exactUsage: [String: Any]?
         var loopGuard = LocalAlpineNativeLoopGuard()
         var executedAnyTool = false
+        var browserToolCount = 0
+        var browserSearchCount = 0
+
+        func streamFinalWithoutLocalAlpineTools(reason: String, fallback: String?) async throws -> [String: Any]? {
+            apiMessages.append([
+                "role": "system",
+                "content": reason
+            ])
+            request.messages = apiMessages
+            Self.disableAgentToolsForResultContinuation(&request)
+            do {
+                let finalStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                for try await event in finalStream {
+                    if Task.isCancelled { break }
+                    if let usage = event.usage, !usage.isEmpty {
+                        exactUsage = usage
+                    }
+                    applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
+                    if event.isFinished { break }
+                }
+            } catch {
+                if let fallback,
+                   !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    acc.replace(fallback)
+                    updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
+                    return exactUsage
+                }
+                throw error
+            }
+            if acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let fallback,
+               !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                acc.replace(fallback)
+                updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
+            }
+            return exactUsage
+        }
 
         for _ in 0..<localAlpineAgentMaxSteps {
             request.messages = apiMessages
@@ -11665,9 +11707,14 @@ final class ChatViewModel {
             apiMessages.append(Self.openAIToolCallAssistantMessage(for: calls))
             var blockedLoopMessage: String?
             var shouldSkipRemainingCalls = false
+            var skipRemainingToolMessage: String?
+            var needsFinalAnswerWithoutTools = false
+            var finalAnswerFallback: String?
             for call in calls {
                 if shouldSkipRemainingCalls {
-                    let message = blockedLoopMessage ?? "[LOOP BLOCKED] Local Alpine tool execution was stopped."
+                    let message = skipRemainingToolMessage
+                        ?? Self.localAlpineNativeLoopGuardModelMessage(blockedLoopMessage)
+                        ?? "本地工具已经返回足够结果。请直接回答用户，不要继续调用工具。"
                     apiMessages.append([
                         "role": "tool",
                         "tool_call_id": call.id,
@@ -11678,9 +11725,10 @@ final class ChatViewModel {
 
                 let decision = loopGuard.checkBeforeExecution(call)
                 if !decision.shouldExecute {
-                    let message = decision.message ?? "[LOOP WARNING] Repeated Local Alpine tool call skipped."
+                    let message = Self.localAlpineNativeLoopGuardModelMessage(decision.message)
+                        ?? "本地工具已经返回足够结果。请直接回答用户，不要继续调用工具。"
                     if decision.isBlocked {
-                        blockedLoopMessage = message
+                        blockedLoopMessage = decision.message
                         shouldSkipRemainingCalls = true
                     }
                     apiMessages.append([
@@ -11694,11 +11742,17 @@ final class ChatViewModel {
                 let preExecutionWarning = decision.message
                 let result = await executeLocalAlpineNativeToolCall(call, assistantMessageId: assistantMessageId)
                 let postExecutionDecision = loopGuard.recordAfterExecution(call, result: result)
-                var content = Self.localAlpineNativeToolResultContent(result)
-                if let preExecutionWarning {
-                    content += "\n\n\(preExecutionWarning)"
+                if Self.isLocalAlpineBrowserNativeToolCall(call) {
+                    browserToolCount += 1
+                    if call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "web_search" {
+                        browserSearchCount += 1
+                    }
                 }
-                if let message = postExecutionDecision.message {
+                var content = Self.localAlpineNativeToolResultContent(result)
+                if let message = Self.localAlpineNativeLoopGuardModelMessage(preExecutionWarning) {
+                    content += "\n\n\(message)"
+                }
+                if let message = Self.localAlpineNativeLoopGuardModelMessage(postExecutionDecision.message) {
                     content += "\n\n\(message)"
                 }
                 if postExecutionDecision.isBlocked {
@@ -11710,14 +11764,26 @@ final class ChatViewModel {
                     "tool_call_id": call.id,
                     "content": content
                 ])
+                if Self.localAlpineNativeToolShouldStopAfterResult(
+                    call,
+                    result: result,
+                    browserToolCount: browserToolCount,
+                    browserSearchCount: browserSearchCount
+                ) {
+                    needsFinalAnswerWithoutTools = true
+                    finalAnswerFallback = Self.localAlpineNativeToolFallbackMessage(call, result: result)
+                    skipRemainingToolMessage = "浏览器工具已经返回足够结果。请直接根据已有浏览器结果回答用户，不要继续调用工具。"
+                    shouldSkipRemainingCalls = true
+                }
             }
             if let blockedLoopMessage {
+                let guardMessage = Self.localAlpineNativeLoopGuardModelMessage(blockedLoopMessage)
+                    ?? "本地工具循环保护已停止重复执行。"
                 apiMessages.append([
                     "role": "system",
                     "content": """
-                    Local Alpine agent loop guard stopped repeated tool execution.
-                    \(blockedLoopMessage)
-                    Answer the user now. Summarize what was completed, what is still unresolved, and the exact next different action needed. Do not call more tools for this turn.
+                    \(guardMessage)
+                    请现在根据已经返回的本地工具结果回答用户：说明已完成什么、还有什么未解决、下一步不同的操作是什么。不要再调用工具，也不要引用内部循环保护文案。
                     """
                 ])
                 request.messages = apiMessages
@@ -11744,43 +11810,35 @@ final class ChatViewModel {
                 }
                 return exactUsage
             }
+            if needsFinalAnswerWithoutTools {
+                return try await streamFinalWithoutLocalAlpineTools(
+                    reason: """
+                    A Local Alpine native tool already returned the real result for this user request.
+                    Answer the user now using the tool result above. Do not call more Local Alpine tools for this same user message.
+                    If the tool result is an error, explain the concrete reason and what the user can try next instead of retrying the tool.
+                    """,
+                    fallback: finalAnswerFallback
+                )
+            }
         }
 
         let maxStepMessage = """
-        [LOOP BLOCKED] Local Alpine reached the maximum tool step count (\(localAlpineAgentMaxSteps)) for this assistant turn.
-        The app stopped tool execution to avoid an unstable repeated read/write loop. Answer the user now with what was completed, what is still unresolved, and the next different action needed.
+        本地工具连续执行次数已达到上限（\(localAlpineAgentMaxSteps) 步），App 已停止继续执行以避免重复操作。
         """
         apiMessages.append([
             "role": "system",
             "content": """
-            Local Alpine agent loop guard reached the max-step circuit breaker.
             \(maxStepMessage)
-            Do not call more tools for this turn.
+            请直接根据已有工具结果回答用户，不要再调用工具，也不要引用内部循环保护文案。
             """
         ])
         request.messages = apiMessages
         Self.disableAgentToolsForResultContinuation(&request)
         let fallback = Self.localAlpineNativeLoopBlockedFallbackMessage(maxStepMessage)
-        do {
-            let finalStream = try await manager.sendPreferredOpenAIStreaming(request: request)
-            for try await event in finalStream {
-                if Task.isCancelled { break }
-                if let usage = event.usage, !usage.isEmpty {
-                    exactUsage = usage
-                }
-                applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
-                if event.isFinished { break }
-            }
-        } catch {
-            acc.replace(fallback)
-            updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
-            return exactUsage
-        }
-        if acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            acc.replace(fallback)
-            updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
-        }
-        return exactUsage
+        return try await streamFinalWithoutLocalAlpineTools(
+            reason: "Do not call more tools. Summarize the available Local Alpine result or blocker now.",
+            fallback: fallback
+        )
     }
 
     private struct LocalNativeFunctionToolExecution {
@@ -11826,8 +11884,16 @@ final class ChatViewModel {
             } catch {
                 if let resolvedFallback,
                    !resolvedFallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let finalFallback = Self.localNativeFinalFallbackMessage(
+                        resolvedFallback,
+                        after: error
+                    )
                     acc.replace(resolvedFallback)
                     updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
+                    if finalFallback != resolvedFallback {
+                        acc.replace(finalFallback)
+                        updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
+                    }
                     return exactUsage
                 }
                 throw error
@@ -11878,10 +11944,11 @@ final class ChatViewModel {
             var finalAnswerFallback: String?
             for call in calls {
                 if needsFinalAnswerWithoutTools {
+                    let message = "本地工具已经返回足够结果。请直接根据已有工具结果回答用户，不要继续调用工具。"
                     apiMessages.append([
                         "role": "tool",
                         "tool_call_id": call.id,
-                        "content": "[TOOL LOOP BLOCKED] A previous local native tool call in this turn already provided enough result data. Use the existing tool result and answer now."
+                        "content": message
                     ])
                     continue
                 }
@@ -11891,10 +11958,10 @@ final class ChatViewModel {
                 callCountsBySignature[signature] = count
                 if count > 1 {
                     let message = """
-                    [TOOL LOOP BLOCKED] The app blocked a repeated local native tool call before execution.
-                    Tool: \(call.name)
-                    Reason: identical arguments were already executed in this assistant turn.
-                    Use the previous tool result and answer the user now. Do not call the same tool again.
+                    本地工具检测到重复调用，已停止这次重复执行。
+                    工具：\(call.name)
+                    原因：本轮已经用相同参数执行过这个工具。
+                    请直接根据前一次工具结果回答用户，不要继续调用同一个工具。
                     """
                     apiMessages.append([
                         "role": "tool",
@@ -11907,14 +11974,14 @@ final class ChatViewModel {
                 }
 
                 let browserKind = Self.localNativeBrowserToolKind(call)
-                if browserToolCount >= 3
+                if browserToolCount >= 6
                     || (browserKind == .search && browserSearchCount >= 2)
                     || (browserKind == .readable && browserReadCount >= 2) {
                     let message = """
-                    [TOOL LOOP BLOCKED] The app stopped additional browser tool calls for this same user message.
-                    Tool: \(call.name)
-                    Reason: the current turn already used enough browser/search tools to answer from available results.
-                    Use the previous search/page results and answer the user now. Do not call browser tools again for this turn.
+                    浏览器工具已经返回足够结果，本轮已停止继续调用浏览器工具。
+                    工具：\(call.name)
+                    原因：当前用户消息已经有足够的搜索/网页结果可以回答。
+                    请直接根据已有网页结果回答用户，不要继续调用浏览器工具。
                     """
                     apiMessages.append([
                         "role": "tool",
@@ -11949,7 +12016,10 @@ final class ChatViewModel {
                         browserReadCount += 1
                     }
                     lastNativeToolFallback = Self.localNativeBrowserFallbackMessage(from: execution.toolContent)
-                    if browserKind == .readable || browserToolCount >= 3 || browserSearchCount >= 2 {
+                    if Self.localNativeBrowserToolResultShouldStop(call, toolContent: execution.toolContent)
+                        || browserKind == .readable
+                        || browserToolCount >= 6
+                        || browserSearchCount >= 2 {
                         needsFinalAnswerWithoutTools = true
                         finalAnswerFallback = lastNativeToolFallback
                     }
@@ -11980,13 +12050,12 @@ final class ChatViewModel {
         apiMessages.append([
             "role": "system",
             "content": """
-            Local native tool loop guard reached the max-step circuit breaker.
             \(message)
-            Answer the user now from the available tool results. Do not call more tools for this turn.
+            请直接根据已有工具结果回答用户，不要继续调用工具，也不要引用内部循环保护文案。
             """
         ])
         return try await streamFinalWithoutTools(
-            reason: "Do not call more tools. Summarize the available result or blocker now.",
+            reason: "请不要继续调用工具，直接总结已有结果或当前阻塞原因。",
             fallback: "我先停下，避免继续重复调用本地工具。\n\n\(message)"
         )
     }
@@ -12650,6 +12719,9 @@ final class ChatViewModel {
         let content = Self.localNativeFunctionToolEnvelopeContent(for: call)
         let result = await LocalNativeToolService.shared.executeBlocks(in: content)
         enqueueLocalAlpineOpenRequests(result.openRequests)
+        if !result.files.isEmpty {
+            attachLocalNativeFiles(result.files, to: assistantMessageId)
+        }
         let failed = result.browserDocument?.ok == false
             || Self.localAlpineSyntheticToolFailed(result.summary)
         return executeLocalAlpineSyntheticToolCall(
@@ -12657,6 +12729,7 @@ final class ChatViewModel {
             assistantMessageId: assistantMessageId,
             detail: detail,
             output: result.summary,
+            filePaths: result.files.compactMap(\.url),
             openRequests: result.openRequests,
             browserURL: result.browserDocument?.url,
             imageFilePath: Self.localNativeBrowserPreviewImage(from: result.browserDocument),
@@ -12673,6 +12746,21 @@ final class ChatViewModel {
                 .compactMap(\.thumbnailURL)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .first { !$0.isEmpty }
+    }
+
+    private func attachLocalNativeFiles(_ files: [ChatMessageFile], to messageId: String) {
+        guard !files.isEmpty,
+              let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else {
+            return
+        }
+        var merged = Self.sanitizedMessageFiles(conversation?.messages[index].files ?? [])
+        for file in Self.sanitizedMessageFiles(files) {
+            Self.upsertMessageFile(file, into: &merged)
+        }
+        conversation?.messages[index].files = merged
+        conversation?.history.updateNode(id: messageId) { node in
+            node.files = merged
+        }
     }
 
     private func executeLocalAlpineOpenToolCall(
@@ -12999,6 +13087,138 @@ final class ChatViewModel {
         return String((body.isEmpty ? fallback : body).prefix(limit))
     }
 
+    private static func isLocalAlpineBrowserNativeToolCall(_ call: LocalAlpineNativeToolCall) -> Bool {
+        switch call.name.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "web_search", "browser_use", "iexa_open":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func localAlpineNativeToolShouldStopAfterResult(
+        _ call: LocalAlpineNativeToolCall,
+        result: LocalAlpineAgentResult,
+        browserToolCount: Int,
+        browserSearchCount: Int
+    ) -> Bool {
+        let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ["web_search", "browser_use", "iexa_open"].contains(name) else { return false }
+        if result.hadFailure {
+            return browserToolCount >= 3
+        }
+        if name == "iexa_open" {
+            return !result.openRequests.isEmpty
+        }
+        if name == "web_search" {
+            return browserSearchCount >= 2
+        }
+        guard name == "browser_use" else { return false }
+        let action = localAlpineBrowserActionName(from: call, result: result)
+        let terminalActions: Set<String> = [
+            "browser.readable", "browser.text", "browser.fetch",
+            "browser.wait_for_image", "browser.get_page_info", "browser.get_backbone",
+            "browser.scroll_and_collect", "browser.list_tabs"
+        ]
+        if terminalActions.contains(action) {
+            return true
+        }
+        let hasSavedFile = result.summary.localizedCaseInsensitiveContains("\"file_url\"")
+            || result.summary.localizedCaseInsensitiveContains("已等待到网页生成图片")
+            || result.summary.localizedCaseInsensitiveContains("已下载网页资源")
+        let hasImagePreviewResult = action == "browser.wait_for_image"
+            && result.summary.localizedCaseInsensitiveContains("\"preview_images\"")
+        if hasSavedFile || hasImagePreviewResult {
+            return true
+        }
+        return browserToolCount >= 6
+    }
+
+    private static func localAlpineBrowserActionName(
+        from call: LocalAlpineNativeToolCall,
+        result: LocalAlpineAgentResult
+    ) -> String {
+        let args = localAlpineNativeToolArguments(for: call)
+        let raw = (args["browser_use_action"] as? String)
+            ?? (args["browser_action"] as? String)
+            ?? (args["operation"] as? String)
+            ?? (args["op"] as? String)
+            ?? (args["action"] as? String)
+            ?? firstJSONStringValue(in: result.summary, key: "browser_action")
+            ?? firstJSONStringValue(in: result.summary, key: "action")
+            ?? ""
+        let normalized = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: ".")
+            .lowercased()
+        switch normalized {
+        case "get.readable", "readable", "read.webpage":
+            return "browser.readable"
+        case "get.text", "text":
+            return "browser.text"
+        case "screenshot":
+            return "browser.screenshot"
+        case "fetch", "download":
+            return "browser.fetch"
+        case "wait.for.image", "wait.image", "image.result", "browser.wait.for.image":
+            return "browser.wait_for_image"
+        case "get.page.info", "info", "browser.get.page.info":
+            return "browser.get_page_info"
+        case "get.backbone", "backbone", "browser.get.backbone":
+            return "browser.get_backbone"
+        case "scroll.and.collect", "browser.scroll.and.collect":
+            return "browser.scroll_and_collect"
+        case "list.tabs", "browser.list.tabs":
+            return "browser.list_tabs"
+        default:
+            return normalized.hasPrefix("browser.") ? normalized : "browser.\(normalized)"
+        }
+    }
+
+    private static func localAlpineNativeToolFallbackMessage(
+        _ call: LocalAlpineNativeToolCall,
+        result: LocalAlpineAgentResult
+    ) -> String {
+        let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name == "browser_use" || name == "web_search" {
+            if let summary = firstJSONStringValue(in: result.summary, key: "summary"),
+               !summary.isEmpty {
+                return summary
+            }
+            if let fileURL = firstJSONStringValue(in: result.summary, key: "file_url"),
+               !fileURL.isEmpty {
+                return "已完成网页操作，并保存了生成结果：\(fileURL)"
+            }
+            if let error = firstJSONStringValue(in: result.summary, key: "error"),
+               !error.isEmpty {
+                return "网页操作没有完成：\(error)"
+            }
+            let trimmed = result.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "网页工具已返回结果。" : String(trimmed.prefix(800))
+        }
+        if name == "iexa_open" {
+            return result.openRequests.isEmpty ? "预览打开失败。" : "已打开预览。"
+        }
+        return result.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func localAlpineNativeLoopGuardModelMessage(_ message: String?) -> String? {
+        guard let message,
+              !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let lower = message.lowercased()
+        if lower.contains("maximum tool step count") || lower.contains("max-step") {
+            return "本地工具连续执行次数已达到上限。请直接根据已有工具结果回答用户，不要继续调用工具。"
+        }
+        if lower.contains("repeated") || lower.contains("loop blocked") || lower.contains("loop warning") {
+            return "本地工具检测到重复操作。请使用已有结果回答用户，或说明下一步需要换一个不同操作。"
+        }
+        return message
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private static func localAlpineObservationOutputLimit(for command: String) -> Int {
         LocalAlpineAgentCommandResult.isReadFileCommand(command) ? 220_000 : 4_000
     }
@@ -13055,15 +13275,14 @@ final class ChatViewModel {
     }
 
     private static func localAlpineNativeLoopBlockedFallbackMessage(_ blockedMessage: String) -> String {
-        let cleaned = blockedMessage
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = localAlpineNativeLoopGuardModelMessage(blockedMessage)
+            ?? "本地工具已停止继续执行。"
         return """
         我先停下，避免继续重复执行同一个本地工具。
 
         \(cleaned)
 
-        这通常表示当前 Agent loop 已经没有新的有效动作。下一步需要换一个不同的检查/修改路径，或者根据已有结果总结当前状态。
+        我会根据已有工具结果直接总结；如果还没完成，需要换一个不同的浏览器操作或让用户手动接管当前页面。
         """
     }
 
@@ -13205,6 +13424,32 @@ final class ChatViewModel {
 
         \(cleaned)
         """
+    }
+
+    private static func localNativeBrowserToolResultShouldStop(
+        _ call: LocalAlpineNativeToolCall,
+        toolContent: String
+    ) -> Bool {
+        let args = localAlpineNativeToolArguments(for: call)
+        let rawAction = (args["browser_use_action"] as? String)
+            ?? (args["browser_action"] as? String)
+            ?? (args["operation"] as? String)
+            ?? (args["op"] as? String)
+            ?? (args["action"] as? String)
+            ?? ""
+        let action = rawAction
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: ".")
+            .lowercased()
+        if action == "wait.for.image" || action == "browser.wait.for.image" {
+            return true
+        }
+        if toolContent.localizedCaseInsensitiveContains("\"file_url\"")
+            || toolContent.localizedCaseInsensitiveContains("已等待到网页生成图片")
+            || toolContent.localizedCaseInsensitiveContains("已下载网页资源") {
+            return true
+        }
+        return false
     }
 
     private static func localNativeBrowserFallbackMessage(from toolContent: String) -> String {
@@ -17210,7 +17455,7 @@ final class ChatViewModel {
             ? "- Shortcuts: `shortcuts.run` with `name` and optional `input`; `shortcuts.open` with `name`; `shortcuts.create` only opens the system creation screen.\n"
             : ""
         let browserActionExamples = includeBrowserTools
-            ? "- Browser fallback actions: `web.search`, `browser.readable`, `browser.screenshot`, `browser.fetch`, and `browser_use` with `browser_use_action` plus fields such as `url`, `selector`, `text`, `script`, `tab_id`, `timeout`, `screenshot`, `max_length`.\n"
+            ? "- Browser fallback actions: `web.search`, `browser.readable`, `browser.screenshot`, `browser.fetch`, `browser.wait_for_image`, and `browser_use` with `browser_use_action` plus fields such as `url`, `selector`, `text`, `script`, `tab_id`, `timeout`, `screenshot`, `max_length`, `min_width`, `min_height`.\n"
             : ""
         let officeActionExamples = includeOfficeTools
             ? "- Office/PDF fallback actions: `office.create_excel`, `office.create_ppt`, `office.create_word`, `office.create_pdf`, `office.delete`. Include `title`, `file_name`, structured content (`sheets`, `slides`, or `sections`), optional `theme`, and for deletion `file_url` or `latest:true`.\n"
@@ -17220,7 +17465,7 @@ final class ChatViewModel {
             : ""
         let browserInstructions = includeBrowserTools ? """
 
-        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when the answer depends on current/recent/external/source-backed facts or live website content. Use search when there is no exact URL, readable for a known URL or result verification, and `browser_use` for bounded interactive page work (navigate/screenshot/click/type/scroll/DOM/cookies/js). In Markdown fallback, keep `action:"browser_use"` and put the concrete action in `browser_use_action`. Set `screenshot:true` when visual evidence helps. Answer from the returned browser result and cite title/URL plainly.
+        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when the answer depends on current/recent/external/source-backed facts or live website content. Use search when there is no exact URL, readable for a known URL or result verification, and `browser_use` for bounded interactive page work (navigate/screenshot/click/type/scroll/DOM/cookies/js). For image-generation websites, after entering the prompt and clicking generate/download, call `browser_use` with `action:"wait_for_image"` to poll the visible page and save the generated image as an attachment, then answer from that result instead of repeating screenshots. In Markdown fallback, keep `action:"browser_use"` and put the concrete action in `browser_use_action`. Set `screenshot:true` when visual evidence helps. Answer from the returned browser result and cite title/URL plainly.
         """ : ""
         let officeInstructions = includeOfficeTools ? """
 
