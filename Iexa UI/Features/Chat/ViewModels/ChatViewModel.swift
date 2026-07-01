@@ -11884,16 +11884,8 @@ final class ChatViewModel {
             } catch {
                 if let resolvedFallback,
                    !resolvedFallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let finalFallback = Self.localNativeFinalFallbackMessage(
-                        resolvedFallback,
-                        after: error
-                    )
                     acc.replace(resolvedFallback)
                     updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
-                    if finalFallback != resolvedFallback {
-                        acc.replace(finalFallback)
-                        updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
-                    }
                     return exactUsage
                 }
                 throw error
@@ -12728,8 +12720,8 @@ final class ChatViewModel {
             call,
             assistantMessageId: assistantMessageId,
             detail: detail,
-            output: result.summary,
             filePaths: result.files.compactMap(\.url),
+            output: result.summary,
             openRequests: result.openRequests,
             browserURL: result.browserDocument?.url,
             imageFilePath: Self.localNativeBrowserPreviewImage(from: result.browserDocument),
