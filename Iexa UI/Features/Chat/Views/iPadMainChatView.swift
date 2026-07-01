@@ -381,7 +381,11 @@ struct iPadMainChatView: View {
         }
         // In-app session browser
         .sheet(isPresented: $showSessionBrowser) {
-            InAppWebPreviewSheet(url: Self.defaultSessionBrowserURL, showsAddressBar: true)
+            InAppWebPreviewSheet(
+                url: Self.defaultSessionBrowserURL,
+                showsAddressBar: true,
+                usesAutomationBrowser: true
+            )
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(24)

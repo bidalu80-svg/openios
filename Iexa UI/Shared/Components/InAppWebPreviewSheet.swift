@@ -12,6 +12,7 @@ struct WebPreviewURL: Identifiable, Equatable {
 struct InAppWebPreviewSheet: View {
     let url: URL
     var showsAddressBar: Bool = false
+    var usesAutomationBrowser: Bool = false
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
@@ -31,7 +32,11 @@ struct InAppWebPreviewSheet: View {
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {
-                InAppWebPreviewRepresentable(url: url, state: state)
+                InAppWebPreviewRepresentable(
+                    url: url,
+                    state: state,
+                    usesAutomationBrowser: usesAutomationBrowser
+                )
                     .ignoresSafeArea(edges: .bottom)
 
                 if state.isLoading {
@@ -709,12 +714,30 @@ private struct WebPreviewVideoPlayerSheet: View {
 private struct InAppWebPreviewRepresentable: UIViewRepresentable {
     let url: URL
     let state: InAppWebPreviewState
+    let usesAutomationBrowser: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator(state: state)
     }
 
-    func makeUIView(context: Context) -> WKWebView {
+    func makeUIView(context: Context) -> UIView {
+        if usesAutomationBrowser {
+            let container = UIView(frame: .zero)
+            container.backgroundColor = .systemBackground
+            let webView = BrowserWebSearchService.shared.attachAutomationBrowser(
+                to: container,
+                initialURL: url,
+                navigationDelegate: context.coordinator,
+                uiDelegate: context.coordinator
+            )
+            context.coordinator.webView = webView
+            context.coordinator.usesAutomationBrowser = true
+            state.webView = webView
+            context.coordinator.addProgressObserver(to: webView)
+            context.coordinator.syncState(from: webView)
+            return container
+        }
+
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.allowsInlineMediaPlayback = true
@@ -728,12 +751,18 @@ private struct InAppWebPreviewRepresentable: UIViewRepresentable {
 
         context.coordinator.webView = webView
         state.webView = webView
-        webView.addObserver(context.coordinator, forKeyPath: #keyPath(WKWebView.estimatedProgress), options: [.new], context: nil)
+        context.coordinator.addProgressObserver(to: webView)
         load(url, in: webView)
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {
+    func updateUIView(_ view: UIView, context: Context) {
+        if usesAutomationBrowser {
+            BrowserWebSearchService.shared.updateAutomationBrowserViewport(view.bounds.size)
+            return
+        }
+
+        guard let webView = view as? WKWebView else { return }
         if webView.url == nil {
             load(url, in: webView)
         }
@@ -747,16 +776,65 @@ private struct InAppWebPreviewRepresentable: UIViewRepresentable {
         }
     }
 
-    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
-        webView.removeObserver(coordinator, forKeyPath: #keyPath(WKWebView.estimatedProgress))
+    static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
+        if coordinator.usesAutomationBrowser {
+            BrowserWebSearchService.shared.detachAutomationBrowser(coordinator.webView)
+        }
+        coordinator.removeProgressObserver()
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         let state: InAppWebPreviewState
         weak var webView: WKWebView?
+        weak var observedWebView: WKWebView?
+        var usesAutomationBrowser = false
+        private var browserChangeObserver: NSObjectProtocol?
 
         init(state: InAppWebPreviewState) {
             self.state = state
+            super.init()
+            browserChangeObserver = NotificationCenter.default.addObserver(
+                forName: .browserWebSearchServiceActiveBrowserDidChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                guard let self, self.usesAutomationBrowser else { return }
+                self.syncState(from: (notification.object as? WKWebView) ?? self.webView)
+            }
+        }
+
+        deinit {
+            removeProgressObserver()
+            if let browserChangeObserver {
+                NotificationCenter.default.removeObserver(browserChangeObserver)
+            }
+        }
+
+        func addProgressObserver(to webView: WKWebView) {
+            removeProgressObserver()
+            observedWebView = webView
+            webView.addObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress), options: [.new], context: nil)
+        }
+
+        func removeProgressObserver() {
+            guard let observedWebView else { return }
+            observedWebView.removeObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress))
+            self.observedWebView = nil
+        }
+
+        func syncState(from webView: WKWebView?) {
+            guard let webView else { return }
+            if self.webView !== webView {
+                removeProgressObserver()
+                self.webView = webView
+                state.webView = webView
+                addProgressObserver(to: webView)
+            }
+            state.isLoading = webView.isLoading
+            state.estimatedProgress = webView.estimatedProgress
+            state.title = webView.title ?? ""
+            state.currentURL = webView.url
+            state.canGoBack = webView.canGoBack
         }
 
         override func observeValue(
@@ -780,6 +858,11 @@ private struct InAppWebPreviewRepresentable: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            if usesAutomationBrowser {
+                Task { @MainActor in
+                    BrowserWebSearchService.shared.browserWebViewDidFinishNavigation(webView)
+                }
+            }
             state.isLoading = false
             state.estimatedProgress = 1
             state.title = webView.title ?? ""
@@ -789,11 +872,21 @@ private struct InAppWebPreviewRepresentable: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            if usesAutomationBrowser {
+                Task { @MainActor in
+                    BrowserWebSearchService.shared.browserWebViewDidFailNavigation(webView)
+                }
+            }
             state.isLoading = false
             state.canGoBack = webView.canGoBack
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            if usesAutomationBrowser {
+                Task { @MainActor in
+                    BrowserWebSearchService.shared.browserWebViewDidFailNavigation(webView)
+                }
+            }
             state.isLoading = false
             state.canGoBack = webView.canGoBack
         }

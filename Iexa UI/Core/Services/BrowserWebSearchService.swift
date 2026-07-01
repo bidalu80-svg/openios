@@ -16,6 +16,9 @@ final class BrowserWebSearchService: NSObject {
     private var browserUserAgentProfile = "desktop_chrome"
     private var navigationContinuation: CheckedContinuation<Bool, Never>?
     private var timeoutTask: Task<Void, Never>?
+    private weak var automationBrowserContainer: UIView?
+    private weak var automationBrowserNavigationDelegate: WKNavigationDelegate?
+    private weak var automationBrowserUIDelegate: WKUIDelegate?
 
     private override init() {
         super.init()
@@ -1268,6 +1271,7 @@ final class BrowserWebSearchService: NSObject {
         browserTabs[tabID] = webView
         activeBrowserTabID = tabID
         self.webView = webView
+        mountActiveBrowserIfPresented()
 
         if let url = Self.urlValue(in: call) {
             _ = await load(url: url, timeout: 14)
@@ -1301,10 +1305,12 @@ final class BrowserWebSearchService: NSObject {
             browserTabs[1] = replacement
             activeBrowserTabID = 1
             self.webView = replacement
+            mountActiveBrowserIfPresented()
         } else if activeBrowserTabID == tabID {
             let nextTabID = browserTabs.keys.sorted().last ?? 1
             activeBrowserTabID = nextTabID
             self.webView = browserTabs[nextTabID]
+            mountActiveBrowserIfPresented()
         }
 
         return [
@@ -1380,6 +1386,7 @@ final class BrowserWebSearchService: NSObject {
         guard let tab = browserTabs[tabID] else { return }
         activeBrowserTabID = tabID
         webView = tab
+        mountActiveBrowserIfPresented()
     }
 
     private static func browserUserAgentString(profile: String) -> String {
@@ -1595,19 +1602,75 @@ final class BrowserWebSearchService: NSObject {
         return wv
     }
 
+    func attachAutomationBrowser(
+        to container: UIView,
+        initialURL: URL?,
+        navigationDelegate: WKNavigationDelegate?,
+        uiDelegate: WKUIDelegate?
+    ) -> WKWebView {
+        automationBrowserContainer = container
+        automationBrowserNavigationDelegate = navigationDelegate
+        automationBrowserUIDelegate = uiDelegate
+        let tab = webViewReady()
+        mountAutomationBrowser(tab, in: container)
+        if tab.url == nil, let initialURL {
+            loadInitialAutomationURL(initialURL, in: tab)
+        }
+        notifyActiveBrowserDidChange()
+        return tab
+    }
+
+    func detachAutomationBrowser(_ detachedWebView: WKWebView?) {
+        guard automationBrowserContainer != nil else { return }
+        automationBrowserContainer = nil
+        automationBrowserNavigationDelegate = nil
+        automationBrowserUIDelegate = nil
+        for tab in browserTabs.values {
+            tab.navigationDelegate = self
+            tab.uiDelegate = nil
+        }
+        let active = webView ?? detachedWebView
+        if let active {
+            attachToWindow(active)
+        }
+    }
+
+    func updateAutomationBrowserViewport(_ size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        browserViewportSize = size
+        if let webView, isAutomationBrowserVisible(webView) {
+            webView.frame = CGRect(origin: .zero, size: size)
+        }
+    }
+
+    func browserWebViewDidFinishNavigation(_ source: WKWebView) {
+        guard isKnownBrowserWebView(source) else { return }
+        resolveNavigation(true)
+        notifyActiveBrowserDidChange()
+    }
+
+    func browserWebViewDidFailNavigation(_ source: WKWebView) {
+        guard isKnownBrowserWebView(source) else { return }
+        resolveNavigation(false)
+        notifyActiveBrowserDidChange()
+    }
+
     private func resolveBrowserTab(for tabID: Int? = nil, createIfMissing: Bool = true) -> WKWebView {
         if let tabID, let tab = browserTabs[tabID] {
             activeBrowserTabID = tabID
             webView = tab
+            mountActiveBrowserIfPresented()
             return tab
         }
         if let active = browserTabs[activeBrowserTabID] {
             webView = active
+            mountActiveBrowserIfPresented()
             return active
         }
         if let last = browserTabs.keys.sorted().last, let tab = browserTabs[last] {
             activeBrowserTabID = last
             webView = tab
+            mountActiveBrowserIfPresented()
             return tab
         }
         let tab = makeBrowserWebView()
@@ -1616,17 +1679,21 @@ final class BrowserWebSearchService: NSObject {
         nextBrowserTabID = max(nextBrowserTabID, newID + 1)
         browserTabs[newID] = tab
         webView = tab
+        mountActiveBrowserIfPresented()
         return tab
     }
 
     private func capturePageThumbnail(prefix: String) async -> URL? {
         let wv = webViewReady()
-        let width = browserViewportSize.width
-        let height = browserViewportSize.height
+        let visibleInAutomationBrowser = isAutomationBrowserVisible(wv)
+        let width = visibleInAutomationBrowser ? max(wv.bounds.width, 1) : browserViewportSize.width
+        let height = visibleInAutomationBrowser ? max(wv.bounds.height, 1) : browserViewportSize.height
         wv.isHidden = false
         wv.alpha = 1
-        wv.frame = CGRect(x: -10_000, y: -10_000, width: width, height: height)
-        wv.scrollView.setContentOffset(.zero, animated: false)
+        if !visibleInAutomationBrowser {
+            wv.frame = CGRect(x: -10_000, y: -10_000, width: width, height: height)
+            wv.scrollView.setContentOffset(.zero, animated: false)
+        }
         wv.setNeedsLayout()
         wv.layoutIfNeeded()
 
@@ -2193,12 +2260,76 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private func attachToWindow(_ webView: WKWebView) {
+        guard !isAutomationBrowserVisible(webView) else { return }
         let scene = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive }
         let window = scene?.windows.first { $0.isKeyWindow } ?? scene?.windows.first
         window?.addSubview(webView)
         window?.sendSubviewToBack(webView)
+    }
+
+    private func mountActiveBrowserIfPresented() {
+        guard let container = automationBrowserContainer,
+              let webView else {
+            return
+        }
+        mountAutomationBrowser(webView, in: container)
+        notifyActiveBrowserDidChange()
+    }
+
+    private func mountAutomationBrowser(_ webView: WKWebView, in container: UIView) {
+        for tab in browserTabs.values where tab !== webView && tab.superview === container {
+            tab.removeFromSuperview()
+            tab.navigationDelegate = self
+            tab.uiDelegate = nil
+            attachToWindow(tab)
+        }
+        if webView.superview !== container {
+            webView.removeFromSuperview()
+            container.addSubview(webView)
+        }
+        webView.navigationDelegate = automationBrowserNavigationDelegate ?? self
+        webView.uiDelegate = automationBrowserUIDelegate
+        webView.isHidden = false
+        webView.alpha = 1
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        webView.frame = container.bounds
+        browserViewportSize = container.bounds.size.width > 0 && container.bounds.size.height > 0
+            ? container.bounds.size
+            : browserViewportSize
+        webView.setNeedsLayout()
+        webView.layoutIfNeeded()
+    }
+
+    private func isAutomationBrowserVisible(_ webView: WKWebView) -> Bool {
+        guard let container = automationBrowserContainer else { return false }
+        return webView.superview === container
+    }
+
+    private func isKnownBrowserWebView(_ source: WKWebView) -> Bool {
+        if source === webView { return true }
+        return browserTabs.values.contains { $0 === source }
+    }
+
+    private func notifyActiveBrowserDidChange() {
+        NotificationCenter.default.post(
+            name: .browserWebSearchServiceActiveBrowserDidChange,
+            object: webView,
+            userInfo: [
+                "tab_id": activeBrowserTabID,
+                "url": webView?.url?.absoluteString ?? "",
+                "title": webView?.title ?? ""
+            ]
+        )
+    }
+
+    private func loadInitialAutomationURL(_ url: URL, in webView: WKWebView) {
+        if url.isFileURL {
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        } else {
+            webView.load(URLRequest(url: url))
+        }
     }
 
     private func resolveNavigation(_ success: Bool) {
@@ -2657,4 +2788,9 @@ private struct SearchPage {
     let timeout: TimeInterval
     let settleDelay: UInt64
     let resultLimit: Int
+}
+
+extension Notification.Name {
+    static let browserWebSearchServiceActiveBrowserDidChange =
+        Notification.Name("BrowserWebSearchServiceActiveBrowserDidChange")
 }

@@ -2589,8 +2589,8 @@ final class ChatViewModel {
         ),
         LocalAlpineToolCapability(
             name: "browser_use",
-            description: "Fetch an HTTP/HTTPS URL from the Alpine shell with bounded output, or save it to a workspace file for preview/offload.",
-            arguments: ["url/href/link", "save_to/output/path optional", "open_preview optional", "max_lines optional", "aliases: web_fetch/fetch_url/open_url"]
+            description: "Operate the shared iOS browser session: navigate, inspect, screenshot, click, type, scroll, run JS, fetch/download, and continue from the visible browser state.",
+            arguments: ["action navigate/screenshot/click/type/get_text/get_readable/scroll/find_elements/fetch/execute_js", "url?", "selector?", "text?", "coordinate_x/y?", "save_to?", "screenshot?", "aliases: web_fetch/fetch_url/open_url"]
         ),
         LocalAlpineToolCapability(
             name: "web_search",
@@ -2746,19 +2746,37 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "browser_use",
-                    "description": "Fetch an HTTP/HTTPS URL, optionally save it under `/mnt/iexa/shared`, and open preview.",
+                    "description": "Interactive browser automation backed by the shared iOS WKWebView session. Use it to navigate websites, inspect page text/DOM, click/type/scroll, screenshot, fetch/download resources, and continue from the browser the user can open from the side menu.",
                     "parameters": [
                         "type": "object",
                         "properties": [
                             "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
-                            "action": ["type": "string", "description": "Compatibility hint such as navigate, fetch, get_text, or open. Iexa uses url/save_to/open_preview."],
-                            "url": ["type": "string", "description": "HTTP or HTTPS URL to fetch."],
-                            "save_to": ["type": "string", "description": "Optional output path under /mnt/iexa."],
-                            "open_preview": ["type": "boolean", "description": "Open the saved output in Iexa preview after fetching."],
-                            "max_lines": ["type": "integer", "description": "Maximum text preview lines to return."],
-                            "timeout": ["type": "integer", "description": "Fetch timeout in seconds."]
+                            "action": [
+                                "type": "string",
+                                "enum": [
+                                    "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
+                                    "scroll", "scroll_and_collect", "find_elements", "get_page_info",
+                                    "get_backbone", "fetch", "new_tab", "close_tab", "list_tabs",
+                                    "set_user_agent", "set_viewport", "get_cookies", "wait_for_dom_stable", "execute_js"
+                                ],
+                                "description": "Browser action to perform."
+                            ],
+                            "url": ["type": "string", "description": "HTTP, HTTPS, or file URL. Required for navigate/fetch or when loading a page before another action."],
+                            "selector": ["type": "string", "description": "CSS selector or XPath for click/type/text/scroll/find actions."],
+                            "text": ["type": "string", "description": "Text to type into the selected element."],
+                            "coordinate_x": ["type": "integer", "description": "Viewport x coordinate for click fallback."],
+                            "coordinate_y": ["type": "integer", "description": "Viewport y coordinate for click fallback."],
+                            "direction": ["type": "string", "enum": ["up", "down"], "description": "Scroll direction."],
+                            "amount": ["type": "integer", "description": "Scroll distance in pixels."],
+                            "script": ["type": "string", "description": "JavaScript body for execute_js."],
+                            "save_to": ["type": "string", "description": "Optional output path/name for fetch/download compatibility."],
+                            "output": ["type": "string", "description": "Compatibility alias for save_to."],
+                            "path": ["type": "string", "description": "Compatibility alias for save_to when action is fetch."],
+                            "screenshot": ["type": "boolean", "description": "Capture a screenshot/thumbnail when visual evidence helps."],
+                            "max_length": ["type": "integer", "description": "Maximum readable text length."],
+                            "timeout": ["type": "integer", "description": "Timeout in seconds."]
                         ],
-                        "required": ["tool_title", "url"]
+                        "required": ["tool_title", "action"]
                     ]
                 ]
             ],
@@ -2816,7 +2834,7 @@ final class ChatViewModel {
         - Shell is Alpine BusyBox/ash. Install OS packages with `apk add --no-cache`; never use apt/brew/sudo/systemctl/macOS/Windows commands.
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
-        - Use `web_search` for live search, `browser_use` for bounded HTTP fetch/save/open-preview, `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
+        - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
         - Website/app preview: for static HTML/SVG/files, use `iexa-open <path>` directly so Iexa opens the in-app preview. Use `iexa-serve <directory-or-file> <port>` or a framework dev server only when the project actually requires localhost; start long-running servers in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
         - One meaningful step per decision. A write plus one direct verification may share a step when validating the same change. Stop when the tool result completes the user goal.
@@ -12538,7 +12556,7 @@ final class ChatViewModel {
             return await executeLocalAlpineMemoryWriteToolCall(call, assistantMessageId: assistantMessageId)
         case "memory_get":
             return await executeLocalAlpineMemoryGetToolCall(call, assistantMessageId: assistantMessageId)
-        case "web_search":
+        case "web_search", "browser_use":
             return await executeLocalAlpineWebSearchToolCall(call, assistantMessageId: assistantMessageId)
         case "iexa_open":
             return await executeLocalAlpineOpenToolCall(call, assistantMessageId: assistantMessageId)
@@ -12622,9 +12640,13 @@ final class ChatViewModel {
         let query = ((arguments["query"] as? String)
             ?? (arguments["queries"] as? [String])?.first
             ?? (arguments["keywords"] as? String)
+            ?? (arguments["url"] as? String)
             ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let detail = query.isEmpty ? "搜索网页" : String(query.prefix(96))
+        let detailFallback = call.name == "browser_use" ? "操作网页" : "搜索网页"
+        let detail = query.isEmpty
+            ? detailFallback
+            : String(query.prefix(96))
         let content = Self.localNativeFunctionToolEnvelopeContent(for: call)
         let result = await LocalNativeToolService.shared.executeBlocks(in: content)
         enqueueLocalAlpineOpenRequests(result.openRequests)

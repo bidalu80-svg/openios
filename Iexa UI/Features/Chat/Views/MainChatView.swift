@@ -795,7 +795,11 @@ struct MainChatView: View {
                 .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
 
         case .sessionBrowser:
-            InAppWebPreviewSheet(url: Self.defaultSessionBrowserURL, showsAddressBar: true)
+            InAppWebPreviewSheet(
+                url: Self.defaultSessionBrowserURL,
+                showsAddressBar: true,
+                usesAutomationBrowser: true
+            )
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(24)

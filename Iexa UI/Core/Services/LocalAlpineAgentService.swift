@@ -510,8 +510,10 @@ enum LocalAlpineToolDisplayRegistry {
             return LocalAlpineToolDisplay(icon: "play.circle", title: "运行脚本")
         case "install_dependency", "install":
             return LocalAlpineToolDisplay(icon: "shippingbox", title: "安装依赖")
-        case "network_fetch", "fetch", "browser_use", "web_fetch":
+        case "network_fetch", "fetch", "web_fetch":
             return LocalAlpineToolDisplay(icon: "network", title: "网络请求")
+        case "browser_use":
+            return LocalAlpineToolDisplay(icon: "globe", title: "浏览器操作")
         case "web_search", "search_web", "browser_search":
             return LocalAlpineToolDisplay(icon: "globe", title: "搜索网页")
         case "iexa_open", "open_preview":
