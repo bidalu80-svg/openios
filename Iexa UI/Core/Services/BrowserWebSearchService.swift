@@ -556,23 +556,52 @@ final class BrowserWebSearchService: NSObject {
         try? await Task.sleep(nanoseconds: 250_000_000)
 
         let selector = Self.firstString(in: call, keys: ["selector", "css", "element"])
+        let label = Self.firstString(in: call, keys: [
+            "label", "button_text", "buttonText", "aria_label", "ariaLabel",
+            "name", "title", "placeholder", "text"
+        ])
         let x = Self.intValue(call["coordinate_x"] ?? call["x"] ?? call["client_x"])
         let y = Self.intValue(call["coordinate_y"] ?? call["y"] ?? call["client_y"])
-        guard selector != nil || (x != nil && y != nil) else {
+        guard selector != nil || label != nil || (x != nil && y != nil) else {
             return [
                 "action": "browser.click",
                 "ok": false,
-                "error": "Missing selector or coordinates"
+                "error": "Missing selector, label, or coordinates"
             ]
         }
 
         let script = """
         (() => {
           const selector = \(Self.javascriptString(selector ?? ""));
+          const desiredLabel = \(Self.javascriptString(label ?? ""));
           const x = \(x.map(String.init) ?? "null");
           const y = \(y.map(String.init) ?? "null");
+          const clickableSelector = [
+            'button', 'a[href]', 'input', 'textarea', 'select', 'summary',
+            '[role="button"]', '[role="link"]', '[onclick]', '[tabindex]',
+            '[aria-label]', '[data-testid]', '[data-test]', '[data-cy]'
+          ].join(',');
+          function norm(value) {
+            return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          }
           function text(node) {
             return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim();
+          }
+          function accessibleText(node) {
+            if (!node) return '';
+            const parts = [
+              text(node),
+              node.getAttribute ? node.getAttribute('aria-label') : '',
+              node.getAttribute ? node.getAttribute('title') : '',
+              node.getAttribute ? node.getAttribute('alt') : '',
+              node.getAttribute ? node.getAttribute('name') : '',
+              node.getAttribute ? node.getAttribute('value') : '',
+              node.getAttribute ? node.getAttribute('placeholder') : '',
+              node.getAttribute ? node.getAttribute('data-testid') : '',
+              node.value || '',
+              node.placeholder || ''
+            ];
+            return parts.filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
           }
           function rect(node) {
             if (!node || !node.getBoundingClientRect) return null;
@@ -584,6 +613,35 @@ final class BrowserWebSearchService: NSObject {
               height: Math.round(r.height)
             };
           }
+          function visible(node) {
+            if (!node || !node.getBoundingClientRect) return false;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) return false;
+            const r = node.getBoundingClientRect();
+            return r.width > 1 && r.height > 1 && r.bottom >= 0 && r.right >= 0 && r.top <= innerHeight && r.left <= innerWidth;
+          }
+          function allRoots() {
+            const roots = [document];
+            for (let i = 0; i < roots.length; i += 1) {
+              const root = roots[i];
+              const nodes = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : [];
+              for (const node of nodes) {
+                if (node.shadowRoot) roots.push(node.shadowRoot);
+              }
+            }
+            return roots;
+          }
+          function deepQuerySelector(raw) {
+            for (const root of allRoots()) {
+              try {
+                const match = root.querySelector(raw);
+                if (match) return match;
+              } catch (_) {
+                return null;
+              }
+            }
+            return null;
+          }
           function findNode(raw) {
             if (!raw) return null;
             try {
@@ -591,17 +649,46 @@ final class BrowserWebSearchService: NSObject {
                 const result = document.evaluate(raw, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
                 return result.singleNodeValue;
               }
-              return document.querySelector(raw);
+              return deepQuerySelector(raw);
             } catch (_) {
               return null;
             }
+          }
+          function findByLabel(raw) {
+            const wanted = norm(raw);
+            if (!wanted) return null;
+            const candidates = [];
+            for (const root of allRoots()) {
+              try {
+                candidates.push(...Array.from(root.querySelectorAll(clickableSelector)));
+              } catch (_) {}
+            }
+            let best = null;
+            let bestScore = -1;
+            for (const node of candidates) {
+              if (!visible(node)) continue;
+              const label = norm(accessibleText(node));
+              if (!label) continue;
+              let score = -1;
+              if (label === wanted) score = 100;
+              else if (label.startsWith(wanted)) score = 80;
+              else if (label.includes(wanted)) score = 60;
+              else if (wanted.includes(label) && label.length >= 2) score = 40;
+              if (score > bestScore) {
+                best = node;
+                bestScore = score;
+              }
+            }
+            return best;
           }
           function isEditable(node) {
             if (!node) return false;
             const tag = (node.tagName || node.nodeName || '').toLowerCase();
             return tag === 'input' || tag === 'textarea' || tag === 'select' || !!node.isContentEditable;
           }
-          const node = findNode(selector) || ((Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null);
+          const node = findNode(selector)
+            || findByLabel(desiredLabel)
+            || ((Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null);
           if (!node) {
             return JSON.stringify({ ok: false, error: 'Element not found' });
           }
@@ -610,15 +697,22 @@ final class BrowserWebSearchService: NSObject {
           }
           const target = node.closest && node.closest('button, a, input, textarea, select, [contenteditable], [role="button"], [onclick]') || node;
           const editableTarget = isEditable(target);
+          const r = target.getBoundingClientRect ? target.getBoundingClientRect() : null;
+          const cx = Number.isFinite(x) ? x : (r ? Math.round(r.left + r.width / 2) : 0);
+          const cy = Number.isFinite(y) ? y : (r ? Math.round(r.top + r.height / 2) : 0);
           const events = [
-            ['pointerdown', { bubbles: true, cancelable: true, composed: true }],
-            ['mousedown', { bubbles: true, cancelable: true, composed: true }],
-            ['mouseup', { bubbles: true, cancelable: true, composed: true }],
-            ['click', { bubbles: true, cancelable: true, composed: true }]
+            ['pointerdown', { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, pointerType: 'touch', isPrimary: true }],
+            ['mousedown', { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy }],
+            ['pointerup', { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, pointerType: 'touch', isPrimary: true }],
+            ['mouseup', { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy }],
+            ['click', { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy }]
           ];
           for (const [name, init] of events) {
             try {
-              target.dispatchEvent(new MouseEvent(name, init));
+              const event = name.startsWith('pointer') && window.PointerEvent
+                ? new PointerEvent(name, init)
+                : new MouseEvent(name, init);
+              target.dispatchEvent(event);
             } catch (_) {}
           }
           if (!editableTarget && typeof target.click === 'function') {
@@ -632,10 +726,13 @@ final class BrowserWebSearchService: NSObject {
             title: document.title || '',
             url: location.href,
             selector: selector || '',
+            label: desiredLabel || '',
             tag: (target.tagName || target.nodeName || '').toLowerCase(),
-            text: text(target).slice(0, 120),
+            text: accessibleText(target).slice(0, 160),
             href: target.href || '',
-            rect: rect(target)
+            rect: rect(target),
+            coordinate_x: cx,
+            coordinate_y: cy
           });
         })();
         """
@@ -1661,6 +1758,22 @@ final class BrowserWebSearchService: NSObject {
               return '';
             }
           }
+          function accessibleText(node) {
+            if (!node) return '';
+            const parts = [
+              text(node),
+              node.getAttribute ? node.getAttribute('aria-label') : '',
+              node.getAttribute ? node.getAttribute('title') : '',
+              node.getAttribute ? node.getAttribute('alt') : '',
+              node.getAttribute ? node.getAttribute('name') : '',
+              node.getAttribute ? node.getAttribute('value') : '',
+              node.getAttribute ? node.getAttribute('placeholder') : '',
+              node.getAttribute ? node.getAttribute('data-testid') : '',
+              node.value || '',
+              node.placeholder || ''
+            ];
+            return parts.filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+          }
           function rect(node) {
             if (!node || !node.getBoundingClientRect) return null;
             const r = node.getBoundingClientRect();
@@ -1671,24 +1784,52 @@ final class BrowserWebSearchService: NSObject {
               height: Math.round(r.height)
             };
           }
-          function findElements(raw) {
-            try {
-              return Array.from(document.querySelectorAll(raw));
-            } catch (_) {
-              return [];
-            }
+          function visible(node) {
+            if (!node || !node.getBoundingClientRect) return false;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) return false;
+            const r = node.getBoundingClientRect();
+            return r.width > 1 && r.height > 1 && r.bottom >= 0 && r.right >= 0 && r.top <= innerHeight && r.left <= innerWidth;
           }
-          const elements = findElements(selector).slice(0, limit);
+          function allRoots() {
+            const roots = [document];
+            for (let i = 0; i < roots.length; i += 1) {
+              const root = roots[i];
+              const nodes = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : [];
+              for (const node of nodes) {
+                if (node.shadowRoot) roots.push(node.shadowRoot);
+              }
+            }
+            return roots;
+          }
+          function findElements(raw) {
+            const seen = new Set();
+            const results = [];
+            for (const root of allRoots()) {
+              try {
+                for (const node of Array.from(root.querySelectorAll(raw))) {
+                  if (seen.has(node)) continue;
+                  seen.add(node);
+                  results.push(node);
+                }
+              } catch (_) {}
+            }
+            return results;
+          }
+          const elements = findElements(selector).filter(visible).slice(0, limit);
           const items = elements.map((node, index) => ({
             index,
             tag: (node.tagName || node.nodeName || '').toLowerCase(),
-            title: text(node).slice(0, 120),
-            text: text(node).slice(0, 240),
+            title: accessibleText(node).slice(0, 120),
+            text: accessibleText(node).slice(0, 240),
             href: href(node),
             id: node.id || '',
             classes: typeof node.className === 'string' ? node.className : '',
             placeholder: node.placeholder || '',
             role: node.getAttribute ? (node.getAttribute('role') || '') : '',
+            aria_label: node.getAttribute ? (node.getAttribute('aria-label') || '') : '',
+            name: node.getAttribute ? (node.getAttribute('name') || '') : '',
+            value: node.getAttribute ? (node.getAttribute('value') || node.value || '') : (node.value || ''),
             type: node.getAttribute ? (node.getAttribute('type') || '') : '',
             rect: rect(node)
           }));
