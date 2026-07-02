@@ -12788,8 +12788,12 @@ final class ChatViewModel {
     }
 
     private static func isRepeatableBrowserMicroAction(_ call: LocalAlpineNativeToolCall) -> Bool {
-        guard normalizeScalar(call.name) == "browser_use",
-              let arguments = decodedArguments(call.arguments) else {
+        let toolName = call.name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard toolName == "browser_use",
+              let data = call.arguments.data(using: .utf8),
+              let arguments = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return false
         }
         let rawAction = (arguments["browser_use_action"] as? String)
@@ -12798,7 +12802,12 @@ final class ChatViewModel {
             ?? (arguments["op"] as? String)
             ?? (arguments["action"] as? String)
             ?? ""
-        let action = normalizeScalar(rawAction).replacingOccurrences(of: "_", with: ".")
+        let action = rawAction
+            .replacingOccurrences(of: "\\", with: "/")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: ".")
         switch action {
         case "navigate", "browser.navigate",
             "scroll", "browser.scroll",
