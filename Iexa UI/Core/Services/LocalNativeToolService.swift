@@ -704,7 +704,9 @@ final class LocalNativeToolService {
     private static func files(from result: [String: Any]) -> [ChatMessageFile] {
         guard (result["ok"] as? Bool) == true else { return [] }
         var files: [ChatMessageFile] = []
-        if let fileURL = result["file_url"] as? String,
+        let attachFile = result.keys.contains("attach_file") ? Self.boolValue(result["attach_file"]) : true
+        if attachFile,
+           let fileURL = result["file_url"] as? String,
            let fileName = result["file_name"] as? String {
             let contentType = result["content_type"] as? String
             files.append(ChatMessageFile(
@@ -715,7 +717,7 @@ final class LocalNativeToolService {
                 displayURL: contentType?.lowercased().hasPrefix("image/") == true ? fileURL : nil
             ))
         }
-        if let previews = result["preview_images"] as? [String] {
+        if attachFile, let previews = result["preview_images"] as? [String] {
             for (index, preview) in previews.prefix(6).enumerated() {
                 files.append(ChatMessageFile(
                     type: "image",

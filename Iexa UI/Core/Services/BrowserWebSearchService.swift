@@ -221,7 +221,7 @@ final class BrowserWebSearchService: NSObject {
 
         let extraQueries = Self.stringArray(in: call, keys: ["queries", "search_queries"])
         let limit = min(max(Self.intValue(call["limit"] ?? call["count"] ?? call["max_results"]) ?? 6, 1), 8)
-        let includeScreenshot = Self.boolValue(call["screenshot"] ?? call["with_screenshot"] ?? call["thumbnail"]) ?? true
+        let includeScreenshot = Self.boolValue(call["screenshot"] ?? call["with_screenshot"] ?? call["thumbnail"] ?? call["attach_preview"] ?? call["attachPreview"]) ?? false
         let queries = Self.unique(([query] + extraQueries).map(Self.normalizedQuery))
         let response = await search(queries: Array(queries.prefix(4)), originalQuery: query)
 
@@ -307,7 +307,7 @@ final class BrowserWebSearchService: NSObject {
         try? await Task.sleep(nanoseconds: 650_000_000)
 
         let maxLength = min(max(Self.intValue(call["max_length"] ?? call["limit"]) ?? 8_000, 800), 18_000)
-        let includeScreenshot = Self.boolValue(call["screenshot"] ?? call["with_screenshot"] ?? call["thumbnail"]) ?? true
+        let includeScreenshot = Self.boolValue(call["screenshot"] ?? call["with_screenshot"] ?? call["thumbnail"] ?? call["attach_preview"] ?? call["attachPreview"]) ?? false
         let snapshot = await evaluatePageSnapshot()
         let thumbnail = includeScreenshot ? await capturePageThumbnail(prefix: "browser") : nil
         let title = snapshot?.title.isEmpty == false ? snapshot!.title : (url.host ?? url.absoluteString)
@@ -466,7 +466,12 @@ final class BrowserWebSearchService: NSObject {
         }
         try? await Task.sleep(nanoseconds: 650_000_000)
 
-        guard let screenshot = await capturePageThumbnail(prefix: "browser") else {
+        let fullPage = Self.boolValue(call["full_page"] ?? call["fullPage"] ?? call["fullpage"] ?? call["entire_page"] ?? call["entirePage"]) ?? false
+        let attachPreview = Self.boolValue(call["attach_preview"] ?? call["attachPreview"] ?? call["show_in_chat"] ?? call["showInChat"]) ?? false
+        let screenshot = fullPage
+            ? await captureFullPageScreenshot(prefix: "browser_full")
+            : await capturePageThumbnail(prefix: "browser")
+        guard let screenshot else {
             return [
                 "action": "browser.screenshot",
                 "ok": false,
@@ -481,14 +486,21 @@ final class BrowserWebSearchService: NSObject {
             "ok": true,
             "title": title,
             "url": url,
-            "preview_images": [screenshot.absoluteString],
+            "screenshot_url": screenshot.absoluteString,
+            "file_url": screenshot.absoluteString,
+            "file_name": screenshot.lastPathComponent,
+            "content_type": "image/png",
+            "full_page": fullPage,
+            "attach_preview": attachPreview,
+            "attach_file": attachPreview,
+            "preview_images": attachPreview ? [screenshot.absoluteString] : [],
             "items": [[
                 "title": title,
                 "link": url,
                 "snippet": snapshot.map { String($0.text.prefix(260)) } ?? "",
-                "thumbnail_url": screenshot.absoluteString
+                "thumbnail_url": attachPreview ? screenshot.absoluteString : ""
             ]],
-            "summary": "已生成网页截图。"
+            "summary": fullPage ? "已生成整页网页截图（仅供工具观察，不默认插入对话）。" : "已生成当前视口网页截图（仅供工具观察，不默认插入对话）。"
         ]
     }
 
@@ -687,6 +699,24 @@ final class BrowserWebSearchService: NSObject {
             const tag = (node.tagName || node.nodeName || '').toLowerCase();
             return tag === 'input' || tag === 'textarea' || tag === 'select' || !!node.isContentEditable;
           }
+          function humanVerificationState() {
+            const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
+            const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
+            const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || frame.getAttribute('aria-label') || '').join(' ');
+            const bodyText = norm(document.body && document.body.innerText || '');
+            const textDetected = /prove you are human|verify you are human|checking if the site connection is secure|captcha|turnstile|recaptcha/.test(bodyText);
+            const frameDetected = /turnstile|captcha|recaptcha|challenge/.test(frames.toLowerCase());
+            const tokenNode = turnstile || recaptcha;
+            const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
+            return {
+              detected: Boolean(provider),
+              provider,
+              token_length: tokenLength,
+              completed: Boolean(tokenLength > 0),
+              reason: provider && tokenLength === 0 ? 'Human verification is present but not completed.' : ''
+            };
+          }
           const node = findNode(selector)
             || findByLabel(desiredLabel)
             || ((Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null);
@@ -701,6 +731,33 @@ final class BrowserWebSearchService: NSObject {
           const r = target.getBoundingClientRect ? target.getBoundingClientRect() : null;
           const cx = Number.isFinite(x) ? x : (r ? Math.round(r.left + r.width / 2) : 0);
           const cy = Number.isFinite(y) ? y : (r ? Math.round(r.top + r.height / 2) : 0);
+          const verification = humanVerificationState();
+          const disabled = Boolean(
+            target.disabled ||
+            target.getAttribute && target.getAttribute('aria-disabled') === 'true' ||
+            node.disabled ||
+            node.getAttribute && node.getAttribute('aria-disabled') === 'true'
+          );
+          if (disabled) {
+            return JSON.stringify({
+              ok: false,
+              error: verification.detected && !verification.completed
+                ? 'Element is disabled because human verification is not complete'
+                : 'Element is disabled',
+              disabled: true,
+              requires_user_verification: verification.detected && !verification.completed,
+              human_verification: verification,
+              title: document.title || '',
+              url: location.href,
+              selector: selector || '',
+              label: desiredLabel || '',
+              tag: (target.tagName || target.nodeName || '').toLowerCase(),
+              text: accessibleText(target).slice(0, 160),
+              rect: rect(target),
+              coordinate_x: cx,
+              coordinate_y: cy
+            });
+          }
           const events = [
             ['pointerdown', { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, pointerType: 'touch', isPrimary: true }],
             ['mousedown', { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy }],
@@ -733,7 +790,9 @@ final class BrowserWebSearchService: NSObject {
             href: target.href || '',
             rect: rect(target),
             coordinate_x: cx,
-            coordinate_y: cy
+            coordinate_y: cy,
+            disabled: false,
+            human_verification: verification
           });
         })();
         """
@@ -747,7 +806,15 @@ final class BrowserWebSearchService: NSObject {
         }
         var payload = object
         payload["action"] = "browser.click"
-        payload["summary"] = "已点击网页元素。"
+        let requiresVerification = Self.boolValue(payload["requires_user_verification"]) == true
+        let clicked = Self.boolValue(payload["ok"]) ?? false
+        if requiresVerification {
+            payload["summary"] = "网页需要先完成人机验证，目标按钮当前不可点击。请在浏览器中完成验证后继续。"
+        } else if clicked {
+            payload["summary"] = "已点击网页元素。"
+        } else {
+            payload["summary"] = (payload["error"] as? String) ?? "网页点击未完成。"
+        }
         return payload
     }
 
@@ -1182,6 +1249,7 @@ final class BrowserWebSearchService: NSObject {
         }
         var collected: [[String: Any]] = []
         var seen = Set<String>()
+        var humanVerification: [String: Any]?
         let viewportCount = max(scrollOffsets.count, 1)
         let perViewportLimit = max(6, min(24, ((limit + viewportCount - 1) / viewportCount) + 4))
 
@@ -1192,6 +1260,10 @@ final class BrowserWebSearchService: NSObject {
             guard let snapshot = await evaluateJSONObject(Self.elementCollectionScript(selector: selector, limit: min(max(perViewportLimit * 2, 24), 100))),
                   let items = snapshot["items"] as? [[String: Any]] else {
                 continue
+            }
+            if let verification = snapshot["human_verification"] as? [String: Any],
+               Self.boolValue(verification["detected"]) == true {
+                humanVerification = verification
             }
 
             var addedInViewport = 0
@@ -1225,6 +1297,19 @@ final class BrowserWebSearchService: NSObject {
 
         _ = await evaluateJSONObject(Self.scrollToPageYScript(originalY))
         let returnedItems = Self.evenlySampleElements(collected, limit: limit)
+        let verification = humanVerification ?? ["detected": false]
+        let verificationDetected = Self.boolValue(verification["detected"]) == true
+        let verificationCompleted = Self.boolValue(verification["completed"]) == true
+        let summary: String
+        if verificationDetected && !verificationCompleted {
+            summary = collected.isEmpty
+                ? "网页存在未完成的人机验证，整页扫描后未找到匹配网页元素。"
+                : "网页存在未完成的人机验证；已滚动扫描整页并找到 \(collected.count) 个网页元素，返回其中 \(returnedItems.count) 个代表项。"
+        } else {
+            summary = collected.isEmpty
+                ? "整页扫描后未找到匹配网页元素。"
+                : "已滚动扫描整页并找到 \(collected.count) 个网页元素，返回其中 \(returnedItems.count) 个代表项。"
+        }
 
         return [
             "action": "browser.find_elements",
@@ -1236,10 +1321,12 @@ final class BrowserWebSearchService: NSObject {
             "scroll_positions": scrollOffsets.count,
             "scroll_height": scrollHeight,
             "viewport_height": viewportHeight,
+            "human_verification": verification,
+            "requires_user_verification": verificationDetected && !verificationCompleted,
             "count": returnedItems.count,
             "total_count": collected.count,
             "items": returnedItems,
-            "summary": collected.isEmpty ? "整页扫描后未找到匹配网页元素。" : "已滚动扫描整页并找到 \(collected.count) 个网页元素，返回其中 \(returnedItems.count) 个代表项。"
+            "summary": summary
         ]
     }
 
@@ -1506,6 +1593,7 @@ final class BrowserWebSearchService: NSObject {
         let deadline = Date().addingTimeInterval(min(max(timeout, 3), 90))
         let minWidth = max(Self.intValue(call["min_width"]) ?? 160, 32)
         let minHeight = max(Self.intValue(call["min_height"]) ?? 160, 32)
+        let attachPreview = Self.boolValue(call["attach_preview"] ?? call["attachPreview"] ?? call["show_in_chat"] ?? call["showInChat"]) ?? false
         let query = Self.firstString(in: call, keys: ["query", "keywords", "hint"])
         var lastCandidates: [[String: Any]] = []
 
@@ -1527,6 +1615,7 @@ final class BrowserWebSearchService: NSObject {
                         "file_url": saved.url.absoluteString,
                         "file_name": saved.url.lastPathComponent,
                         "content_type": saved.contentType,
+                        "attach_file": true,
                         "bytes": saved.byteCount,
                         "image_width": candidate["width"] as? Int ?? 0,
                         "image_height": candidate["height"] as? Int ?? 0,
@@ -1545,10 +1634,11 @@ final class BrowserWebSearchService: NSObject {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
         }
 
-        let thumbnail = await capturePageThumbnail(prefix: "browser_image_timeout")
+        let thumbnail = attachPreview ? await capturePageThumbnail(prefix: "browser_image_timeout") : nil
         var payload: [String: Any] = [
             "action": "browser.wait_for_image",
             "ok": false,
+            "attach_file": attachPreview,
             "candidate_count": lastCandidates.count,
             "candidates": Array(lastCandidates.prefix(5)),
             "error": "Timed out waiting for a generated image"
@@ -1906,7 +1996,8 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private static func elementIdentityKey(_ item: [String: Any]) -> String {
-        var parts: [String] = []
+        var semanticParts: [String] = []
+        var tagPart: String?
         for key in ["href", "id", "aria_label", "name", "role", "title", "text", "tag"] {
             if let value = item[key] as? String {
                 let normalized = value
@@ -1914,18 +2005,28 @@ final class BrowserWebSearchService: NSObject {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .lowercased()
                 if !normalized.isEmpty {
-                    parts.append(normalized)
+                    if key == "tag" {
+                        tagPart = "tag:\(normalized)"
+                    } else {
+                        semanticParts.append("\(key):\(normalized)")
+                    }
                 }
             }
+        }
+        if !semanticParts.isEmpty {
+            if let tagPart {
+                semanticParts.append(tagPart)
+            }
+            return semanticParts.joined(separator: "|")
         }
         if let rect = item["rect"] as? [String: Any] {
             let pageX = Self.intValue(rect["page_x"] ?? rect["x"]) ?? 0
             let pageY = Self.intValue(rect["page_y"] ?? rect["y"]) ?? 0
             let width = Self.intValue(rect["width"]) ?? 0
             let height = Self.intValue(rect["height"]) ?? 0
-            parts.append("rect:\(pageX):\(pageY):\(width):\(height)")
+            return "\(tagPart ?? "node")|rect:\(pageX):\(pageY):\(width):\(height)"
         }
-        return parts.joined(separator: "|")
+        return tagPart ?? ""
     }
 
     private static func evenlySampleElements(_ items: [[String: Any]], limit: Int) -> [[String: Any]] {
@@ -2030,6 +2131,32 @@ final class BrowserWebSearchService: NSObject {
             }
             return results;
           }
+          function disabledState(node) {
+            if (!node) return false;
+            return Boolean(
+              node.disabled ||
+              node.getAttribute && node.getAttribute('aria-disabled') === 'true' ||
+              node.closest && node.closest('[disabled],[aria-disabled="true"]')
+            );
+          }
+          function humanVerificationState() {
+            const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
+            const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
+            const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || frame.getAttribute('aria-label') || '').join(' ');
+            const bodyText = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const textDetected = /prove you are human|verify you are human|checking if the site connection is secure|captcha|turnstile|recaptcha/.test(bodyText);
+            const frameDetected = /turnstile|captcha|recaptcha|challenge/.test(frames.toLowerCase());
+            const tokenNode = turnstile || recaptcha;
+            const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
+            return {
+              detected: Boolean(provider),
+              provider,
+              token_length: tokenLength,
+              completed: Boolean(tokenLength > 0)
+            };
+          }
+          const humanVerification = humanVerificationState();
           const elements = findElements(selector).filter(visible).slice(0, limit);
           const items = elements.map((node, index) => ({
             index,
@@ -2045,6 +2172,8 @@ final class BrowserWebSearchService: NSObject {
             name: node.getAttribute ? (node.getAttribute('name') || '') : '',
             value: node.getAttribute ? (node.getAttribute('value') || node.value || '') : (node.value || ''),
             type: node.getAttribute ? (node.getAttribute('type') || '') : '',
+            disabled: disabledState(node),
+            blocked_by_human_verification: disabledState(node) && humanVerification.detected && !humanVerification.completed,
             rect: rect(node)
           }));
           return JSON.stringify({
@@ -2052,6 +2181,7 @@ final class BrowserWebSearchService: NSObject {
             title: document.title || '',
             url: location.href,
             selector,
+            human_verification: humanVerification,
             count: items.length,
             items
           });
@@ -2372,6 +2502,107 @@ final class BrowserWebSearchService: NSObject {
                     self.logger.debug("Browser snapshot write failed: \(error.localizedDescription, privacy: .public)")
                     continuation.resume(returning: nil)
                 }
+            }
+        }
+    }
+
+    private func captureFullPageScreenshot(prefix: String) async -> URL? {
+        let wv = webViewReady()
+        let visibleInAutomationBrowser = isAutomationBrowserVisible(wv)
+        let width = visibleInAutomationBrowser ? max(wv.bounds.width, 1) : browserViewportSize.width
+        let viewportHeight = visibleInAutomationBrowser ? max(wv.bounds.height, 1) : browserViewportSize.height
+        wv.isHidden = false
+        wv.alpha = 1
+        if !visibleInAutomationBrowser {
+            wv.frame = CGRect(x: -10_000, y: -10_000, width: width, height: viewportHeight)
+        }
+        wv.setNeedsLayout()
+        wv.layoutIfNeeded()
+
+        let originalOffset = wv.scrollView.contentOffset
+        let contentHeight = max(wv.scrollView.contentSize.height, viewportHeight)
+        let maxCaptureHeight: CGFloat = 16_000
+        let targetHeight = min(contentHeight, maxCaptureHeight)
+        let stepHeight = max(viewportHeight * 0.86, 240)
+        var offsets: [CGFloat] = [0]
+        if targetHeight > viewportHeight {
+            var nextY: CGFloat = 0
+            while nextY < targetHeight - viewportHeight {
+                offsets.append(nextY)
+                nextY += stepHeight
+            }
+            offsets.append(max(targetHeight - viewportHeight, 0))
+        }
+
+        var uniqueOffsets: [CGFloat] = []
+        var seenOffsets = Set<Int>()
+        for offset in offsets {
+            let clamped = min(max(offset, 0), max(targetHeight - viewportHeight, 0))
+            let key = Int(clamped.rounded())
+            guard seenOffsets.insert(key).inserted else { continue }
+            uniqueOffsets.append(clamped)
+        }
+
+        var pieces: [(image: UIImage, offsetY: CGFloat)] = []
+        for offset in uniqueOffsets.prefix(28) {
+            wv.scrollView.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
+            wv.scrollView.layoutIfNeeded()
+            try? await Task.sleep(nanoseconds: 160_000_000)
+            guard let image = await captureVisibleWebViewImage(width: width, height: viewportHeight) else {
+                continue
+            }
+            pieces.append((image, offset))
+        }
+        wv.scrollView.setContentOffset(originalOffset, animated: false)
+
+        guard !pieces.isEmpty else { return nil }
+        let scale = pieces.first?.image.scale ?? UIScreen.main.scale
+        let outputSize = CGSize(width: width, height: targetHeight)
+        let renderer = UIGraphicsImageRenderer(size: outputSize, format: {
+            let format = UIGraphicsImageRendererFormat.default()
+            format.scale = scale
+            format.opaque = true
+            return format
+        }())
+        let stitched = renderer.image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: outputSize))
+            for piece in pieces {
+                let drawHeight = min(viewportHeight, targetHeight - piece.offsetY)
+                guard drawHeight > 0 else { continue }
+                let destinationRect = CGRect(x: 0, y: piece.offsetY, width: width, height: piece.image.size.height)
+                context.cgContext.saveGState()
+                context.cgContext.clip(to: CGRect(x: 0, y: piece.offsetY, width: width, height: drawHeight))
+                piece.image.draw(in: destinationRect, blendMode: .normal, alpha: 1)
+                context.cgContext.restoreGState()
+            }
+        }
+        guard let data = stitched.pngData() else { return nil }
+        do {
+            let folder = try browserOutputDirectory()
+            let suffix = contentHeight > maxCaptureHeight ? "_truncated" : ""
+            let fileURL = folder.appendingPathComponent("\(prefix)\(suffix)_\(Int(Date().timeIntervalSince1970 * 1000)).png")
+            try data.write(to: fileURL, options: [.atomic])
+            return fileURL
+        } catch {
+            logger.debug("Browser full-page snapshot write failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    private func captureVisibleWebViewImage(width: CGFloat, height: CGFloat) async -> UIImage? {
+        let wv = webViewReady()
+        let config = WKSnapshotConfiguration()
+        config.rect = CGRect(x: 0, y: 0, width: width, height: height)
+        config.snapshotWidth = NSNumber(value: Double(width))
+        return await withCheckedContinuation { continuation in
+            wv.takeSnapshot(with: config) { image, error in
+                if let error {
+                    self.logger.debug("Browser visible snapshot failed: \(error.localizedDescription, privacy: .public)")
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: image)
             }
         }
     }
