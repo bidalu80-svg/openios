@@ -9960,7 +9960,7 @@ private struct AgentStepFloatingBarHost: View {
 private enum AgentStepFloatingMetrics {
     static let previewSize = CGSize(width: 86, height: 54)
     static let previewCornerRadius: CGFloat = 8
-    static let previewOffset = CGSize(width: 0, height: 0)
+    static let previewOffset = CGSize(width: 6, height: 0)
     static let barHeight: CGFloat = 34
     static let barCornerRadius: CGFloat = 13
     static let barLeadingInset: CGFloat = 98
