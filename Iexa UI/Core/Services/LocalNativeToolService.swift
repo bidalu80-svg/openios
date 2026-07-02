@@ -9,6 +9,11 @@ struct LocalNativeToolRunResult: Sendable {
     let officeDocument: LocalNativeOfficeDocument?
     let browserDocument: LocalNativeBrowserDocument?
     let openRequests: [LocalAlpineOpenRequest]
+
+    var requiresBrowserUserVerification: Bool {
+        browserDocument?.requiresUserVerification == true
+            || openRequests.contains { $0.target == "iexa://automation-browser" }
+    }
 }
 
 enum LocalNativeOfficeKind: String, Sendable, Equatable {
@@ -65,6 +70,7 @@ struct LocalNativeBrowserDocument: Sendable {
     let items: [ChatStatusItem]
     let previewImages: [String]
     let error: String?
+    let requiresUserVerification: Bool
 }
 
 enum LocalOfficeProgressPhase: Sendable {
@@ -731,7 +737,7 @@ final class LocalNativeToolService {
     }
 
     private static func browserDocument(from results: [[String: Any]]) -> LocalNativeBrowserDocument? {
-        for result in results {
+        for result in results.reversed() {
             let action = (result["action"] as? String ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
@@ -793,7 +799,8 @@ final class LocalNativeToolService {
                 summary: summary,
                 items: items,
                 previewImages: previewImages,
-                error: result["error"] as? String
+                error: result["error"] as? String,
+                requiresUserVerification: boolValue(result["requires_user_verification"])
             )
         }
         return nil
@@ -827,10 +834,14 @@ final class LocalNativeToolService {
     }
 
     private static func openRequests(from results: [[String: Any]]) -> [LocalAlpineOpenRequest] {
-        results.compactMap { result in
+        var requests = results.compactMap { result in
             firstString(in: result, keys: ["open_preview_target", "preview_target", "local_preview"])
                 .map { LocalAlpineOpenRequest(target: $0) }
         }
+        if results.contains(where: { boolValue($0["requires_user_verification"]) }) {
+            requests.append(LocalAlpineOpenRequest(target: "iexa://automation-browser"))
+        }
+        return requests
     }
 
     private static func localPreviewOpenRequest(from call: [String: Any]) -> LocalAlpineOpenRequest? {

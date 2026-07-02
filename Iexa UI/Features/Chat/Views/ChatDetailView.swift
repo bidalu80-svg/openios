@@ -2803,6 +2803,14 @@ struct ChatDetailView: View {
     private func handleLocalAlpineOpenRequest(_ request: LocalAlpineOpenRequest?) {
         guard let request else { return }
         viewModel.consumeLocalAlpinePendingOpenRequest(request)
+        if request.target == "iexa://automation-browser" {
+            previewWebURL = WebPreviewURL(
+                url: BrowserWebSearchService.shared.currentAutomationBrowserURL(),
+                usesAutomationBrowser: true,
+                dismissWhenHumanVerificationCompletes: true
+            )
+            return
+        }
         if let url = request.webURL {
             previewWebURL = WebPreviewURL(url: url)
             return
@@ -3645,7 +3653,11 @@ struct ChatDetailView: View {
                 .themed()
         }
         .sheet(item: $previewWebURL) { item in
-            InAppWebPreviewSheet(url: item.url)
+            InAppWebPreviewSheet(
+                url: item.url,
+                usesAutomationBrowser: item.usesAutomationBrowser,
+                dismissWhenHumanVerificationCompletes: item.dismissWhenHumanVerificationCompletes
+            )
                 .themed()
         }
         .sheet(item: $previewingMessageFile) { item in
