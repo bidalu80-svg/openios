@@ -2852,7 +2852,7 @@ final class ChatViewModel {
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
         - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
-        - Browser interaction: use `find_elements` to scan the page for inputs/buttons when selectors are unknown. It scrolls the page by default; use `scan_page:true`/`max_scrolls` when a target may be below the first viewport. Use `screenshot` with `full_page:true` only when visual layout is needed; observation screenshots are tool-only by default and should not be presented as the final user-facing result. For clicks, prefer a stable selector when available; otherwise use `label`, `button_text`, or `aria_label` from `find_elements`; use screenshot coordinates only as a fallback after the target is in the current viewport. For website workflows, keep using `browser_use` for bounded micro-actions in the same turn until the requested page task is actually complete; a successful scroll/find/click/type step is only intermediate progress, not the final answer. If a result says `requires_user_verification:true`, stop browser retries and tell the user to complete the human verification in the visible browser, then continue from that same page. Do not retry the same failed selector.
+        - Browser interaction: use `find_elements` to scan the page for inputs/buttons when selectors are unknown. It scrolls the page by default; use `scan_page:true`/`max_scrolls` when a target may be below the first viewport. Use `screenshot` with `full_page:true` only when visual layout is needed; observation screenshots are tool-only by default and should not be presented as the final user-facing result. For clicks, prefer a stable selector when available; otherwise use `label`, `button_text`, or `aria_label` from `find_elements`; use screenshot coordinates only as a fallback after the target is in the current viewport. For website workflows, keep using `browser_use` for bounded micro-actions in the same turn until the requested page task is actually complete; a successful scroll/find/click/type step is only intermediate progress, not the final answer. If a result says `requires_user_verification:true`, the app will surface the shared browser for the user and return another observation after verification; continue from the current page once that observation says verification completed. Do not retry the same failed selector.
         - For image-generation websites, after entering the prompt and clicking generate/download, use `browser_use` action `wait_for_image` to poll for the generated image and save it as an attachment. Do not repeatedly call generic screenshot/read actions once `wait_for_image` returns a saved file.
         - Website/app preview: for static HTML/SVG/files, use `iexa-open <path>` directly so Iexa opens the in-app preview. Use `iexa-serve <directory-or-file> <port>` or a framework dev server only when the project actually requires localhost; start long-running servers in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
@@ -12148,7 +12148,13 @@ final class ChatViewModel {
                 )
             }
         )
-        enqueueLocalAlpineOpenRequests(result.openRequests)
+        if !result.requiresBrowserUserVerification {
+            enqueueLocalAlpineOpenRequests(result.openRequests)
+        }
+        let browserVerificationCompleted = await waitForBrowserUserVerificationIfNeeded(
+            result,
+            messageId: assistantMessageId
+        )
 
         guard result.didExecute else {
             let toolContent = "Local native tool did not execute. The tool call could not be parsed."
@@ -12186,7 +12192,8 @@ final class ChatViewModel {
                         summary: "模型返回的搜索指令无法解析。",
                         items: [],
                         previewImages: [],
-                        error: "模型返回的搜索指令无法解析。"
+                        error: "模型返回的搜索指令无法解析。",
+                        requiresUserVerification: false
                     ),
                     keepStreaming: true
                 )
@@ -12244,7 +12251,9 @@ final class ChatViewModel {
         if let browserDocument = result.browserDocument {
             finishLocalBrowserTool(
                 messageId: assistantMessageId,
-                document: browserDocument,
+                document: browserVerificationCompleted && browserDocument.requiresUserVerification
+                    ? Self.localNativeBrowserVerificationCompletedDocument(from: browserDocument)
+                    : browserDocument,
                 keepStreaming: true
             )
         } else if let browserAction {
@@ -12259,7 +12268,8 @@ final class ChatViewModel {
                     summary: "搜索没有返回可用结果。",
                     items: [],
                     previewImages: [],
-                    error: "搜索没有返回可用结果。"
+                    error: "搜索没有返回可用结果。",
+                    requiresUserVerification: false
                 ),
                 keepStreaming: true
             )
@@ -12273,8 +12283,12 @@ final class ChatViewModel {
             )
         }
 
+        let toolContent = Self.localNativeFunctionToolResultContent(
+            result.summary,
+            browserVerificationCompleted: browserVerificationCompleted
+        )
         return LocalNativeFunctionToolExecution(
-            toolContent: Self.localNativeFunctionToolResultContent(result.summary),
+            toolContent: toolContent,
             completedAssistantTurn: false,
             visibleContent: nil
         )
@@ -12742,23 +12756,82 @@ final class ChatViewModel {
             : String(query.prefix(96))
         let content = Self.localNativeFunctionToolEnvelopeContent(for: call)
         let result = await LocalNativeToolService.shared.executeBlocks(in: content)
-        enqueueLocalAlpineOpenRequests(result.openRequests)
+        if !result.requiresBrowserUserVerification {
+            enqueueLocalAlpineOpenRequests(result.openRequests)
+        }
+        let browserVerificationCompleted = await waitForBrowserUserVerificationIfNeeded(
+            result,
+            messageId: assistantMessageId
+        )
         if !result.files.isEmpty {
             attachLocalNativeFiles(result.files, to: assistantMessageId)
         }
-        let failed = result.browserDocument?.ok == false
-            || Self.localAlpineSyntheticToolFailed(result.summary)
+        let browserDocument = browserVerificationCompleted
+            ? result.browserDocument.map { Self.localNativeBrowserVerificationCompletedDocument(from: $0) }
+            : result.browserDocument
+        let failed = result.browserDocument.map { !$0.ok && !$0.requiresUserVerification }
+            ?? Self.localAlpineSyntheticToolFailed(result.summary)
+        let output = Self.localNativeFunctionToolResultContent(
+            result.summary,
+            browserVerificationCompleted: browserVerificationCompleted
+        )
         return executeLocalAlpineSyntheticToolCall(
             call,
             assistantMessageId: assistantMessageId,
             detail: detail,
             filePaths: result.files.compactMap(\.url),
-            output: result.summary,
+            output: output,
             openRequests: result.openRequests,
-            browserURL: result.browserDocument?.url,
-            imageFilePath: Self.localNativeBrowserPreviewImage(from: result.browserDocument),
+            browserURL: browserDocument?.url,
+            imageFilePath: Self.localNativeBrowserPreviewImage(from: browserDocument),
             failed: failed
         )
+    }
+
+    private func waitForBrowserUserVerificationIfNeeded(
+        _ result: LocalNativeToolRunResult,
+        messageId: String
+    ) async -> Bool {
+        guard result.requiresBrowserUserVerification else { return false }
+        enqueueLocalAlpineOpenRequests([LocalAlpineOpenRequest(target: "iexa://automation-browser")])
+
+        let document = result.browserDocument
+        let urls = document?.url.map { [$0] } ?? []
+        updateLocalBrowserToolMessage(
+            messageId: messageId,
+            content: "请在弹出的浏览器里完成人机验证，完成后我会继续操作网页。",
+            isStreaming: true,
+            status: ChatStatusUpdate(
+                action: "browser_web_search",
+                description: "等待人机验证...",
+                done: false,
+                urls: urls,
+                occurredAt: .now,
+                items: document?.items ?? [],
+                count: max(document?.items.count ?? 0, urls.count),
+                query: document?.query,
+                queries: document?.query.map { [$0] } ?? []
+            )
+        )
+
+        let completed = await BrowserWebSearchService.shared.waitForVisibleHumanVerificationCompletion(timeout: 120)
+        updateLocalBrowserToolMessage(
+            messageId: messageId,
+            content: completed ? "人机验证已完成，正在继续操作网页..." : "人机验证尚未完成。",
+            isStreaming: !completed,
+            status: ChatStatusUpdate(
+                action: "browser_web_search",
+                description: completed ? "人机验证已完成，继续操作网页..." : "人机验证尚未完成",
+                done: completed,
+                urls: urls,
+                occurredAt: .now,
+                items: document?.items ?? [],
+                count: max(document?.items.count ?? 0, urls.count),
+                query: document?.query,
+                queries: document?.query.map { [$0] } ?? []
+            )
+        )
+        return completed
     }
 
     private static func localNativeBrowserPreviewImage(from document: LocalNativeBrowserDocument?) -> String? {
@@ -13174,11 +13247,13 @@ final class ChatViewModel {
             return browserSearchCount >= Self.localAlpineBrowserSearchSoftLimit
         }
         guard name == "browser_use" else { return false }
+        let userVerificationCompleted = result.summary.localizedCaseInsensitiveContains("Browser human verification was completed")
+            || result.summary.localizedCaseInsensitiveContains("人机验证已完成")
         let needsUserVerification = result.summary.localizedCaseInsensitiveContains("\"requires_user_verification\"")
             || result.summary.localizedCaseInsensitiveContains("requires_user_verification")
             || result.summary.localizedCaseInsensitiveContains("human verification is not complete")
             || result.summary.localizedCaseInsensitiveContains("网页需要先完成人机验证")
-        if needsUserVerification {
+        if needsUserVerification && !userVerificationCompleted {
             return true
         }
         let action = localAlpineBrowserActionName(from: call, result: result)
@@ -13700,9 +13775,36 @@ final class ChatViewModel {
         }
     }
 
-    private static func localNativeFunctionToolResultContent(_ summary: String) -> String {
+    private static func localNativeFunctionToolResultContent(
+        _ summary: String,
+        browserVerificationCompleted: Bool = false
+    ) -> String {
         let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        return String((trimmed.isEmpty ? "Local native tool completed." : trimmed).prefix(16_000))
+        var body = trimmed.isEmpty ? "Local native tool completed." : trimmed
+        if browserVerificationCompleted {
+            body += """
+
+            Browser human verification was completed by the user in the visible shared browser. Continue the same browser workflow from the current page state now; do not ask the user to continue manually.
+            """
+        }
+        return String(body.prefix(16_000))
+    }
+
+    private static func localNativeBrowserVerificationCompletedDocument(
+        from document: LocalNativeBrowserDocument
+    ) -> LocalNativeBrowserDocument {
+        LocalNativeBrowserDocument(
+            ok: true,
+            action: document.action,
+            title: document.title.isEmpty ? "网页工具" : document.title,
+            url: document.url,
+            query: document.query,
+            summary: "人机验证已完成，继续操作网页。",
+            items: document.items,
+            previewImages: document.previewImages,
+            error: nil,
+            requiresUserVerification: false
+        )
     }
 
     private static func nativeToolIntValue(_ value: Any?) -> Int? {
@@ -17531,7 +17633,7 @@ final class ChatViewModel {
             : ""
         let browserInstructions = includeBrowserTools ? """
 
-        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when the answer depends on current/recent/external/source-backed facts or live website content. Use search when there is no exact URL, readable for a known URL or result verification, and `browser_use` for bounded interactive page work (navigate/screenshot/click/type/scroll/DOM/cookies/js). When selectors are unknown, call `browser_use` with `action:"find_elements"` to scan controls across the page; use `scan_page:true`/`max_scrolls` if the target may be below the first viewport. Use `screenshot` with `full_page:true` only when visual layout is needed; browser observation screenshots are not chat attachments unless `attach_preview:true`. Then click by stable selector, `label`/`button_text`/`aria_label`; use screenshot coordinates only after the target is in the current viewport. For multi-step website tasks, continue issuing bounded `browser_use` micro-actions in the same turn until the requested browser workflow is complete or a real blocker appears; do not stop after a single successful intermediate click/scroll/read. If a browser result says `requires_user_verification:true`, stop browser retries and ask the user to complete the human verification in the visible browser before continuing from the same page. For image-generation websites, after entering the prompt and clicking generate/download, call `browser_use` with `action:"wait_for_image"` to poll the visible page and save the generated image as an attachment, then answer from that result instead of repeating screenshots. In Markdown fallback, keep `action:"browser_use"` and put the concrete action in `browser_use_action`. Set `screenshot:true` when visual evidence helps. Answer from the returned browser result and cite title/URL plainly.
+        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when the answer depends on current/recent/external/source-backed facts or live website content. Use search when there is no exact URL, readable for a known URL or result verification, and `browser_use` for bounded interactive page work (navigate/screenshot/click/type/scroll/DOM/cookies/js). When selectors are unknown, call `browser_use` with `action:"find_elements"` to scan controls across the page; use `scan_page:true`/`max_scrolls` if the target may be below the first viewport. Use `screenshot` with `full_page:true` only when visual layout is needed; browser observation screenshots are not chat attachments unless `attach_preview:true`. Then click by stable selector, `label`/`button_text`/`aria_label`; use screenshot coordinates only after the target is in the current viewport. For multi-step website tasks, continue issuing bounded `browser_use` micro-actions in the same turn until the requested browser workflow is complete or a real blocker appears; do not stop after a single successful intermediate click/scroll/read. If a browser result says `requires_user_verification:true`, wait for the app's follow-up observation after the user completes the visible shared-browser verification, then continue from the same page without asking the user to send "continue". For image-generation websites, after entering the prompt and clicking generate/download, call `browser_use` with `action:"wait_for_image"` to poll the visible page and save the generated image as an attachment, then answer from that result instead of repeating screenshots. In Markdown fallback, keep `action:"browser_use"` and put the concrete action in `browser_use_action`. Set `screenshot:true` when visual evidence helps. Answer from the returned browser result and cite title/URL plainly.
         """ : ""
         let officeInstructions = includeOfficeTools ? """
 
@@ -20084,7 +20186,13 @@ final class ChatViewModel {
                 )
             }
         )
-        enqueueLocalAlpineOpenRequests(result.openRequests)
+        if !result.requiresBrowserUserVerification {
+            enqueueLocalAlpineOpenRequests(result.openRequests)
+        }
+        let browserVerificationCompleted = await waitForBrowserUserVerificationIfNeeded(
+            result,
+            messageId: messageId
+        )
         guard result.didExecute else {
             if let officeKind {
                 await finishLocalOfficeGeneration(
@@ -20113,7 +20221,8 @@ final class ChatViewModel {
                         summary: "模型返回的搜索指令无法解析。",
                         items: [],
                         previewImages: [],
-                        error: "模型返回的搜索指令无法解析。"
+                        error: "模型返回的搜索指令无法解析。",
+                        requiresUserVerification: false
                     )
                 )
             }
@@ -20153,7 +20262,9 @@ final class ChatViewModel {
         if let browserDocument = result.browserDocument {
             finishLocalBrowserTool(
                 messageId: messageId,
-                document: browserDocument
+                document: browserVerificationCompleted && browserDocument.requiresUserVerification
+                    ? Self.localNativeBrowserVerificationCompletedDocument(from: browserDocument)
+                    : browserDocument
             )
             inheritedStatusHistory = localNativeContinuationStatusHistory(from: messageId)
         } else if browserAction != nil {
@@ -20168,7 +20279,8 @@ final class ChatViewModel {
                     summary: "搜索没有返回可用结果。",
                     items: [],
                     previewImages: [],
-                    error: "搜索没有返回可用结果。"
+                    error: "搜索没有返回可用结果。",
+                    requiresUserVerification: false
                 )
             )
             inheritedStatusHistory = localNativeContinuationStatusHistory(from: messageId)
@@ -20177,9 +20289,13 @@ final class ChatViewModel {
             markLocalNativeToolParentHidden(messageId: messageId)
         }
 
+        let resultContent = Self.localNativeFunctionToolResultContent(
+            result.summary,
+            browserVerificationCompleted: browserVerificationCompleted
+        )
         let resultMessage = ChatMessage(
             role: .system,
-            content: "本地 iOS 工具执行结果\n\n\(result.summary)",
+            content: "本地 iOS 工具执行结果\n\n\(resultContent)",
             timestamp: .now,
             model: "Local Native",
             isStreaming: false,

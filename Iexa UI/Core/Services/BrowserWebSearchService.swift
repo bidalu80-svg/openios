@@ -2432,12 +2432,45 @@ final class BrowserWebSearchService: NSObject {
         guard isKnownBrowserWebView(source) else { return }
         resolveNavigation(true)
         notifyActiveBrowserDidChange()
+        notifyHumanVerificationStateIfNeeded(from: source)
     }
 
     func browserWebViewDidFailNavigation(_ source: WKWebView) {
         guard isKnownBrowserWebView(source) else { return }
         resolveNavigation(false)
         notifyActiveBrowserDidChange()
+        notifyHumanVerificationStateIfNeeded(from: source)
+    }
+
+    func currentAutomationBrowserURL() -> URL {
+        webView?.url ?? URL(string: "about:blank")!
+    }
+
+    func waitForVisibleHumanVerificationCompletion(timeout: TimeInterval = 120) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var sawChallenge = false
+        var missingChallengeCount = 0
+        while Date() < deadline {
+            if let probe = await evaluateJSONObject(Self.visibleChallengeProbeScript()) {
+                let detected = Self.boolValue(probe["detected"]) == true
+                let completed = Self.boolValue(probe["completed"]) == true
+                if detected {
+                    sawChallenge = true
+                    missingChallengeCount = 0
+                } else if sawChallenge {
+                    missingChallengeCount += 1
+                }
+                if completed || (sawChallenge && missingChallengeCount >= 2) {
+                    var completedProbe = probe
+                    completedProbe["completed"] = true
+                    notifyHumanVerificationState(completedProbe)
+                    return true
+                }
+                notifyHumanVerificationState(probe)
+            }
+            try? await Task.sleep(nanoseconds: 900_000_000)
+        }
+        return false
     }
 
     private func resolveBrowserTab(for tabID: Int? = nil, createIfMissing: Bool = true) -> WKWebView {
@@ -3260,6 +3293,34 @@ final class BrowserWebSearchService: NSObject {
         }
     }
 
+    private func notifyHumanVerificationStateIfNeeded(from source: WKWebView) {
+        Task { @MainActor [weak self, weak source] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard let self,
+                  let source,
+                  self.webView === source,
+                  let probe = await self.evaluateJSONObject(Self.visibleChallengeProbeScript()) else {
+                return
+            }
+            self.notifyHumanVerificationState(probe)
+        }
+    }
+
+    private func notifyHumanVerificationState(_ probe: [String: Any]) {
+        NotificationCenter.default.post(
+            name: .browserWebSearchServiceHumanVerificationStateDidChange,
+            object: webView,
+            userInfo: [
+                "detected": Self.boolValue(probe["detected"]) == true,
+                "completed": Self.boolValue(probe["completed"]) == true
+                    || Self.boolValue(probe["detected"]) != true,
+                "failed_state": Self.boolValue(probe["failed_state"]) == true,
+                "url": webView?.url?.absoluteString ?? "",
+                "title": webView?.title ?? ""
+            ]
+        )
+    }
+
     private static func visibleChallengeProbeScript() -> String {
         """
         (() => {
@@ -3276,9 +3337,10 @@ final class BrowserWebSearchService: NSObject {
             /prove you are human|verify you are human|captcha|turnstile|故障排除|验证失败|troubleshooting|verification failed/.test(bodyText)
           );
           const failedState = /故障排除|验证失败|troubleshooting|verification failed/.test(bodyText);
+          const successState = /成功|success|verified/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText);
           return JSON.stringify({
             detected: challengeDetected,
-            completed: tokenLength > 0,
+            completed: tokenLength > 0 || successState,
             failed_state: failedState
           });
         })();
@@ -3776,4 +3838,6 @@ private struct SearchPage {
 extension Notification.Name {
     static let browserWebSearchServiceActiveBrowserDidChange =
         Notification.Name("BrowserWebSearchServiceActiveBrowserDidChange")
+    static let browserWebSearchServiceHumanVerificationStateDidChange =
+        Notification.Name("BrowserWebSearchServiceHumanVerificationStateDidChange")
 }

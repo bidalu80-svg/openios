@@ -5,14 +5,23 @@ import AVFoundation
 
 struct WebPreviewURL: Identifiable, Equatable {
     let url: URL
+    var usesAutomationBrowser: Bool = false
+    var dismissWhenHumanVerificationCompletes: Bool = false
 
-    var id: String { url.absoluteString }
+    var id: String {
+        [
+            url.absoluteString,
+            usesAutomationBrowser ? "automation" : "preview",
+            dismissWhenHumanVerificationCompletes ? "auto-dismiss" : "manual"
+        ].joined(separator: "|")
+    }
 }
 
 struct InAppWebPreviewSheet: View {
     let url: URL
     var showsAddressBar: Bool = false
     var usesAutomationBrowser: Bool = false
+    var dismissWhenHumanVerificationCompletes: Bool = false
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
@@ -109,6 +118,14 @@ struct InAppWebPreviewSheet: View {
             if !addressFocused {
                 addressText = Self.addressText(for: newURL)
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .browserWebSearchServiceHumanVerificationStateDidChange)) { notification in
+            guard dismissWhenHumanVerificationCompletes,
+                  usesAutomationBrowser,
+                  (notification.userInfo?["completed"] as? Bool) == true else {
+                return
+            }
+            dismiss()
         }
         .sheet(item: $playingVideo) { item in
             WebPreviewVideoPlayerSheet(url: item.url, refererURL: activeURL)
