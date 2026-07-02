@@ -567,12 +567,20 @@ final class ChatViewModel {
     @ObservationIgnored private var localAlpinePendingToolStatusByMessageId: [String: ChatStatusUpdate] = [:]
     @ObservationIgnored private var localAlpineToolEventFlushTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var localAlpineLastToolEventFlushAtByMessageId: [String: Date] = [:]
-    private let localAlpineAgentMaxSteps = 10
+    private let localAlpineAgentMaxSteps = 16
     private let localAlpineNoProgressRepeatLimit = 2
     private let localAlpineToolEventFlushInterval: TimeInterval = 0.45
     private let localAlpineLiveToolPreviewLimit = 260
     private let localAlpineLiveToolDetailLimit = 180
     private let localAlpineLiveToolCommandLimit = 420
+    private static let localNativeFunctionMaxSteps = 12
+    private static let localNativeBrowserRepeatedSignatureLimit = 3
+    private static let localNativeBrowserToolSoftLimit = 12
+    private static let localNativeBrowserSearchSoftLimit = 3
+    private static let localNativeBrowserReadableSoftLimit = 3
+    private static let localAlpineBrowserFailureSoftLimit = 5
+    private static let localAlpineBrowserToolSoftLimit = 12
+    private static let localAlpineBrowserSearchSoftLimit = 3
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     var localAlpinePendingOpenRequest: LocalAlpineOpenRequest?
@@ -2844,7 +2852,7 @@ final class ChatViewModel {
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
         - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
-        - Browser interaction: use `find_elements` to scan the page for inputs/buttons when selectors are unknown. It scrolls the page by default; use `scan_page:true`/`max_scrolls` when a target may be below the first viewport. Use `screenshot` with `full_page:true` only when visual layout is needed; observation screenshots are tool-only by default and should not be presented as the final user-facing result. For clicks, prefer a stable selector when available; otherwise use `label`, `button_text`, or `aria_label` from `find_elements`; use screenshot coordinates only as a fallback after the target is in the current viewport. If a result says `requires_user_verification:true`, stop browser retries and tell the user to complete the human verification in the visible browser, then continue from that same page. Do not retry the same failed selector.
+        - Browser interaction: use `find_elements` to scan the page for inputs/buttons when selectors are unknown. It scrolls the page by default; use `scan_page:true`/`max_scrolls` when a target may be below the first viewport. Use `screenshot` with `full_page:true` only when visual layout is needed; observation screenshots are tool-only by default and should not be presented as the final user-facing result. For clicks, prefer a stable selector when available; otherwise use `label`, `button_text`, or `aria_label` from `find_elements`; use screenshot coordinates only as a fallback after the target is in the current viewport. For website workflows, keep using `browser_use` for bounded micro-actions in the same turn until the requested page task is actually complete; a successful scroll/find/click/type step is only intermediate progress, not the final answer. If a result says `requires_user_verification:true`, stop browser retries and tell the user to complete the human verification in the visible browser, then continue from that same page. Do not retry the same failed selector.
         - For image-generation websites, after entering the prompt and clicking generate/download, use `browser_use` action `wait_for_image` to poll for the generated image and save it as an attachment. Do not repeatedly call generic screenshot/read actions once `wait_for_image` returns a saved file.
         - Website/app preview: for static HTML/SVG/files, use `iexa-open <path>` directly so Iexa opens the in-app preview. Use `iexa-serve <directory-or-file> <port>` or a framework dev server only when the project actually requires localhost; start long-running servers in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
@@ -11067,8 +11075,14 @@ final class ChatViewModel {
             let signature = Self.signature(for: call)
             let count = (countsBySignature[signature] ?? 0) + 1
             countsBySignature[signature] = count
+            let signatureWarningThreshold = ChatViewModel.isRepeatableBrowserMicroAction(call)
+                ? 4
+                : warningThreshold
+            let signatureBlockThreshold = ChatViewModel.isRepeatableBrowserMicroAction(call)
+                ? 6
+                : blockThreshold
 
-            if count >= blockThreshold {
+            if count >= signatureBlockThreshold {
                 return .block("""
                 [LOOP BLOCKED] The app blocked this repeated Local Alpine tool call before execution.
                 Tool: \(Self.displayName(for: call))
@@ -11076,7 +11090,7 @@ final class ChatViewModel {
                 Do not call the same tool again. Use the previous tool result, choose a different concrete action, or answer with the current limitation.
                 """)
             }
-            if count >= warningThreshold {
+            if count >= signatureWarningThreshold {
                 return .warn("""
                 [LOOP WARNING] This Local Alpine tool call repeats identical arguments already used in this assistant turn.
                 Tool: \(Self.displayName(for: call))
@@ -11914,7 +11928,7 @@ final class ChatViewModel {
             return exactUsage
         }
 
-        for _ in 0..<4 {
+        for _ in 0..<Self.localNativeFunctionMaxSteps {
             request.messages = apiMessages
             let toolAccumulator = LocalAlpineNativeToolCallAccumulator()
             let sseStream = try await manager.sendPreferredOpenAIStreaming(request: request)
@@ -11963,7 +11977,10 @@ final class ChatViewModel {
                 let signature = Self.localNativeFunctionCallSignature(call)
                 let count = (callCountsBySignature[signature] ?? 0) + 1
                 callCountsBySignature[signature] = count
-                if count > 1 {
+                let repeatedSignatureLimit = Self.localNativeBrowserToolKind(call) == .interactive
+                    ? Self.localNativeBrowserRepeatedSignatureLimit
+                    : 1
+                if count > repeatedSignatureLimit {
                     let message = """
                     本地工具检测到重复调用，已停止这次重复执行。
                     工具：\(call.name)
@@ -11981,9 +11998,9 @@ final class ChatViewModel {
                 }
 
                 let browserKind = Self.localNativeBrowserToolKind(call)
-                if browserToolCount >= 6
-                    || (browserKind == .search && browserSearchCount >= 2)
-                    || (browserKind == .readable && browserReadCount >= 2) {
+                if browserToolCount >= Self.localNativeBrowserToolSoftLimit
+                    || (browserKind == .search && browserSearchCount >= Self.localNativeBrowserSearchSoftLimit)
+                    || (browserKind == .readable && browserReadCount >= Self.localNativeBrowserReadableSoftLimit) {
                     let message = """
                     浏览器工具已经返回足够结果，本轮已停止继续调用浏览器工具。
                     工具：\(call.name)
@@ -12025,8 +12042,8 @@ final class ChatViewModel {
                     lastNativeToolFallback = Self.localNativeBrowserFallbackMessage(from: execution.toolContent)
                     if Self.localNativeBrowserToolResultShouldStop(call, toolContent: execution.toolContent)
                         || browserKind == .readable
-                        || browserToolCount >= 6
-                        || browserSearchCount >= 2 {
+                        || browserToolCount >= Self.localNativeBrowserToolSoftLimit
+                        || browserSearchCount >= Self.localNativeBrowserSearchSoftLimit {
                         needsFinalAnswerWithoutTools = true
                         finalAnswerFallback = lastNativeToolFallback
                     }
@@ -12770,6 +12787,33 @@ final class ChatViewModel {
         }
     }
 
+    private static func isRepeatableBrowserMicroAction(_ call: LocalAlpineNativeToolCall) -> Bool {
+        guard normalizeScalar(call.name) == "browser_use",
+              let arguments = decodedArguments(call.arguments) else {
+            return false
+        }
+        let rawAction = (arguments["browser_use_action"] as? String)
+            ?? (arguments["browser_action"] as? String)
+            ?? (arguments["operation"] as? String)
+            ?? (arguments["op"] as? String)
+            ?? (arguments["action"] as? String)
+            ?? ""
+        let action = normalizeScalar(rawAction).replacingOccurrences(of: "_", with: ".")
+        switch action {
+        case "navigate", "browser.navigate",
+            "scroll", "browser.scroll",
+            "click", "browser.click",
+            "type", "browser.type",
+            "find.elements", "browser.find.elements",
+            "get.page.info", "browser.get.page.info",
+            "screenshot", "browser.screenshot",
+            "execute.js", "browser.execute.js":
+            return true
+        default:
+            return false
+        }
+    }
+
     private func executeLocalAlpineOpenToolCall(
         _ call: LocalAlpineNativeToolCall,
         assistantMessageId: String
@@ -13112,13 +13156,13 @@ final class ChatViewModel {
         let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard ["web_search", "browser_use", "iexa_open"].contains(name) else { return false }
         if result.hadFailure {
-            return browserToolCount >= 3
+            return browserToolCount >= Self.localAlpineBrowserFailureSoftLimit
         }
         if name == "iexa_open" {
             return !result.openRequests.isEmpty
         }
         if name == "web_search" {
-            return browserSearchCount >= 2
+            return browserSearchCount >= Self.localAlpineBrowserSearchSoftLimit
         }
         guard name == "browser_use" else { return false }
         let needsUserVerification = result.summary.localizedCaseInsensitiveContains("\"requires_user_verification\"")
@@ -13131,8 +13175,7 @@ final class ChatViewModel {
         let action = localAlpineBrowserActionName(from: call, result: result)
         let terminalActions: Set<String> = [
             "browser.readable", "browser.text", "browser.fetch",
-            "browser.wait_for_image", "browser.get_page_info", "browser.get_backbone",
-            "browser.scroll_and_collect", "browser.list_tabs"
+            "browser.wait_for_image", "browser.scroll_and_collect"
         ]
         if terminalActions.contains(action) {
             return true
@@ -13145,7 +13188,7 @@ final class ChatViewModel {
         if hasSavedFile || hasImagePreviewResult {
             return true
         }
-        return browserToolCount >= 6
+        return browserToolCount >= Self.localAlpineBrowserToolSoftLimit
     }
 
     private static func localAlpineBrowserActionName(
@@ -17479,7 +17522,7 @@ final class ChatViewModel {
             : ""
         let browserInstructions = includeBrowserTools ? """
 
-        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when the answer depends on current/recent/external/source-backed facts or live website content. Use search when there is no exact URL, readable for a known URL or result verification, and `browser_use` for bounded interactive page work (navigate/screenshot/click/type/scroll/DOM/cookies/js). When selectors are unknown, call `browser_use` with `action:"find_elements"` to scan controls across the page; use `scan_page:true`/`max_scrolls` if the target may be below the first viewport. Use `screenshot` with `full_page:true` only when visual layout is needed; browser observation screenshots are not chat attachments unless `attach_preview:true`. Then click by stable selector, `label`/`button_text`/`aria_label`; use screenshot coordinates only after the target is in the current viewport. If a browser result says `requires_user_verification:true`, stop browser retries and ask the user to complete the human verification in the visible browser before continuing from the same page. For image-generation websites, after entering the prompt and clicking generate/download, call `browser_use` with `action:"wait_for_image"` to poll the visible page and save the generated image as an attachment, then answer from that result instead of repeating screenshots. In Markdown fallback, keep `action:"browser_use"` and put the concrete action in `browser_use_action`. Set `screenshot:true` when visual evidence helps. Answer from the returned browser result and cite title/URL plainly.
+        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when the answer depends on current/recent/external/source-backed facts or live website content. Use search when there is no exact URL, readable for a known URL or result verification, and `browser_use` for bounded interactive page work (navigate/screenshot/click/type/scroll/DOM/cookies/js). When selectors are unknown, call `browser_use` with `action:"find_elements"` to scan controls across the page; use `scan_page:true`/`max_scrolls` if the target may be below the first viewport. Use `screenshot` with `full_page:true` only when visual layout is needed; browser observation screenshots are not chat attachments unless `attach_preview:true`. Then click by stable selector, `label`/`button_text`/`aria_label`; use screenshot coordinates only after the target is in the current viewport. For multi-step website tasks, continue issuing bounded `browser_use` micro-actions in the same turn until the requested browser workflow is complete or a real blocker appears; do not stop after a single successful intermediate click/scroll/read. If a browser result says `requires_user_verification:true`, stop browser retries and ask the user to complete the human verification in the visible browser before continuing from the same page. For image-generation websites, after entering the prompt and clicking generate/download, call `browser_use` with `action:"wait_for_image"` to poll the visible page and save the generated image as an attachment, then answer from that result instead of repeating screenshots. In Markdown fallback, keep `action:"browser_use"` and put the concrete action in `browser_use_action`. Set `screenshot:true` when visual evidence helps. Answer from the returned browser result and cite title/URL plainly.
         """ : ""
         let officeInstructions = includeOfficeTools ? """
 
