@@ -2996,7 +2996,7 @@ final class ChatViewModel {
                                 "full_page": ["type": "boolean", "description": "For screenshot: capture the full scrollable page instead of the current viewport."],
                                 "attach_preview": ["type": "boolean", "description": "For screenshot: attach the image to chat. Defaults to false for browser observation screenshots."],
                                 "script": ["type": "string", "description": "JavaScript body for execute_js."],
-                                "user_agent": ["type": "string", "enum": ["desktop_chrome", "mobile_chrome"], "description": "Optional user-agent profile."],
+                                "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile."],
                                 "max_depth": ["type": "integer", "description": "DOM backbone depth."],
                                 "scroll_count": ["type": "integer", "description": "Number of scroll/collect iterations."],
                                 "item_selector": ["type": "string", "description": "Selector for scroll_and_collect items."],

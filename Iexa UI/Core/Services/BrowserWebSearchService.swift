@@ -13,7 +13,8 @@ final class BrowserWebSearchService: NSObject {
     private var activeBrowserTabID = 1
     private var nextBrowserTabID = 2
     private var browserViewportSize = CGSize(width: 390, height: 720)
-    private var browserUserAgentProfile = "desktop_chrome"
+    private var browserUserAgentProfile = "mobile_safari"
+    private var browserVisibleChallengeRefreshURLs: Set<String> = []
     private var navigationContinuation: CheckedContinuation<Bool, Never>?
     private var timeoutTask: Task<Void, Never>?
     private weak var automationBrowserContainer: UIView?
@@ -1505,7 +1506,7 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private func executeNativeSetUserAgent(_ call: [String: Any]) -> [String: Any] {
-        let profile = Self.firstString(in: call, keys: ["user_agent", "userAgent", "profile"]) ?? "desktop_chrome"
+        let profile = Self.firstString(in: call, keys: ["user_agent", "userAgent", "profile"]) ?? "mobile_safari"
         applyBrowserUserAgent(profile)
         return [
             "action": "browser.set_user_agent",
@@ -1836,9 +1837,9 @@ final class BrowserWebSearchService: NSObject {
 
     private func applyBrowserUserAgent(_ profile: String) {
         let normalized = profile.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return }
-        browserUserAgentProfile = normalized
-        let userAgent = Self.browserUserAgentString(profile: normalized)
+        let resolvedProfile = normalized.isEmpty ? "mobile_safari" : normalized
+        browserUserAgentProfile = resolvedProfile
+        let userAgent = Self.browserUserAgentOverride(profile: resolvedProfile)
         for tab in browserTabs.values {
             tab.customUserAgent = userAgent
         }
@@ -1852,12 +1853,16 @@ final class BrowserWebSearchService: NSObject {
         mountActiveBrowserIfPresented()
     }
 
-    private static func browserUserAgentString(profile: String) -> String {
+    private static func browserUserAgentOverride(profile: String) -> String? {
         switch profile.lowercased() {
+        case "mobile_safari", "system", "system_default", "default":
+            return nil
         case "mobile_chrome":
             return "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/126.0.6478.54 Mobile/15E148 Safari/604.1"
-        default:
+        case "desktop_chrome":
             return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        default:
+            return nil
         }
     }
 
@@ -2374,7 +2379,7 @@ final class BrowserWebSearchService: NSObject {
             ),
             configuration: config
         )
-        wv.customUserAgent = Self.browserUserAgentString(profile: browserUserAgentProfile)
+        wv.customUserAgent = Self.browserUserAgentOverride(profile: browserUserAgentProfile)
         wv.isHidden = false
         wv.alpha = 1
         wv.navigationDelegate = self
@@ -3166,7 +3171,9 @@ final class BrowserWebSearchService: NSObject {
             } else {
                 var request = URLRequest(url: url, timeoutInterval: timeout)
                 request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-                request.setValue(Self.browserUserAgentString(profile: browserUserAgentProfile), forHTTPHeaderField: "User-Agent")
+                if let userAgent = Self.browserUserAgentOverride(profile: browserUserAgentProfile) {
+                    request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                }
                 request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
                 request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
                 request.setValue("no-cache", forHTTPHeaderField: "Pragma")
@@ -3199,6 +3206,7 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private func mountAutomationBrowser(_ webView: WKWebView, in container: UIView) {
+        let movedFromBackgroundSession = webView.superview !== container
         for tab in browserTabs.values where tab !== webView && tab.superview === container {
             tab.removeFromSuperview()
             tab.navigationDelegate = self
@@ -3220,6 +3228,61 @@ final class BrowserWebSearchService: NSObject {
             : browserViewportSize
         webView.setNeedsLayout()
         webView.layoutIfNeeded()
+        if movedFromBackgroundSession {
+            refreshVisibleChallengePageIfNeeded(webView)
+        }
+    }
+
+    private func refreshVisibleChallengePageIfNeeded(_ webView: WKWebView) {
+        guard let url = webView.url,
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme) else {
+            return
+        }
+        let key = url.absoluteString
+        guard !browserVisibleChallengeRefreshURLs.contains(key) else { return }
+
+        Task { @MainActor [weak self, weak webView] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard let self, let webView,
+                  self.webView === webView,
+                  self.isAutomationBrowserVisible(webView),
+                  webView.url?.absoluteString == key,
+                  let probe = await self.evaluateJSONObject(Self.visibleChallengeProbeScript()) else {
+                return
+            }
+            let detected = Self.boolValue(probe["detected"]) == true
+            let completed = Self.boolValue(probe["completed"]) == true
+            let failedState = Self.boolValue(probe["failed_state"]) == true
+            guard detected, failedState || !completed else { return }
+            self.browserVisibleChallengeRefreshURLs.insert(key)
+            webView.reload()
+        }
+    }
+
+    private static func visibleChallengeProbeScript() -> String {
+        """
+        (() => {
+          const bodyText = ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || frame.getAttribute('aria-label') || '').join(' ').toLowerCase();
+          const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
+          const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
+          const tokenNode = turnstile || recaptcha;
+          const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+          const challengeDetected = Boolean(
+            turnstile ||
+            recaptcha ||
+            /turnstile|captcha|recaptcha|challenge/.test(frames) ||
+            /prove you are human|verify you are human|captcha|turnstile|故障排除|验证失败|troubleshooting|verification failed/.test(bodyText)
+          );
+          const failedState = /故障排除|验证失败|troubleshooting|verification failed/.test(bodyText);
+          return JSON.stringify({
+            detected: challengeDetected,
+            completed: tokenLength > 0,
+            failed_state: failedState
+          });
+        })();
+        """
     }
 
     private func isAutomationBrowserVisible(_ webView: WKWebView) -> Bool {
