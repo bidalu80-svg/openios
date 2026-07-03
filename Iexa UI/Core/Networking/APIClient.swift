@@ -4637,8 +4637,10 @@ final class APIClient: @unchecked Sendable {
         guard !trimmedQuery.isEmpty else { return [] }
 
         let trimmedContext = context?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentSearchDate = Self.webSearchQueryDateText()
         let systemPrompt = """
         You rewrite a user's request into precise web search queries.
+        Current client date: \(currentSearchDate).
         Return only JSON, no markdown, no commentary.
         Output shape: {"queries":["query 1","query 2"]}
         Rules:
@@ -4646,7 +4648,7 @@ final class APIClient: @unchecked Sendable {
         - Prefer exact keywords over a full natural-language sentence.
         - Preserve product names, version numbers, dates, and factual anchors.
         - Include official/source terms when the user asks about products, APIs, releases, docs, prices, schedules, laws, or current events.
-        - For current/latest questions, include the current year or words like today/latest/current when relevant.
+        - For current/latest/time-sensitive questions, include the current date or year plus words like today/latest/current when relevant.
         - If the request is Chinese but the topic is global/technical, include one English query and one Chinese query when useful.
         - Remove filler phrases like "帮我搜", "查一下", "能不能", and keep only searchable nouns/constraints.
         - Do not repeat the same idea with only tiny wording changes.
@@ -4674,6 +4676,20 @@ final class APIClient: @unchecked Sendable {
         )
         guard let response = extractAssistantText(from: json) else { return [trimmedQuery] }
         return Self.parseGeneratedSearchQueries(response, maxQueries: maxQueries)
+    }
+
+    private static func webSearchQueryDateText(_ date: Date = Date()) -> String {
+        let zhFormatter = DateFormatter()
+        zhFormatter.locale = Locale(identifier: "zh_CN")
+        zhFormatter.timeZone = .current
+        zhFormatter.dateFormat = "yyyy年M月d日"
+
+        let isoFormatter = DateFormatter()
+        isoFormatter.locale = Locale(identifier: "en_US_POSIX")
+        isoFormatter.timeZone = .current
+        isoFormatter.dateFormat = "yyyy-MM-dd"
+
+        return "\(zhFormatter.string(from: date)) / \(isoFormatter.string(from: date))"
     }
 
     // MARK: - Skills

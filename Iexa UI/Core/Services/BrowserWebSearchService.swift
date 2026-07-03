@@ -26,9 +26,13 @@ final class BrowserWebSearchService: NSObject {
     }
 
     func search(queries: [String], originalQuery: String?) async -> WebSearchResponse {
-        let normalizedQueries = queries
+        let baseQueries = queries
             .map(Self.normalizedQuery)
             .filter { !$0.isEmpty }
+        let normalizedQueries = Self.freshnessExpandedQueries(
+            baseQueries,
+            originalQuery: originalQuery
+        )
         guard !normalizedQueries.isEmpty else { return WebSearchResponse() }
 
         let githubSearchSeed = Self.githubSearchSeed(
@@ -81,7 +85,7 @@ final class BrowserWebSearchService: NSObject {
            ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
            await load(url: url, timeout: 8) {
             try? await Task.sleep(nanoseconds: 450_000_000)
-            let snapshot = await evaluatePageSnapshot()
+            let snapshot = await evaluateFullPageSnapshot(maxScrolls: 14)
             let thumbnail = await capturePageThumbnail(prefix: "search")
             if let index = finalItems.firstIndex(where: { $0.link == firstLink }) {
                 if let snapshot, finalItems[index].snippet?.isEmpty != false {
@@ -92,24 +96,15 @@ final class BrowserWebSearchService: NSObject {
                 }
             }
             if let snapshot,
-               !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               !docs.contains(where: { ($0.metadata["source"] ?? $0.metadata["link"]) == firstLink }) {
-                docs.insert(WebSearchDocument(
-                    content: [
-                        "Title: \(snapshot.title.isEmpty ? firstLink : snapshot.title)",
-                        "URL: \(snapshot.url.isEmpty ? firstLink : snapshot.url)",
-                        snapshot.description.isEmpty ? nil : "Description: \(snapshot.description)",
-                        "Content excerpt:\n\(String(snapshot.text.prefix(4_000)))"
-                    ]
-                    .compactMap { $0 }
-                    .joined(separator: "\n"),
-                    metadata: [
-                        "title": snapshot.title.isEmpty ? firstLink : snapshot.title,
-                        "source": snapshot.url.isEmpty ? firstLink : snapshot.url,
-                        "link": snapshot.url.isEmpty ? firstLink : snapshot.url,
-                        "provider": "wkwebview_browser_thumbnail"
-                    ]
-                ), at: 0)
+               !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let doc = Self.fullPageDocument(
+                    from: snapshot,
+                    fallbackTitle: finalItems.first(where: { $0.link == firstLink })?.title,
+                    fallbackURL: firstLink,
+                    provider: "wkwebview_browser_full_page"
+                )
+                docs.removeAll { Self.documentMatches($0, url: firstLink, alternateURL: snapshot.url) }
+                docs.insert(doc, at: 0)
             }
         }
 
@@ -239,7 +234,7 @@ final class BrowserWebSearchService: NSObject {
            ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
            await load(url: url, timeout: 10) {
             try? await Task.sleep(nanoseconds: 550_000_000)
-            let snapshot = await evaluatePageSnapshot()
+            let snapshot = await evaluateFullPageSnapshot(maxScrolls: 14)
             let thumbnail = await capturePageThumbnail(prefix: "search")
             if let thumbnail {
                 previewImages.append(thumbnail.absoluteString)
@@ -254,22 +249,13 @@ final class BrowserWebSearchService: NSObject {
                 }
             }
             if let snapshot, !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let doc = WebSearchDocument(
-                    content: [
-                        "Title: \(snapshot.title.isEmpty ? firstLink : snapshot.title)",
-                        "URL: \(snapshot.url.isEmpty ? firstLink : snapshot.url)",
-                        snapshot.description.isEmpty ? nil : "Description: \(snapshot.description)",
-                        "Content excerpt:\n\(String(snapshot.text.prefix(4_000)))"
-                    ]
-                    .compactMap { $0 }
-                    .joined(separator: "\n"),
-                    metadata: [
-                        "title": snapshot.title.isEmpty ? firstLink : snapshot.title,
-                        "source": snapshot.url.isEmpty ? firstLink : snapshot.url,
-                        "link": snapshot.url.isEmpty ? firstLink : snapshot.url,
-                        "provider": "wkwebview_browser_tool"
-                    ]
+                let doc = Self.fullPageDocument(
+                    from: snapshot,
+                    fallbackTitle: response.items.first(where: { $0.link == firstLink })?.title,
+                    fallbackURL: firstLink,
+                    provider: "wkwebview_browser_tool_full_page"
                 )
+                docsPayload.removeAll { Self.documentPayloadMatches($0, url: firstLink, alternateURL: snapshot.url) }
                 docsPayload.insert(Self.documentPayload(from: doc), at: 0)
             }
         }
@@ -309,7 +295,9 @@ final class BrowserWebSearchService: NSObject {
 
         let maxLength = min(max(Self.intValue(call["max_length"] ?? call["limit"]) ?? 8_000, 800), 18_000)
         let includeScreenshot = Self.boolValue(call["screenshot"] ?? call["with_screenshot"] ?? call["thumbnail"] ?? call["attach_preview"] ?? call["attachPreview"]) ?? false
-        let snapshot = await evaluatePageSnapshot()
+        let snapshot = readable
+            ? await evaluateFullPageSnapshot(maxScrolls: min(max(Self.intValue(call["scroll_count"] ?? call["max_scrolls"] ?? call["maxScrolls"]) ?? 14, 1), 24))
+            : await evaluatePageSnapshot()
         let thumbnail = includeScreenshot ? await capturePageThumbnail(prefix: "browser") : nil
         let title = snapshot?.title.isEmpty == false ? snapshot!.title : (url.host ?? url.absoluteString)
         let finalURL = snapshot?.url.isEmpty == false ? snapshot!.url : url.absoluteString
@@ -357,9 +345,8 @@ final class BrowserWebSearchService: NSObject {
 
         let selector = Self.firstString(in: call, keys: ["selector", "css"])
         let maxLength = min(max(Self.intValue(call["max_length"] ?? call["limit"]) ?? 8_000, 500), 18_000)
-        let script: String
         if let selector, !selector.isEmpty {
-            script = """
+            let script = """
             (() => {
               const node = document.querySelector(\(Self.javascriptString(selector)));
               return JSON.stringify({
@@ -369,33 +356,49 @@ final class BrowserWebSearchService: NSObject {
               });
             })();
             """
-        } else {
-            script = """
-            (() => JSON.stringify({
-              title: document.title || '',
-              url: location.href,
-              text: ((document.body && document.body.innerText) || '').slice(0, \(maxLength))
-            }))();
-            """
+            guard let json = await evaluateString(script),
+                  let data = json.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return [
+                    "action": "browser.text",
+                    "ok": false,
+                    "error": "Unable to read page text"
+                ]
+            }
+            let text = (object["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return [
+                "action": "browser.text",
+                "ok": true,
+                "title": object["title"] as? String ?? "",
+                "url": object["url"] as? String ?? "",
+                "selector": selector,
+                "text": text,
+                "text_truncated": text.count >= maxLength,
+                "full_page": false,
+                "summary": "已读取网页文本。"
+            ]
         }
 
-        guard let json = await evaluateString(script),
-              let data = json.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard let snapshot = await evaluateFullPageSnapshot(
+            maxScrolls: min(max(Self.intValue(call["scroll_count"] ?? call["max_scrolls"] ?? call["maxScrolls"]) ?? 14, 1), 24)
+        ) else {
             return [
                 "action": "browser.text",
                 "ok": false,
                 "error": "Unable to read page text"
             ]
         }
+        let text = snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines)
         return [
             "action": "browser.text",
             "ok": true,
-            "title": object["title"] as? String ?? "",
-            "url": object["url"] as? String ?? "",
-            "selector": selector ?? "",
-            "text": object["text"] as? String ?? "",
-            "summary": "已读取网页文本。"
+            "title": snapshot.title,
+            "url": snapshot.url,
+            "selector": "",
+            "text": String(text.prefix(maxLength)),
+            "text_truncated": text.count > maxLength,
+            "full_page": true,
+            "summary": "已滚动读取网页全文。"
         ]
     }
 
@@ -3211,6 +3214,85 @@ final class BrowserWebSearchService: NSObject {
         ]
     }
 
+    private static func fullPageDocument(
+        from snapshot: BrowserPageSnapshot,
+        fallbackTitle: String?,
+        fallbackURL: String,
+        provider: String
+    ) -> WebSearchDocument {
+        let resolvedURL = snapshot.url.isEmpty ? fallbackURL : snapshot.url
+        let resolvedTitle = snapshot.title.isEmpty
+            ? ((fallbackTitle?.isEmpty == false ? fallbackTitle : nil) ?? resolvedURL)
+            : snapshot.title
+        let text = snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var sections: [String] = [
+            "Title: \(resolvedTitle)",
+            "URL: \(resolvedURL)"
+        ]
+        if !snapshot.description.isEmpty {
+            sections.append("Description: \(snapshot.description)")
+        }
+        if !snapshot.published.isEmpty {
+            sections.append("Published/Updated: \(snapshot.published)")
+        }
+        sections.append("Content excerpt:\n\(String(text.prefix(18_000)))")
+
+        var metadata = [
+            "title": resolvedTitle,
+            "source": resolvedURL,
+            "link": resolvedURL,
+            "provider": provider,
+            "full_page": "true",
+            "searched_at": ISO8601DateFormatter().string(from: Date())
+        ]
+        if !snapshot.published.isEmpty {
+            metadata["published_time"] = snapshot.published
+        }
+        return WebSearchDocument(content: sections.joined(separator: "\n"), metadata: metadata)
+    }
+
+    private static func documentMatches(_ document: WebSearchDocument, url: String, alternateURL: String?) -> Bool {
+        let targets = [url, alternateURL].compactMap { normalizedURLKey($0) }
+        guard !targets.isEmpty else { return false }
+        return [document.metadata["source"], document.metadata["link"]]
+            .compactMap { normalizedURLKey($0) }
+            .contains { targets.contains($0) }
+    }
+
+    private static func documentPayloadMatches(_ payload: [String: Any], url: String, alternateURL: String?) -> Bool {
+        let source: String?
+        let link: String?
+        if let metadata = payload["metadata"] as? [String: String] {
+            source = metadata["source"]
+            link = metadata["link"]
+        } else if let metadata = payload["metadata"] as? [String: Any] {
+            source = metadata["source"] as? String
+            link = metadata["link"] as? String
+        } else {
+            return false
+        }
+        let targets = [url, alternateURL].compactMap { normalizedURLKey($0) }
+        guard !targets.isEmpty else { return false }
+        return [source, link]
+            .compactMap { normalizedURLKey($0) }
+            .contains { targets.contains($0) }
+    }
+
+    private static func normalizedURLKey(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard var components = URLComponents(string: trimmed) else {
+            return trimmed.lowercased()
+        }
+        components.fragment = nil
+        let normalized = components.string ?? trimmed
+        return normalized
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .lowercased()
+    }
+
     private static func urlValue(in call: [String: Any], allowLocalFiles: Bool = true) -> URL? {
         guard let raw = firstString(in: call, keys: ["url", "link", "href", "page_url", "source", "input_url"]),
               let url = URL(string: raw) else {
@@ -3519,7 +3601,7 @@ final class BrowserWebSearchService: NSObject {
         }
         try? await Task.sleep(nanoseconds: 800_000_000)
 
-        guard let snapshot = await evaluatePageSnapshot(),
+        guard let snapshot = await evaluateFullPageSnapshot(maxScrolls: 14),
               !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return Self.summaryDocument(for: item)
         }
@@ -3536,13 +3618,14 @@ final class BrowserWebSearchService: NSObject {
         if !snapshot.published.isEmpty {
             sections.append("Published/Updated: \(snapshot.published)")
         }
-        sections.append("Content excerpt:\n\(String(snapshot.text.prefix(5_000)))")
+        sections.append("Content excerpt:\n\(String(snapshot.text.prefix(12_000)))")
 
         var metadata = [
             "title": title,
             "source": snapshot.url.isEmpty ? rawLink : snapshot.url,
             "link": snapshot.url.isEmpty ? rawLink : snapshot.url,
             "provider": "wkwebview_browser_page",
+            "full_page": "true",
             "searched_at": ISO8601DateFormatter().string(from: Date())
         ]
         if let snippet = item.snippet, !snippet.isEmpty {
@@ -3661,13 +3744,15 @@ final class BrowserWebSearchService: NSObject {
         }
 
         var request = URLRequest(url: url, timeoutInterval: 5)
-        request.cachePolicy = .returnCacheDataElseLoad
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue(
             "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
             forHTTPHeaderField: "User-Agent"
         )
         request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
         request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -4110,9 +4195,10 @@ final class BrowserWebSearchService: NSObject {
         return values.compactMap(WebSearchResultItem.init(json:))
     }
 
-    private func evaluatePageSnapshot() async -> BrowserPageSnapshot? {
+    private func evaluatePageSnapshot(textLimit: Int = 24_000) async -> BrowserPageSnapshot? {
         let script = """
         (() => {
+          const textLimit = \(min(max(textLimit, 1_000), 48_000));
           function clean(value) {
             return (value || '').replace(/\\s+/g, ' ').trim();
           }
@@ -4137,7 +4223,7 @@ final class BrowserWebSearchService: NSObject {
           );
           let text = (main.innerText || main.textContent || '').replace(/\\n{3,}/g, '\\n\\n');
           text = text.split('\\n').map(line => line.trim()).filter(line => line.length > 1).join('\\n');
-          return JSON.stringify({ title, url: location.href, description: desc, published, text: text.slice(0, 9000) });
+          return JSON.stringify({ title, url: location.href, description: desc, published, text: text.slice(0, textLimit) });
         })();
         """
         guard let json = await evaluateString(script),
@@ -4152,6 +4238,127 @@ final class BrowserWebSearchService: NSObject {
             published: object["published"] as? String ?? "",
             text: object["text"] as? String ?? ""
         )
+    }
+
+    private func evaluateVisibleTextSnapshot(textLimit: Int = 1_400) async -> BrowserPageSnapshot? {
+        guard let object = await evaluateJSONObject(Self.viewportContextScript(
+            textLimit: min(max(textLimit, 500), 6_000),
+            elementLimit: 0
+        )) else {
+            return nil
+        }
+        return BrowserPageSnapshot(
+            title: object["title"] as? String ?? "",
+            url: object["url"] as? String ?? "",
+            description: "",
+            published: "",
+            text: object["visible_text"] as? String ?? ""
+        )
+    }
+
+    private func evaluateFullPageSnapshot(maxScrolls: Int = 14) async -> BrowserPageSnapshot? {
+        guard let firstSnapshot = await evaluatePageSnapshot(textLimit: 24_000) else { return nil }
+        guard let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) else {
+            return firstSnapshot
+        }
+
+        let originalY = Self.intValue(metrics["scroll_y"]) ?? 0
+        let viewportHeight = max(Self.intValue(metrics["viewport_height"]) ?? 720, 240)
+        var scrollHeight = max(Self.intValue(metrics["scroll_height"]) ?? viewportHeight, viewportHeight)
+        var maxY = max(scrollHeight - viewportHeight, 0)
+        guard maxY > 80 else { return firstSnapshot }
+
+        var pageSnapshots: [BrowserPageSnapshot] = [firstSnapshot]
+        var viewportSnapshots: [BrowserPageSnapshot] = []
+        let step = max(Int(Double(viewportHeight) * 0.82), 360)
+        let maxSamples = min(max(maxScrolls, 1), 24)
+        var offsets: [Int] = [0]
+        var nextY = step
+        while nextY < maxY {
+            offsets.append(nextY)
+            nextY += step
+        }
+        offsets.append(maxY)
+        offsets = Self.sampledUniqueOffsets(offsets, limit: maxSamples)
+
+        var offsetIndex = 0
+        while offsetIndex < offsets.count {
+            let offset = offsets[offsetIndex]
+            _ = await evaluateJSONObject(Self.scrollToPageYScript(offset))
+            try? await Task.sleep(nanoseconds: offsetIndex == 0 ? 220_000_000 : 380_000_000)
+
+            if let visibleSnapshot = await evaluateVisibleTextSnapshot(textLimit: 1_400),
+               !visibleSnapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                viewportSnapshots.append(visibleSnapshot)
+            }
+
+            if let snapshot = await evaluatePageSnapshot(textLimit: 24_000) {
+                pageSnapshots.append(snapshot)
+            }
+
+            if let updatedMetrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) {
+                let updatedHeight = max(Self.intValue(updatedMetrics["scroll_height"]) ?? scrollHeight, viewportHeight)
+                if updatedHeight > scrollHeight + viewportHeight {
+                    scrollHeight = updatedHeight
+                    maxY = max(scrollHeight - viewportHeight, 0)
+                    let tailOffset = maxY
+                    if !offsets.contains(tailOffset), offsets.count < maxSamples {
+                        offsets.append(tailOffset)
+                    }
+                }
+            }
+            offsetIndex += 1
+        }
+
+        _ = await evaluateJSONObject(Self.scrollToPageYScript(originalY))
+
+        let best = pageSnapshots.last(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+            ?? firstSnapshot
+        let mergedText = Self.mergedSnapshotText(viewportSnapshots + pageSnapshots)
+        return BrowserPageSnapshot(
+            title: best.title.isEmpty ? firstSnapshot.title : best.title,
+            url: best.url.isEmpty ? firstSnapshot.url : best.url,
+            description: best.description.isEmpty ? firstSnapshot.description : best.description,
+            published: best.published.isEmpty ? firstSnapshot.published : best.published,
+            text: mergedText.isEmpty ? firstSnapshot.text : mergedText
+        )
+    }
+
+    private static func sampledUniqueOffsets(_ offsets: [Int], limit: Int) -> [Int] {
+        var unique: [Int] = []
+        var seen = Set<Int>()
+        for offset in offsets.map({ max($0, 0) }) where seen.insert(offset).inserted {
+            unique.append(offset)
+        }
+        guard limit > 0, unique.count > limit else { return unique }
+        guard limit > 1 else { return [unique.first ?? 0] }
+
+        var sampled: [Int] = []
+        let lastIndex = unique.count - 1
+        for index in 0..<limit {
+            let rawIndex = Double(index) * Double(lastIndex) / Double(limit - 1)
+            let sampleIndex = min(max(Int(rawIndex.rounded()), 0), lastIndex)
+            sampled.append(unique[sampleIndex])
+        }
+        var sampleSeen = Set<Int>()
+        return sampled.filter { sampleSeen.insert($0).inserted }
+    }
+
+    private static func mergedSnapshotText(_ snapshots: [BrowserPageSnapshot]) -> String {
+        var lines: [String] = []
+        var seen = Set<String>()
+        for snapshot in snapshots {
+            for rawLine in snapshot.text.components(separatedBy: .newlines) {
+                let line = rawLine
+                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard line.count > 1 else { continue }
+                let key = line.lowercased()
+                guard seen.insert(key).inserted else { continue }
+                lines.append(line)
+            }
+        }
+        return String(lines.joined(separator: "\n").prefix(32_000))
     }
 
     private func evaluateString(_ script: String) async -> String? {
@@ -4174,15 +4381,85 @@ final class BrowserWebSearchService: NSObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func freshnessExpandedQueries(
+        _ queries: [String],
+        originalQuery: String?
+    ) -> [String] {
+        let source = ([originalQuery].compactMap { $0 } + queries)
+            .joined(separator: " ")
+        guard searchNeedsFreshness(source) else {
+            return unique(queries)
+        }
+
+        var expanded: [String] = []
+        let now = Date()
+        let dateText = localizedSearchDateText(now)
+        let isoDateText = isoSearchDateText(now)
+        let englishDateText = englishSearchDateText(now)
+        let dayScoped = searchNeedsDayScope(source)
+
+        for query in queries {
+            let hasCJK = query.unicodeScalars.contains { (0x4E00...0x9FFF).contains(Int($0.value)) }
+            if dayScoped {
+                expanded.append(hasCJK ? "\(query) \(dateText) 最新" : "\(query) \(englishDateText) latest")
+                expanded.append(hasCJK ? "\(query) \(isoDateText) 今天 24小时" : "\(query) \(isoDateText) past 24 hours")
+            } else {
+                expanded.append(hasCJK ? "\(query) 最新 \(dateText)" : "\(query) latest \(englishDateText)")
+                expanded.append(hasCJK ? "\(query) 官方 更新 \(isoDateText)" : "\(query) official updated \(isoDateText)")
+            }
+            expanded.append(query)
+        }
+        return unique(expanded)
+    }
+
     private static func searchNeedsFreshness(_ query: String) -> Bool {
         let normalized = query
             .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         return [
-            "今天", "今日", "24小时", "一天内", "当天",
-            "today", "last24hours", "past24hours"
+            "最新", "今天", "今日", "现在", "目前", "刚刚", "新闻", "热搜", "实时",
+            "现价", "价格", "油价", "天气", "气温", "股价", "汇率", "版本", "发布",
+            "更新", "日期", "当天", "24小时", "一天内",
+            "latest", "today", "current", "now", "news", "breaking", "price",
+            "weather", "stock", "exchange", "rate", "release", "version",
+            "updated", "last24hours", "past24hours"
         ].contains { normalized.contains($0) }
+    }
+
+    private static func searchNeedsDayScope(_ query: String) -> Bool {
+        let normalized = query
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return [
+            "今天", "今日", "现在", "目前", "刚刚", "实时", "当天", "24小时", "一天内",
+            "today", "now", "current", "last24hours", "past24hours"
+        ].contains { normalized.contains($0) }
+    }
+
+    private static func localizedSearchDateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy年M月d日"
+        return formatter.string(from: date)
+    }
+
+    private static func isoSearchDateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    private static func englishSearchDateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "MMMM d yyyy"
+        return formatter.string(from: date)
     }
 
     private nonisolated static func isBlockedDocumentURL(_ url: URL) -> Bool {

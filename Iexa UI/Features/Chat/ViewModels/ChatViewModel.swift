@@ -18002,21 +18002,26 @@ final class ChatViewModel {
             return mergeSearchQueries(original: precise, generated: generated, limit: limit)
         }
 
-        let currentYear = Calendar.current.component(.year, from: Date())
+        let now = Date()
+        let currentYear = Calendar.current.component(.year, from: now)
+        let zhDate = webSearchLocalizedDateText(now)
+        let isoDate = webSearchISODateText(now)
+        let englishDate = webSearchEnglishDateText(now)
         let hasCJK = containsCJK(precise)
         var freshGenerated = hasCJK
             ? [
-                "\(precise) 最新",
-                "\(precise) 官方 更新 \(currentYear)",
+                "\(precise) 最新 \(zhDate)",
+                "\(precise) 官方 更新 \(isoDate)",
                 "\(precise) \(currentYear)"
             ]
             : [
-                "\(precise) latest",
-                "\(precise) official updated \(currentYear)",
+                "\(precise) latest \(englishDate)",
+                "\(precise) official updated \(isoDate)",
                 "\(precise) \(currentYear)"
             ]
         if webSearchNeedsDayScope(userText) || webSearchNeedsDayScope(originalQuery) {
-            freshGenerated.insert(hasCJK ? "\(precise) 今天" : "\(precise) today", at: 0)
+            freshGenerated.insert(hasCJK ? "\(precise) \(zhDate) 今天" : "\(precise) \(englishDate) today", at: 0)
+            freshGenerated.insert(hasCJK ? "\(precise) \(isoDate) 24小时" : "\(precise) \(isoDate) past 24 hours", at: 1)
         }
         return mergeSearchQueries(original: precise, generated: freshGenerated + generated, limit: limit)
     }
@@ -18029,7 +18034,7 @@ final class ChatViewModel {
         guard !normalized.isEmpty else { return false }
         return [
             "最新", "今天", "今日", "现在", "目前", "刚刚", "新闻", "热搜", "实时", "现价",
-            "油价", "天气", "气温", "股价", "汇率", "版本", "发布", "更新",
+            "价格", "油价", "天气", "气温", "股价", "汇率", "版本", "发布", "更新", "日期",
             "latest", "today", "current", "now", "news", "breaking", "price", "weather",
             "stock", "exchange", "rate", "release", "version", "updated"
         ].contains { normalized.contains($0) }
@@ -18042,8 +18047,33 @@ final class ChatViewModel {
             .lowercased()
         guard !normalized.isEmpty else { return false }
         return [
-            "今天", "今日", "24小时", "一天内", "当天", "today", "last24hours", "past24hours"
+            "今天", "今日", "现在", "目前", "刚刚", "实时", "24小时", "一天内", "当天",
+            "today", "now", "current", "last24hours", "past24hours"
         ].contains { normalized.contains($0) }
+    }
+
+    private static func webSearchLocalizedDateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy年M月d日"
+        return formatter.string(from: date)
+    }
+
+    private static func webSearchISODateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    private static func webSearchEnglishDateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "MMMM d yyyy"
+        return formatter.string(from: date)
     }
 
     private static func webSearchTimestampText() -> String {
@@ -18324,7 +18354,7 @@ final class ChatViewModel {
         """
 
         [客户端联网搜索能力]
-        Iexa 客户端已接入内置 WKWebView 浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明你可以调用 iOS 内置浏览器搜索工具。若本轮请求提供了 `web_search` / `browser_readable` 函数工具，请直接调用真实函数工具；若没有函数工具但系统提示提供 `iexa_native` 浏览器工具，请主动输出 `web.search` 或 `browser.readable` 工具块。联网搜索会优先找较新的结果，但不会只限制到当天，除非用户明确要求今天或 24 小时内。不要声称你无法联网、无法实时搜索、无法访问最新信息。
+        Iexa 客户端已接入内置 WKWebView 浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明你可以调用 iOS 内置浏览器搜索工具。若本轮请求提供了 `web_search` / `browser_readable` 函数工具，请直接调用真实函数工具；若没有函数工具但系统提示提供 `iexa_native` 浏览器工具，请主动输出 `web.search` 或 `browser.readable` 工具块。天气、新闻、价格、版本、发布、日程等时间敏感问题要默认把当前日期/年份加入查询，并优先核验接近搜索当天的来源；用户明确要求今天或 24 小时内时按当天范围收紧。不要声称你无法联网、无法实时搜索、无法访问最新信息。
         [/客户端联网搜索能力]
         """
     }
@@ -18395,7 +18425,7 @@ final class ChatViewModel {
 
         以下结果由 Iexa 客户端在发送本轮消息前，通过内置 WKWebView 浏览器搜索/读取网页取得。请基于这些资料回答；涉及最新信息时优先使用这些搜索结果。回答要求：
         - 先直接给结论，再补充必要来源和时间。
-        - 天气、油价、新闻、价格、版本等实时问题，必须说清楚信息日期/发布时间；如果结果没有当前日期/当前年份证据，先继续细化搜索，仍没有就明确说“未在搜索结果中找到精确值”，不要编。
+        - 天气、油价、新闻、价格、版本等实时问题，必须说清楚信息日期/发布时间；如果结果没有接近搜索当天或当前年份的日期证据，先继续细化搜索，仍没有就明确说“未在搜索结果中找到精确值”，不要编。
         - 如果结果只是搜索页/中转页/摘要，或没有打开到可用正文，请明确说明缺少可验证来源，不要输出任何搜索工具块。
         - 如果用户明确让你“那你搜啊/你自己搜”，不要回答操作步骤给用户；应当直接基于搜索资料回答，资料不足就继续细化搜索。
         - 引用来源时使用普通链接或来源标题，不要输出 cite turn0search 之类隐藏引用标记，也不要输出无法显示的方框字符。
