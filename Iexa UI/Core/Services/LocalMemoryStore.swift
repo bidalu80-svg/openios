@@ -9,6 +9,9 @@ actor LocalMemoryStore {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let fileManager = FileManager.default
+    private let sharedStoreFilename = "global.json"
+    private let migrationDefaultsKey = "local.memory.migratedToGlobalStore.v1"
+    private let sharedEnabledDefaultsKey = "local.memory.enabled.global"
 
     private init() {
         encoder = JSONEncoder()
@@ -73,7 +76,8 @@ actor LocalMemoryStore {
     }
 
     func isEnabled(serverURL: String) async -> Bool {
-        let key = enabledKey(for: serverURL)
+        migrateEnabledPreferenceIfNeeded(serverURL: serverURL)
+        let key = enabledKey()
         if UserDefaults.standard.object(forKey: key) == nil {
             return true
         }
@@ -81,7 +85,7 @@ actor LocalMemoryStore {
     }
 
     func setEnabled(_ enabled: Bool, serverURL: String) async {
-        UserDefaults.standard.set(enabled, forKey: enabledKey(for: serverURL))
+        UserDefaults.standard.set(enabled, forKey: enabledKey())
     }
 
     func exportToLocalAlpineFileSystem(serverURL: String) async {
@@ -91,18 +95,32 @@ actor LocalMemoryStore {
     }
 
     private func loadAll(serverURL: String) async -> [LocalMemory] {
-        let url = storeURL(for: serverURL)
-        guard let data = try? Data(contentsOf: url) else { return [] }
-        do {
-            return try decoder.decode([LocalMemory].self, from: data)
-        } catch {
-            logger.error("Failed to decode local memories: \(error.localizedDescription)")
-            return []
+        let globalURL = storeURL()
+        var memories = decodeMemories(at: globalURL)
+
+        if !UserDefaults.standard.bool(forKey: migrationDefaultsKey) {
+            let legacyMemories = legacyStoreURLs(for: serverURL).flatMap { decodeMemories(at: $0) }
+            if !legacyMemories.isEmpty {
+                memories = mergeMemories(memories + legacyMemories)
+                writeGlobal(memories)
+            }
+            UserDefaults.standard.set(true, forKey: migrationDefaultsKey)
+        } else {
+            memories = mergeMemories(memories)
         }
+
+        return memories
     }
 
     private func saveAll(_ memories: [LocalMemory], serverURL: String) async {
-        let url = storeURL(for: serverURL)
+        UserDefaults.standard.set(true, forKey: migrationDefaultsKey)
+        let normalizedMemories = mergeMemories(memories)
+        writeGlobal(normalizedMemories)
+        exportFilesystemMirror(memories: normalizedMemories)
+    }
+
+    private func writeGlobal(_ memories: [LocalMemory]) {
+        let url = storeURL()
         do {
             try fileManager.createDirectory(
                 at: url.deletingLastPathComponent(),
@@ -110,10 +128,40 @@ actor LocalMemoryStore {
             )
             let data = try encoder.encode(memories.sorted { $0.updatedAt > $1.updatedAt })
             try data.write(to: url, options: .atomic)
-            exportFilesystemMirror(memories: memories)
         } catch {
             logger.error("Failed to save local memories: \(error.localizedDescription)")
         }
+    }
+
+    private func decodeMemories(at url: URL) -> [LocalMemory] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        do {
+            return try decoder.decode([LocalMemory].self, from: data)
+        } catch {
+            logger.error("Failed to decode local memories from \(url.lastPathComponent): \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    private func mergeMemories(_ memories: [LocalMemory]) -> [LocalMemory] {
+        var newestByID: [String: LocalMemory] = [:]
+        for memory in memories {
+            guard !memory.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            if let existing = newestByID[memory.id], existing.updatedAt >= memory.updatedAt {
+                continue
+            }
+            newestByID[memory.id] = memory
+        }
+
+        var seenContent = Set<String>()
+        return newestByID.values
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .filter { memory in
+                let normalizedContent = Self.normalized(memory.content)
+                guard !seenContent.contains(normalizedContent) else { return false }
+                seenContent.insert(normalizedContent)
+                return true
+            }
     }
 
     private func exportFilesystemMirror(memories: [LocalMemory]) {
@@ -174,11 +222,41 @@ actor LocalMemoryStore {
         """
     }
 
-    private func storeURL(for serverURL: String) -> URL {
+    private func storeURL() -> URL {
+        localStoreDirectory().appendingPathComponent(sharedStoreFilename)
+    }
+
+    private func legacyStoreURLs(for serverURL: String) -> [URL] {
+        let directory = localStoreDirectory()
+        let globalPath = storeURL().path
+        var paths = Set<String>()
+        var urls: [URL] = []
+
+        if let existing = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for url in existing where url.pathExtension == "json" && url.path != globalPath {
+                paths.insert(url.path)
+                urls.append(url)
+            }
+        }
+
+        let currentLegacyURL = directory.appendingPathComponent(safeFilename(for: serverURL) + ".json")
+        if currentLegacyURL.path != globalPath,
+           fileManager.fileExists(atPath: currentLegacyURL.path),
+           !paths.contains(currentLegacyURL.path) {
+            urls.append(currentLegacyURL)
+        }
+
+        return urls
+    }
+
+    private func localStoreDirectory() -> URL {
         let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory
-        let directory = base.appendingPathComponent("Iexa/LocalMemories", isDirectory: true)
-        return directory.appendingPathComponent(safeFilename(for: serverURL) + ".json")
+        return base.appendingPathComponent("Iexa/LocalMemories", isDirectory: true)
     }
 
     private static func localAlpineMemoryDirectory() throws -> URL {
@@ -191,8 +269,20 @@ actor LocalMemoryStore {
             .appendingPathComponent("memory", isDirectory: true)
     }
 
-    private func enabledKey(for serverURL: String) -> String {
+    private func enabledKey() -> String {
+        sharedEnabledDefaultsKey
+    }
+
+    private func legacyEnabledKey(for serverURL: String) -> String {
         "local.memory.enabled.\(safeFilename(for: serverURL))"
+    }
+
+    private func migrateEnabledPreferenceIfNeeded(serverURL: String) {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: sharedEnabledDefaultsKey) == nil else { return }
+        let legacyKey = legacyEnabledKey(for: serverURL)
+        guard defaults.object(forKey: legacyKey) != nil else { return }
+        defaults.set(defaults.bool(forKey: legacyKey), forKey: sharedEnabledDefaultsKey)
     }
 
     private func safeFilename(for value: String) -> String {

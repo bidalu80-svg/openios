@@ -416,6 +416,8 @@ actor LocalConversationStore {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let fileManager = FileManager.default
+    private let sharedStoreFilename = "global.json"
+    private let migrationDefaultsKey = "local.conversations.migratedToGlobalStore.v1"
 
     private init() {
         encoder = JSONEncoder()
@@ -501,18 +503,30 @@ actor LocalConversationStore {
     }
 
     private func loadAll(serverURL: String) async -> [Conversation] {
-        let url = storeURL(for: serverURL)
-        guard let data = try? Data(contentsOf: url) else { return [] }
-        do {
-            return try decoder.decode([Conversation].self, from: data)
-        } catch {
-            logger.error("Failed to decode local conversations: \(error.localizedDescription)")
-            return []
+        let globalURL = storeURL()
+        var conversations = decodeConversations(at: globalURL)
+
+        if !UserDefaults.standard.bool(forKey: migrationDefaultsKey) {
+            let legacyConversations = legacyStoreURLs(for: serverURL).flatMap { decodeConversations(at: $0) }
+            if !legacyConversations.isEmpty {
+                conversations = mergeConversations(conversations + legacyConversations)
+                writeGlobal(conversations)
+            }
+            UserDefaults.standard.set(true, forKey: migrationDefaultsKey)
+        } else {
+            conversations = mergeConversations(conversations)
         }
+
+        return conversations
     }
 
     private func saveAll(_ conversations: [Conversation], serverURL: String) async {
-        let url = storeURL(for: serverURL)
+        UserDefaults.standard.set(true, forKey: migrationDefaultsKey)
+        writeGlobal(mergeConversations(conversations))
+    }
+
+    private func writeGlobal(_ conversations: [Conversation]) {
+        let url = storeURL()
         do {
             try fileManager.createDirectory(
                 at: url.deletingLastPathComponent(),
@@ -525,12 +539,62 @@ actor LocalConversationStore {
         }
     }
 
-    private func storeURL(for serverURL: String) -> URL {
+    private func decodeConversations(at url: URL) -> [Conversation] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        do {
+            return try decoder.decode([Conversation].self, from: data)
+        } catch {
+            logger.error("Failed to decode local conversations from \(url.lastPathComponent): \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    private func mergeConversations(_ conversations: [Conversation]) -> [Conversation] {
+        var newestByID: [String: Conversation] = [:]
+        for conversation in conversations {
+            if let existing = newestByID[conversation.id], existing.updatedAt >= conversation.updatedAt {
+                continue
+            }
+            newestByID[conversation.id] = conversation
+        }
+        return newestByID.values.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func storeURL() -> URL {
+        localStoreDirectory().appendingPathComponent(sharedStoreFilename)
+    }
+
+    private func legacyStoreURLs(for serverURL: String) -> [URL] {
+        let directory = localStoreDirectory()
+        let globalPath = storeURL().path
+        var paths = Set<String>()
+        var urls: [URL] = []
+
+        if let existing = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for url in existing where url.pathExtension == "json" && url.path != globalPath {
+                paths.insert(url.path)
+                urls.append(url)
+            }
+        }
+
+        let currentLegacyURL = directory.appendingPathComponent(safeFilename(for: serverURL) + ".json")
+        if currentLegacyURL.path != globalPath,
+           fileManager.fileExists(atPath: currentLegacyURL.path),
+           !paths.contains(currentLegacyURL.path) {
+            urls.append(currentLegacyURL)
+        }
+
+        return urls
+    }
+
+    private func localStoreDirectory() -> URL {
         let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory
-        let directory = base.appendingPathComponent("Iexa/LocalConversations", isDirectory: true)
-        let filename = safeFilename(for: serverURL) + ".json"
-        return directory.appendingPathComponent(filename)
+        return base.appendingPathComponent("Iexa/LocalConversations", isDirectory: true)
     }
 
     private func safeFilename(for value: String) -> String {
