@@ -4767,6 +4767,11 @@ struct ChatDetailView: View {
                 && viewModel.streamingStore.isActive)
     }
 
+    private var visualizationRevealDelayNanoseconds: UInt64 {
+        let delay = max(0.08, min(keyboard.animationDuration + 0.04, 0.45))
+        return UInt64(delay * 1_000_000_000)
+    }
+
     private func beginPostSendWaitingUIDelayIfNeeded() {
         postSendWaitingUIDelayGeneration += 1
         isPostSendWaitingUIDelayed = false
@@ -5475,6 +5480,8 @@ struct ChatDetailView: View {
                 contentOverride: assistantContentOverride[message.id]
                     ?? assistantContentOverrideForActivityParent(message, activityItem: activityItem),
                 showEmptyThinkingCapsule: true,
+                keyboardIsVisible: keyboard.isVisible,
+                visualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds,
                 serverBaseURL: viewModel.serverBaseURL,
                 authToken: viewModel.serverAuthToken,
                 apiClient: dependencies.apiClient
@@ -8956,6 +8963,8 @@ private struct IsolatedAssistantMessage: View {
     var contentOverride: String? = nil
     /// Suppressed once real inline agent/tool steps are visible for the message.
     var showEmptyThinkingCapsule: Bool = true
+    var keyboardIsVisible: Bool = false
+    var visualizationRevealDelayNanoseconds: UInt64 = 120_000_000
     let serverBaseURL: String
     /// Auth token passed down to Rich UI embed webviews for localStorage injection.
     var authToken: String? = nil
@@ -9096,14 +9105,18 @@ private struct IsolatedAssistantMessage: View {
                                 content: frozenTailProse,
                                 isStreaming: false,
                                 authToken: authToken,
-                                serverBaseURL: serverBaseURL
+                                serverBaseURL: serverBaseURL,
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                             )
                             if !liveProsTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 StreamingMarkdownView(
                                     content: liveProsTail,
                                     isStreaming: true,
                                     authToken: authToken,
-                                    serverBaseURL: serverBaseURL
+                                    serverBaseURL: serverBaseURL,
+                                    deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                    deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                                 )
                             }
                         } else {
@@ -9111,7 +9124,9 @@ private struct IsolatedAssistantMessage: View {
                                 content: liveTail,
                                 isStreaming: true,
                                 authToken: authToken,
-                                serverBaseURL: serverBaseURL
+                                serverBaseURL: serverBaseURL,
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                             )
                         }
                     }
@@ -9158,7 +9173,9 @@ private struct IsolatedAssistantMessage: View {
                                 content: frozenProse,
                                 isStreaming: false,
                                 authToken: authToken,
-                                serverBaseURL: serverBaseURL
+                                serverBaseURL: serverBaseURL,
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                             )
                             // Live tail: current paragraph only, changes every tick.
                             if !liveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -9166,7 +9183,9 @@ private struct IsolatedAssistantMessage: View {
                                     content: liveProse,
                                     isStreaming: true,
                                     authToken: authToken,
-                                    serverBaseURL: serverBaseURL
+                                    serverBaseURL: serverBaseURL,
+                                    deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                    deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                                 )
                             }
                         } else {
@@ -9174,7 +9193,9 @@ private struct IsolatedAssistantMessage: View {
                                 content: displayContent,
                                 isStreaming: true,
                                 authToken: authToken,
-                                serverBaseURL: serverBaseURL
+                                serverBaseURL: serverBaseURL,
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                             )
                         }
                     }

@@ -2954,8 +2954,14 @@ final class BrowserWebSearchService: NSObject {
     func updateAutomationBrowserViewport(_ size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
         browserViewportSize = size
+        if let container = automationBrowserContainer {
+            syncAutomationBrowserViewport(to: container)
+        }
         if let webView, isAutomationBrowserVisible(webView) {
             webView.frame = CGRect(origin: .zero, size: size)
+            webView.setNeedsLayout()
+            webView.layoutIfNeeded()
+            webView.evaluateJavaScript("window.dispatchEvent(new Event('resize'));", completionHandler: nil)
         }
     }
 
@@ -3769,6 +3775,22 @@ final class BrowserWebSearchService: NSObject {
         notifyActiveBrowserDidChange()
     }
 
+    private func syncAutomationBrowserViewport(to container: UIView) {
+        let size = container.bounds.size
+        guard size.width > 0, size.height > 0 else { return }
+        browserViewportSize = size
+        for tab in browserTabs.values {
+            if tab.superview === container {
+                tab.frame = container.bounds
+                tab.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                tab.setNeedsLayout()
+                tab.layoutIfNeeded()
+            } else {
+                tab.frame = CGRect(x: -10_000, y: -10_000, width: size.width, height: size.height)
+            }
+        }
+    }
+
     private func mountAutomationBrowser(_ webView: WKWebView, in container: UIView) {
         let movedFromBackgroundSession = webView.superview !== container
         for tab in browserTabs.values where tab !== webView && tab.superview === container {
@@ -3787,9 +3809,7 @@ final class BrowserWebSearchService: NSObject {
         webView.alpha = 1
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         webView.frame = container.bounds
-        browserViewportSize = container.bounds.size.width > 0 && container.bounds.size.height > 0
-            ? container.bounds.size
-            : browserViewportSize
+        syncAutomationBrowserViewport(to: container)
         webView.setNeedsLayout()
         webView.layoutIfNeeded()
         if movedFromBackgroundSession {

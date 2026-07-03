@@ -36,6 +36,8 @@ struct StreamingMarkdownView: View {
     let textColor: SwiftUI.Color?
     let authToken: String?
     let serverBaseURL: String?
+    let deferVisualizationRevealUntilKeyboardDismissed: Bool
+    let deferVisualizationRevealDelayNanoseconds: UInt64
 
     @Environment(\.accessibilityScale) private var accessibilityScale
 
@@ -54,13 +56,17 @@ struct StreamingMarkdownView: View {
         isStreaming: Bool,
         textColor: SwiftUI.Color? = nil,
         authToken: String? = nil,
-        serverBaseURL: String? = nil
+        serverBaseURL: String? = nil,
+        deferVisualizationRevealUntilKeyboardDismissed: Bool = false,
+        deferVisualizationRevealDelayNanoseconds: UInt64 = 120_000_000
     ) {
         self.content = content
         self.isStreaming = isStreaming
         self.textColor = textColor
         self.authToken = authToken
         self.serverBaseURL = serverBaseURL
+        self.deferVisualizationRevealUntilKeyboardDismissed = deferVisualizationRevealUntilKeyboardDismissed
+        self.deferVisualizationRevealDelayNanoseconds = deferVisualizationRevealDelayNanoseconds
     }
 
     /// Returns a MarkdownTheme with fonts scaled by the user's accessibility content scale,
@@ -443,7 +449,61 @@ struct StreamingMarkdownView: View {
             let vizComplete = content.contains("\n@@@VIZ-END")
             let vizIsStreaming = isStreaming && !vizComplete
             let _ = vizLog.debug("StreamingMarkdownView: rendering InlineVisualizerView isStreaming=\(vizIsStreaming) (vizComplete=\(vizComplete)), htmlLen=\(html.count)")
-            InlineVisualizerView(content: html, isStreaming: vizIsStreaming)
+            DelayedRevealContainer(
+                isDeferred: deferVisualizationRevealUntilKeyboardDismissed,
+                delayNanoseconds: deferVisualizationRevealDelayNanoseconds
+            ) {
+                InlineVisualizerView(content: html, isStreaming: vizIsStreaming)
+            }
+        }
+    }
+
+    private struct DelayedRevealContainer<Content: View>: View {
+        let isDeferred: Bool
+        let delayNanoseconds: UInt64
+        @ViewBuilder let content: () -> Content
+
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @State private var isVisible = false
+        @State private var revealTask: Task<Void, Never>? = nil
+
+        var body: some View {
+            content()
+                .opacity(isVisible ? 1 : 0)
+                .offset(y: isVisible ? 0 : 10)
+                .scaleEffect(isVisible ? 1 : 0.985, anchor: .top)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.28), value: isVisible)
+                .onAppear { syncVisibility() }
+                .onChange(of: isDeferred) { _, _ in syncVisibility() }
+                .onDisappear {
+                    revealTask?.cancel()
+                    revealTask = nil
+                    isVisible = false
+                }
+        }
+
+        private func syncVisibility() {
+            revealTask?.cancel()
+            revealTask = nil
+
+            guard !isDeferred else {
+                isVisible = false
+                return
+            }
+
+            if reduceMotion {
+                isVisible = true
+                return
+            }
+
+            isVisible = false
+            revealTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeOut(duration: 0.28)) {
+                    isVisible = true
+                }
+            }
         }
     }
 
