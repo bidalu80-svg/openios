@@ -37,6 +37,7 @@ struct StreamingMarkdownView: View {
     let authToken: String?
     let serverBaseURL: String?
     let deferVisualizationRevealUntilKeyboardDismissed: Bool
+    let deferVisualizationRevealDelayNanoseconds: UInt64
 
     @Environment(\.accessibilityScale) private var accessibilityScale
 
@@ -56,7 +57,8 @@ struct StreamingMarkdownView: View {
         textColor: SwiftUI.Color? = nil,
         authToken: String? = nil,
         serverBaseURL: String? = nil,
-        deferVisualizationRevealUntilKeyboardDismissed: Bool = false
+        deferVisualizationRevealUntilKeyboardDismissed: Bool = false,
+        deferVisualizationRevealDelayNanoseconds: UInt64 = 120_000_000
     ) {
         self.content = content
         self.isStreaming = isStreaming
@@ -64,6 +66,7 @@ struct StreamingMarkdownView: View {
         self.authToken = authToken
         self.serverBaseURL = serverBaseURL
         self.deferVisualizationRevealUntilKeyboardDismissed = deferVisualizationRevealUntilKeyboardDismissed
+        self.deferVisualizationRevealDelayNanoseconds = deferVisualizationRevealDelayNanoseconds
     }
 
     /// Returns a MarkdownTheme with fonts scaled by the user's accessibility content scale,
@@ -448,7 +451,7 @@ struct StreamingMarkdownView: View {
             let _ = vizLog.debug("StreamingMarkdownView: rendering InlineVisualizerView isStreaming=\(vizIsStreaming) (vizComplete=\(vizComplete)), htmlLen=\(html.count)")
             DelayedRevealContainer(
                 isDeferred: deferVisualizationRevealUntilKeyboardDismissed,
-                delayNanoseconds: 120_000_000
+                delayNanoseconds: deferVisualizationRevealDelayNanoseconds
             ) {
                 InlineVisualizerView(content: html, isStreaming: vizIsStreaming)
             }

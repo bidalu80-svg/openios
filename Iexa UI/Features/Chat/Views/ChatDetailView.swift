@@ -4767,6 +4767,11 @@ struct ChatDetailView: View {
                 && viewModel.streamingStore.isActive)
     }
 
+    private var visualizationRevealDelayNanoseconds: UInt64 {
+        let delay = max(0.08, min(keyboard.animationDuration + 0.04, 0.45))
+        return UInt64(delay * 1_000_000_000)
+    }
+
     private func beginPostSendWaitingUIDelayIfNeeded() {
         postSendWaitingUIDelayGeneration += 1
         isPostSendWaitingUIDelayed = false
@@ -9099,7 +9104,8 @@ private struct IsolatedAssistantMessage: View {
                                 isStreaming: false,
                                 authToken: authToken,
                                 serverBaseURL: serverBaseURL,
-                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                             )
                             if !liveProsTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 StreamingMarkdownView(
@@ -9107,7 +9113,8 @@ private struct IsolatedAssistantMessage: View {
                                     isStreaming: true,
                                     authToken: authToken,
                                     serverBaseURL: serverBaseURL,
-                                    deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible
+                                    deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                    deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                                 )
                             }
                         } else {
@@ -9116,7 +9123,8 @@ private struct IsolatedAssistantMessage: View {
                                 isStreaming: true,
                                 authToken: authToken,
                                 serverBaseURL: serverBaseURL,
-                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                             )
                         }
                     }
@@ -9164,7 +9172,8 @@ private struct IsolatedAssistantMessage: View {
                                 isStreaming: false,
                                 authToken: authToken,
                                 serverBaseURL: serverBaseURL,
-                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                             )
                             // Live tail: current paragraph only, changes every tick.
                             if !liveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -9173,7 +9182,8 @@ private struct IsolatedAssistantMessage: View {
                                     isStreaming: true,
                                     authToken: authToken,
                                     serverBaseURL: serverBaseURL,
-                                    deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible
+                                    deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                    deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                                 )
                             }
                         } else {
@@ -9182,7 +9192,8 @@ private struct IsolatedAssistantMessage: View {
                                 isStreaming: true,
                                 authToken: authToken,
                                 serverBaseURL: serverBaseURL,
-                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                             )
                         }
                     }
