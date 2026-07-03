@@ -15983,8 +15983,8 @@ final class ChatViewModel {
             if let data = attachment.data {
                 let prepared = FileAttachmentService.prepareImageForUpload(data: data, originalName: attachment.name)
                 images.append(ImageEditSource(data: prepared.data, fileName: prepared.fileName))
-            } else if let dataURL = attachment.displayDataURL,
-                      let data = Self.imageData(fromDataURL: dataURL) {
+            } else if let data = Self.imageData(fromImageReference: attachment.displayDataURL)
+                ?? Self.imageData(fromImageReference: attachment.displayImageReference) {
                 let prepared = FileAttachmentService.prepareImageForUpload(data: data, originalName: attachment.name)
                 images.append(ImageEditSource(data: prepared.data, fileName: prepared.fileName))
             }
@@ -15993,6 +15993,42 @@ final class ChatViewModel {
             }
         }
         return images
+    }
+
+    private static func imageData(fromImageReference reference: String?) -> Data? {
+        guard let reference = reference?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !reference.isEmpty else { return nil }
+        if let data = imageData(fromDataURL: reference) {
+            return data
+        }
+        guard let fileURL = localImageFileURL(from: reference),
+              let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true,
+              let fileSize = values.fileSize,
+              (1...64_000_000).contains(fileSize),
+              let data = try? Data(contentsOf: fileURL),
+              data.count <= 64_000_000 else {
+            return nil
+        }
+        return data
+    }
+
+    private static func localImageFileURL(from reference: String) -> URL? {
+        guard let safeReference = safeMessageFileReference(reference, isImage: false),
+              !safeReference.isEmpty else {
+            return nil
+        }
+        if let url = URL(string: safeReference),
+           url.isFileURL {
+            return url
+        }
+        if safeReference.contains("://") {
+            return nil
+        }
+        guard safeReference.hasPrefix("/") || safeReference.hasPrefix("~") else {
+            return nil
+        }
+        return URL(fileURLWithPath: (safeReference as NSString).expandingTildeInPath)
     }
 
     private static func imageData(fromDataURL dataURL: String) -> Data? {
