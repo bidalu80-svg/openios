@@ -3400,8 +3400,6 @@ struct ChatDetailView: View {
     @State private var keyboard = KeyboardTracker()
     @State private var isPostSendWaitingUIDelayed = false
     @State private var postSendWaitingUIDelayGeneration = 0
-    @State private var isPostSendImagePlaceholderDelayed = false
-    @State private var postSendImagePlaceholderDelayGeneration = 0
 
     // MARK: Attachment pickers
     @State private var selectedPhotos: [PhotosPickerItem] = []
@@ -4772,26 +4770,11 @@ struct ChatDetailView: View {
     private func beginPostSendWaitingUIDelayIfNeeded() {
         postSendWaitingUIDelayGeneration += 1
         isPostSendWaitingUIDelayed = false
-        beginPostSendImagePlaceholderDelay()
         if keyboard.isVisible {
             pendingNewAgentFloatingSnapshotAfterKeyboard = nil
             suppressStaleAgentFloatingBarAfterKeyboard = true
             agentFloatingActivitySnapshot = nil
             setAgentFloatingBarHiddenForKeyboard(true)
-        }
-    }
-
-    private func beginPostSendImagePlaceholderDelay() {
-        postSendImagePlaceholderDelayGeneration += 1
-        let generation = postSendImagePlaceholderDelayGeneration
-        isPostSendImagePlaceholderDelayed = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
-            guard postSendImagePlaceholderDelayGeneration == generation else { return }
-            var transaction = Transaction(animation: nil)
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                isPostSendImagePlaceholderDelayed = false
-            }
         }
     }
 
@@ -4878,23 +4861,6 @@ struct ChatDetailView: View {
               message.files.isEmpty,
               message.sources.isEmpty,
               message.statusHistory.isEmpty else {
-            return false
-        }
-        guard let messageIndex = viewModel.messages.firstIndex(where: { $0.id == message.id }),
-              messageIndex > viewModel.messages.startIndex else {
-            return false
-        }
-        let previousIndex = viewModel.messages.index(before: messageIndex)
-        return viewModel.messages[previousIndex].role == .user
-    }
-
-    private func shouldDelayImageGenerationPlaceholder(for message: ChatMessage) -> Bool {
-        guard isPostSendImagePlaceholderDelayed,
-              message.role == .assistant,
-              message.isStreaming,
-              message.metadata?["iexa_image_generation_placeholder"] == "true",
-              message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              message.error == nil else {
             return false
         }
         guard let messageIndex = viewModel.messages.firstIndex(where: { $0.id == message.id }),
@@ -9063,8 +9029,6 @@ private struct IsolatedAssistantMessage: View {
                 } else {
                     EmptyView()
                 }
-            } else if shouldDelayImageGenerationPlaceholder(for: message) {
-                EmptyView()
             } else if message.metadata?["iexa_image_generation_placeholder"] == "true" {
                 ImageGenerationPlaceholderView()
             } else if showEmptyThinkingCapsule {
